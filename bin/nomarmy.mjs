@@ -192,7 +192,12 @@ async function cmdSizing() {
     ? `${path.basename(gguf.path)} (${gib(gguf.fileSizeBytes)})`
     : "not found - using assumed architecture"}`);
 
-  console.log(`\nRecommended (confidence: ${res.confidence}):\n`);
+  // Never present a configuration as "recommended" when the arithmetic says it
+  // does not fit. The fallback is a floor to start from, not an endorsement.
+  const doesNotFit = res.memory && res.memory.fits === false;
+  console.log(doesNotFit
+    ? `\nNOTHING FITS on this machine. Closest fallback (confidence: ${res.confidence}):\n`
+    : `\nRecommended (confidence: ${res.confidence}):\n`);
   for (const [k, v] of Object.entries(res.env ?? {})) console.log(`  ${k}=${v}`);
   console.log(`\n  ${res.maxWorkers} nom(s) at ${K(res.contextPerNom)} each`
     + (res.contextTotal ? `  (${res.contextTotal} total across ${res.llamaParallel} slot(s))` : ""));
