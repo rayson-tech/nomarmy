@@ -71,6 +71,22 @@ MSG
     ;;
 esac
 need node; need npm
+
+# The nomarmy CLI and the MCP server both import from lib/, which has real
+# dependencies. Without this a fresh clone cannot run `nomarmy` at all -- the
+# first import of `yaml` fails. This is separate from the copy the worker setup
+# scripts install into $NOMARMY_AGENT_INSTALL_DIR.
+echo '==> Installing nomArmy dependencies'
+(cd "$ROOT" && npm install --omit=dev --no-audit --no-fund)
+
+# Put `nomarmy` on PATH. Non-fatal by design: linking needs a writable npm
+# global prefix, and the CLI is equally usable as `node bin/nomarmy.mjs`.
+if (cd "$ROOT" && npm link >/dev/null 2>&1); then
+  echo '==> Linked the nomarmy CLI onto PATH'
+else
+  echo 'NOTE: could not link the nomarmy CLI (npm global prefix not writable).'
+  echo "      Run it directly instead: node $ROOT/bin/nomarmy.mjs <command>"
+fi
 # The sandbox is required on every profile, cloud included: it is what keeps
 # repository content away from host credentials.
 docker info >/dev/null || { echo 'ERROR: Docker daemon is not running.'; exit 1; }

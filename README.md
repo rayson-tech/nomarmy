@@ -106,6 +106,7 @@ Environment configuration is **data to validate, not authority**. The scanner is
 - hardened Docker coding sandbox (no network, no elevated host execution)
 - on a Bedrock profile: no local build at all — workers and coordinator are hosted
 - the nomArmy MCP server, registered with Claude Code when it is installed
+- the `nomarmy` CLI, with its dependencies installed and linked onto your PATH
 - platform profiles, nom sizing, and E2E verification
 
 It intentionally does **not** install or authenticate Claude Code. Claude credentials are a user/organization concern. A DGX worker can therefore be provisioned with `--no-claude`, while a machine that will run the Claude coordinator can register the MCP locally.
@@ -127,6 +128,36 @@ All values live in `config/common.env` and `config/profiles/*.env`. Hardware tun
 Local profiles cost nothing per token and are capped by VRAM. Bedrock profiles are capped by TPM quota and budget, so `NOMARMY_MAX_WORKERS` above 1 is reachable. Measure first-pass accept rate before raising it: coordinator review tokens dominate worker tokens, so a cheaper worker that fails the gate more often is not cheaper.
 
 Cloud profiles send repository content off the machine. That is the decision to weigh, not the engineering.
+
+## The `nomarmy` CLI
+
+`install.sh` installs the repository's dependencies and links `nomarmy` onto your PATH. If you only want the CLI — to inspect a repository or size a machine before committing to a full install — that part stands alone:
+
+```bash
+git clone https://github.com/rayson-tech/nomarmy.git
+cd nomarmy
+npm install
+npm link          # optional; puts `nomarmy` on PATH
+```
+
+Without `npm link`, every command works the same way run directly:
+
+```bash
+node bin/nomarmy.mjs doctor
+```
+
+`npm install` is not optional. The CLI imports from `lib/`, which has real dependencies, so a fresh clone cannot run any command until they are present.
+
+| Command | What it does |
+|---|---|
+| `nomarmy doctor` | Checks this host is ready to run nomArmy and prints a fix for anything missing. Start here. |
+| `nomarmy sizing` | Recommends context and nom count from your hardware and the model's own GGUF metadata. `--check` evaluates the profile you already have. |
+| `nomarmy scan` | Reports a repository's execution environment from deterministic evidence. `--check` compares it against a committed `.nomarmy.yml`. |
+| `nomarmy validate` | Validates `.nomarmy.yml` against the schema and flags services needing explicit policy approval. |
+
+Every command takes `--json` for machine-readable output, and `--repo <dir>` to target a repository other than the working directory.
+
+None of them change anything. `scan` never executes what it discovers, `sizing` never writes a profile, and `doctor` never installs anything — they report and propose, and you apply what you agree with.
 
 ## Platform support
 
