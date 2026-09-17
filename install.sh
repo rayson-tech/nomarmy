@@ -48,8 +48,14 @@ advice is not always the better one:
        winget install Microsoft.VisualStudio.2022.BuildTools --override \
          "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
      Prebuilt llama.cpp Windows binaries are NOT a reliable shortcut: on some
-     CPUs every compute backend crashes at startup while non-compute binaries
-     run fine. Build from source with flags matched to the host.
+     CPUs every compute backend crashes at startup (access violation) while
+     non-compute binaries run fine. The cause is dynamic backend loading, so
+     build it statically instead -- these flags are verified working:
+       cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+         -DGGML_BACKEND_DL=OFF -DBUILD_SHARED_LIBS=OFF \
+         -DGGML_NATIVE=ON -DLLAMA_CURL=OFF
+     GGML_BACKEND_DL=OFF is the one that matters: it links the CPU backend in
+     rather than probing for it at runtime.
 
   3. Run workers on a Bedrock profile and skip local inference entirely:
        ./install.sh --profile bedrock
