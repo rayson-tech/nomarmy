@@ -1,5 +1,5 @@
 d10efeabfc12f9908d2d8fb6bfba2fdc58342fff3c82629f561511fab5ab99c6 *./AGENTS.md
-32b216e9d7454482ed836d00769a06a7173428a9f0ad03fa8eac96840719dc42 *./bin/nomarmy.mjs
+d432ac93c08be5f570231ab36f299dda611186514321809467bd6df82191736c *./bin/nomarmy.mjs
 075e0e6596b17bfeee41ade6225e5d4e0501aa77b20475ade198bdf5220bd22c *./CLAUDE.md
 d4be3158f971f3f1fe3063eb557bfe92afc3269e3a4e9961d4e8d0cf5b471c67 *./config/common.env
 35577f9d98ec3227195308ec3c3eea9fd5a9b69e5f1196b779d6a08badb6d1a0 *./config/profiles/bedrock.env
@@ -12,6 +12,7 @@ c22e465a3f33e2cfa725ddc5d891a7251ec02ea36235b4f3a7d867a5a813076a *./config/profi
 35f7a567ded039fd2f4b83ede7e9fec8dd0529c68f77f181193c3e30a9b63dd7 *./e2e.sh
 890c7e3ee6849ab91f5dd96c19c32c70d9480b9e8a7c20a989ec5d935debce1e *./install.sh
 84a5d9f94197e09a56da03392393efd046e6b3a5f4ea2b9ca55536eb768d8eea *./lib/config.mjs
+4de5480dc4f61642132455d84daa92965f68f2f149bc1a2152265e7ef4db91d1 *./lib/doctor.mjs
 87523b72c861f6fec74a80aca933ef7e357fa911390644116234385b794aeb19 *./lib/evidence.mjs
 98ecb492a85663b157e6e65e7eb054a62948a95eb7f284700ebf65a2df37b7a8 *./lib/gguf.mjs
 18408799dfa63d9f1bc2499502e0e6950dfac4f42775d72dbe0f4130379853ca *./lib/hardware.mjs
@@ -44,6 +45,7 @@ cacbda5e84e91dced51ad4e9b6fee14c2475d280b3d11ef802adf17105b86d6d *./scripts/setu
 ec8bc056c9ae3da06cfb5e4c5cfadbbe788f82b006ad58e54f91459b92669c94 *./setup-codex-local-worker.sh
 255c1ab0ac8b7047c88dc876a6948a14df5c52072578e870132d55aa1b66ec22 *./setup-nomarmy-agents.sh
 1f1a7f695936a10a92fcea1d18772b4ecb61947506e5fd0ccaf8e648cbae3761 *./tests/config.test.mjs
+d8c5d74f03ab67a30d583b9425206e2ec63061d2c16bf8077b8178866987eac7 *./tests/doctor.test.mjs
 c6013c1bde37591bdacf24c16460678fec9af24c560584b3e7c814a8996aae2e *./tests/fixtures/node-stack/.github/workflows/ci.yml
 a49ffc1e41e4c1c80812012ead22d4600d7fa2fba08a2b1e3159c3760764c1ff *./tests/fixtures/node-stack/compose.yaml
 b9a47a04fef4815093bec18b1412e9a733845bc7a201fd7412e81d40eed5cedc *./tests/fixtures/node-stack/Dockerfile
