@@ -7,7 +7,7 @@ PROFILE=""
 WITH_CLAUDE=1
 while [[ $# -gt 0 ]]; do case "$1" in --profile) PROFILE="$2"; shift 2;; --no-claude) WITH_CLAUDE=0; shift;; *) echo "Unknown arg: $1"; exit 2;; esac; done
 load_profile "$PROFILE"
-echo "==> nomArmy Local Agents v1.2 portable install ($NOMARMY_PROFILE)"
+echo "==> nomArmy install ($NOMARMY_PROFILE)"
 OS_NAME="$(uname -s)"
 case "$OS_NAME" in
   Darwin)
@@ -32,8 +32,35 @@ case "$OS_NAME" in
     fi
     command -v docker >/dev/null 2>&1 || { echo 'ERROR: Docker Engine (or Docker Desktop with the WSL2 backend) is required. Install and start it, then rerun.'; exit 1; }
     ;;
+  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    cat >&2 <<'MSG'
+ERROR: install.sh does not run natively on Windows. Three options, and the usual
+advice is not always the better one:
+
+  1. WSL2 + Docker Desktop WSL integration (supported path)
+     Note: WSL2 defaults to ~50% of host RAM, shared across ALL distros
+     including docker-desktop. On a 32 GB machine that caps the model at
+     ~16 GB. Raise it in %UserProfile%\.wslconfig, which needs `wsl --shutdown`
+     and will restart every running container.
+
+  2. Native Windows llama.cpp built from source, then point nomArmy at it.
+     Gets the full host RAM. Needs a C++ toolchain:
+       winget install Microsoft.VisualStudio.2022.BuildTools --override \
+         "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+     Prebuilt llama.cpp Windows binaries are NOT a reliable shortcut: on some
+     CPUs every compute backend crashes at startup while non-compute binaries
+     run fine. Build from source with flags matched to the host.
+
+  3. Run workers on a Bedrock profile and skip local inference entirely:
+       ./install.sh --profile bedrock
+
+Run `nomarmy sizing` on the host first -- it reports which of these your
+hardware can actually support before you commit to one.
+MSG
+    exit 1
+    ;;
   *)
-    echo "ERROR: $OS_NAME is not supported directly. On Windows, use WSL2 with Docker Desktop's WSL integration." >&2
+    echo "ERROR: $OS_NAME is not a supported host. See the README for supported platforms." >&2
     exit 1
     ;;
 esac

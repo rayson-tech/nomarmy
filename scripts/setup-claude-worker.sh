@@ -13,7 +13,7 @@ for c in node npm openclaw claude git; do
   }
 done
 
-echo "==> Installing Rayson local worker MCP server"
+echo "==> Installing nomArmy local worker MCP server"
 echo "    Install directory: $INSTALL_DIR"
 
 mkdir -p "$INSTALL_DIR"
@@ -71,6 +71,6 @@ if ! claude mcp get "$SERVER_NAME"; then
 fi
 
 echo
-echo "==> Installed Rayson local worker v1.2"
+echo "==> Installed nomArmy local worker"
 echo "    MCP server: $SERVER_NAME"
 echo "    Server path: $INSTALL_DIR/server.mjs"

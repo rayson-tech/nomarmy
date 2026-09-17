@@ -9,8 +9,8 @@ d4be3158f971f3f1fe3063eb557bfe92afc3269e3a4e9961d4e8d0cf5b471c67 *./config/commo
 c22e465a3f33e2cfa725ddc5d891a7251ec02ea36235b4f3a7d867a5a813076a *./config/profiles/macbook-pro.env
 5491d5f4c33f03d93cb2fd4239e268414702f3182c2de71b006b640fae512ba3 *./config/profiles/nvidia-linux.env
 8301da0069c58153178a5b9f9675311e9b7f0acc14b6f0a7d7b16ac5a43e461c *./docker/Dockerfile
-ecfbd0e2021c8ceb577b8a1fdcd1a6d9a499256c0acaf5a3e9f0d2c99c8ec8c6 *./e2e.sh
-957e931b8f36c95825473fa6a2562bee1bea5ba8a79d4ee311e0fcd812b3c0d5 *./install.sh
+35f7a567ded039fd2f4b83ede7e9fec8dd0529c68f77f181193c3e30a9b63dd7 *./e2e.sh
+223b830b2c40d4e753d2a184b7c12962f511935a3cf27abe598d11959acd9b26 *./install.sh
 84a5d9f94197e09a56da03392393efd046e6b3a5f4ea2b9ca55536eb768d8eea *./lib/config.mjs
 87523b72c861f6fec74a80aca933ef7e357fa911390644116234385b794aeb19 *./lib/evidence.mjs
 98ecb492a85663b157e6e65e7eb054a62948a95eb7f284700ebf65a2df37b7a8 *./lib/gguf.mjs
@@ -30,11 +30,11 @@ ff429eb80c5787efc0375a749a6b15e4ce9938d3265f1103a1c4931ecdc3a801 *./policies/cod
 1fcccaff157e1d64dd27c0f1cafc79bd8124106f00c09e26613fcd64f2c03cfd *./scripts/configure-openclaw.sh
 5f44fd48c03148b4038d9e6cc5cd4533304aae10d742508b90baa1bbb7466c8c *./scripts/configure-orchestrator.sh
 2809b805b8274d62e1eaeda22310ddb405fac26e3262607355f7ed718fa1aabd *./scripts/install-llama-cpp.sh
-92462a43abeac60bc2f21d3a41e9df9cb1ff093a304880d27e430e29966747a9 *./scripts/lib.sh
+6ebf21e3100c970f8f28609bf115a7a6751a1e34792c0ce7194db943b0a8cf66 *./scripts/lib.sh
 5a73aa442b4a6b29f769e4443efe93430529495b6a4cb4450345c216c9e80647 *./scripts/select-model.mjs
 64707939f97bd82c8b0cf2dda894cfff38644de0ea268b1146519baf345b9b5a *./scripts/select-model.sh
-3eff5c50577aa6caa3b508dd37eb0b19a5b3f25c18cedc2e48374f0ba4b0ff24 *./scripts/setup-claude-worker.sh
-4a1a7661595f6b3ccf5633766d295407e36853d685ae44cb9ad04566c9c25f6e *./scripts/setup-codex-worker.sh
+4ab9db6bcfc8f15a5d3835ffccadc7742d306d6925caf140f9b760aa5db05bbb *./scripts/setup-claude-worker.sh
+48be28b048f1f61cd75a6db7e7cc42e125892fefc53ddf6f822924fe461026d1 *./scripts/setup-codex-worker.sh
 cacbda5e84e91dced51ad4e9b6fee14c2475d280b3d11ef802adf17105b86d6d *./scripts/setup-sandbox.sh
 3193af71338f497f2acd0e4a87964193e1ab468b272f1b66800cae8d9d686e8c *./scripts/start-inference.sh
 01b9418733684b4990c5e626cbd90ac716743fe8194294ba80d336c107100f2e *./scripts/stop-inference.sh

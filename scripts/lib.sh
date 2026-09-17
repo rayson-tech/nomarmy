@@ -2,7 +2,7 @@
 set -euo pipefail
 nomarmy_root(){ cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd; }
 
-# v1.2 renamed the configuration namespace RAYSON_* -> NOMARMY_*. Anything a
+# v1.3 renamed the configuration namespace RAYSON_* -> NOMARMY_*. Anything a
 # user or unit file still exports under the old prefix is translated once, so
 # existing installs keep working while they migrate.
 nomarmy_compat_prefix(){

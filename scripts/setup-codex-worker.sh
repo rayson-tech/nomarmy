@@ -9,7 +9,7 @@ for c in node npm openclaw codex git; do
   command -v "$c" >/dev/null || { echo "ERROR: $c not found"; exit 1; }
 done
 
-echo "==> Installing Rayson local worker MCP server"
+echo "==> Installing nomArmy local worker MCP server"
 mkdir -p "$INSTALL_DIR"
 cp "$ROOT/package.json" "$INSTALL_DIR/package.json"
 cp "$ROOT/mcp/server.mjs" "$INSTALL_DIR/server.mjs"
@@ -24,4 +24,4 @@ codex mcp add "$SERVER_NAME" -- node "$INSTALL_DIR/server.mjs"
 
 echo "==> Verifying Codex MCP registration"
 codex mcp list
-echo "==> Installed Rayson local worker v1.2 for Codex"
+echo "==> Installed nomArmy local worker for Codex"

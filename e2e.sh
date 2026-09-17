@@ -22,7 +22,7 @@ done
 
 load_profile "$PROFILE"
 
-echo "=== nomArmy v1.2 E2E: $NOMARMY_PROFILE ==="
+echo "=== nomArmy E2E: $NOMARMY_PROFILE ==="
 
 "$ROOT/scripts/start-inference.sh" "$NOMARMY_PROFILE"
 
