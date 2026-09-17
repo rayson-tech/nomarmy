@@ -27,9 +27,56 @@ function clampInt(value, min, max, fallback) {
   const n = Number.parseInt(value ?? "", 10);
   return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback;
 }
+// npm installs CLIs on Windows as `<name>.cmd` shims. Node's spawn without a
+// shell resolves only exact filenames, so `spawn("openclaw")` fails ENOENT on a
+// host where `openclaw` works fine in a terminal. Resolve the real file instead
+// of setting shell:true -- the argv here carries repository-derived prompt text,
+// and handing that to a Windows command line would be an injection surface.
+// npm installs CLIs on Windows as a `<name>.cmd` shim. Two problems follow:
+// `spawn("openclaw")` cannot see the shim (ENOENT), and since Node 18.20 /
+// 20.12 (CVE-2024-27980) spawning a .cmd without a shell throws EINVAL. Using
+// shell:true would fix both and open an argument-injection hole, because the
+// argv here carries repository-derived prompt text. So resolve the shim to the
+// package's real JS entry point and run it under this same Node binary.
+const execCache = new Map();
+function resolveExecutable(command) {
+  if (process.platform !== "win32") return { file: command, prefixArgs: [] };
+  if (command.includes("/") || command.includes("\\")) return { file: command, prefixArgs: [] };
+  if (execCache.has(command)) return execCache.get(command);
+
+  const exts = (process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
+  const dirs = (process.env.PATH || "").split(path.delimiter).filter(Boolean);
+  let found = null;
+  outer: for (const dir of dirs) {
+    // PATHEXT variants first: npm also drops an extensionless POSIX shell
+    // script beside the shim, and Windows cannot execute that one.
+    for (const ext of [...exts, ""]) {
+      const candidate = path.join(dir, command + ext.toLowerCase());
+      try { if (fs.statSync(candidate).isFile()) { found = candidate; break outer; } } catch { /* not here */ }
+    }
+  }
+  if (!found) return { file: command, prefixArgs: [] };
+
+  let resolved = { file: found, prefixArgs: [] };
+  if (/\.(cmd|bat)$/i.test(found)) {
+    const pkgDir = path.join(path.dirname(found), "node_modules", command);
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(pkgDir, "package.json"), "utf8"));
+      const rel = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.[command];
+      const entry = rel ? path.join(pkgDir, rel) : null;
+      if (entry && fs.statSync(entry).isFile()) {
+        resolved = { file: process.execPath, prefixArgs: [entry] };
+      }
+    } catch { /* fall through to the shim and let spawn report it */ }
+  }
+  execCache.set(command, resolved);
+  return resolved;
+}
+
 function run(command, args, { cwd = projectDir, env = process.env, timeoutMs = 120000, trim = true } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    const exe = resolveExecutable(command);
+    const child = spawn(exe.file, [...exe.prefixArgs, ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "", settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
@@ -529,7 +576,7 @@ export const COORDINATOR_STATUS_BY_OUTCOME = Object.freeze({
   [OUTCOMES.WORKER_FAILED]: "failed"
 });
 
-async function executeJob({ task, acceptance, verification, mode = "inspect", baseRef, timeoutSeconds = 600, profile = "coder", reasoning = "high", workerId }) {
+export async function executeJob({ task, acceptance, verification, mode = "inspect", baseRef, timeoutSeconds = 600, profile = "coder", reasoning = "high", workerId }) {
   await assertRepo();
   ensureJobsRoot();
   const jobStartedMs = Date.now();
