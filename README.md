@@ -67,18 +67,20 @@ nomArmy v1.2 is proven: bounded delegation, isolated worktrees, coordinator-owne
 |---|---|
 | Bounded delegation, coordinator-owned Git, retained worktrees | Working, E2E tested |
 | Local (llama.cpp) and Amazon Bedrock execution profiles | Working |
+| `nomarmy doctor` — host readiness with a fix for every failure | Working, verified on a real host |
+| Hardware detection and nom sizing | Working, calibrated against a real OOM |
 | Objective + acceptance-criteria briefs, compact worker contract | Built, unit tested |
 | Truncated-report recovery, test-change classification, metrics | Built, unit tested |
 | `.nomarmy.yml` environment contract — schema, loader, validator | Built, unit tested |
 | Deterministic environment scanner and evidence normalizer | Built, unit tested |
-| Hardware detection and nom sizing | Built |
-| Sandboxed independent verification | In progress |
+| Sandboxed independent verification | Built, unit tested |
+| Real worker dispatch against a local model | Run — 6 jobs, 6 correct rejections, 0 accepted |
 | Disposable per-job service environments (Postgres, mocks, app) | Not built |
 | Nom-local browser/E2E and the autonomous repair loop | Not built |
 | Fresh integrated PR-gate environment | Not built |
 | Full-stack acceptance test proving the thesis end to end | **Not yet run** |
 
-"Built, unit tested" means the logic is covered by tests; it does not mean it has run against a live worker on a real ticket. The last row is the one that decides whether any of this was worth doing, and it is honestly still open.
+"Built, unit tested" means the logic is covered by tests; it does not mean it has survived a live worker on a real ticket. The dispatch row is the one worth dwelling on: six jobs have run against a local model and the gate rejected every one — correctly, including a worker that returned confident, well-structured, unparseable code. That demonstrates the gate works. It does not yet demonstrate that a cheap worker can pass it, and the last row remains open.
 
 Known limitations worth knowing up front: the Compose parser does not resolve YAML anchors, aliases or merge keys — affected findings are dropped with an explicit note rather than guessed at. Verification profiles requiring services beyond `environment: none` currently report `not_run` rather than running commands without their dependencies.
 

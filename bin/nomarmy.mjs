@@ -33,6 +33,8 @@ Usage: nomarmy <command> [options]
   validate        Validate .nomarmy.yml against the schema.
   sizing          Recommend context and nom count for this machine.
                   --check   evaluate the loaded profile instead of recommending
+  doctor          Check this host is ready to run nomArmy, with a fix for
+                  anything missing.
   help
 
 Options:
