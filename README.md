@@ -30,6 +30,35 @@ Everything else follows from that one line. The worker never runs Git. It cannot
 
 A malformed or truncated report is not automatically a failure either: if the repository changed, nomArmy verifies independently and may recover the work. **Failing verification stays failed**, the worktree is retained, and no recovery path can launder it into an accepted job.
 
+### What that looks like in practice
+
+A real job, run against this repository: *add a `doctor` command to the CLI, with tests.* The worker was a 20B local model. It produced 156 lines that look like competent engineering — JSDoc throughout, pure exported check functions, a distinct remediation message per failed check, `--json` support, logic placed in `lib/` to match the repo's existing layout.
+
+It had six defects:
+
+- an unterminated template literal, so **the file did not parse at all**
+- `process.env.PATH || os.platform() === "win32" ? a : b` — `||` binds tighter than `?:`, so on Linux and macOS it silently searched an empty string and found nothing
+- executable probing that appended only `.exe`, missing `.cmd` and `.bat`
+- output that printed "All checks passed." unconditionally, then appended "Some checks failed."
+- checks against `NOMARMY_MODEL_ENDPOINT`, a variable that **does not exist in this project** — it never read the configuration it claimed to validate
+- no test file, despite an explicit acceptance criterion
+
+A reviewer skimming that diff would plausibly approve it. It has the shape of good code, and every defect is invisible without executing it: a missing backtick, an operator-precedence subtlety, a fabricated environment variable.
+
+nomArmy committed nothing. The record reads:
+
+```
+outcome           WORKER_TIMEOUT
+coordinatorStatus incomplete
+commit.created    false
+worktree          retained
+gate              {satisfied: false, reason: "no report parsed"}
+testChanges       prod: [bin/nomarmy.mjs, lib/doctor.mjs]   newTests: []
+```
+
+Note the last line: production files changed, zero tests added. That is derived from the repository, not from anything the worker said about itself.
+
+This is the entire argument for the design. A review process based on reading the diff fails here. One based on executing it does not.
 ## Status
 
 nomArmy v1.2 is proven: bounded delegation, isolated worktrees, coordinator-owned Git, retained failed worktrees. v1.3 is in development and extends it toward autonomous workers with real execution environments. Honest state of play:
