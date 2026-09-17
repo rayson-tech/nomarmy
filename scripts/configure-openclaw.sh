@@ -52,4 +52,11 @@ printf '%s\n' "$API_KEY" | \
     --provider "$PROVIDER" \
     --profile-id "$PROFILE_ID"
 
+# A local model on CPU can take many minutes for a single response. OpenClaw
+# times out per model call independently of nomArmy's job timeout, so a slow
+# worker is killed mid-turn unless this ceiling is raised to match. nomArmy's
+# whole premise is slow cheap workers, so this is not an edge case.
+openclaw config set "models.providers.$PROVIDER.timeoutSeconds" "${NOMARMY_PROVIDER_TIMEOUT_SECONDS:-1800}"
+openclaw config set agents.defaults.timeoutSeconds "${NOMARMY_AGENT_TIMEOUT_SECONDS:-5400}"
+
 openclaw models list --provider "$PROVIDER"

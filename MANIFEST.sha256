@@ -27,7 +27,7 @@ ff429eb80c5787efc0375a749a6b15e4ce9938d3265f1103a1c4931ecdc3a801 *./policies/cod
 09ae55882464a6930f74820dbd1169599e152dc17d13abe2d7c1feee015f57ce *./policies/orchestrator.md
 10af37b65175dce248f185718652c0f3aa820cbf6563495a1bfaad952c3896cb *./policies/reviewer.md
 85d8770fd0ec5765df6d08bfbb6bfc1fb87858bc5cfdc3c3cd3b97c33d8abbbc *./README.md
-1fcccaff157e1d64dd27c0f1cafc79bd8124106f00c09e26613fcd64f2c03cfd *./scripts/configure-openclaw.sh
+929940946490d494dc29dd55390fca9ba8d6ea0ee6ef6b429a33e2c4de00d74f *./scripts/configure-openclaw.sh
 5f44fd48c03148b4038d9e6cc5cd4533304aae10d742508b90baa1bbb7466c8c *./scripts/configure-orchestrator.sh
 2809b805b8274d62e1eaeda22310ddb405fac26e3262607355f7ed718fa1aabd *./scripts/install-llama-cpp.sh
 6ebf21e3100c970f8f28609bf115a7a6751a1e34792c0ce7194db943b0a8cf66 *./scripts/lib.sh
