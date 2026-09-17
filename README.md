@@ -53,6 +53,8 @@ nomArmy v1.2 is proven: bounded delegation, isolated worktrees, coordinator-owne
 
 Known limitations worth knowing up front: the Compose parser does not resolve YAML anchors, aliases or merge keys — affected findings are dropped with an explicit note rather than guessed at. Verification profiles requiring services beyond `environment: none` currently report `not_run` rather than running commands without their dependencies.
 
+On performance: a CPU-only host runs this honestly but slowly — measured at ~3.8 tok/s generation on a 20-core i7 with an 11.3 GiB MoE model, which works out to roughly 11 minutes for two assistant turns. Use a GPU or a hosted profile for interactive work; see [Speed matters more than fit](#speed-matters-more-than-fit).
+
 ## Security posture
 
 The worker gets a writable worktree and nothing else. No Docker socket, no host credentials, no coordinator state, no arbitrary host ports, and no unrestricted network. Repository content is untrusted input: a file in the repo cannot talk a worker into escaping its brief.
@@ -270,6 +272,28 @@ It proposes; it does not write. Apply what you agree with, the same way `nomarmy
 
 Raising concurrency is an empirical question, not a capacity one. Benchmark accepted tickets/hour, memory pressure, latency, and coordinator interventions before increasing it — a second nom that halves the first one's context can lower throughput.
 
+
+### Speed matters more than fit
+
+`nomarmy sizing` answers *"what fits in memory?"* It does not answer *"is this fast enough to be useful?"*, and on CPU-only hardware those are very different questions.
+
+Measured on a 20-core i7-1280P, no GPU, running gpt-oss-20b (MXFP4, 11.3 GiB, MoE with ~3.6B active parameters — a favourable case, not a worst case):
+
+| | |
+|---|---|
+| Generation | ~3.8 tokens/sec |
+| Prompt processing | ~6.7 tokens/sec |
+| Two assistant turns on a real job | **11.5 minutes** |
+
+Sizing will happily report that this machine runs *2 noms at 64K each*, and that is true. It is also close to unusable for interactive work: an autonomous explore → implement → test → repair loop needs many turns, so a single bounded job runs to an hour or more.
+
+Two consequences worth planning around:
+
+**Turn count dominates, not token count.** Every tool-call round re-reads context. llama.cpp caches the prefix within a slot so growth is incremental rather than a full reprocess, but a worker that explores widely pays for it repeatedly. A tighter objective is worth more than a bigger context.
+
+**Provider timeouts must match the model, not the vendor default.** A single model call can exceed a hosted-inference-shaped timeout, and the worker is then killed mid-turn regardless of nomArmy's own job timeout — the two ceilings are independent. `configure-openclaw.sh` sets both; raise them with `NOMARMY_PROVIDER_TIMEOUT_SECONDS` and `NOMARMY_AGENT_TIMEOUT_SECONDS` if your hardware is slower still.
+
+Rules of thumb: **GPU or a hosted profile for interactive work.** CPU-only is viable for overnight or batch runs, and genuinely useful as a correctness testbed — it exercises the whole pipeline honestly, just slowly. Treat a CPU-only local profile as something you are testing, not something you are depending on.
 ## Choose another local model
 
 nomArmy uses llama.cpp's Hugging Face integration, so it can run any compatible GGUF language model—not only the bundled Qwen default. Use the interactive selector to search Hugging Face, inspect GGUF quantizations, select an alias, and explicitly confirm the configuration update:
