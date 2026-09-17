@@ -1,0 +1,55 @@
+# Fixture for the nomArmy scanner. Values here are fake and exist so the
+# tests can prove that NO value ever reaches the evidence package.
+name: fixture-stack
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: node server.js
+    ports:
+      - "8080:3000"
+      - "9229:9229/tcp"
+    environment:
+      DATABASE_URL: postgres://app:hunter2-not-a-real-password@db:5432/app
+      API_TOKEN: "tok_live_DO_NOT_LEAK_0001"
+      LOG_LEVEL: debug
+    env_file:
+      - .env.example
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  db:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=app
+      - POSTGRES_PASSWORD=hunter2-not-a-real-password
+      - POSTGRES_DB
+    volumes:
+      - ./db/seed.sql:/docker-entrypoint-initdb.d/seed.sql
+    healthcheck:
+      test: pg_isready -U app
+      interval: 5s
+
+  cache:
+    image: redis:7
+    expose:
+      - 6379
+
+  e2e:
+    image: mcr.microsoft.com/playwright:v1.44.0
+    profiles: [tools]
+    depends_on:
+      - api
+    command: npx playwright test

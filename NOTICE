@@ -1,0 +1,25 @@
+nomArmy
+Copyright 2026 Rayson Technologies
+
+This product includes software developed by Rayson Technologies.
+
+Licensed under the Apache License, Version 2.0. See the LICENSE file.
+
+---
+
+nomArmy orchestrates, but does not redistribute, the following third-party
+software. Each is obtained and run by the user under its own licence:
+
+  llama.cpp            MIT           https://github.com/ggml-org/llama.cpp
+  OpenClaw             see upstream  https://openclaw.ai
+  Qwen3-Coder models   Apache-2.0    https://huggingface.co/Qwen
+
+Bundled runtime dependencies and their licences are declared in package.json
+and resolved at install time:
+
+  @modelcontextprotocol/sdk   MIT
+  zod                         MIT
+  yaml                        ISC
+
+"nomArmy" and "Rayson Technologies" are trademarks of Rayson Technologies.
+Section 6 of the Apache License does not grant permission to use them.

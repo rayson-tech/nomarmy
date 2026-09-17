@@ -1,0 +1,25 @@
+# nomArmy is developed on Windows but runs on Linux and macOS. CRLF in a shell
+# script produces "bad interpreter: /bin/bash^M" on the target host, so line
+# endings are normalised to LF in the repository and in the working tree.
+* text=auto eol=lf
+
+*.sh      text eol=lf
+*.mjs     text eol=lf
+*.js      text eol=lf
+*.json    text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.env     text eol=lf
+*.md      text eol=lf
+Dockerfile text eol=lf
+Makefile  text eol=lf
+Procfile  text eol=lf
+LICENSE   text eol=lf
+NOTICE    text eol=lf
+
+# Checksums must match byte-for-byte on every platform.
+MANIFEST.sha256 text eol=lf
+
+*.png binary
+*.jpg binary
+*.gguf binary

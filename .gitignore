@@ -1,0 +1,89 @@
+# ---- Dependencies ----------------------------------------------------------
+node_modules/
+jspm_packages/
+.pnp
+.pnp.js
+.yarn/cache
+.yarn/unplugged
+.yarn/install-state.gz
+
+# The lockfile IS committed: nomArmy is an application, and reproducible
+# installs matter more here than dependency-range flexibility.
+# package-lock.json
+
+# ---- nomArmy runtime state -------------------------------------------------
+# Job artifacts, worktrees, logs and the llama.cpp build normally live under
+# $NOMARMY_INSTALL_ROOT (default ~/.local/share/rayson-local-agents), outside
+# the repository. These entries catch the case where someone repoints it here.
+run/
+logs/
+jobs/
+worktree/
+models/
+*.gguf
+*.pid
+llama-server
+llama.cpp/
+
+# ---- Credentials -----------------------------------------------------------
+# A Bedrock key, an AWS profile or an SSH key must never reach a commit.
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+aws-credentials*
+.aws/
+credentials.json
+secrets.json
+*.secret
+
+# ---- Worker sandbox byproducts ---------------------------------------------
+.openclaw/
+.npm/
+.npm-cache/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- Test and build output -------------------------------------------------
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+cypress/screenshots/
+cypress/videos/
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# ---- Editors and OS --------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.idea/
+.vscode/
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+.\#*
+\#*\#
+
+# ---- Local overrides -------------------------------------------------------
+# A developer may keep a machine-specific profile without committing it.
+config/profiles/*.local.env
+.nomarmy.local.yml

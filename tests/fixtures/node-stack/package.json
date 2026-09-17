@@ -1,0 +1,27 @@
+{
+  "name": "fixture-app",
+  "private": true,
+  "packageManager": "pnpm@9.1.0",
+  "workspaces": ["packages/*"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "lint": "eslint .",
+    "db:migrate": "prisma migrate deploy",
+    "db:seed": "node scripts/seed.js",
+    "start": "node server.js --port ${PORT}"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "pg": "^8.11.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.44.0",
+    "prisma": "^5.14.0",
+    "testcontainers": "^10.9.0",
+    "vitest": "^1.6.0"
+  }
+}

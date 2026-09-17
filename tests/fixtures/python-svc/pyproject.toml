@@ -1,0 +1,19 @@
+[project]
+name = "fixture-svc"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.111",
+  "uvicorn[standard]>=0.29",
+  "sqlalchemy>=2.0",
+  "alembic>=1.13",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-playwright>=0.5", "testcontainers>=4.5"]
+
+[project.scripts]
+serve = "app.main:run"
+seed-db = "app.seed:main"
+
+[tool.pytest.ini_options]
+addopts = "-q"
