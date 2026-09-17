@@ -236,6 +236,13 @@ function sizingCheck(hardware, gguf) {
 }
 
 const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, help: () => usage(0) };
+// doctor command
+async function cmdDoctor() {
+  // Import lazily to avoid circular dependencies
+  const { runDoctor } = await import("../lib/doctor.mjs");
+  await runDoctor({ json, exit: true });
+}
+commands.doctor = cmdDoctor;
 if (!command || flag("help") || !commands[command]) usage(command && !commands[command] ? 2 : 0);
 
 try {
