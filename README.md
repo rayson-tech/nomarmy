@@ -527,6 +527,7 @@ lib/sizing.mjs        hardware -> context/nom recommendation
 lib/hardware.mjs  lib/gguf.mjs  lib/doctor.mjs
 lib/config.mjs    lib/schema.mjs  lib/scan.mjs  lib/evidence.mjs  lib/verify.mjs
 tests/
+docs/experiments/     dated runbooks and results
 CLAUDE.md
 AGENTS.md
 docker/Dockerfile
