@@ -19,9 +19,11 @@ import {
   buildMetrics,
   testChangeBanner,
   workerPrompt,
+  reportRecoveryPrompt,
   jobSchema,
   maxTaskChars,
-  maxAcceptanceItemChars
+  maxAcceptanceItemChars,
+  formatResult
 } from "../mcp/server.mjs";
 
 const report = ({ status = "done", tests = "pass", notDone = "none", note = "n/a" } = {}) =>
@@ -527,4 +529,58 @@ test("jobSchema: rejects an oversized acceptance item", () => {
 test("jobSchema: accepts an acceptance item at the character ceiling", () => {
   const result = jobSchema.safeParse({ task: "t", acceptance: ["x".repeat(maxAcceptanceItemChars)] });
   assert.equal(result.success, true);
+});
+
+// ---------------------------------------------------------------------------
+// Display order: the VERIFIED EXECUTION RECORD is evidence; the worker's own
+// report is a claim. Leading with the claim buried the record beneath
+// whatever the worker said, including a truncated or garbled reply.
+// ---------------------------------------------------------------------------
+test("formatResult: the execution record precedes the worker's report, not the other way round", () => {
+  const text = formatResult({
+    ok: true,
+    report: "some truncated worker prose that should not lead",
+    manifest: { outcome: OUTCOMES.WORKER_DONE, jobId: "job-1", testChanges: null },
+    jobDir: "/tmp/job-1",
+  });
+  const recordIndex = text.indexOf("VERIFIED EXECUTION RECORD");
+  const reportIndex = text.indexOf("some truncated worker prose");
+  assert.ok(recordIndex >= 0 && reportIndex >= 0, "both sections must be present");
+  assert.ok(recordIndex < reportIndex, "the record must come before the worker's report");
+  assert.match(text, /WORKER REPORT \(a claim, not evidence\)/);
+});
+
+test("formatResult: a scout's record also precedes its report", () => {
+  const text = formatResult({
+    ok: true,
+    report: "FINDING: something",
+    manifest: { outcome: OUTCOMES.SCOUT_ANSWERED ?? "SCOUT_ANSWERED", mode: "scout", jobId: "job-2" },
+    jobDir: "/tmp/job-2",
+  });
+  const recordIndex = text.indexOf("SCOUT RECORD");
+  const reportIndex = text.indexOf("FINDING: something");
+  assert.ok(recordIndex >= 0 && reportIndex >= 0, "both sections must be present");
+  assert.ok(recordIndex < reportIndex, "the record must come before the worker's report");
+});
+
+// ---------------------------------------------------------------------------
+// Report recovery: one follow-up call for a run that finished but left no
+// usable report, asking for nothing but the four lines. It must not ask for
+// or permit anything that would let it pass as a second attempt at the task.
+// ---------------------------------------------------------------------------
+test("reportRecoveryPrompt: asks only for the four report lines, not a retry", () => {
+  const p = reportRecoveryPrompt({ report: { targetTokens: 256, hardCapTokens: 512 } });
+  assert.match(p, /STATUS: done \| partial \| blocked/);
+  assert.match(p, /TESTS: pass \| fail \| not_run/);
+  assert.match(p, /NOT_DONE: none \| <brief>/);
+  assert.match(p, /NOTE: <brief/);
+  assert.match(p, /Do not repeat, redo, retry/);
+  assert.match(p, /Do not call any tool/);
+  assert.match(p, /512 is the hard cap/);
+});
+
+test("reportRecoveryPrompt: tells an uncertain worker to under-claim, not to say done", () => {
+  const p = reportRecoveryPrompt({ report: { targetTokens: 256, hardCapTokens: 512 } });
+  assert.match(p, /unsure whether an edit you attempted actually applied/);
+  assert.match(p, /partial or STATUS: blocked rather than STATUS: done/);
 });

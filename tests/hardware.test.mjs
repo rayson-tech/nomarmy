@@ -19,6 +19,7 @@ import {
   parseNvidiaSmiMemoryCsv,
   parseProcCpuinfoPhysicalCores,
   parseProcMeminfoBytes,
+  parseVmStatBytes,
 } from "../lib/hardware.mjs";
 
 import { deriveHeadDim, readGGUFMetadata } from "../lib/gguf.mjs";
@@ -70,6 +71,58 @@ test("reads MemAvailable, not MemFree, from /proc/meminfo", () => {
   assert.equal(parseProcMeminfoBytes(meminfo, "MemTotal"), 131072000 * 1024);
   assert.equal(parseProcMeminfoBytes(meminfo, "Nonsense"), null);
   assert.equal(parseProcMeminfoBytes(""), null);
+});
+
+// --- vm_stat parsing (Darwin) -----------------------------------------------
+//
+// os.freemem() on Darwin counts only free+speculative pages, ignoring tens of
+// GiB of reclaimable file-backed cache the kernel evicts instantly under
+// pressure. parseVmStatBytes sums free+inactive+speculative+purgeable instead,
+// mirroring what /proc/meminfo's MemAvailable does on Linux.
+
+const VM_STAT_SAMPLE = `Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                    13008.
+Pages active:                                 187220.
+Pages inactive:                               185715.
+Pages speculative:                              3988.
+Pages throttled:                                   0.
+Pages wired down:                            3305691.
+Pages purgeable:                               19047.
+"Translation faults":                      245081780.
+Pages copy-on-write:                        15991108.
+File-backed pages:                            123309.
+Anonymous pages:                              253614.
+`;
+
+test("parseVmStatBytes sums free+inactive+speculative+purgeable, scaled by the real page size", () => {
+  const bytes = parseVmStatBytes(VM_STAT_SAMPLE);
+  const pageSize = 16384;
+  assert.equal(bytes, (13008 + 185715 + 3988 + 19047) * pageSize);
+});
+
+test("parseVmStatBytes is far larger than free+speculative alone (the freemem() bug)", () => {
+  const bytes = parseVmStatBytes(VM_STAT_SAMPLE);
+  const freememEquivalent = (13008 + 3988) * 16384;
+  assert.ok(bytes > freememEquivalent * 5, "reclaimable-inclusive figure should dwarf the freemem-only figure");
+});
+
+test("parseVmStatBytes returns null when the page size line is missing", () => {
+  assert.equal(parseVmStatBytes("Pages free: 100.\nPages inactive: 200.\n"), null);
+});
+
+test("parseVmStatBytes returns null when a required field is missing", () => {
+  const missingPurgeable = `Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                    100.
+Pages inactive:                                200.
+Pages speculative:                              50.
+`;
+  assert.equal(parseVmStatBytes(missingPurgeable), null);
+});
+
+test("parseVmStatBytes tolerates junk input", () => {
+  assert.equal(parseVmStatBytes(""), null);
+  assert.equal(parseVmStatBytes(null), null);
+  assert.equal(parseVmStatBytes(undefined), null);
 });
 
 test("detects WSL2 from the kernel release or /proc/version", () => {
