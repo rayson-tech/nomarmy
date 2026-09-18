@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-INSTALL_DIR="${NOMARMY_AGENT_INSTALL_DIR:-$HOME/.local/share/rayson-local-worker}"
-SERVER_NAME="rayson-local-worker"
+INSTALL_DIR="${NOMARMY_AGENT_INSTALL_DIR:-$HOME/.local/share/nomarmy-local-worker}"
+SERVER_NAME="nomarmy-local-worker"
 
 for c in node npm openclaw claude git; do
   command -v "$c" >/dev/null || {
@@ -16,10 +16,16 @@ done
 echo "==> Installing nomArmy local worker MCP server"
 echo "    Install directory: $INSTALL_DIR"
 
-mkdir -p "$INSTALL_DIR"
+mkdir -p "$INSTALL_DIR/mcp"
 
 cp "$ROOT/package.json" "$INSTALL_DIR/package.json"
-cp "$ROOT/mcp/server.mjs" "$INSTALL_DIR/server.mjs"
+cp "$ROOT/mcp/server.mjs" "$INSTALL_DIR/mcp/server.mjs"
+# server.mjs resolves its verification runner via "../lib/verify.mjs", relative
+# to its own location, so lib/ must ship as a sibling of the mcp/ directory
+# (and both as children of INSTALL_DIR, so npm's node_modules resolves from
+# either one by walking up).
+rm -rf "$INSTALL_DIR/lib"
+cp -R "$ROOT/lib" "$INSTALL_DIR/lib"
 
 cd "$INSTALL_DIR"
 
@@ -29,9 +35,12 @@ npm install --omit=dev
 
 echo "==> Validating MCP server"
 
-node --check server.mjs
+node --check mcp/server.mjs
 
 echo "==> Registering $SERVER_NAME with Claude Code"
+
+# Best-effort removal of old name for clean upgrades.
+claude mcp remove rayson-local-worker --scope user >/dev/null 2>&1 || claude mcp remove rayson-local-worker >/dev/null 2>&1 || true
 
 # Remove an older registration if one exists.
 # Failure here is harmless when this is a fresh install.
@@ -45,7 +54,7 @@ true
 if claude mcp add \
   --scope user \
   "$SERVER_NAME" \
-  -- node "$INSTALL_DIR/server.mjs"
+  -- node "$INSTALL_DIR/mcp/server.mjs"
 then
   :
 else
@@ -55,7 +64,7 @@ else
 
   claude mcp add \
     "$SERVER_NAME" \
-    -- node "$INSTALL_DIR/server.mjs"
+    -- node "$INSTALL_DIR/mcp/server.mjs"
 fi
 
 echo "==> Verifying Claude MCP registration"
@@ -73,4 +82,4 @@ fi
 echo
 echo "==> Installed nomArmy local worker"
 echo "    MCP server: $SERVER_NAME"
-echo "    Server path: $INSTALL_DIR/server.mjs"
+echo "    Server path: $INSTALL_DIR/mcp/server.mjs"

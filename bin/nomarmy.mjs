@@ -52,7 +52,7 @@ function findModel() {
   const explicit = value("model");
   if (explicit) return explicit;
   const installRoot = process.env.NOMARMY_INSTALL_ROOT
-    || path.join(os.homedir(), ".local", "share", "rayson-local-agents");
+    || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
   const roots = [
     process.env.NOMARMY_MODEL_PATH,
     path.join(os.homedir(), ".cache", "llama.cpp"),

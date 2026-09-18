@@ -1,6 +1,6 @@
 # nomArmy by Rayson Technologies — local agent instructions (v1.3)
 
-Use `rayson-local-worker` as the default execution layer for bounded engineering work that is cheap to verify. Qwen3-Coder-Next is the default local coder; GPT-OSS 20B is a fallback/control.
+Use `nomarmy-local-worker` as the default execution layer for bounded engineering work that is cheap to verify. Qwen3-Coder-Next is the default local coder; GPT-OSS 20B is a fallback/control.
 
 ## Coordinator responsibilities
 You own planning, decomposition, uncertain diagnosis, architecture, security decisions, review, integration, merge/conflict decisions, and final acceptance. You also own all Git operations. Local workers must never be treated as Git or acceptance authorities.
@@ -52,4 +52,4 @@ Cloud profiles send repository content off the machine. That is the decision to 
 Every job record carries `execution.orchestratorTrust`, and degraded results print a banner. Check it before weighting a prior acceptance. `policies/reviewer.md` lists what is and is not permitted under `degraded`.
 
 ## Naming
-Configuration is `NOMARMY_*`. `RAYSON_*` is translated once at load with a deprecation warning; the MCP server is still registered as `rayson-local-worker`.
+Configuration is `NOMARMY_*`. `RAYSON_*` is translated once at load with a deprecation warning; the MCP server is registered as `nomarmy-local-worker`.

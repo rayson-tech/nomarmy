@@ -60,5 +60,5 @@ else
   echo "PASS Orchestrator trust is frontier (${NOMARMY_ORCHESTRATOR_MODEL:-local coordinator})"
 fi
 
-if command -v claude >/dev/null 2>&1; then claude mcp get rayson-local-worker >/dev/null 2>&1 && echo 'PASS Claude MCP registration' || echo 'WARN Claude installed but MCP not registered'; else echo 'INFO Claude Code not installed on this node'; fi
+if command -v claude >/dev/null 2>&1; then claude mcp get nomarmy-local-worker >/dev/null 2>&1 && echo 'PASS Claude MCP registration' || echo 'WARN Claude installed but MCP not registered'; else echo 'INFO Claude Code not installed on this node'; fi
 exit "$fail"

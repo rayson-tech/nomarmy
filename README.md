@@ -201,7 +201,7 @@ PASS autonomous edit + verification
 If Claude Code is installed, verify the final coordinator connection with:
 
 ```bash
-claude mcp get rayson-local-worker
+claude mcp get nomarmy-local-worker
 ```
 
 Then copy/merge this package's `CLAUDE.md` into a real repository, start `claude` from that repo, run `/mcp`, and delegate one bounded implementation ticket before increasing worker count.
@@ -228,7 +228,7 @@ When the `codex` command is available, `install.sh` also registers the Rayson MC
 codex mcp list
 ```
 
-The Codex desktop app, CLI, and IDE extension share this local MCP configuration. In Codex, use `/mcp` to confirm that `rayson-local-worker` is available.
+The Codex desktop app, CLI, and IDE extension share this local MCP configuration. In Codex, use `/mcp` to confirm that `nomarmy-local-worker` is available.
 
 ## DGX Spark: clean E2E
 
@@ -299,7 +299,7 @@ Every job record under this profile carries `execution.orchestratorTrust: "degra
 
 ## Configuration naming
 
-Configuration variables are `NOMARMY_*`. Anything still exported as `RAYSON_*` is translated once at profile load with a deprecation warning, so existing installs and unit files keep working. The MCP server itself is still registered as `rayson-local-worker`.
+Configuration variables are `NOMARMY_*`. Anything still exported as `RAYSON_*` is translated once at profile load with a deprecation warning, so existing installs and unit files keep working. The MCP server itself is registered as `nomarmy-local-worker`.
 
 ## Starting/stopping inference
 
@@ -308,7 +308,7 @@ Configuration variables are `NOMARMY_*`. Anything still exported as `RAYSON_*` i
 ./scripts/stop-inference.sh macbook-pro
 ```
 
-Logs are under `$HOME/.local/share/rayson-local-agents/logs/`.
+Logs are under `$HOME/.local/share/nomarmy-local-agents/logs/`.
 
 ## Sizing noms
 

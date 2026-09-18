@@ -16,7 +16,7 @@ RUNTIME="${NOMARMY_ORCHESTRATOR_RUNTIME:-claude-code}"
 
 if ! nomarmy_is_cloud; then
   echo "Profile '$NOMARMY_PROFILE' runs a local worker stack and does not configure the orchestrator."
-  echo "The orchestrator is whichever Claude Code or Codex session drives the rayson-local-worker MCP server."
+  echo "The orchestrator is whichever Claude Code or Codex session drives the nomarmy-local-worker MCP server."
   exit 0
 fi
 
@@ -26,7 +26,7 @@ Profile '$NOMARMY_PROFILE' declares orchestrator runtime '$RUNTIME', not claude-
 
 Claude Code's Bedrock integration only routes Anthropic models, so it cannot run
 '$NOMARMY_ORCHESTRATOR_MODEL'. This profile's coordinator is OpenClaw driving the
-same rayson-local-worker MCP server, configured by scripts/configure-openclaw.sh.
+same nomarmy-local-worker MCP server, configured by scripts/configure-openclaw.sh.
 
 Orchestrator trust: ${NOMARMY_ORCHESTRATOR_TRUST:-frontier}
 MSG

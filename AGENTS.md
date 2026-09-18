@@ -1,6 +1,6 @@
 # nomArmy by Rayson Technologies — local worker instructions
 
-Use `rayson-local-worker` for bounded engineering work that is cheap to verify. Qwen3-Coder-Next is the default local coder; GPT-OSS 20B is a fallback/control.
+Use `nomarmy-local-worker` for bounded engineering work that is cheap to verify. Qwen3-Coder-Next is the default local coder; GPT-OSS 20B is a fallback/control.
 
 ## Coordinator responsibilities
 
@@ -34,4 +34,4 @@ Cloud profiles send repository content off the machine.
 
 ## Naming
 
-Configuration is `NOMARMY_*`; `RAYSON_*` is translated once at load with a deprecation warning. The MCP server is still `rayson-local-worker`.
+Configuration is `NOMARMY_*`; `RAYSON_*` is translated once at load with a deprecation warning. The MCP server is `nomarmy-local-worker`.

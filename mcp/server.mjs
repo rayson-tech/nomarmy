@@ -9,9 +9,9 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const VERSION = "1.3.0";
-const server = new McpServer({ name: "rayson-local-worker", version: VERSION });
+const server = new McpServer({ name: "nomarmy-local-worker", version: VERSION });
 const projectDir = path.resolve(process.env.CLAUDE_PROJECT_DIR || process.cwd());
-const stateRoot = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "rayson-local-agents");
+const stateRoot = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
 const jobsRoot = path.join(stateRoot, "jobs");
 const defaultParallel = clampInt(process.env.NOMARMY_MAX_WORKERS, 1, 8, 1);
 
@@ -135,6 +135,16 @@ const workerModelFallback = process.env.NOMARMY_WORKER_MODEL_FALLBACK || "gpt-os
 const orchestratorTrust = process.env.NOMARMY_ORCHESTRATOR_TRUST || "frontier";
 const contextLimitRaw = process.env.NOMARMY_CONTEXT_LIMIT ?? process.env.NOMARMY_WORKER_CONTEXT_LIMIT ?? "";
 const contextLimit = Number.isFinite(Number.parseInt(contextLimitRaw, 10)) ? Number.parseInt(contextLimitRaw, 10) : null;
+
+// A local worker's context window is a shared, finite resource, not a place
+// to dump an entire plan. An oversized brief does not make a small model more
+// capable; it spends the job's turn on reading instead of editing (observed:
+// a ten-file, ~3.5k-character brief produced zero edits before running out of
+// output budget). The coordinator enforces a ceiling here so "keep the brief
+// small and single-purpose" is a contract, not a habit the orchestrator has
+// to remember. Configurable per hardware/model, not hardcoded.
+export const maxTaskChars = Number.parseInt(process.env.NOMARMY_MAX_TASK_CHARS ?? "", 10) || 3000;
+export const maxAcceptanceItemChars = Number.parseInt(process.env.NOMARMY_MAX_ACCEPTANCE_ITEM_CHARS ?? "", 10) || 300;
 const execution = {
   layer: process.env.NOMARMY_EXECUTION || "local",
   workerProvider, workerModel, workerModelFallback, orchestratorTrust,
@@ -669,9 +679,13 @@ async function mapLimit(items, limit, fn) {
   async function runner() { while (true) { const i = next++; if (i >= items.length) return; results[i] = await fn(items[i], i); } }
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, runner)); return results;
 }
-const jobSchema = z.object({
-  task: z.string().min(1).describe("OBJECTIVE: the outcome the worker must achieve, not the edit it should make"),
-  acceptance: z.array(z.string().min(1)).max(20).optional().describe("Explicit acceptance criteria the worker must satisfy"),
+export const jobSchema = z.object({
+  task: z.string().min(1).max(maxTaskChars,
+    `Objective exceeds the ${maxTaskChars}-character worker context budget. Split this into smaller, single-purpose jobs rather than describing many files or a broad change in one brief.`
+  ).describe("OBJECTIVE: the outcome the worker must achieve, not the edit it should make"),
+  acceptance: z.array(z.string().min(1).max(maxAcceptanceItemChars,
+    `Acceptance item exceeds ${maxAcceptanceItemChars} characters. Keep each criterion to one concrete, checkable statement.`
+  )).max(20).optional().describe("Explicit acceptance criteria the worker must satisfy"),
   verification: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().describe("Verification profile NAME (e.g. quick, standard, browser). Semantic; nomArmy owns execution."),
   mode: z.enum(["inspect", "implement"]).default("implement"), base_ref: z.string().optional(),
   timeout_seconds: z.number().int().min(30).max(1800).default(600), profile: z.enum(["coder", "gpt"]).default("coder"),
@@ -701,13 +715,28 @@ server.tool("local_worker_jobs", "List recent local-worker job metadata for revi
   const rows = dirs.map(name => { const dir = path.join(jobsRoot, name); for (const f of ["metadata.json", "failure.json"]) { const p = path.join(dir, f); if (fs.existsSync(p)) { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch {} } } return { jobId: name, status: "unknown" }; });
   return { content: [{ type: "text", text: JSON.stringify(rows, null, 2) }] };
 });
+// The Docker sandbox writes skill/guardrail files under .openclaw/ with
+// permissions meant to stop the SANDBOXED AGENT from deleting them. On macOS,
+// Docker Desktop's bind-mount translation can carry that protection through
+// to the host as an ACE (e.g. "deny delete") that also blocks the host-side
+// coordinator from removing the worktree during cleanup. By cleanup time the
+// sandbox has already exited, so it is safe to strip here; best-effort and
+// non-fatal, since a worktree with no such lock has nothing to clear.
+async function releaseSandboxLocks(dir) {
+  if (process.platform === "darwin") {
+    await run("chmod", ["-R", "-N", dir], { cwd: projectDir }).catch(() => {});
+  } else {
+    await run("chmod", ["-R", "u+rwX", dir], { cwd: projectDir }).catch(() => {});
+    await run("setfacl", ["-R", "-b", dir], { cwd: projectDir }).catch(() => {});
+  }
+}
 server.tool("local_worker_cleanup", "Remove a retained worker worktree and optionally its agent branch after Claude has reviewed/integrated or deliberately discarded it. Refuses to delete the current branch.", {
   job_id: z.string().min(1), delete_branch: z.boolean().default(false), force: z.boolean().default(false)
 }, async ({ job_id, delete_branch, force }) => {
   await assertRepo(); const jobDir = path.join(ensureJobsRoot(), path.basename(job_id)); const metaPath = path.join(jobDir, "metadata.json"); const failPath = path.join(jobDir, "failure.json");
   const p = fs.existsSync(metaPath) ? metaPath : failPath; if (!fs.existsSync(p)) throw new Error(`Unknown job: ${job_id}`);
   const meta = JSON.parse(fs.readFileSync(p, "utf8")); const worktree = meta.worktree, branch = meta.branch;
-  if (worktree && fs.existsSync(worktree)) await run("git", ["worktree", "remove", ...(force ? ["--force"] : []), worktree], { cwd: projectDir });
+  if (worktree && fs.existsSync(worktree)) { await releaseSandboxLocks(worktree); await run("git", ["worktree", "remove", ...(force ? ["--force"] : []), worktree], { cwd: projectDir }); }
   if (delete_branch && branch) { const current = await git(["branch", "--show-current"]); if (current === branch) throw new Error("Refusing to delete current branch"); await run("git", ["branch", force ? "-D" : "-d", branch], { cwd: projectDir }); }
   return { content: [{ type: "text", text: JSON.stringify({ jobId: job_id, removedWorktree: worktree || null, deletedBranch: delete_branch ? branch : null }, null, 2) }] };
 });

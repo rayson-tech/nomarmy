@@ -18,7 +18,10 @@ import {
   resolveOutcome,
   buildMetrics,
   testChangeBanner,
-  workerPrompt
+  workerPrompt,
+  jobSchema,
+  maxTaskChars,
+  maxAcceptanceItemChars
 } from "../mcp/server.mjs";
 
 const report = ({ status = "done", tests = "pass", notDone = "none", note = "n/a" } = {}) =>
@@ -494,4 +497,34 @@ test("prompt: tells the worker not to narrate or restate Git facts", () => {
   assert.match(p, /Do NOT include Git metadata/);
   assert.match(p, /Do NOT paste test output, logs, or tool history/);
   assert.match(p, /512 is the hard cap/);
+});
+
+// ---------------------------------------------------------------------------
+// Context budget: a worker's context window is a shared, finite resource.
+// The schema enforces a ceiling so an oversized brief is rejected before a
+// job ever starts, instead of quietly burning the worker's turn on reading
+// instead of editing.
+// ---------------------------------------------------------------------------
+test("jobSchema: accepts a task at the character ceiling", () => {
+  const task = "x".repeat(maxTaskChars);
+  const result = jobSchema.safeParse({ task });
+  assert.equal(result.success, true);
+});
+
+test("jobSchema: rejects a task one character over the ceiling", () => {
+  const task = "x".repeat(maxTaskChars + 1);
+  const result = jobSchema.safeParse({ task });
+  assert.equal(result.success, false);
+  assert.match(result.error.issues[0].message, /worker context budget/);
+});
+
+test("jobSchema: rejects an oversized acceptance item", () => {
+  const result = jobSchema.safeParse({ task: "t", acceptance: ["x".repeat(maxAcceptanceItemChars + 1)] });
+  assert.equal(result.success, false);
+  assert.match(result.error.issues[0].message, /concrete, checkable statement/);
+});
+
+test("jobSchema: accepts an acceptance item at the character ceiling", () => {
+  const result = jobSchema.safeParse({ task: "t", acceptance: ["x".repeat(maxAcceptanceItemChars)] });
+  assert.equal(result.success, true);
 });
