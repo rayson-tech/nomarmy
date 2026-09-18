@@ -264,12 +264,25 @@ export function sandboxHashesFromState(stateDir) {
 async function reapSandboxContainers(stateDir, jobDir) {
   const reaped = [];
   for (const hash of sandboxHashesFromState(stateDir)) {
-    const name = `openclaw-sbx-workspace-${hash}`;
-    // -v also removes the container's anonymous volume. Without it the
-    // container was reaped but its volume silently outlived it -- found in
-    // the wild as orphaned hash-named volumes with nothing left referencing
-    // them.
-    try { await run("podman", ["rm", "-f", "-v", name], { timeoutMs: 30000 }); reaped.push(name); } catch { /* already gone, or no podman */ }
+    // Look the container up by hash rather than reconstructing its name.
+    // OpenClaw names it openclaw-sbx-workspace-<hash> under Docker but
+    // openclaw-sbx-podman-workspace-<hash> under Podman -- a backend id
+    // inserted into the name that a hardcoded template silently missed
+    // entirely under Podman, every job leaked its container and volume
+    // and this reap ran without ever once matching anything. The hash
+    // itself is the reliable, backend-independent identifier.
+    try {
+      const { stdout } = await run("podman", ["ps", "-a", "--filter", `name=${hash}`, "--format", "{{.Names}}"], { timeoutMs: 30000 });
+      const names = stdout.split("\n").map(s => s.trim()).filter(Boolean);
+      for (const name of names) {
+        // -v also removes the container's anonymous volume. Without it the
+        // container was reaped but its volume silently outlived it -- found
+        // in the wild as orphaned hash-named volumes with nothing left
+        // referencing them.
+        await run("podman", ["rm", "-f", "-v", name], { timeoutMs: 30000 });
+        reaped.push(name);
+      }
+    } catch { /* already gone, or no podman */ }
   }
   if (reaped.length) fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} reaped sandbox container(s): ${reaped.join(", ")}\n`);
   return reaped;
@@ -287,10 +300,14 @@ async function reapSandboxContainers(stateDir, jobDir) {
 // live job still needs (which would be running, not exited) is never at
 // risk. Best-effort and silent on failure -- no Podman, no permission, or
 // nothing to sweep are all normal outcomes, not errors.
+// Filters on "openclaw-sbx-" only, not the fuller "openclaw-sbx-workspace-"
+// -- OpenClaw inserts a backend id into the name under Podman
+// (openclaw-sbx-podman-workspace-<hash>, not openclaw-sbx-workspace-<hash>),
+// which the narrower filter silently never matched at all.
 export async function sweepStaleSandboxContainers() {
   try {
     const { stdout } = await run("podman",
-      ["ps", "-a", "--filter", "name=openclaw-sbx-workspace-", "--filter", "status=exited", "--format", "{{.ID}}"],
+      ["ps", "-a", "--filter", "name=openclaw-sbx-", "--filter", "status=exited", "--format", "{{.ID}}"],
       { timeoutMs: 30000 });
     const ids = stdout.split("\n").map(s => s.trim()).filter(Boolean);
     if (!ids.length) return [];
