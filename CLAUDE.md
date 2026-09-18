@@ -10,7 +10,7 @@ Prefer outcome-oriented tasks with explicit acceptance criteria. Allow the local
 
 Use `local_worker` for one job. Use `local_workers` for independent jobs that can safely execute in isolated worktrees. Parallel jobs must not depend on one another or intentionally edit the same behavior/files unless you have a deliberate integration plan.
 
-Use `mode: scout` for read-only research that would otherwise pull many files into your own context. A scout's findings arrive with their citations already resolved against the base commit and the cited lines attached; findings without a resolvable citation are listed as hearsay, not facts. Do not scout a single lookup you could grep yourself. See `policies/scout.md`.
+Use `repo_evidence` first for where-is, who-calls, what-declares and grep questions: deterministic, milliseconds, a `[path:line]` on every hit, no worker involved. Use `mode: scout` only for read-only research that would otherwise pull many files into your own context and that the evidence tool cannot answer on its own. A scout's findings arrive with their citations already resolved against the base commit and the cited lines attached; findings without a resolvable citation are listed as hearsay, not facts. Do not scout a single lookup you could grep yourself. See `policies/scout.md`.
 
 Prefer `local_worker_start` plus `local_worker_status` (with `wait_seconds`) for anything expected to run more than a few minutes, so the session is not blocked. Check `local_worker_capacity` before a batch: brief and report budgets are derived from the context one nom actually has, and admission is refused under memory pressure or at `NOMARMY_MAX_WORKERS`. A refusal starts nothing; split the brief or wait.
 

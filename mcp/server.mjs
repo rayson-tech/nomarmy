@@ -9,6 +9,8 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { SCOUT_OUTCOMES, SCOUT_STATUS_BY_OUTCOME, scoutPrompt, parseScoutReport, verifyCitations, resolveScoutOutcome, renderScoutReport } from "../lib/scout.mjs";
 import { deriveBudgets, checkBrief, resolveContextPerNom, assessAdmission, describeBudgets } from "../lib/budget.mjs";
+import { readOpenClawTranscript, estimateDisplacement } from "../lib/transcript.mjs";
+import { runQuery, formatCitations, OPS as EVIDENCE_OPS } from "../lib/repo-query.mjs";
 
 const VERSION = "1.3.0";
 const server = new McpServer({ name: "nomarmy-local-worker", version: VERSION });
@@ -182,7 +184,7 @@ function profileConfig(profile, reasoning) {
   if (!profiles[profile]) throw new Error(`Unknown worker profile: ${profile}`);
   return profiles[profile];
 }
-async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef, baseSha, timeoutSeconds, runtimeDir, profile, reasoning, jobDir, workerId }) {
+async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef, baseSha, timeoutSeconds, runtimeDir, profile, reasoning, jobDir, workerId, evidenceTool = null }) {
   const selected = profileConfig(profile, reasoning);
   const agentHome = path.join(runtimeDir, "home");
   const npmCache = path.join(runtimeDir, "npm-cache");
@@ -190,7 +192,7 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
   const env = { ...process.env, OPENCLAW_LOCAL_WORKER_RUNTIME: runtimeDir, NOMARMY_AGENT_HOME: agentHome,
     NPM_CONFIG_CACHE: npmCache, npm_config_cache: npmCache, NPM_CONFIG_UPDATE_NOTIFIER: "false", npm_config_update_notifier: "false" };
   const prompt = mode === "scout"
-    ? scoutPrompt({ question: task, mustCover: acceptance, baseRef, baseSha, workerId, limits: budgets.scout, report: budgets.report.scout })
+    ? scoutPrompt({ question: task, mustCover: acceptance, baseRef, baseSha, workerId, limits: budgets.scout, report: budgets.report.scout, evidenceTool })
     : workerPrompt({ task, acceptance, verification, mode, baseRef, baseSha, workerId, report: budgets.report.implement });
   fs.writeFileSync(path.join(jobDir, "brief.txt"), prompt + "\n");
   // --state-dir keeps OpenClaw's session state (its transcript database among
@@ -765,11 +767,22 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
     await run("git", ["worktree", "add", "--detach", worktree, base.sha], { cwd: projectDir });
     const startedAt = new Date().toISOString();
 
+    // Place the deterministic evidence CLI where the sandbox can run it. It
+    // lives under .openclaw/, which the Git record already treats as runtime
+    // junk, so its presence does not dirty the snapshot. The sandbox image has
+    // Node; the script has no dependencies.
+    const evidenceTool = ".openclaw/nomarmy-evidence.mjs";
+    try {
+      fs.mkdirSync(path.join(worktree, ".openclaw"), { recursive: true });
+      fs.copyFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "lib", "repo-query.mjs"), path.join(worktree, evidenceTool));
+    } catch (error) { fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} evidence tool not placed: ${error.message}\n`); }
+    const evidencePlaced = fs.existsSync(path.join(worktree, evidenceTool));
+
     let result = null, workerFailed = false, workerTimedOut = false, workerError = null;
     const workerStartedMs = Date.now();
     progress("worker");
     try {
-      result = await runOpenClaw({ task, acceptance, verification: null, mode, cwd: worktree, baseRef: base.ref, baseSha: base.sha, timeoutSeconds, runtimeDir, profile, reasoning, jobDir, workerId: workerId || jobId });
+      result = await runOpenClaw({ task, acceptance, verification: null, mode, cwd: worktree, baseRef: base.ref, baseSha: base.sha, timeoutSeconds, runtimeDir, profile, reasoning, jobDir, workerId: workerId || jobId, evidenceTool: evidencePlaced ? evidenceTool : null });
     } catch (error) {
       workerFailed = true;
       workerTimedOut = Boolean(error.timedOut) || /timed out/i.test(error.message);
@@ -797,11 +810,34 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
     const failures = worker.toolSummary?.failures ?? 0; if (failures > 0) issues.push(`scout recorded ${failures} tool failure(s)`);
     if (dirty) issues.push(`snapshot changed: ${record.repoStatusFiles.join(", ")}`);
 
+    // The number this project is for: repository content the scout pulled
+    // through its tools (what the coordinator would otherwise have carried)
+    // against the size of what the coordinator receives instead.
+    const transcript = await readOpenClawTranscript(path.join(runtimeDir, "state"));
+    let rendered = renderScoutReport({ report, verified, outcome, baseSha: base.sha });
+    // Only repository reads count. tool_search, sessions_* and other harness
+    // chatter is the agent framework talking to itself, and counting it made
+    // a two-file scout look like a 4x saving on the second live run.
+    const displacement = estimateDisplacement({ readChars: transcript.available ? transcript.repoReadChars : null, deliveredChars: rendered.length + 400 /* the compact record that travels with it */ });
+    if (transcript.available) {
+      const harness = transcript.harnessChars ? ` (plus ~${Math.round(transcript.harnessChars / 4)} tokens of harness tool output, not counted)` : "";
+      rendered += `\n\nCONTEXT (estimate): scout read ~${displacement.frontier_read_tokens_est} tokens of repository content across ${transcript.filesRead.length} file(s) and ${transcript.toolCalls.length} tool call(s)${harness}; `
+        + `this report is ~${displacement.delivered_tokens_est} tokens -> ${displacement.verdict.toUpperCase()}: ${displacement.note}`;
+    } else rendered += `\n\nCONTEXT (estimate): unavailable (${transcript.reason})`;
+    if (displacement.verdict === "negative") issues.push("negative displacement: this scout cost more coordinator context than reading directly would have");
+
     const metrics = {
       ...buildMetrics({ result, record: null, reportValidation: null, outcome: null, workerElapsedMs, totalElapsedMs: Date.now() - jobStartedMs }),
       report_truncated: report.truncated, report_strict: report.strict, worker_timeout: workerTimedOut,
       scout_findings_supported: verified.supported, scout_findings_unsupported: verified.unsupported,
-      scout_findings_weak: verified.weak, scout_excerpt_lines: verified.excerptLinesUsed
+      scout_findings_weak: verified.weak, scout_excerpt_lines: verified.excerptLinesUsed,
+      scout_model_calls: transcript.available ? transcript.modelCalls : null,
+      scout_tool_calls: transcript.available ? transcript.toolCalls.length : null,
+      scout_files_read: transcript.available ? transcript.filesRead.length : null,
+      frontier_read_tokens_est: displacement.frontier_read_tokens_est,
+      delivered_tokens_est: displacement.delivered_tokens_est,
+      displaced_tokens_est: displacement.displaced_tokens_est,
+      displacement_verdict: displacement.verdict
     };
     const manifest = { version: VERSION, jobId, workerId: workerId || jobId, mode, projectDir, worktree: worktreeRetained ? worktree : null, branch: null, baseSha: base.sha, startedAt, finishedAt,
       objective: task, mustCover: acceptance ?? [],
@@ -810,13 +846,17 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
         findings: verified.findings, supported: verified.supported, unsupported: verified.unsupported, weak: verified.weak,
         excerptLinesUsed: verified.excerptLinesUsed, excerptTruncated: verified.excerptTruncated,
         reportParse: { present: report.present, strict: report.strict, lenient: report.lenient, truncated: report.truncated, parseMode: report.parseMode, reason: report.reason, droppedFindings: report.droppedFindings } },
+      transcript: transcript.available
+        ? { modelCalls: transcript.modelCalls, toolCalls: transcript.toolCalls, filesRead: transcript.filesRead, commands: transcript.commands, toolResultChars: transcript.toolResultChars, assistantChars: transcript.assistantChars, dbPath: transcript.dbPath }
+        : { available: false, reason: transcript.reason },
+      displacement,
       dirty, snapshotChanges: record.repoStatusFiles, worktreeRetained, metrics, worker, workerError,
       budgets: { contextPerNom: budgets.contextPerNom, source: budgets.source, scout: budgets.scout, report: budgets.report.scout },
       requestedProfile: profile, requestedReasoning: profile === "gpt" ? reasoning : "off", execution };
     fs.writeFileSync(path.join(jobDir, "metadata.json"), JSON.stringify(manifest, null, 2));
     if (result) fs.writeFileSync(path.join(jobDir, "result.json"), JSON.stringify(result, null, 2));
     progress("finished", { coordinatorStatus: outcome.coordinatorStatus, outcome: outcome.outcome });
-    return { ok: outcome.coordinatorStatus === "complete", report: renderScoutReport({ report, verified, outcome, baseSha: base.sha }), manifest, jobDir };
+    return { ok: outcome.coordinatorStatus === "complete", report: rendered, manifest, jobDir };
   } catch (error) {
     const failure = { version: VERSION, jobId, workerId: workerId || jobId, mode, branch: null, worktree: fs.existsSync(worktree) ? worktree : null, outcome: OUTCOMES.WORKER_FAILED,
       coordinatorStatus: "failed", error: error.stack || error.message, worktreeRetained: fs.existsSync(worktree), execution };
@@ -839,11 +879,19 @@ export function testChangeBanner(testChanges) {
 // The scout record deliberately omits the findings: they are already in the
 // rendered report above it, and repeating the excerpts would spend the very
 // frontier context a scout exists to save.
+// Kept small on purpose: every field here lands in the coordinator's context.
+// Budgets, execution details and the full metrics stay in metadata.json.
 function compactScoutRecord(m) {
+  const met = m.metrics ?? {};
   return { jobId: m.jobId, workerId: m.workerId, mode: m.mode, outcome: m.outcome, coordinatorStatus: m.coordinatorStatus, reviewRequired: m.reviewRequired,
-    baseSha: m.baseSha, supported: m.scout?.supported ?? null, unsupported: m.scout?.unsupported ?? null, weak: m.scout?.weak ?? null,
-    reportParse: m.scout?.reportParse ?? null, issues: m.issues ?? [], dirty: m.dirty ?? null, worktreeRetained: m.worktreeRetained ?? null,
-    metrics: m.metrics ?? null, budgets: m.budgets ?? null, execution: m.execution ?? null, error: m.error ?? null };
+    baseSha: m.baseSha ? String(m.baseSha).slice(0, 10) : null,
+    findings: { supported: m.scout?.supported ?? null, weak: m.scout?.weak ?? null, unsupported: m.scout?.unsupported ?? null },
+    report: m.scout?.reportParse ? { parseMode: m.scout.reportParse.parseMode, truncated: m.scout.reportParse.truncated, dropped: m.scout.reportParse.droppedFindings } : null,
+    scoutRead: m.transcript?.filesRead ?? null,
+    displacement: m.displacement ? { read: m.displacement.frontier_read_tokens_est, delivered: m.displacement.delivered_tokens_est, displaced: m.displacement.displaced_tokens_est, verdict: m.displacement.verdict } : null,
+    elapsedSeconds: Number.isFinite(met.total_elapsed) ? Math.round(met.total_elapsed / 1000) : null,
+    modelCalls: met.scout_model_calls ?? null, workerModel: met.worker_model ?? null,
+    issues: m.issues ?? [], dirty: m.dirty ?? null, worktreeRetained: m.worktreeRetained ?? null, error: m.error ?? null };
 }
 function formatResult(r) {
   const banner = orchestratorTrust === "degraded" ? DEGRADED_BANNER : "";
@@ -997,6 +1045,18 @@ server.tool("local_workers", "Run independent jobs (implement or scout) with bou
     jobs: results.map(r => ({ jobId: r.manifest.jobId, workerId: r.manifest.workerId, mode: r.manifest.mode, outcome: r.manifest.outcome || OUTCOMES.WORKER_FAILED, recovered: Boolean(r.manifest.recovered), status: r.manifest.coordinatorStatus || "failed", branch: r.manifest.branch, commit: r.manifest.commit?.sha || null, worktree: r.manifest.worktree, jobDir: r.jobDir })) };
   const text = `BATCH EXECUTION RECORD\n${JSON.stringify(summary, null, 2)}\n\nWORKER RESULTS\n\n${results.map((r, i) => `===== WORKER ${i + 1} =====\n${formatResult(r)}`).join("\n\n")}`;
   return toolText(text, results.some(r => !r.ok));
+});
+// No model, no sandbox, no tokens spent on a worker: the coordinator asks the
+// repository directly and gets [path:line] on every hit. Use this before a
+// scout, and instead of one for anything a grep or an outline can answer.
+server.tool("repo_evidence", `Deterministic repository evidence with exact [path:line] citations and no model involved. ops: ${EVIDENCE_OPS.join(", ")}. definitions/references take a symbol in 'query' (heuristic per language family); outline takes 'path'; grep takes a regex in 'query'; files takes a glob. Runs against the project working tree in milliseconds. Prefer this over reading files for where-is / who-calls / what-declares questions, and over a scout for anything it can answer.`, {
+  op: z.enum(EVIDENCE_OPS), query: z.string().min(1).max(500).optional(), path: z.string().min(1).max(1024).optional(), glob: z.string().min(1).max(200).optional(),
+  max_results: z.number().int().min(1).max(1000).default(100), ignore_case: z.boolean().default(false), whole_word: z.boolean().default(false), json: z.boolean().default(false)
+}, async args => {
+  try {
+    const result = runQuery(projectDir, args.op, args);
+    return toolText(args.json ? JSON.stringify(result, null, 2) : formatCitations(result));
+  } catch (error) { return toolText(`repo_evidence ${args.op}: ${error.message}`, true); }
 });
 server.tool("local_worker_jobs", "List recent job records for review/recovery, including jobs still running or orphaned by a server restart. Does not modify repositories.", { limit: z.number().int().min(1).max(50).default(10) }, async ({ limit }) => {
   const dirs = fs.readdirSync(ensureJobsRoot(), { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name).sort().reverse().slice(0, limit);

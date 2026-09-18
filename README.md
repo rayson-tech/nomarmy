@@ -57,7 +57,9 @@ The problem is that a scout's claim *is* the deliverable — there is no Git rec
 
 `CONFIDENCE` is recorded as the scout's own estimate and labelled that way. A citation that names a real file but no readable lines counts as weak evidence, and a report made only of those is `SCOUT_WEAK` and goes to review rather than being called complete. A scout that writes to its snapshot gets `SCOUT_TAINTED`, a retained worktree, and a banner. See `policies/scout.md`.
 
-The first live scout run, a 4B model on a CPU-only laptop, produced a perfectly shaped report in about twelve minutes — and cited the documentation instead of the code, with the citation template copied literally as `[path:AGENTS.md:start-55]`. The gate held: zero findings verified as lines read. That is the same lesson as the implement run above, in a cheaper form.
+The first live scout run, a 4B model on a CPU-only laptop, produced a perfectly shaped report in about twelve minutes — and cited the documentation instead of the code, with the citation template copied literally as `[path:AGENTS.md:start-55]`. The gate held: zero findings verified as lines read. The second run, with concrete example citations in the brief, cited real line ranges that resolved — and the attached lines were about delegation while the findings were about commit gates. Resolution is not support. So the verifier now also checks whether the cited lines mention any of the finding's distinctive terms; a finding whose citations share no term with it is labelled weak, and a report made only of those is `SCOUT_WEAK`. Heuristic, and labelled as such. That is the same lesson as the implement run above, in a cheaper form.
+
+**Most scout questions are not questions for a model.** Where is X defined, who calls it, what does this file declare, which files match this pattern — those are deterministic, and `repo_evidence` answers them from the files in milliseconds with a citation on every hit. The coordinator gets it as an MCP tool; a scout gets the same script inside its sandbox, so its job shrinks to choosing queries and copying real locations, which is the thing a small model does reliably. Every scout job also reports an estimated displacement: repository content the scout read, against the size of what the coordinator received instead, with harness chatter excluded — and says plainly when the number is negative.
 
 Scouts win on breadth, not depth. "Read every test file and list which ones start Docker" is a scout task; a single grep is not. On CPU-only hardware a scout is slower than the frontier doing the lookup itself, so the break-even is a measurement, not a given.
 
@@ -130,6 +132,7 @@ The coordinator drives nomArmy through the `nomarmy-local-worker` MCP server. Ev
 | `local_worker_start` | Start one job in the background and return a `job_id` immediately. |
 | `local_worker_status` | Phase, elapsed time against the timeout, and the result once finished. `wait_seconds` long-polls; `full=true` returns the complete report. |
 | `local_worker_capacity` | Context per nom, the brief and report budgets derived from it, memory pressure, and what is running. Read-only. |
+| `repo_evidence` | Deterministic repository evidence with an exact `[path:line]` on every hit: definitions, references, outline, grep, files. No model, no sandbox, milliseconds. Use it before a scout and instead of one for anything it can answer. |
 | `local_workers` | Run a batch with bounded parallelism and wait for all of them. Never merges. |
 | `local_worker_jobs` | Recent job records, including jobs still running or orphaned by a server restart. |
 | `local_worker_cleanup` | Remove a retained worktree after review. Refuses to delete the current branch. |
@@ -434,6 +437,17 @@ Measured on a 20-core i7-1280P, no GPU, running gpt-oss-20b (MXFP4, 11.3 GiB, Mo
 | Prompt processing | ~6.7 tokens/sec |
 | Two assistant turns on a real job | **11.5 minutes** |
 
+A smaller model helps less than its size suggests. Same machine, Qwen3-4B-Instruct-2507 (Q4_K_M, 2.3 GiB), 32K context, first live scout run:
+
+| | Idle server, short prompt | During the scout, sandbox and OpenClaw running |
+|---|---|---|
+| Generation | ~9.8 tokens/sec | ~1.6–2.1 tokens/sec |
+| Prompt processing | ~65 tokens/sec | ~11–22 tokens/sec |
+| First prompt | | ~5,400 tokens, of which the nomArmy brief is ~700; the rest is the agent harness |
+| Whole scout (4 model calls, 2 file reads) | | **12.5 minutes** |
+
+Two things fall out of that table. The harness costs more than the brief: at CPU prefill speeds the first prompt alone is minutes before the model reads a single file, so keep the tool surface lean. And contention matters as much as model size: the same server ran five times faster once the sandbox and OpenClaw were idle. Thread count was measured rather than guessed on this 6P+8E i7 — generation at 6, 12, 16 and 20 threads was 5.5, 6.3, 9.8 and 3.3 tokens/sec, so more threads helped right up until the cores were oversubscribed.
+
 Sizing will happily report that this machine runs *2 noms at 64K each*, and that is true. It is also close to unusable for interactive work: an autonomous explore → implement → test → repair loop needs many turns, so a single bounded job runs to an hour or more.
 
 Two consequences worth planning around:
@@ -505,6 +519,8 @@ mcp/server.mjs
 bin/nomarmy.mjs
 lib/budget.mjs        context-derived budgets, memory-pressure admission
 lib/scout.mjs         scout report contract, citation verification
+lib/repo-query.mjs    deterministic repository evidence (repo_evidence tool, scout CLI)
+lib/transcript.mjs    worker transcript summary, displacement estimate
 lib/sizing.mjs        hardware -> context/nom recommendation
 lib/hardware.mjs  lib/gguf.mjs  lib/doctor.mjs
 lib/config.mjs    lib/schema.mjs  lib/scan.mjs  lib/evidence.mjs  lib/verify.mjs

@@ -194,6 +194,44 @@ test("verifyCitations: a throwing reader is a missing file, not a crash", async 
   assert.equal(v.findings[0].citations[0].status, "missing_file");
 });
 
+test("verifyCitations: a real range that never mentions the finding's terms is weak and labelled unrelated", async () => {
+  // The second live run verbatim in shape: three claims about commit gates, all citing five delegation lines.
+  const r = parseScoutReport("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: medium\nFINDING: A commit is blocked unless STATUS is done and VERIFICATION passes. [src/routes/users.js:1-3]\nFINDING: The users router applies requireAuth to every route. [src/routes/users.js:1-2]\nNOT_FOUND: none\nEND");
+  const v = await verifyCitations(r.findings, { readFile });
+  assert.equal(v.findings[0].supported, true);
+  assert.equal(v.findings[0].weak, true);
+  assert.equal(v.findings[0].unrelated, true);
+  assert.equal(v.findings[0].citations[0].related, false);
+  assert.equal(v.findings[1].weak, false);
+  assert.equal(v.findings[1].citations[0].related, true);
+  assert.ok(v.findings[1].citations[0].overlapTerms.includes("requireauth"));
+  const text = renderScoutReport({ report: r, verified: v, outcome: resolveScoutOutcome({ report: r, verified: v }), baseSha: "abc" });
+  assert.match(text, /\[WEAK: the cited lines do not mention this finding's terms\]/);
+  assert.match(text, /\(no shared terms with the finding\)/);
+});
+
+test("verifyCitations: a finding with no distinctive terms is not penalised for relatedness", async () => {
+  const r = parseScoutReport("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: low\nFINDING: see [lib/auth.mjs:1-2]\nNOT_FOUND: none\nEND");
+  const v = await verifyCitations(r.findings, { readFile });
+  assert.equal(v.findings[0].citations[0].related, null);
+  assert.equal(v.findings[0].weak, false);
+});
+
+test("resolveScoutOutcome: all findings unrelated to their cited lines is SCOUT_WEAK", async () => {
+  const r = parseScoutReport("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: high\nFINDING: Commits require VERIFICATION pass. [README.md:1]\nFINDING: Timeouts block the commit. [README.md:1]\nNOT_FOUND: none\nEND");
+  const v = await verifyCitations(r.findings, { readFile });
+  assert.equal(resolveScoutOutcome({ report: r, verified: v }).outcome, SCOUT_OUTCOMES.SCOUT_WEAK);
+});
+
+test("scoutPrompt: the evidence tool section appears only when the tool was placed in the sandbox", () => {
+  const without = scoutPrompt({ question: "q", baseRef: "HEAD", baseSha: "abc", workerId: "s" });
+  assert.doesNotMatch(without, /EVIDENCE TOOL/);
+  const with_ = scoutPrompt({ question: "q", baseRef: "HEAD", baseSha: "abc", workerId: "s", evidenceTool: ".openclaw/nomarmy-evidence.mjs" });
+  assert.match(with_, /EVIDENCE TOOL/);
+  assert.match(with_, /node \.openclaw\/nomarmy-evidence\.mjs definitions <symbol>/);
+  assert.match(with_, /copy verbatim into a FINDING/);
+});
+
 // --- outcome ----------------------------------------------------------------
 async function verifiedGood() { const r = parseScoutReport(GOOD); return { report: r, verified: await verifyCitations(r.findings, { readFile }) }; }
 
@@ -229,7 +267,7 @@ test("resolveScoutOutcome: a dirty snapshot is tainted and retained whatever els
 
 test("resolveScoutOutcome: missing report is invalid; truncated-but-supported completes with review", async () => {
   assert.equal(resolveScoutOutcome({ report: parseScoutReport(""), verified: null }).outcome, SCOUT_OUTCOMES.SCOUT_REPORT_INVALID);
-  const r = parseScoutReport("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: high\nFINDING: real [lib/auth.mjs:1-2]\n");
+  const r = parseScoutReport("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: high\nFINDING: the auth module starts here [lib/auth.mjs:1-2]\n");
   const v = await verifyCitations(r.findings, { readFile });
   const o = resolveScoutOutcome({ report: r, verified: v });
   assert.equal(o.outcome, SCOUT_OUTCOMES.SCOUT_DONE);
