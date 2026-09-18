@@ -65,7 +65,7 @@ function nvidiaMachine({ freeVramBytes, totalVramBytes, ramBytes, gpuCount = 1 }
       totalVramBytes: totalVramBytes ?? freeVramBytes,
       freeVramBytes,
     },
-    docker: { available: true, totalMemoryBytes: ramBytes },
+    podman: { available: true, totalMemoryBytes: ramBytes },
     probes: [],
   };
 }
@@ -79,7 +79,7 @@ function appleMachine(ramBytes) {
     cpu: { model: "Apple M3 Max", physicalCores: 14, logicalCores: 14 },
     memory: { totalBytes: ramBytes, availableBytes: ramBytes, unified: true, unifiedBytes: ramBytes },
     gpu: { vendor: "apple", count: 0, devices: [], totalVramBytes: null, freeVramBytes: null },
-    docker: { available: true, totalMemoryBytes: 8 * GIB },
+    podman: { available: true, totalMemoryBytes: 8 * GIB },
     probes: [],
   };
 }
@@ -93,7 +93,7 @@ function cpuOnlyMachine(ramBytes, availableBytes = ramBytes) {
     cpu: { model: "i5", physicalCores: 4, logicalCores: 8 },
     memory: { totalBytes: ramBytes, availableBytes, unified: false, unifiedBytes: null },
     gpu: { vendor: null, count: 0, devices: [], totalVramBytes: null, freeVramBytes: null },
-    docker: { available: true, totalMemoryBytes: ramBytes },
+    podman: { available: true, totalMemoryBytes: ramBytes },
     probes: [],
   };
 }
@@ -291,10 +291,10 @@ test("headroom is actually reserved: a machine that 'just fits' gets fewer noms"
   // And the breakdown must name the reserves, not bury them.
   assert.equal(tight.memory.reserved.runtimeOverheadBytes, RESERVES.runtimeOverheadBytes);
   assert.equal(tight.memory.reserved.safetyFraction, RESERVES.safetyFraction);
-  assert.ok(tight.memory.reserved.dockerSandboxBytes >= RESERVES.dockerSandboxPerNomBytes);
+  assert.ok(tight.memory.reserved.sandboxBytes >= RESERVES.sandboxPerNomBytes);
 });
 
-test("the Docker sandbox per nom is charged against system RAM on a discrete-GPU box", () => {
+test("the Podman sandbox per nom is charged against system RAM on a discrete-GPU box", () => {
   // Plenty of VRAM, but system RAM only has room for a couple of sandboxes.
   const result = recommend({
     hardware: nvidiaMachine({ freeVramBytes: 180 * GIB, ramBytes: 8 * GIB }),

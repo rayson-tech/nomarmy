@@ -15,7 +15,7 @@ import {
   MIB,
   detectHardware,
   looksLikeWSL,
-  parseDockerMemTotal,
+  parsePodmanMemTotal,
   parseNvidiaSmiMemoryCsv,
   parseProcCpuinfoPhysicalCores,
   parseProcMeminfoBytes,
@@ -132,11 +132,11 @@ test("detects WSL2 from the kernel release or /proc/version", () => {
   assert.equal(looksLikeWSL(""), false);
 });
 
-test("parses docker info MemTotal", () => {
-  assert.equal(parseDockerMemTotal("16637308928\n"), 16637308928);
-  assert.equal(parseDockerMemTotal("0"), null);
-  assert.equal(parseDockerMemTotal("<no value>"), null);
-  assert.equal(parseDockerMemTotal(undefined), null);
+test("parses podman info Host.MemTotal", () => {
+  assert.equal(parsePodmanMemTotal("16637308928\n"), 16637308928);
+  assert.equal(parsePodmanMemTotal("0"), null);
+  assert.equal(parsePodmanMemTotal("<no value>"), null);
+  assert.equal(parsePodmanMemTotal(undefined), null);
 });
 
 // --- detectHardware contract ----------------------------------------------
@@ -165,7 +165,7 @@ test("detectHardware() never throws and returns a well-formed facts object", () 
     facts.memory.availableBytes,
     facts.gpu.totalVramBytes,
     facts.gpu.freeVramBytes,
-    facts.docker.totalMemoryBytes,
+    facts.podman.totalMemoryBytes,
   ];
   for (const value of nullable) {
     assert.ok(value === null || (typeof value === "number" && Number.isFinite(value) && value > 0));
@@ -177,7 +177,7 @@ test("detectHardware() never throws and returns a well-formed facts object", () 
 });
 
 test("detectHardware() measures the basics that sizing depends on", () => {
-  const facts = detectHardware({ skipDocker: true, skipGpu: true });
+  const facts = detectHardware({ skipPodman: true, skipGpu: true });
   assert.ok(facts.memory.totalBytes > 0, "total RAM must be measurable via node:os everywhere");
   assert.ok(facts.cpu.logicalCores >= 1);
   // Skipped probes are recorded as attempted-and-skipped, not silently dropped.
@@ -187,7 +187,7 @@ test("detectHardware() measures the basics that sizing depends on", () => {
 });
 
 test("unified memory is reported only on Apple Silicon", () => {
-  const facts = detectHardware({ skipDocker: true, skipGpu: true });
+  const facts = detectHardware({ skipPodman: true, skipGpu: true });
   const expected = process.platform === "darwin" && process.arch === "arm64";
   assert.equal(facts.memory.unified, expected);
   if (!expected) assert.equal(facts.memory.unifiedBytes, null);

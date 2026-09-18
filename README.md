@@ -28,7 +28,7 @@ Pick your host, then follow that link. Each path ends the same way: a passing lo
 | NVIDIA DGX Spark | You're setting up a Spark as a dedicated worker host | [DGX Spark](#dgx-spark-clean-e2e) |
 | Cloud (no GPU needed) | You'd rather not run local inference at all | [Bedrock](#bedrock-clean-e2e) |
 
-All of them need Git and Docker; the local profiles also need enough memory to hold the model. Run `nomarmy doctor` any time to check a host's readiness with a fix for whatever's missing — see [The `nomarmy` CLI](#the-nomarmy-cli).
+All of them need Git and Podman; the local profiles also need enough memory to hold the model. Run `nomarmy doctor` any time to check a host's readiness with a fix for whatever's missing — see [The `nomarmy` CLI](#the-nomarmy-cli).
 
 ## The thesis
 
@@ -148,7 +148,7 @@ The phases a poller sees — `starting`, `worktree`, `worker`, `verification`, `
 
 ## Security posture
 
-The worker gets a writable worktree and nothing else. No Docker socket, no host credentials, no coordinator state, no arbitrary host ports, and no unrestricted network. Repository content is untrusted input: a file in the repo cannot talk a worker into escaping its brief.
+The worker gets a writable worktree and nothing else. No Podman socket, no host credentials, no coordinator state, no arbitrary host ports, and no unrestricted network. Repository content is untrusted input: a file in the repo cannot talk a worker into escaping its brief.
 
 Environment configuration is **data to validate, not authority**. The scanner is deterministic and never executes anything it discovers. An LLM may later propose a `.nomarmy.yml` from bounded scan evidence, but that proposal is schema-validated and independently probed before anything runs. Verification commands execute inside the sandbox, never on the host — if the sandbox is unavailable, verification reports `not_run` rather than falling back.
 
@@ -163,11 +163,13 @@ Environment configuration is **data to validate, not authority**. The scanner is
 - an OpenAI-compatible `llama-server` with stable alias `qwen3-coder-next`
 - OpenClaw when absent, plus its official llama.cpp provider plugin
 - OpenClaw connection to the local llama-server
-- hardened Docker coding sandbox (no network, no elevated host execution)
+- hardened Podman coding sandbox (no network, no elevated host execution)
 - on a Bedrock profile: no local build at all — workers and coordinator are hosted
 - the nomArmy MCP server, registered with Claude Code when it is installed
 - the `nomarmy` CLI, with its dependencies installed and linked onto your PATH
 - platform profiles, nom sizing, and E2E verification
+
+**Why Podman, not Docker.** Docker Desktop requires a paid commercial license once an organization passes about 250 employees or $10M revenue; Podman is Apache-2.0 with no commercial tier at any size, on any OS. It is also lighter: on the machine this was measured on, Podman's VM ran with a 2 GiB memory ceiling against Docker Desktop's 31.2 GiB for the equivalent job. The sandbox is only ever used for a job's file/shell tool calls — model inference runs on the host (or remotely, on Bedrock) and was never inside it — so the switch changes nothing about GPU access or model performance. One real behavioral difference: on macOS, Podman Machine only allows bind-mounting paths under the host's home directory, a path under `/tmp` is rejected outright. This does not affect nomArmy's own job directories, already under `~/.local/share/nomarmy-local-agents`, but matters if you point `NOMARMY_AGENT_INSTALL_DIR` or similar somewhere else.
 
 It intentionally does **not** install or authenticate Claude Code. Claude credentials are a user/organization concern. A DGX worker can therefore be provisioned with `--no-claude`, while a machine that will run the Claude coordinator can register the MCP locally.
 
@@ -225,7 +227,7 @@ Native support is macOS (Apple Silicon) and Linux. Windows runs nomArmy through 
 
 ### macOS (Apple Silicon): clean E2E
 
-Prerequisites: Apple Silicon macOS, Homebrew, Docker Desktop running, Git, Internet access for installation/model download. The reference path expects enough unified memory for the selected Q4_K_M model and context.
+Prerequisites: Apple Silicon macOS, Homebrew, Podman running (`podman machine start`), Git, Internet access for installation/model download. The reference path expects enough unified memory for the selected Q4_K_M model and context.
 
 ```bash
 git clone https://github.com/rayson-tech/nomarmy.git
@@ -235,7 +237,7 @@ chmod +x install.sh e2e.sh scripts/*.sh
 ./e2e.sh --profile macbook-pro
 ```
 
-`install.sh` builds llama.cpp with Metal, installs/configures OpenClaw, starts Qwen, builds the Docker sandbox, and installs the MCP if `claude` is already available.
+`install.sh` builds llama.cpp with Metal, installs/configures OpenClaw, starts Qwen, builds the Podman sandbox, and installs the MCP if `claude` is already available.
 
 The E2E test creates a disposable Git repository containing an intentionally broken JavaScript function, asks Qwen through OpenClaw to diagnose/fix it and run the named test, then independently runs the test and checks that the repository actually changed and the worker emitted the required report contract.
 
@@ -268,11 +270,11 @@ If E2E reports `No API key found for provider "llama-cpp"`, rerun the configurat
 
 ### Windows
 
-`install.sh` does not run natively on Windows (`.sh` scripts, Docker sandboxing, and llama.cpp's build tooling all assume a POSIX host). Three real options, roughly in the order most people should try them:
+`install.sh` does not run natively on Windows (`.sh` scripts, Podman sandboxing, and llama.cpp's build tooling all assume a POSIX host). Three real options, roughly in the order most people should try them:
 
-1. **WSL2 + Docker Desktop's WSL integration (supported path).** Install a Linux distribution under WSL2, enable Docker Desktop's WSL integration for it, then follow the [Linux](#linux) guide entirely inside that distribution.
+1. **WSL2, with Podman installed inside the distro (supported path).** Install a Linux distribution under WSL2, install Podman *inside* that distro exactly as in the [Linux](#linux) guide, then follow the rest of that guide entirely inside the distribution. Nothing is required on the Windows host itself — no Docker Desktop, no host-side licensing exposure, since the sandbox is entirely contained within the WSL2 Linux environment.
 
-   One trap: WSL2 defaults to ~50% of host RAM, shared across every distro *including* `docker-desktop`. On a 32 GB machine that caps the model at ~16 GB. Raise the limit in `%UserProfile%\.wslconfig`, then run `wsl --shutdown` — this restarts every running container, so do it before you start inference, not after.
+   One trap: WSL2 defaults to ~50% of host RAM, shared across every distro. On a 32 GB machine that caps the model at ~16 GB. Raise the limit in `%UserProfile%\.wslconfig`, then run `wsl --shutdown` — this restarts every running container, so do it before you start inference, not after.
 
    A second trap: every job gets its own worktree under the state directory, so every repository path grows by that prefix. Without `git config --global core.longpaths true`, a repository with a deep tree fails at `git worktree add` with `Filename too long`. `nomarmy doctor` checks for this on Windows.
 
@@ -302,7 +304,7 @@ Whichever you're leaning toward, run `nomarmy sizing` first (see [The `nomarmy` 
 
 ### Linux
 
-The installer detects Ubuntu/Debian (`apt`), Fedora/RHEL (`dnf` or `yum`), openSUSE (`zypper`), Arch (`pacman`), and Alpine (`apk`), then installs the C++ build toolchain, CMake, Git, curl, Node.js, and npm when missing. Docker Engine is a deliberate prerequisite: install it before running the installer.
+The installer detects Ubuntu/Debian (`apt`), Fedora/RHEL (`dnf` or `yum`), openSUSE (`zypper`), Arch (`pacman`), and Alpine (`apk`), then installs the C++ build toolchain, CMake, Git, curl, Node.js, and npm when missing. Podman is a deliberate prerequisite: install it before running the installer (`apt install podman`, `dnf install podman`, `zypper install podman`, `pacman -S podman`, or `apk add podman`, depending on your distro). Unlike Docker, Podman needs no separate daemon on Linux and can run fully rootless.
 
 On a Linux system **without** an NVIDIA GPU, use the CPU profile — this is the portable fallback, with a smaller 16K context to match:
 
@@ -327,7 +329,7 @@ CPU-only Linux is viable but slow for interactive use — read [Speed matters mo
 
 ### DGX Spark: clean E2E
 
-The DGX Spark profile assumes Linux ARM64, NVIDIA drivers/CUDA toolkit, Docker Engine, Git, Internet access for initial installation/model download, and `sudo` for missing build packages. NVIDIA lists DGX Spark as a Grace Blackwell system with a 20-core Arm CPU and 128 GB coherent unified memory; nomArmy therefore does not assume x86_64 binaries.
+The DGX Spark profile assumes Linux ARM64, NVIDIA drivers/CUDA toolkit, Podman, Git, Internet access for initial installation/model download, and `sudo` for missing build packages. NVIDIA lists DGX Spark as a Grace Blackwell system with a 20-core Arm CPU and 128 GB coherent unified memory; nomArmy therefore does not assume x86_64 binaries.
 
 ```bash
 git clone https://github.com/rayson-tech/nomarmy.git
@@ -360,7 +362,7 @@ export AWS_BEARER_TOKEN_BEDROCK=...        # or configure an AWS profile
 ./e2e.sh --profile bedrock
 ```
 
-`install.sh` skips the llama.cpp build entirely on a cloud profile, configures the Docker sandbox before storing any credential, and points OpenClaw at `https://bedrock-runtime.<region>.amazonaws.com/openai/v1`.
+`install.sh` skips the llama.cpp build entirely on a cloud profile, configures the Podman sandbox before storing any credential, and points OpenClaw at `https://bedrock-runtime.<region>.amazonaws.com/openai/v1`.
 
 Region is a profile variable, not a constant. Set `NOMARMY_BEDROCK_REGION` in `config/profiles/bedrock.env`; it is validated at load, and `scripts/verify-install.sh` confirms each worker model is actually listed in that region before you hit it in a job. Region is also a data-residency decision, not only a latency one.
 
@@ -415,7 +417,7 @@ Three knobs decide how many noms you get and how much room each one has. They ar
 
 **`-c` is divided across `-np`.** Each nom gets `NOMARMY_LLAMA_CONTEXT / NOMARMY_LLAMA_PARALLEL`, not the full figure. So `65536` with `2` slots gives each nom 32K. To give two noms 64K each you need `NOMARMY_LLAMA_CONTEXT=131072`. Size by context *per nom* and multiply, never the other way round.
 
-**Do not set `NOMARMY_MAX_WORKERS` above `NOMARMY_LLAMA_PARALLEL` on a local profile.** The extra noms do not run in parallel; they queue for a slot and add latency while consuming a Docker sandbox each. On a Bedrock profile there are no local slots, so `NOMARMY_LLAMA_PARALLEL` is inert and `NOMARMY_MAX_WORKERS` is bounded by your API quota and budget instead.
+**Do not set `NOMARMY_MAX_WORKERS` above `NOMARMY_LLAMA_PARALLEL` on a local profile.** The extra noms do not run in parallel; they queue for a slot and add latency while consuming a Podman sandbox each. On a Bedrock profile there are no local slots, so `NOMARMY_LLAMA_PARALLEL` is inert and `NOMARMY_MAX_WORKERS` is bounded by your API quota and budget instead.
 
 The v1.3 target is 64K per nom — the autonomous explore/implement/test/repair loop needs more room than a one-shot edit. Trading context for parallelism below that is usually the wrong trade: a nom that exhausts its context mid-repair fails the job, whereas a nom that waits for a slot merely finishes later.
 
@@ -485,7 +487,7 @@ The model is downloaded and cached by llama.cpp on first start. A repository mus
 
 ## Security boundary
 
-The coder receives a writable `/workspace` inside Docker but no outbound network and no host AWS/SSH credentials. OpenClaw is configured for per-session Docker sandboxing and elevated host execution is disabled. The MCP coordinator owns Git state outside the worker sandbox. Failed or incomplete implementation worktrees are retained rather than silently merged.
+The coder receives a writable `/workspace` inside Podman but no outbound network and no host AWS/SSH credentials. OpenClaw is configured for per-session Podman sandboxing and elevated host execution is disabled. The MCP coordinator owns Git state outside the worker sandbox. Failed or incomplete implementation worktrees are retained rather than silently merged.
 
 Do not give the general-purpose coder AWS credentials, production credentials, deployment access, SSH keys, Kubernetes contexts, or production Terraform state.
 

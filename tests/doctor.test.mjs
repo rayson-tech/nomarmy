@@ -3,7 +3,7 @@
 // The check functions are pure: they take a facts object and return a
 // verdict. Facts are hand-built here rather than collected from the real
 // filesystem/network/subprocess, so these tests run with no node_modules and
-// no live docker/llama-server/AWS.
+// no live podman/llama-server/AWS.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -15,8 +15,8 @@ import {
   findExecutable,
   checkGit,
   checkGitLongPaths,
-  checkDockerPresent,
-  checkDockerDaemon,
+  checkPodmanPresent,
+  checkPodmanDaemon,
   checkEndpoint,
   evaluateChecks,
   runDoctor,
@@ -80,13 +80,13 @@ test("findExecutable finds a *nix-style binary with no extension appended", () =
 });
 
 test("findExecutable on Windows finds a .cmd shim, not just .exe", () => {
-  const found = findExecutable("docker", {
+  const found = findExecutable("podman", {
     platform: "win32",
     pathEnv: "C:\\tools;C:\\Windows\\System32",
     pathExt: ".COM;.EXE;.BAT;.CMD",
-    existsFile: (candidate) => candidate === "C:\\tools\\docker.cmd",
+    existsFile: (candidate) => candidate === "C:\\tools\\podman.cmd",
   });
-  assert.equal(found, "C:\\tools\\docker.cmd");
+  assert.equal(found, "C:\\tools\\podman.cmd");
 });
 
 test("findExecutable on Windows finds a .bat shim", () => {
@@ -120,7 +120,7 @@ test("findExecutable ignores PATH casing/precedence traps (defect #2)", () => {
   assert.equal(found, "C:\\Git\\bin\\git.exe");
 });
 
-// --- checkGit / checkDockerPresent / checkDockerDaemon ----------------------
+// --- checkGit / checkPodmanPresent / checkPodmanDaemon ----------------------
 
 test("checkGit ok when present", () => {
   assert.equal(checkGit({ gitFound: true }).ok, true);
@@ -132,28 +132,28 @@ test("checkGit fails with a concrete fix when absent", () => {
   assert.match(result.fix, /Install Git/);
 });
 
-test("checkDockerPresent fails with a concrete fix when absent", () => {
-  const result = checkDockerPresent({ dockerFound: false });
+test("checkPodmanPresent fails with a concrete fix when absent", () => {
+  const result = checkPodmanPresent({ podmanFound: false });
   assert.equal(result.ok, false);
-  assert.match(result.fix, /Install Docker/);
+  assert.match(result.fix, /Install Podman/);
 });
 
-test("checkDockerDaemon distinguishes 'not installed' from 'not running' (the CLI vs the daemon)", () => {
-  const notInstalled = checkDockerDaemon({ dockerFound: false, dockerDaemonReachable: false });
+test("checkPodmanDaemon distinguishes 'not installed' from 'not usable' (the CLI vs actually working)", () => {
+  const notInstalled = checkPodmanDaemon({ podmanFound: false, podmanDaemonReachable: false });
   assert.match(notInstalled.message, /executable not found/);
 
-  const installedButDown = checkDockerDaemon({
-    dockerFound: true,
-    dockerDaemonReachable: false,
-    dockerDaemonError: "connection refused",
+  const installedButDown = checkPodmanDaemon({
+    podmanFound: true,
+    podmanDaemonReachable: false,
+    podmanDaemonError: "connection refused",
   });
   assert.equal(installedButDown.ok, false);
   assert.match(installedButDown.message, /connection refused/);
-  assert.match(installedButDown.fix, /Start Docker/);
+  assert.match(installedButDown.fix, /podman machine start/);
 });
 
-test("checkDockerDaemon ok when the daemon answers", () => {
-  const result = checkDockerDaemon({ dockerFound: true, dockerDaemonReachable: true });
+test("checkPodmanDaemon ok when podman answers", () => {
+  const result = checkPodmanDaemon({ podmanFound: true, podmanDaemonReachable: true });
   assert.equal(result.ok, true);
 });
 
@@ -266,9 +266,9 @@ function passingFacts() {
     platform: "linux",
     gitFound: true,
     gitLongPaths: null,
-    dockerFound: true,
-    dockerDaemonReachable: true,
-    dockerDaemonError: null,
+    podmanFound: true,
+    podmanDaemonReachable: true,
+    podmanDaemonError: null,
     execution: "local",
     endpoint: { mode: "local", url: "http://127.0.0.1:8080/health", healthy: true, error: null },
   };
@@ -278,7 +278,7 @@ test("evaluateChecks reports overall ok when every check passes", () => {
   const checks = evaluateChecks(passingFacts());
   assert.equal(checks.length, 6);
   assert.ok(checks.every((c) => c.ok));
-  assert.deepEqual(checks.map((c) => c.id), ["node", "git", "git-longpaths", "docker", "docker-daemon", "endpoint"]);
+  assert.deepEqual(checks.map((c) => c.id), ["node", "git", "git-longpaths", "podman", "podman-daemon", "endpoint"]);
 });
 
 test("evaluateChecks fails the whole report when one check fails (defect #4 - no contradictory output)", () => {
@@ -309,7 +309,7 @@ test("runDoctor with injected facts returns ok:false and reports only the failin
   const lines = [];
   console.log = (msg) => lines.push(String(msg));
   try {
-    const result = await runDoctor({ facts: { ...passingFacts(), dockerFound: false, dockerDaemonReachable: false } });
+    const result = await runDoctor({ facts: { ...passingFacts(), podmanFound: false, podmanDaemonReachable: false } });
     assert.equal(result.ok, false);
     const text = lines.join("\n");
     assert.match(text, /Some checks failed\./);

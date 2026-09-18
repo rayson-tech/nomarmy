@@ -80,7 +80,7 @@ nomarmy_validate_local(){
   if [[ "$workers" -gt "$parallel" ]]; then
     echo "WARN: NOMARMY_MAX_WORKERS=$workers exceeds NOMARMY_LLAMA_PARALLEL=$parallel." >&2
     echo "WARN: only $parallel nom(s) can infer at once; the rest queue for a slot while" >&2
-    echo "WARN: still holding a Docker sandbox each. Run 'nomarmy sizing' for a recommendation." >&2
+    echo "WARN: still holding a Podman sandbox each. Run 'nomarmy sizing' for a recommendation." >&2
   fi
   if [[ "$ctx" -gt 0 && "$per_nom" -lt 65536 ]]; then
     if [[ "$parallel" -gt 1 ]]; then
@@ -149,15 +149,19 @@ run_as_root(){
   if [[ "${EUID}" -eq 0 ]]; then "$@"; else need sudo; sudo "$@"; fi
 }
 
+linux_package_manager(){
+  if command -v apt-get >/dev/null 2>&1; then echo apt
+  elif command -v dnf >/dev/null 2>&1; then echo dnf
+  elif command -v yum >/dev/null 2>&1; then echo yum
+  elif command -v zypper >/dev/null 2>&1; then echo zypper
+  elif command -v pacman >/dev/null 2>&1; then echo pacman
+  elif command -v apk >/dev/null 2>&1; then echo apk
+  fi
+}
+
 install_build_dependencies(){
-  local manager
-  if command -v apt-get >/dev/null 2>&1; then manager=apt
-  elif command -v dnf >/dev/null 2>&1; then manager=dnf
-  elif command -v yum >/dev/null 2>&1; then manager=yum
-  elif command -v zypper >/dev/null 2>&1; then manager=zypper
-  elif command -v pacman >/dev/null 2>&1; then manager=pacman
-  elif command -v apk >/dev/null 2>&1; then manager=apk
-  else
+  local manager; manager="$(linux_package_manager)"
+  if [[ -z "$manager" ]]; then
     echo 'ERROR: unsupported Linux package manager. Install a C++ compiler, CMake, curl, Git, and CA certificates, then rerun.' >&2
     return 1
   fi
@@ -170,5 +174,25 @@ install_build_dependencies(){
     zypper) run_as_root zypper --non-interactive install gcc-c++ cmake curl git ca-certificates nodejs npm ;;
     pacman) run_as_root pacman --noconfirm --needed -S base-devel cmake curl git ca-certificates nodejs npm ;;
     apk) run_as_root apk add build-base cmake curl git ca-certificates nodejs npm ;;
+  esac
+}
+
+# Podman is required on every Linux profile, cloud included -- unlike the
+# build toolchain above, which cloud profiles skip entirely.
+install_podman(){
+  local manager; manager="$(linux_package_manager)"
+  if [[ -z "$manager" ]]; then
+    echo 'ERROR: unsupported Linux package manager. Install Podman yourself, then rerun.' >&2
+    return 1
+  fi
+
+  echo "==> Installing Podman with $manager"
+  case "$manager" in
+    apt) run_as_root apt-get update; run_as_root apt-get install -y podman ;;
+    dnf) run_as_root dnf install -y podman ;;
+    yum) run_as_root yum install -y podman ;;
+    zypper) run_as_root zypper --non-interactive install podman ;;
+    pacman) run_as_root pacman --noconfirm --needed -S podman ;;
+    apk) run_as_root apk add podman ;;
   esac
 }

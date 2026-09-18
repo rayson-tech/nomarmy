@@ -116,7 +116,7 @@ test("assessAdmission: at NOMARMY_MAX_WORKERS or at the slot count, refuse on ca
 });
 
 test("assessAdmission: below the sandbox reserve plus floor is critical and refused", () => {
-  const need = (RESERVES.dockerSandboxPerNomBytes + BUDGET_RULES.admissionFloorBytes) / GIB;
+  const need = (RESERVES.sandboxPerNomBytes + BUDGET_RULES.admissionFloorBytes) / GIB;
   const a = assessAdmission({ hardware: hw(32, need - 0.1), runningJobs: 0, slots: null, maxWorkers: 2 });
   assert.equal(a.admit, false); assert.equal(a.level, "critical"); assert.match(a.reasons[0], /Free memory before starting/);
 });

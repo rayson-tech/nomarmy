@@ -1,7 +1,7 @@
 // Tests for the independent verification runner.
 // Run: node --test tests/verify.test.mjs
 //
-// Node built-ins only, and NO Docker: every test injects a fake executor, so
+// Node built-ins only, and NO Podman: every test injects a fake executor, so
 // the state machine is provable on a machine that has never built the sandbox.
 
 import assert from "node:assert/strict";
@@ -15,7 +15,7 @@ import {
   DEFAULT_CONTAINER_USER,
   DEFAULT_WORKDIR,
   TRUNCATION_MARKER,
-  buildDockerArgs,
+  buildPodmanArgs,
   capOutput,
   classifyResults,
   createVerificationRunner,
@@ -187,11 +187,11 @@ test("capOutput truncates and records the number of bytes dropped", () => {
 });
 
 // --------------------------------------------------------------------------
-// buildDockerArgs — the sandbox invocation
+// buildPodmanArgs — the sandbox invocation
 // --------------------------------------------------------------------------
 
-test("buildDockerArgs isolates the container and passes the command as one argv element", () => {
-  const args = buildDockerArgs({
+test("buildPodmanArgs isolates the container and passes the command as one argv element", () => {
+  const args = buildPodmanArgs({
     cwd: "/jobs/j1/worktree",
     command: "npm test; echo $(whoami)",
     jobId: "j1",
@@ -351,15 +351,15 @@ test("environment: integration is not_run naming the unmet requirement, NOT fail
 // runner — the sandbox is mandatory
 // --------------------------------------------------------------------------
 
-test("Docker unavailable is not_run and NOTHING is executed on the host", async () => {
-  const executor = fakeExecutor({ available: false, probeReason: "docker daemon is not reachable" });
+test("Podman unavailable is not_run and NOTHING is executed on the host", async () => {
+  const executor = fakeExecutor({ available: false, probeReason: "podman is not usable" });
   const run = createVerificationRunner({ loadConfig: fixedConfig(STANDARD), executor });
 
   const verdict = await run(CONTEXT);
 
   assert.equal(verdict.status, "not_run");
   assert.equal(verdict.basis, "sandbox-unavailable");
-  assert.match(verdict.reason, /docker daemon is not reachable/);
+  assert.match(verdict.reason, /podman is not usable/);
   assert.match(verdict.reason, /never executed on the host/);
 
   // The security property under test: no execution path was attempted at all.
@@ -383,20 +383,20 @@ test("a missing sandbox image is not_run, not a fabricated failure", async () =>
 test("a probe that throws is not_run, never a host fallback", async () => {
   const calls = [];
   const executor = {
-    async probe() { throw new Error("docker socket exploded"); },
+    async probe() { throw new Error("podman socket exploded"); },
     async run(input) { calls.push(input); return { started: true, exitCode: 0 }; },
   };
   const run = createVerificationRunner({ loadConfig: fixedConfig(STANDARD), executor });
 
   const verdict = await run(CONTEXT);
   assert.equal(verdict.status, "not_run");
-  assert.match(verdict.reason, /docker socket exploded/);
+  assert.match(verdict.reason, /podman socket exploded/);
   assert.equal(calls.length, 0);
 });
 
 test("a container that never starts is not_run when nothing ran at all", async () => {
   const executor = fakeExecutor({
-    fallback: { started: false, reason: "container failed to start: docker exit 125" },
+    fallback: { started: false, reason: "container failed to start: podman exit 125" },
   });
   const run = createVerificationRunner({ loadConfig: fixedConfig(STANDARD), executor });
 

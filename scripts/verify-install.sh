@@ -4,7 +4,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; source "$ROOT/scripts/l
 fail=0
 check(){ if "$@" >/dev/null 2>&1; then echo "PASS $*"; else echo "FAIL $*"; fail=1; fi; }
 
-check git --version; check docker info; check openclaw --version
+check git --version; check podman info; check openclaw --version
 
 if nomarmy_is_cloud; then
   echo "INFO cloud profile '$NOMARMY_PROFILE' (region $NOMARMY_BEDROCK_REGION) — no local inference expected"
@@ -39,7 +39,11 @@ fi
 openclaw models list --provider "$NOMARMY_WORKER_PROVIDER" | grep -q "$NOMARMY_WORKER_MODEL" \
   && echo "PASS OpenClaw worker model ($NOMARMY_WORKER_PROVIDER/$NOMARMY_WORKER_MODEL)" \
   || { echo "FAIL OpenClaw worker model ($NOMARMY_WORKER_PROVIDER/$NOMARMY_WORKER_MODEL)"; fail=1; }
-openclaw config get agents.defaults.sandbox | grep -qi docker && echo 'PASS Docker sandbox configured' || { echo 'FAIL Docker sandbox'; fail=1; }
+# The sandbox config keeps its "docker" sub-key namespace regardless of
+# backend, so grepping the whole block for "docker" would falsely pass even
+# when the backend is podman. Check the actual backend value instead.
+SANDBOX_BACKEND="$(openclaw config get agents.defaults.sandbox.backend 2>/dev/null | tr -d '[:space:]"' || true)"
+[[ "$SANDBOX_BACKEND" == "podman" ]] && echo 'PASS Podman sandbox configured' || { echo "FAIL Podman sandbox (backend is '$SANDBOX_BACKEND')"; fail=1; }
 
 # The no-network sandbox is what keeps repository content away from any
 # credential the host process holds. It is a hard requirement on cloud profiles.

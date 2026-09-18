@@ -52,18 +52,21 @@ else
   echo "PASS model discovery"
 fi
 
-TMP="$(mktemp -d)"
+# Under $HOME, not the system tmpdir: Podman Machine on macOS only allows
+# bind-mounting paths under the host home directory, and the cleanup step
+# below bind-mounts this directory into a container.
+TMP="$(mktemp -d "$HOME/.nomarmy-e2e.XXXXXX")"
 
 cleanup() {
   local exit_code=$?
 
   if [[ -n "${TMP:-}" && -d "$TMP" ]]; then
 
-    # OpenClaw's Docker sandbox may create files that the host user
+    # OpenClaw's Podman sandbox may create files that the host user
     # cannot delete directly. Use a disposable container to clean
     # the temporary workspace first.
-    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-      docker run --rm \
+    if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
+      podman run --rm \
         -v "$TMP:/cleanup" \
         alpine:3.20 \
         sh -c '

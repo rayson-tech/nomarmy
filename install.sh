@@ -19,7 +19,9 @@ case "$OS_NAME" in
       command -v xcode-select >/dev/null 2>&1 && xcode-select -p >/dev/null 2>&1 || { echo 'ERROR: Xcode Command Line Tools are required. Run: xcode-select --install'; exit 1; }
       command -v cmake >/dev/null 2>&1 || brew install cmake
     fi
-    command -v docker >/dev/null 2>&1 || { echo 'ERROR: Docker Desktop is required on macOS. Install and start it, then rerun.'; exit 1; }
+    # A Homebrew formula, not a cask -- installs headlessly like curl/git/node,
+    # no manual first-launch the way Docker Desktop needs.
+    command -v podman >/dev/null 2>&1 || brew install podman
     ;;
   Linux)
     if nomarmy_is_cloud; then
@@ -30,18 +32,22 @@ case "$OS_NAME" in
       need curl; need git; need cmake; need c++; need node; need npm
       if [[ "$NOMARMY_PROFILE" == dgx-spark || "$NOMARMY_PROFILE" == nvidia-linux ]]; then need nvidia-smi; need nvcc; fi
     fi
-    command -v docker >/dev/null 2>&1 || { echo 'ERROR: Docker Engine (or Docker Desktop with the WSL2 backend) is required. Install and start it, then rerun.'; exit 1; }
+    # Podman runs rootless, directly on the host kernel here -- no daemon to
+    # enable or start, unlike Docker Engine.
+    command -v podman >/dev/null 2>&1 || install_podman
     ;;
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
     cat >&2 <<'MSG'
 ERROR: install.sh does not run natively on Windows. Three options, and the usual
 advice is not always the better one:
 
-  1. WSL2 + Docker Desktop WSL integration (supported path)
-     Note: WSL2 defaults to ~50% of host RAM, shared across ALL distros
-     including docker-desktop. On a 32 GB machine that caps the model at
-     ~16 GB. Raise it in %UserProfile%\.wslconfig, which needs `wsl --shutdown`
-     and will restart every running container.
+  1. WSL2, then run the Linux install inside your distro (supported path)
+     Podman runs natively inside the WSL2 distro itself -- nothing to install
+     on the Windows host, and no Docker Desktop licensing exposure there.
+     Note: WSL2 defaults to ~50% of host RAM, shared across every distro. On
+     a 32 GB machine that caps the model at ~16 GB. Raise it in
+     %UserProfile%\.wslconfig, which needs `wsl --shutdown` and will restart
+     every running container.
 
   2. Native Windows llama.cpp built from source, then point nomArmy at it.
      Gets the full host RAM. Needs a C++ toolchain:
@@ -88,8 +94,9 @@ else
   echo "      Run it directly instead: node $ROOT/bin/nomarmy.mjs <command>"
 fi
 # The sandbox is required on every profile, cloud included: it is what keeps
-# repository content away from host credentials.
-docker info >/dev/null || { echo 'ERROR: Docker daemon is not running.'; exit 1; }
+# repository content away from host credentials. Podman readiness (starting
+# the macOS VM if needed) is verified later, in scripts/setup-sandbox.sh --
+# on a fresh macOS install nothing has initialized that VM yet at this point.
 if nomarmy_is_cloud; then need aws || { echo 'ERROR: the AWS CLI is required for cloud profiles.'; exit 1; }; fi
 "$ROOT/scripts/install-llama-cpp.sh" "$NOMARMY_PROFILE"
 if ! command -v openclaw >/dev/null 2>&1; then
