@@ -921,18 +921,23 @@ server.tool("local_worker_start", "Start one worker or scout in the background a
     const entry = launch(args);
     return toolText(JSON.stringify({ started: true, jobId: entry.jobId, workerId: entry.workerId, mode: entry.mode, state: "running",
       jobDir: path.join(jobsRoot, entry.jobId), timeoutSeconds: args.timeout_seconds,
-      poll: { tool: "local_worker_status", job_id: entry.jobId, wait_seconds: 60 },
+      poll: { tool: "local_worker_status", job_id: entry.jobId, wait_seconds: MAX_STATUS_WAIT_SECONDS },
       admission: { level: admission.level, notes: admission.reasons }, budgets: describeBudgets(budgets) }, null, 2));
   });
-server.tool("local_worker_status", "Status of one job started by this server: phase (starting, worktree, worker, verification, commit, record, finished), elapsed time against its timeout, and the result once finished. wait_seconds long-polls up to that long for completion. full=true returns the complete formatted result instead of a summary.", {
-  job_id: z.string().min(1), wait_seconds: z.number().int().min(0).max(300).default(0), full: z.boolean().default(false)
+// A long poll must return inside the MCP client's own request timeout, which
+// the reference SDK sets to 60 seconds. Observed: a 120-second wait had the
+// client abandon the request, and with it the server, while the worker ran on.
+// 50 leaves a margin; a job that needs longer is simply polled again.
+export const MAX_STATUS_WAIT_SECONDS = 50;
+server.tool("local_worker_status", `Status of one job started by this server: phase (starting, worktree, worker, verification, commit, record, finished), elapsed time against its timeout, and the result once finished. wait_seconds long-polls up to that long for completion (max ${MAX_STATUS_WAIT_SECONDS}, to stay inside MCP client request timeouts; poll again for longer jobs). full=true returns the complete formatted result instead of a summary.`, {
+  job_id: z.string().min(1), wait_seconds: z.number().int().min(0).max(MAX_STATUS_WAIT_SECONDS).default(0), full: z.boolean().default(false)
 }, async ({ job_id, wait_seconds, full }) => {
   const jobId = path.basename(job_id), entry = activeJobs.get(jobId), jobDir = path.join(ensureJobsRoot(), jobId);
   if (entry && !entry.settled && wait_seconds > 0) await Promise.race([entry.promise.catch(() => {}), sleep(wait_seconds * 1000)]);
   const files = { status: readJson(path.join(jobDir, "status.json")), meta: readJson(path.join(jobDir, "metadata.json")), failure: readJson(path.join(jobDir, "failure.json")) };
   if (!entry && !files.status && !files.meta && !files.failure) return toolText(`Unknown job: ${job_id}`, true);
   const summary = summarize(entry, files);
-  if (summary.state === "running") return toolText(JSON.stringify({ ...summary, jobDir, hint: `poll again with wait_seconds up to 300; the worker phase gives no finer signal than elapsed time` }, null, 2));
+  if (summary.state === "running") return toolText(JSON.stringify({ ...summary, jobDir, hint: `poll again with wait_seconds up to ${MAX_STATUS_WAIT_SECONDS}; the worker phase gives no finer signal than elapsed time` }, null, 2));
   if (entry?.error) return toolText(JSON.stringify({ ...summary, jobDir }, null, 2), true);
   if (full && entry?.result) return toolText(formatResult(entry.result), !entry.result.ok);
   if (full && files.meta) return toolText(JSON.stringify(files.meta, null, 2), summary.coordinatorStatus !== "complete");
