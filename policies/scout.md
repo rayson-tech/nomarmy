@@ -48,7 +48,9 @@ The invariant does not change: a scout's report is a claim. What changes is what
 - A finding with no resolvable citation is not passed through as a fact. It is listed under `UNSUPPORTED FINDINGS` as hearsay.
 - `CONFIDENCE` is recorded as the scout's own estimate and labelled that way. It is not evidence.
 
-Outcomes: `SCOUT_DONE` (at least one finding supported), `SCOUT_UNSUPPORTED` (none supported; incomplete), `SCOUT_REPORT_INVALID` (no usable report), `SCOUT_TAINTED` (the snapshot changed; needs review). A `SCOUT_DONE` with unsupported findings or a truncated report is complete but marked for review.
+Outcomes: `SCOUT_DONE` (at least one finding supported by cited lines), `SCOUT_WEAK` (every supported finding names a file but no readable lines, so nothing is attached; needs review), `SCOUT_UNSUPPORTED` (none supported; incomplete), `SCOUT_REPORT_INVALID` (no usable report), `SCOUT_TAINTED` (the snapshot changed; needs review). A `SCOUT_DONE` with unsupported findings or a truncated report is complete but marked for review.
+
+A citation whose line part is garbled but whose file exists, such as a template copied literally as `[path:AGENTS.md:start-55]`, is salvaged to a file-level citation and labelled as such. It counts as weak evidence, never as lines read. This was observed verbatim from a 4B model on the first live scout run; the brief now shows concrete example citations and says not to copy them.
 
 ## What the coordinator still owns
 

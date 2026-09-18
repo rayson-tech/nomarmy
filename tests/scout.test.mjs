@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 
 import {
   SCOUT_OUTCOMES, DEFAULT_SCOUT_LIMITS,
-  scoutPrompt, parseCitation, parseScoutReport, verifyCitations, resolveScoutOutcome, renderScoutReport
+  scoutPrompt, parseCitation, parseCitationToken, extractCitations, parseScoutReport, verifyCitations, resolveScoutOutcome, renderScoutReport
 } from "../lib/scout.mjs";
 
 const FILES = {
@@ -30,7 +30,9 @@ test("scoutPrompt: read-only rules, citation requirement and caps are stated", (
     limits: { ...DEFAULT_SCOUT_LIMITS, maxFindings: 7 }, report: { targetTokens: 500, hardCapTokens: 900 } });
   assert.match(p, /You read; you never write/);
   assert.match(p, /NEVER run git commands/);
-  assert.match(p, /\[path:start-end\]/);
+  assert.match(p, /\[src\/example\.js:10-24\]/);
+  assert.match(p, /never write the words "path", "start" or "end"/);
+  assert.match(p, /read the source files that implement it/);
   assert.match(p, /At most 7 findings/);
   assert.match(p, /Target 500 tokens; 900 is the hard cap/);
   assert.match(p, /MUST COVER\n- a\n- b/);
@@ -52,6 +54,36 @@ test("parseCitation: accepts relative paths, strips /workspace and ./, rejects e
   assert.equal(parseCitation("https://example.com/x", 1), null);
   assert.equal(parseCitation("lib/a.mjs", 0), null, "lines are 1-based");
   assert.equal(parseCitation("lib/a.mjs", 9, 3), null, "end before start");
+});
+
+test("parseCitationToken: a template copied literally is salvaged to a weak file-level citation, never lines", () => {
+  // Observed verbatim from a 4B model on the first live scout run.
+  const c = parseCitationToken("path:AGENTS.md:start-55");
+  assert.equal(c.path, "AGENTS.md");
+  assert.equal(c.granularity, "file");
+  assert.equal(c.lineSpecInvalid, "start-55");
+  assert.equal(parseCitationToken("file: lib/a.mjs:12-14").granularity, "lines");
+  assert.equal(parseCitationToken("lib/a.mjs:L12-L14").end, 14);
+  assert.equal(parseCitationToken("see the discussion above"), null);
+  assert.equal(parseCitationToken("../../etc/passwd:1"), null);
+});
+
+test("extractCitations: every bracketed token is an attempt; garbled ones are reported, not dropped", () => {
+  const cs = extractCitations("x [lib/a.mjs:1-2] y [path:README.md:start-end] z [no idea]");
+  assert.equal(cs.length, 3);
+  assert.equal(cs[0].granularity, "lines");
+  assert.equal(cs[1].granularity, "file"); assert.equal(cs[1].path, "README.md");
+  assert.equal(cs[2].granularity, "invalid"); assert.equal(cs[2].raw, "[no idea]");
+});
+
+test("verifyCitations: a salvaged file-level citation is weak; an unparseable one is labelled as such", async () => {
+  const r = parseScoutReport("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: low\nFINDING: a [path:README.md:start-55]\nFINDING: b [see above]\nNOT_FOUND: none\nEND");
+  const v = await verifyCitations(r.findings, { readFile });
+  assert.equal(v.findings[0].supported, true); assert.equal(v.findings[0].weak, true);
+  assert.equal(v.findings[1].supported, false); assert.equal(v.findings[1].citations[0].status, "unparseable");
+  const text = renderScoutReport({ report: r, verified: v, outcome: resolveScoutOutcome({ report: r, verified: v }), baseSha: "abc" });
+  assert.match(text, /line spec "start-55" was unreadable/);
+  assert.match(text, /\[see above\]: unparseable/);
 });
 
 // --- parsing ----------------------------------------------------------------
@@ -130,7 +162,7 @@ test("verifyCitations: missing files, out-of-range lines and bad paths leave a f
   assert.deepEqual(v.findings.map(f => f.supported), [false, false, false, false, true]);
   assert.equal(v.findings[0].citations[0].status, "missing_file");
   assert.equal(v.findings[1].citations[0].status, "out_of_range");
-  assert.equal(v.findings[2].citations[0].status, "bad_path");
+  assert.equal(v.findings[2].citations[0].status, "unparseable");
   const e = v.findings[4].citations[0];
   assert.equal(e.end, 40, "an end past EOF is clamped, not rejected");
   assert.equal(e.endClamped, true);
@@ -203,6 +235,23 @@ test("resolveScoutOutcome: missing report is invalid; truncated-but-supported co
   assert.equal(o.outcome, SCOUT_OUTCOMES.SCOUT_DONE);
   assert.equal(o.reviewRequired, true);
   assert.match(o.reasons.join(" "), /truncated/);
+});
+
+test("resolveScoutOutcome: file-level-only support is SCOUT_WEAK and needs review, not complete", async () => {
+  // The first live run verbatim: template citations salvaged to file level, so nothing to read.
+  const r = parseScoutReport("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: high\nFINDING: a [path:README.md:start-55]\nFINDING: b [README.md]\nFINDING: c [nowhere.md:3]\nNOT_FOUND: none\nEND");
+  const v = await verifyCitations(r.findings, { readFile });
+  assert.equal(v.supported, 2); assert.equal(v.weak, 2);
+  const o = resolveScoutOutcome({ report: r, verified: v });
+  assert.equal(o.outcome, SCOUT_OUTCOMES.SCOUT_WEAK);
+  assert.equal(o.coordinatorStatus, "needs_review");
+  assert.equal(o.reviewRequired, true);
+  assert.match(o.reasons[0], /cites a file, not lines/);
+  assert.match(o.reasons[1], /1 finding\(s\) had no resolvable citation/);
+  // One real line citation among weak ones is enough to be DONE again.
+  const r2 = parseScoutReport("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: high\nFINDING: a [README.md]\nFINDING: b [lib/auth.mjs:1-2]\nNOT_FOUND: none\nEND");
+  const v2 = await verifyCitations(r2.findings, { readFile });
+  assert.equal(resolveScoutOutcome({ report: r2, verified: v2 }).outcome, SCOUT_OUTCOMES.SCOUT_DONE);
 });
 
 // --- rendering --------------------------------------------------------------

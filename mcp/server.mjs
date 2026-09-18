@@ -193,9 +193,16 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
     ? scoutPrompt({ question: task, mustCover: acceptance, baseRef, baseSha, workerId, limits: budgets.scout, report: budgets.report.scout })
     : workerPrompt({ task, acceptance, verification, mode, baseRef, baseSha, workerId, report: budgets.report.implement });
   fs.writeFileSync(path.join(jobDir, "brief.txt"), prompt + "\n");
+  // --state-dir keeps OpenClaw's session state (its transcript database among
+  // it) inside the job directory instead of a temp dir it deletes on exit.
+  // Two reasons: on Windows that deletion hit EBUSY on a still-open sqlite
+  // handle and turned a finished run into `ok:false` with an empty final; and
+  // a retained transcript is what lets a lost report be recovered on review.
+  const stateDir = path.join(runtimeDir, "state");
+  fs.mkdirSync(stateDir, { recursive: true });
   const args = ["agent", "exec", prompt, "--model", selected.model,
     "--cwd", cwd, "--code-mode", "direct", "--local-model-lean", "--thinking", selected.thinking,
-    "--timeout", String(timeoutSeconds), "--json"];
+    "--timeout", String(timeoutSeconds), "--state-dir", stateDir, "--json"];
   try {
     const { stdout, stderr } = await run("openclaw", args, { cwd, env, timeoutMs: (timeoutSeconds + 30) * 1000 });
     fs.writeFileSync(path.join(jobDir, "openclaw.stdout.log"), stdout + "\n");
@@ -204,7 +211,32 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
   } catch (error) {
     fs.writeFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} OpenClaw failure\n${error.stack || error.message}\n`);
     throw error;
+  } finally {
+    await reapSandboxContainers(stateDir, jobDir);
   }
+}
+
+// OpenClaw names each job's sandbox container after the hash of its skills
+// workspace, which it records under the state directory, and nothing stops the
+// container when `agent exec` returns: one leaked per job, observed on every
+// failed run. Match on that hash so only this job's container is touched.
+// Best-effort: a missing docker or an already-gone container is not an error.
+export function sandboxHashesFromState(stateDir) {
+  const root = path.join(stateDir, "sandbox", "skills-workspaces");
+  try {
+    return fs.readdirSync(root, { withFileTypes: true })
+      .filter(d => d.isDirectory() && /^workspace-[0-9a-f]{16,}$/.test(d.name))
+      .map(d => d.name.replace(/^workspace-/, ""));
+  } catch { return []; }
+}
+async function reapSandboxContainers(stateDir, jobDir) {
+  const reaped = [];
+  for (const hash of sandboxHashesFromState(stateDir)) {
+    const name = `openclaw-sbx-workspace-${hash}`;
+    try { await run("docker", ["rm", "-f", name], { timeoutMs: 30000 }); reaped.push(name); } catch { /* already gone, or no docker */ }
+  }
+  if (reaped.length) fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} reaped sandbox container(s): ${reaped.join(", ")}\n`);
+  return reaped;
 }
 
 // ---------------------------------------------------------------------------

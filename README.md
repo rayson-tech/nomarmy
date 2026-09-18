@@ -55,7 +55,9 @@ The problem is that a scout's claim *is* the deliverable — there is no Git rec
 - the cited lines are attached to the finding, so the coordinator reads claim and evidence side by side without opening the file;
 - a finding with no resolvable citation is not passed through as a fact. It is listed separately as hearsay.
 
-`CONFIDENCE` is recorded as the scout's own estimate and labelled that way. A scout that writes to its snapshot gets `SCOUT_TAINTED`, a retained worktree, and a banner. See `policies/scout.md`.
+`CONFIDENCE` is recorded as the scout's own estimate and labelled that way. A citation that names a real file but no readable lines counts as weak evidence, and a report made only of those is `SCOUT_WEAK` and goes to review rather than being called complete. A scout that writes to its snapshot gets `SCOUT_TAINTED`, a retained worktree, and a banner. See `policies/scout.md`.
+
+The first live scout run, a 4B model on a CPU-only laptop, produced a perfectly shaped report in about twelve minutes — and cited the documentation instead of the code, with the citation template copied literally as `[path:AGENTS.md:start-55]`. The gate held: zero findings verified as lines read. That is the same lesson as the implement run above, in a cheaper form.
 
 Scouts win on breadth, not depth. "Read every test file and list which ones start Docker" is a scout task; a single grep is not. On CPU-only hardware a scout is slower than the frontier doing the lookup itself, so the break-even is a measurement, not a given.
 
