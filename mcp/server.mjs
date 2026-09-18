@@ -17,7 +17,22 @@ const server = new McpServer({ name: "nomarmy-local-worker", version: VERSION })
 const projectDir = path.resolve(process.env.CLAUDE_PROJECT_DIR || process.cwd());
 const stateRoot = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
 const jobsRoot = path.join(stateRoot, "jobs");
-const defaultParallel = clampInt(process.env.NOMARMY_MAX_WORKERS, 1, 8, 1);
+// NOMARMY_MAX_WORKERS, when set, is the operator's own declared ceiling.
+// Left unset, the natural default is however many inference slots
+// llama-server actually reports right now (contextInfo.slots, refreshed
+// alongside the context budget on every admission check) -- not a value
+// frozen from the environment at server startup. assessAdmission already
+// refuses independently once running jobs reach the real slot count
+// (`slots && runningJobs >= slots`), so a lower, stale default here only
+// ever added a second, needlessly tighter ceiling on top of that real one:
+// restarting llama-server with more slots (e.g. -np 4) had no effect on
+// concurrency until the whole coordinator process was also restarted.
+export function currentMaxWorkers() {
+  const declared = process.env.NOMARMY_MAX_WORKERS;
+  if (declared !== undefined) return clampInt(declared, 1, 8, 1);
+  const slots = contextInfo?.slots;
+  return Number.isFinite(slots) && slots > 0 ? Math.min(slots, 8) : 1;
+}
 
 // Importing this module (the contract tests do) must not touch the filesystem
 // or open a transport. Job state is created lazily; stdio only runs in main.
@@ -1014,21 +1029,21 @@ function track(jobId, meta, promise) {
 }
 function toolText(text, isError = false) { return { content: [{ type: "text", text }], isError }; }
 function capacitySnapshot() {
-  const admission = assessAdmission({ hardware: hardwareSnapshot, runningJobs: runningCount(), slots: contextInfo.slots, maxWorkers: defaultParallel });
+  const admission = assessAdmission({ hardware: hardwareSnapshot, runningJobs: runningCount(), slots: contextInfo.slots, maxWorkers: currentMaxWorkers() });
   return {
     budgets: { ...budgets, describe: describeBudgets(budgets) },
     context: contextInfo,
     admission,
     memory: hardwareSnapshot?.memory ?? null,
     running: [...activeJobs.values()].filter(j => !j.settled).map(j => ({ jobId: j.jobId, workerId: j.workerId, mode: j.mode, startedAt: j.startedAt, phase: readJson(path.join(jobsRoot, j.jobId, "status.json"))?.phase ?? "starting" })),
-    maxWorkers: defaultParallel
+    maxWorkers: currentMaxWorkers()
   };
 }
 async function admit(jobs) {
   await refreshBudgets();
   const problems = [];
   jobs.forEach((j, i) => { for (const p of checkBrief(j, budgets)) problems.push(jobs.length > 1 ? `job ${i + 1}: ${p}` : p); });
-  const admission = assessAdmission({ hardware: hardwareSnapshot, runningJobs: runningCount(), slots: contextInfo.slots, maxWorkers: defaultParallel });
+  const admission = assessAdmission({ hardware: hardwareSnapshot, runningJobs: runningCount(), slots: contextInfo.slots, maxWorkers: currentMaxWorkers() });
   if (!admission.admit) problems.push(...admission.reasons.map(r => `not admitted (${admission.level}): ${r}`));
   return { problems, admission };
 }
@@ -1116,12 +1131,12 @@ server.tool("local_worker_capacity", "What this host can take right now: context
   return toolText(JSON.stringify(capacitySnapshot(), null, 2));
 });
 server.tool("local_workers", "Run independent jobs (implement or scout) with bounded parallelism and wait for all of them. Every implement job receives its own branch, worktree, sandbox session, logs, validation, and coordinator-owned commit. This tool never merges worker branches; Claude reviews and integrates them. For long batches prefer local_worker_start per job and poll.", {
-  jobs: z.array(jobSchema).min(1).max(8), max_parallel: z.number().int().min(1).max(8).default(defaultParallel)
+  jobs: z.array(jobSchema).min(1).max(8), max_parallel: z.number().int().min(1).max(8).default(() => currentMaxWorkers())
 }, async ({ jobs, max_parallel }) => {
   const { problems } = await admit(jobs);
   if (problems.length) return refusal(problems);
   const batchId = slug("batch"), startedAt = new Date().toISOString();
-  const parallel = Math.max(1, Math.min(max_parallel, defaultParallel - runningCount()));
+  const parallel = Math.max(1, Math.min(max_parallel, currentMaxWorkers() - runningCount()));
   const results = await mapLimit(jobs, parallel, (j, i) => {
     const workerId = j.worker_id || `${batchId}-w${i + 1}`, jobId = slug(workerId);
     return track(jobId, { mode: j.mode, workerId }, executeJob({ ...jobArgs(j, workerId), jobId })).promise;

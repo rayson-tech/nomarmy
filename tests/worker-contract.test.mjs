@@ -23,7 +23,8 @@ import {
   jobSchema,
   maxTaskChars,
   maxAcceptanceItemChars,
-  formatResult
+  formatResult,
+  currentMaxWorkers
 } from "../mcp/server.mjs";
 
 const report = ({ status = "done", tests = "pass", notDone = "none", note = "n/a" } = {}) =>
@@ -583,4 +584,43 @@ test("reportRecoveryPrompt: tells an uncertain worker to under-claim, not to say
   const p = reportRecoveryPrompt({ report: { targetTokens: 256, hardCapTokens: 512 } });
   assert.match(p, /unsure whether an edit you attempted actually applied/);
   assert.match(p, /partial or STATUS: blocked rather than STATUS: done/);
+});
+
+// ---------------------------------------------------------------------------
+// Concurrency ceiling: NOMARMY_MAX_WORKERS, when set, is the operator's own
+// declared preference. Left unset, this must never silently default to a
+// value tighter than what the live inference server actually offers --
+// that was the bug: a coordinator started once could never see a
+// llama-server restarted afterward with more slots (-np raised) without
+// also restarting the whole coordinator process.
+// ---------------------------------------------------------------------------
+test("currentMaxWorkers: an explicit NOMARMY_MAX_WORKERS is respected and clamped to [1,8]", () => {
+  const prior = process.env.NOMARMY_MAX_WORKERS;
+  try {
+    process.env.NOMARMY_MAX_WORKERS = "4";
+    assert.equal(currentMaxWorkers(), 4);
+    process.env.NOMARMY_MAX_WORKERS = "99";
+    assert.equal(currentMaxWorkers(), 8, "must not exceed the hard ceiling");
+    process.env.NOMARMY_MAX_WORKERS = "0";
+    assert.equal(currentMaxWorkers(), 1, "must not go below 1");
+  } finally {
+    if (prior === undefined) delete process.env.NOMARMY_MAX_WORKERS;
+    else process.env.NOMARMY_MAX_WORKERS = prior;
+  }
+});
+
+test("currentMaxWorkers: with no explicit override and no known slot count, falls back to 1 safely", () => {
+  const prior = process.env.NOMARMY_MAX_WORKERS;
+  try {
+    delete process.env.NOMARMY_MAX_WORKERS;
+    // This test process never awaited refreshBudgets() against a live
+    // llama-server, so contextInfo.slots is at its unpopulated default --
+    // the function must degrade to the same safe floor as before, not throw
+    // or return something nonsensical.
+    const result = currentMaxWorkers();
+    assert.ok(Number.isInteger(result) && result >= 1 && result <= 8);
+  } finally {
+    if (prior === undefined) delete process.env.NOMARMY_MAX_WORKERS;
+    else process.env.NOMARMY_MAX_WORKERS = prior;
+  }
 });
