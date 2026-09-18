@@ -226,13 +226,13 @@ test("recovery: an invalid report with NO repository change is simply invalid", 
   assert.equal(outcome.commitAllowed, false);
 });
 
-test("recovery never runs in inspect mode commits", () => {
+test("recovery never commits in scout mode", () => {
   const outcome = resolveOutcome({
     report: parseWorkerReport("STATUS: done\nTESTS: pass\nNOT_DO"),
-    repositoryChanged: true, independentVerification: PASS, mode: "inspect"
+    repositoryChanged: true, independentVerification: PASS, mode: "scout"
   });
   assert.equal(outcome.outcome, OUTCOMES.RECOVERED_SUCCESS);
-  assert.equal(outcome.commitAllowed, false, "inspect mode never commits");
+  assert.equal(outcome.commitAllowed, false, "scout mode never commits");
 });
 
 // ---------------------------------------------------------------------------

@@ -217,6 +217,12 @@ async function cmdSizing() {
     console.log("\nAssumptions:");
     for (const a of res.assumptions) console.log(`  ${a}`);
   }
+  // Context bounds text, so show what a nom at this context can be asked and
+  // how much it can say back. Memory pressure is checked at job admission by
+  // the MCP server, not here.
+  const { deriveBudgets, describeBudgets } = await import("../lib/budget.mjs");
+  console.log("\nWorker budgets at this context:");
+  for (const line of describeBudgets(deriveBudgets({ contextPerNom: res.contextPerNom, source: "this recommendation" }))) console.log(`  ${line}`);
   console.log("\nThis is a recommendation. Apply it by editing config/profiles/<profile>.env.");
 }
 

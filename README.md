@@ -44,6 +44,21 @@ Everything else follows from that one line. The worker never runs Git. It cannot
 
 A malformed or truncated report is not automatically a failure either: if the repository changed, nomArmy verifies independently and may recover the work. **Failing verification stays failed**, the worktree is retained, and no recovery path can launder it into an accepted job.
 
+### Scouts: the same invariant for reading
+
+Not every job is an edit. The frontier's most expensive habit is reading: every file it opens stays in its context until compaction, and most of what it reads is answering a question rather than making a change. A **scout** is a nom that reads and never writes. It gets a question, a detached snapshot of the base commit, and no permission to modify anything. It hands back findings.
+
+The problem is that a scout's claim *is* the deliverable — there is no Git record to check it against, and if the coordinator re-reads everything to verify the answer, the saving is gone. So the scout contract makes citations mandatory and mechanically checkable:
+
+- every `FINDING` must carry `[path:start-end]`;
+- nomArmy resolves each citation against the exact commit the scout read, through Git, not through the worktree — a scout that edits its snapshot cannot forge evidence;
+- the cited lines are attached to the finding, so the coordinator reads claim and evidence side by side without opening the file;
+- a finding with no resolvable citation is not passed through as a fact. It is listed separately as hearsay.
+
+`CONFIDENCE` is recorded as the scout's own estimate and labelled that way. A scout that writes to its snapshot gets `SCOUT_TAINTED`, a retained worktree, and a banner. See `policies/scout.md`.
+
+Scouts win on breadth, not depth. "Read every test file and list which ones start Docker" is a scout task; a single grep is not. On CPU-only hardware a scout is slower than the frontier doing the lookup itself, so the break-even is a measurement, not a given.
+
 ### What that looks like in practice
 
 A real job, run against this repository: *add a `doctor` command to the CLI, with tests.* The worker was a 20B local model. It produced 156 lines that look like competent engineering — JSDoc throughout, pure exported check functions, a distinct remediation message per failed check, `--json` support, logic placed in `lib/` to match the repo's existing layout.
@@ -89,6 +104,8 @@ nomArmy v1.2 is proven: bounded delegation, isolated worktrees, coordinator-owne
 | `.nomarmy.yml` environment contract — schema, loader, validator | Built, unit tested |
 | Deterministic environment scanner and evidence normalizer | Built, unit tested |
 | Sandboxed independent verification | Built, unit tested |
+| Scout mode — read-only noms with verified, expanded citations | Built, unit tested; not yet run against a live model |
+| Background jobs with status polling; memory-pressure admission and context-derived brief/report budgets | Built, unit tested |
 | Real worker dispatch against a local model | Run — 6 jobs, 6 correct rejections, 0 accepted |
 | Disposable per-job service environments (Postgres, mocks, app) | Not built |
 | Nom-local browser/E2E and the autonomous repair loop | Not built |
@@ -100,6 +117,27 @@ nomArmy v1.2 is proven: bounded delegation, isolated worktrees, coordinator-owne
 Known limitations worth knowing up front: the Compose parser does not resolve YAML anchors, aliases or merge keys — affected findings are dropped with an explicit note rather than guessed at. Verification profiles requiring services beyond `environment: none` currently report `not_run` rather than running commands without their dependencies.
 
 On performance: a CPU-only host runs this honestly but slowly — measured at ~3.8 tok/s generation on a 20-core i7 with an 11.3 GiB MoE model, which works out to roughly 11 minutes for two assistant turns. Use a GPU or a hosted profile for interactive work; see [Speed matters more than fit](#speed-matters-more-than-fit).
+
+## The MCP tools
+
+The coordinator drives nomArmy through the `nomarmy-local-worker` MCP server. Every job takes the same brief: a `task` (an objective for `implement`, a question for `scout`), optional `acceptance` items, a `mode`, and a timeout.
+
+| Tool | What it does |
+|---|---|
+| `local_worker` | Run one job and wait for it. Blocks the coordinator for the duration. |
+| `local_worker_start` | Start one job in the background and return a `job_id` immediately. |
+| `local_worker_status` | Phase, elapsed time against the timeout, and the result once finished. `wait_seconds` long-polls; `full=true` returns the complete report. |
+| `local_worker_capacity` | Context per nom, the brief and report budgets derived from it, memory pressure, and what is running. Read-only. |
+| `local_workers` | Run a batch with bounded parallelism and wait for all of them. Never merges. |
+| `local_worker_jobs` | Recent job records, including jobs still running or orphaned by a server restart. |
+| `local_worker_cleanup` | Remove a retained worktree after review. Refuses to delete the current branch. |
+
+The phases a poller sees — `starting`, `worktree`, `worker`, `verification`, `commit`, `record`, `finished` — are the ones nomArmy itself passes through. Inside the `worker` phase the only honest signal is elapsed time, and the status says so rather than inventing a percentage.
+
+**Admission.** Every job, blocking or backgrounded, passes the same check before anything starts. Two resources, two rules, deliberately not conflated:
+
+- *Context per nom bounds text.* The brief ceiling, the report caps, and a scout's finding and excerpt budgets are derived from the context one nom actually has — from the loaded profile, or from the running llama-server's own `/props`. A smaller context means a shorter brief, not a bigger prompt into a model that cannot hold it. `nomarmy sizing` prints the budgets for its recommendation; `local_worker_capacity` prints the live ones.
+- *Free memory bounds admission.* Starting one more job adds a sandbox container and an OpenClaw process, never a second copy of the model. If the machine cannot hold that right now, or `NOMARMY_MAX_WORKERS` jobs are already running, the job is refused with the reason and the current capacity, and nothing is started. nomArmy does not shrink the brief and hope.
 
 ## Security posture
 
@@ -166,7 +204,7 @@ node bin/nomarmy.mjs doctor
 | Command | What it does |
 |---|---|
 | `nomarmy doctor` | Checks this host is ready to run nomArmy and prints a fix for anything missing. Start here. |
-| `nomarmy sizing` | Recommends context and nom count from your hardware and the model's own GGUF metadata. `--check` evaluates the profile you already have. |
+| `nomarmy sizing` | Recommends context and nom count from your hardware and the model's own GGUF metadata, and prints the brief and report budgets a nom at that context can carry. `--check` evaluates the profile you already have. |
 | `nomarmy scan` | Reports a repository's execution environment from deterministic evidence. `--check` compares it against a committed `.nomarmy.yml`. |
 | `nomarmy validate` | Validates `.nomarmy.yml` against the schema and flags services needing explicit policy approval. |
 
@@ -460,10 +498,17 @@ setup-claude-local-worker.sh
 setup-codex-local-worker.sh
 setup-nomarmy-agents.sh
 mcp/server.mjs
+bin/nomarmy.mjs
+lib/budget.mjs        context-derived budgets, memory-pressure admission
+lib/scout.mjs         scout report contract, citation verification
+lib/sizing.mjs        hardware -> context/nom recommendation
+lib/hardware.mjs  lib/gguf.mjs  lib/doctor.mjs
+lib/config.mjs    lib/schema.mjs  lib/scan.mjs  lib/evidence.mjs  lib/verify.mjs
+tests/
 CLAUDE.md
 AGENTS.md
 docker/Dockerfile
-policies/
+policies/coder.md  policies/scout.md  policies/orchestrator.md  policies/reviewer.md
 ```
 
 ## Important deployment distinction
