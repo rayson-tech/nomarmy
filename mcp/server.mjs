@@ -250,10 +250,38 @@ async function reapSandboxContainers(stateDir, jobDir) {
   const reaped = [];
   for (const hash of sandboxHashesFromState(stateDir)) {
     const name = `openclaw-sbx-workspace-${hash}`;
-    try { await run("docker", ["rm", "-f", name], { timeoutMs: 30000 }); reaped.push(name); } catch { /* already gone, or no docker */ }
+    // -v also removes the container's anonymous volume. Without it the
+    // container was reaped but its volume silently outlived it -- found in
+    // the wild as orphaned hash-named volumes with nothing left referencing
+    // them.
+    try { await run("docker", ["rm", "-f", "-v", name], { timeoutMs: 30000 }); reaped.push(name); } catch { /* already gone, or no docker */ }
   }
   if (reaped.length) fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} reaped sandbox container(s): ${reaped.join(", ")}\n`);
   return reaped;
+}
+
+// A per-job reap (above) only ever sees that job's own container, by design:
+// it matches on the hash recorded in that job's own state dir. Anything left
+// behind by a coordinator process that died before reaching its `finally`, a
+// Docker Desktop restart (which SIGTERMs every container but reaps none), or
+// a different nomArmy install on this machine is invisible to it and
+// accumulates forever -- 34 stopped containers and two orphaned anonymous
+// volumes were found from exactly this on one real machine. This sweep is
+// broader and deliberately conservative: it only ever touches containers
+// Docker already reports as exited, so a container a live job still needs
+// (which would be running, not exited) is never at risk. Best-effort and
+// silent on failure -- no Docker, no permission, or nothing to sweep are all
+// normal outcomes, not errors.
+export async function sweepStaleSandboxContainers() {
+  try {
+    const { stdout } = await run("docker",
+      ["ps", "-a", "--filter", "name=openclaw-sbx-workspace-", "--filter", "status=exited", "--format", "{{.ID}}"],
+      { timeoutMs: 30000 });
+    const ids = stdout.split("\n").map(s => s.trim()).filter(Boolean);
+    if (!ids.length) return [];
+    await run("docker", ["rm", "-f", "-v", ...ids], { timeoutMs: 30000 });
+    return ids;
+  } catch { return []; }
 }
 
 // ---------------------------------------------------------------------------
@@ -681,6 +709,9 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 export async function executeJob({ task, acceptance, verification, mode = "implement", baseRef, timeoutSeconds = 600, profile = "coder", reasoning = "high", workerId, jobId: presetJobId = null }) {
   await assertRepo();
   ensureJobsRoot();
+  // Fire-and-forget: sweeps whatever this or any other nomArmy install left
+  // behind, without adding Docker round-trip latency to this job's own start.
+  sweepStaleSandboxContainers().catch(() => {});
   const jobStartedMs = Date.now();
   const base = await resolveBase(baseRef), jobId = presetJobId || slug(workerId || (mode === "scout" ? "scout" : "worker")), jobDir = path.join(jobsRoot, jobId), runtimeDir = path.join(jobDir, "runtime");
   fs.mkdirSync(runtimeDir, { recursive: true });
@@ -1166,6 +1197,10 @@ if (isMain) {
   // admission refreshes it anyway, and a slow hardware probe must not delay
   // the MCP handshake.
   refreshBudgets().catch(() => {});
+  // Catches accumulation from a session that ended without a job ever
+  // running again (a crash, a Docker Desktop restart) rather than waiting
+  // for the next job to trigger the per-job sweep in executeJob.
+  sweepStaleSandboxContainers().catch(() => {});
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
