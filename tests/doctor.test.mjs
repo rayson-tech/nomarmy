@@ -14,6 +14,7 @@ import {
   checkNodeVersion,
   findExecutable,
   checkGit,
+  checkGitLongPaths,
   checkDockerPresent,
   checkDockerDaemon,
   checkEndpoint,
@@ -239,12 +240,32 @@ test("checkEndpoint never references NOMARMY_MODEL_ENDPOINT (defect #5 - it does
   }
 });
 
+// --- checkGitLongPaths -------------------------------------------------------
+
+test("checkGitLongPaths is a no-op off Windows and when git is absent", () => {
+  assert.equal(checkGitLongPaths({ platform: "darwin", gitFound: true, gitLongPaths: null }).ok, true);
+  assert.equal(checkGitLongPaths({ platform: "linux", gitFound: true, gitLongPaths: false }).ok, true);
+  assert.equal(checkGitLongPaths({ platform: "win32", gitFound: false, gitLongPaths: null }).ok, true);
+});
+
+test("checkGitLongPaths on Windows passes only when core.longpaths is true, with the exact fix", () => {
+  assert.equal(checkGitLongPaths({ platform: "win32", gitFound: true, gitLongPaths: true }).ok, true);
+  for (const value of [false, null]) {
+    const r = checkGitLongPaths({ platform: "win32", gitFound: true, gitLongPaths: value });
+    assert.equal(r.ok, false);
+    assert.match(r.message, /260-character/);
+    assert.equal(r.fix, "git config --global core.longpaths true");
+  }
+});
+
 // --- evaluateChecks / runDoctor: whole-report behaviour ---------------------
 
 function passingFacts() {
   return {
     nodeVersion: "v20.11.3",
+    platform: "linux",
     gitFound: true,
+    gitLongPaths: null,
     dockerFound: true,
     dockerDaemonReachable: true,
     dockerDaemonError: null,
@@ -255,9 +276,9 @@ function passingFacts() {
 
 test("evaluateChecks reports overall ok when every check passes", () => {
   const checks = evaluateChecks(passingFacts());
-  assert.equal(checks.length, 5);
+  assert.equal(checks.length, 6);
   assert.ok(checks.every((c) => c.ok));
-  assert.deepEqual(checks.map((c) => c.id), ["node", "git", "docker", "docker-daemon", "endpoint"]);
+  assert.deepEqual(checks.map((c) => c.id), ["node", "git", "git-longpaths", "docker", "docker-daemon", "endpoint"]);
 });
 
 test("evaluateChecks fails the whole report when one check fails (defect #4 - no contradictory output)", () => {
@@ -308,7 +329,7 @@ test("runDoctor --json (injected facts) produces machine-readable, consistent ou
     const parsed = JSON.parse(printed);
     assert.equal(parsed.ok, true);
     assert.ok(Array.isArray(parsed.checks));
-    assert.equal(parsed.checks.length, 5);
+    assert.equal(parsed.checks.length, 6);
   } finally {
     console.log = originalLog;
   }

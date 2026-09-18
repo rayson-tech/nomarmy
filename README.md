@@ -267,6 +267,8 @@ If E2E reports `No API key found for provider "llama-cpp"`, rerun the configurat
 
    One trap: WSL2 defaults to ~50% of host RAM, shared across every distro *including* `docker-desktop`. On a 32 GB machine that caps the model at ~16 GB. Raise the limit in `%UserProfile%\.wslconfig`, then run `wsl --shutdown` — this restarts every running container, so do it before you start inference, not after.
 
+   A second trap: every job gets its own worktree under the state directory, so every repository path grows by that prefix. Without `git config --global core.longpaths true`, a repository with a deep tree fails at `git worktree add` with `Filename too long`. `nomarmy doctor` checks for this on Windows.
+
 2. **Native Windows llama.cpp, built from source, with nomArmy pointed at it.** Gets the full host RAM instead of WSL2's slice, at the cost of building llama.cpp yourself. Needs a C++ toolchain:
 
    ```powershell
