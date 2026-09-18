@@ -16,6 +16,20 @@ A frontier coordinator decides *what* should be built and whether the result is 
 
 Developed and maintained by Rayson Technologies.
 
+## Quick start
+
+Pick your host, then follow that link. Each path ends the same way: a passing local end-to-end test.
+
+| Host | Use when | Guide |
+|---|---|---|
+| macOS (Apple Silicon) | You have a Mac with an M-series chip | [macOS](#macos-apple-silicon-clean-e2e) |
+| Windows | You're on Windows | [Windows](#windows) |
+| Linux | Ubuntu/Debian/Fedora/Arch/etc., with or without an NVIDIA GPU | [Linux](#linux) |
+| NVIDIA DGX Spark | You're setting up a Spark as a dedicated worker host | [DGX Spark](#dgx-spark-clean-e2e) |
+| Cloud (no GPU needed) | You'd rather not run local inference at all | [Bedrock](#bedrock-clean-e2e) |
+
+All of them need Git and Docker; the local profiles also need enough memory to hold the model. Run `nomarmy doctor` any time to check a host's readiness with a fix for whatever's missing — see [The `nomarmy` CLI](#the-nomarmy-cli).
+
 ## The thesis
 
 > Use scarce frontier intelligence for intent, decomposition, architecture and judgment. Use abundant worker intelligence for repository exploration, implementation, testing, repair loops and verification.
@@ -59,6 +73,7 @@ testChanges       prod: [bin/nomarmy.mjs, lib/doctor.mjs]   newTests: []
 Note the last line: production files changed, zero tests added. That is derived from the repository, not from anything the worker said about itself.
 
 This is the entire argument for the design. A review process based on reading the diff fails here. One based on executing it does not.
+
 ## Status
 
 nomArmy v1.2 is proven: bounded delegation, isolated worktrees, coordinator-owned Git, retained failed worktrees. v1.3 is in development and extends it toward autonomous workers with real execution environments. Honest state of play:
@@ -113,12 +128,12 @@ It intentionally does **not** install or authenticate Claude Code. Claude creden
 
 ## Profiles
 
-- `macbook-pro`: Apple Silicon / Metal, 32K active llama context, one inference slot, one worker.
+- `macbook-pro`: Apple Silicon / Metal, 64K active llama context, one inference slot, one worker.
 - `dgx-spark`: NVIDIA Linux ARM64 / CUDA, 64K active llama context, two inference slots, two workers initially.
 - `nvidia-linux`: generic NVIDIA Linux/CUDA, conservative 32K/one-worker defaults.
 - `cpu-linux`: generic Linux without CUDA. This is the portable fallback and uses a smaller 16K context.
 
-All values live in `config/common.env` and `config/profiles/*.env`. Hardware tuning is configuration, not coordinator code.
+All values live in `config/common.env` and `config/profiles/*.env`. Hardware tuning is configuration, not coordinator code. Run `nomarmy sizing` before trusting any of these defaults on your actual machine — see [Sizing noms](#sizing-noms).
 
 ### Cloud profiles
 
@@ -159,20 +174,11 @@ Every command takes `--json` for machine-readable output, and `--repo <dir>` to 
 
 None of them change anything. `scan` never executes what it discovers, `sizing` never writes a profile, and `doctor` never installs anything — they report and propose, and you apply what you agree with.
 
-## Platform support
+## Platform guides
 
-nomArmy runs natively on Apple Silicon macOS and Linux. On macOS it uses Homebrew for missing command-line dependencies. On Linux, the installer detects Ubuntu/Debian (`apt`), Fedora/RHEL (`dnf` or `yum`), openSUSE (`zypper`), Arch (`pacman`), and Alpine (`apk`), then installs the C++ build toolchain, CMake, Git, curl, Node.js, and npm when missing.
+Native support is macOS (Apple Silicon) and Linux. Windows runs nomArmy through WSL2. Each guide below ends with a passing `./e2e.sh` run.
 
-Docker remains a deliberate prerequisite: install Docker Desktop on macOS or Docker Engine on Linux before running the installer. On Windows, use WSL2 with Docker Desktop's WSL integration and run the Linux installation inside your distribution. Native Windows shells are not supported.
-
-On a Linux system without an NVIDIA GPU, use the CPU profile:
-
-```bash
-./install.sh --profile cpu-linux --no-claude
-./e2e.sh --profile cpu-linux
-```
-
-## MacBook Pro: clean E2E
+### macOS (Apple Silicon): clean E2E
 
 Prerequisites: Apple Silicon macOS, Homebrew, Docker Desktop running, Git, Internet access for installation/model download. The reference path expects enough unified memory for the selected Q4_K_M model and context.
 
@@ -206,9 +212,7 @@ claude mcp get nomarmy-local-worker
 
 Then copy/merge this package's `CLAUDE.md` into a real repository, start `claude` from that repo, run `/mcp`, and delegate one bounded implementation ticket before increasing worker count.
 
-### OpenClaw local-provider authentication
-
-OpenClaw requires an auth profile even when the llama.cpp server is running only on `127.0.0.1` and accepts requests without a key. `scripts/configure-openclaw.sh` creates a local-only placeholder profile (`llama-cpp:nomarmy-local`); it is not a cloud credential or a secret. The profile lets OpenClaw pass provider configuration into the isolated agent used by `e2e.sh`.
+**OpenClaw local-provider authentication.** OpenClaw requires an auth profile even when the llama.cpp server is running only on `127.0.0.1` and accepts requests without a key. `scripts/configure-openclaw.sh` creates a local-only placeholder profile (`llama-cpp:nomarmy-local`); it is not a cloud credential or a secret. The profile lets OpenClaw pass provider configuration into the isolated agent used by `e2e.sh`.
 
 If E2E reports `No API key found for provider "llama-cpp"`, rerun the configuration step, then rerun E2E:
 
@@ -217,20 +221,64 @@ If E2E reports `No API key found for provider "llama-cpp"`, rerun the configurat
 ./e2e.sh --profile macbook-pro
 ```
 
-## Codex support
+### Windows
 
-Codex uses `AGENTS.md` for repository guidance. This package includes it alongside `CLAUDE.md` so both coordinators follow the same trust boundary and integration rules.
+`install.sh` does not run natively on Windows (`.sh` scripts, Docker sandboxing, and llama.cpp's build tooling all assume a POSIX host). Three real options, roughly in the order most people should try them:
 
-When the `codex` command is available, `install.sh` also registers the Rayson MCP server. To register it later, run:
+1. **WSL2 + Docker Desktop's WSL integration (supported path).** Install a Linux distribution under WSL2, enable Docker Desktop's WSL integration for it, then follow the [Linux](#linux) guide entirely inside that distribution.
+
+   One trap: WSL2 defaults to ~50% of host RAM, shared across every distro *including* `docker-desktop`. On a 32 GB machine that caps the model at ~16 GB. Raise the limit in `%UserProfile%\.wslconfig`, then run `wsl --shutdown` — this restarts every running container, so do it before you start inference, not after.
+
+2. **Native Windows llama.cpp, built from source, with nomArmy pointed at it.** Gets the full host RAM instead of WSL2's slice, at the cost of building llama.cpp yourself. Needs a C++ toolchain:
+
+   ```powershell
+   winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+   ```
+
+   Prebuilt llama.cpp Windows binaries are not a reliable shortcut: on some CPUs every compute backend crashes at startup (access violation) while non-compute binaries run fine, because of dynamic backend loading. Build statically instead — these flags are verified working:
+
+   ```powershell
+   cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_BACKEND_DL=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=ON -DLLAMA_CURL=OFF
+   ```
+
+   `GGML_BACKEND_DL=OFF` is the flag that matters: it links the CPU backend in rather than probing for it at runtime.
+
+3. **Skip local inference entirely and run workers on Bedrock:**
+
+   ```bash
+   ./install.sh --profile bedrock
+   ```
+
+   See [Bedrock: clean E2E](#bedrock-clean-e2e).
+
+Whichever you're leaning toward, run `nomarmy sizing` first (see [The `nomarmy` CLI](#the-nomarmy-cli)) — it reports which of these your actual hardware can support before you commit to one.
+
+### Linux
+
+The installer detects Ubuntu/Debian (`apt`), Fedora/RHEL (`dnf` or `yum`), openSUSE (`zypper`), Arch (`pacman`), and Alpine (`apk`), then installs the C++ build toolchain, CMake, Git, curl, Node.js, and npm when missing. Docker Engine is a deliberate prerequisite: install it before running the installer.
+
+On a Linux system **without** an NVIDIA GPU, use the CPU profile — this is the portable fallback, with a smaller 16K context to match:
 
 ```bash
-./scripts/setup-codex-worker.sh
-codex mcp list
+git clone https://github.com/rayson-tech/nomarmy.git
+cd nomarmy
+chmod +x install.sh e2e.sh scripts/*.sh
+./install.sh --profile cpu-linux --no-claude
+./e2e.sh --profile cpu-linux
 ```
 
-The Codex desktop app, CLI, and IDE extension share this local MCP configuration. In Codex, use `/mcp` to confirm that `nomarmy-local-worker` is available.
+On a Linux system **with** an NVIDIA GPU (an RTX workstation, a GB10 OEM system, or similar — not a DGX Spark, which has its own profile below):
 
-## DGX Spark: clean E2E
+```bash
+./install.sh --profile nvidia-linux --no-claude
+./e2e.sh --profile nvidia-linux
+```
+
+Copy `config/profiles/nvidia-linux.env` to a new profile when a machine needs different context, thread, or parallel-worker settings.
+
+CPU-only Linux is viable but slow for interactive use — read [Speed matters more than fit](#speed-matters-more-than-fit) before you plan around it.
+
+### DGX Spark: clean E2E
 
 The DGX Spark profile assumes Linux ARM64, NVIDIA drivers/CUDA toolkit, Docker Engine, Git, Internet access for initial installation/model download, and `sudo` for missing build packages. NVIDIA lists DGX Spark as a Grace Blackwell system with a 20-core Arm CPU and 128 GB coherent unified memory; nomArmy therefore does not assume x86_64 binaries.
 
@@ -251,24 +299,11 @@ That validates the Spark as a self-contained local worker host. If you also inst
 
 and use Claude there exactly as on the Mac.
 
-### DGX Spark equivalent / other NVIDIA Linux
+**Moving from Mac to Spark.** The repository is the deployment unit. Do not copy a Mac llama.cpp binary or a Mac model runtime directory to the Spark. Clone the repo, select `dgx-spark`, and let `install.sh` build CUDA-native llama.cpp and fetch/cache the model on that host. The coordinator/MCP code is the same on both platforms, so a successful Mac E2E validates agent behavior and packaging, while a successful Spark E2E separately validates CUDA/runtime behavior on the target hardware.
 
-For an RTX workstation, GB10 OEM system, or other NVIDIA Linux host:
+### Bedrock: clean E2E
 
-```bash
-./install.sh --profile nvidia-linux --no-claude
-./e2e.sh --profile nvidia-linux
-```
-
-Copy `config/profiles/nvidia-linux.env` to a new profile when a machine needs different context, thread, or parallel-worker settings.
-
-## Moving from Mac to Spark
-
-The repository is the deployment unit. Do not copy a Mac llama.cpp binary or a Mac model runtime directory to the Spark. Clone the repo, select `dgx-spark`, and let `install.sh` build CUDA-native llama.cpp and fetch/cache the model on that host. The coordinator/MCP code is the same on both platforms.
-
-A successful Mac E2E therefore validates agent behavior and packaging; a successful Spark E2E separately validates CUDA/runtime behavior on the target hardware.
-
-## Bedrock: clean E2E
+No GPU, no local build — the option to reach for on Windows, on underpowered hardware, or whenever you'd rather not run inference locally at all.
 
 Enable the Anthropic and Qwen models you intend to use in the Bedrock console first, then:
 
@@ -291,11 +326,22 @@ To point the orchestrator at Bedrock:
 
 `--apply` merges into the `env` block of `~/.claude/settings.json` and keeps a timestamped backup. Restart Claude Code and run `/status` to confirm the provider and region. Prompt caching is supported on Bedrock and is the single biggest lever on coordinator spend — leave it on. Note that the WebSearch tool is unavailable when Claude Code runs on Bedrock.
 
-### Degraded acceptance
-
-`bedrock-cheap` runs the orchestrator on the same open-weight model as the workers. The mechanical gates still hold — report shape, commit presence, worktree pointer integrity, and `STATUS: done` requiring `VERIFICATION: pass` are all verified against Git by the MCP coordinator regardless of model. What stops working is judgement: a plausible-looking wrong diff, a test that passes for the wrong reason, a regression test that does not pin what it claims.
+**Degraded acceptance.** `bedrock-cheap` runs the orchestrator on the same open-weight model as the workers. The mechanical gates still hold — report shape, commit presence, worktree pointer integrity, and `STATUS: done` requiring `TESTS: pass` are all verified against Git by the MCP coordinator regardless of model. What stops working is judgement: a plausible-looking wrong diff, a test that passes for the wrong reason, a regression test that does not pin what it claims.
 
 Every job record under this profile carries `execution.orchestratorTrust: "degraded"` and prints a banner. `policies/reviewer.md` lists what is and is not permitted.
+
+## Codex support
+
+Codex uses `AGENTS.md` for repository guidance. This package includes it alongside `CLAUDE.md` so both coordinators follow the same trust boundary and integration rules.
+
+When the `codex` command is available, `install.sh` also registers the nomArmy MCP server. To register it later, run:
+
+```bash
+./scripts/setup-codex-worker.sh
+codex mcp list
+```
+
+The Codex desktop app, CLI, and IDE extension share this local MCP configuration. In Codex, use `/mcp` to confirm that `nomarmy-local-worker` is available.
 
 ## Configuration naming
 
@@ -328,12 +374,11 @@ The v1.3 target is 64K per nom — the autonomous explore/implement/test/repair 
 
 ### Measuring instead of guessing
 
-`nomarmy sizing` inspects the machine — cores, RAM, VRAM, unified memory, and the model's own GGUF metadata — and recommends a context/slot/worker combination with the memory arithmetic shown. It also evaluates the profile you already have and reports oversubscription or over-commitment.
+`nomarmy sizing` inspects the machine — cores, RAM, VRAM, unified memory, and the model's own GGUF metadata — and recommends a context/slot/worker combination with the memory arithmetic shown. It also evaluates the profile you already have and reports oversubscription or over-commitment. It checks memory pressure at the moment you run it, too: a recommendation that fits the machine's total RAM can still refuse to start right now if something else already has most of it in use.
 
-It proposes; it does not write. Apply what you agree with, the same way `nomarmy scan` proposes environment configuration rather than provisioning it.
+It proposes; it does not write. Apply what you agree with, the same way `nomarmy scan` proposes environment configuration rather than provisioning it. Restarting inference to pick up a changed value is a separate manual step — `start-inference.sh` does nothing if a server is already running, so a config change alone does not take effect until you stop and start it.
 
 Raising concurrency is an empirical question, not a capacity one. Benchmark accepted tickets/hour, memory pressure, latency, and coordinator interventions before increasing it — a second nom that halves the first one's context can lower throughput.
-
 
 ### Speed matters more than fit
 
@@ -356,6 +401,7 @@ Two consequences worth planning around:
 **Provider timeouts must match the model, not the vendor default.** A single model call can exceed a hosted-inference-shaped timeout, and the worker is then killed mid-turn regardless of nomArmy's own job timeout — the two ceilings are independent. `configure-openclaw.sh` sets both; raise them with `NOMARMY_PROVIDER_TIMEOUT_SECONDS` and `NOMARMY_AGENT_TIMEOUT_SECONDS` if your hardware is slower still.
 
 Rules of thumb: **GPU or a hosted profile for interactive work.** CPU-only is viable for overnight or batch runs, and genuinely useful as a correctness testbed — it exercises the whole pipeline honestly, just slowly. Treat a CPU-only local profile as something you are testing, not something you are depending on.
+
 ## Choose another local model
 
 nomArmy uses llama.cpp's Hugging Face integration, so it can run any compatible GGUF language model—not only the bundled Qwen default. Use the interactive selector to search Hugging Face, inspect GGUF quantizations, select an alias, and explicitly confirm the configuration update:
