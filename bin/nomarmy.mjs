@@ -177,7 +177,7 @@ function cmdValidate() {
 async function cmdInit() {
   const existing = findConfigFile(repoDir);
   if (existing && !flag("force")) {
-    if (json) return out({ error: `${path.basename(existing)} already exists`, path: existing });
+    if (json) { out({ error: `${path.basename(existing)} already exists`, path: existing }); process.exit(1); }
     console.log(c.yellow(`${path.basename(existing)} already exists at ${existing}.`));
     console.log("Not overwriting a config someone already wrote. Re-run with --force to replace it.");
     process.exit(1);
@@ -426,7 +426,7 @@ async function cmdUpdate() {
   const say = (s) => { if (!json) console.log(s); };
   const status = git(["status", "--porcelain"]);
   if (status) {
-    if (json) return out({ error: "working tree is not clean; refusing to pull over local changes", status });
+    if (json) { out({ error: "working tree is not clean; refusing to pull over local changes", status }); process.exit(1); }
     console.log(c.red("Working tree is not clean -- refusing to pull over local changes:"));
     console.log(status);
     process.exit(1);
@@ -442,7 +442,7 @@ async function cmdUpdate() {
     return;
   }
   if (base !== local) {
-    if (json) return out({ error: "local branch has diverged from upstream; not a clean fast-forward", local, remote, base });
+    if (json) { out({ error: "local branch has diverged from upstream; not a clean fast-forward", local, remote, base }); process.exit(1); }
     console.log(c.red("Local branch has diverged from upstream -- not a clean fast-forward. Resolve by hand (rebase or merge), then rerun.")); process.exit(1);
   }
 
