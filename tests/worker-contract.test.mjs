@@ -43,7 +43,9 @@ import {
   blobHash,
   currentBlobHash,
   gitShowBuffer,
-  gitModeAtBase
+  gitModeAtBase,
+  resolveCleanupTarget,
+  stripRuntimeJunk
 } from "../mcp/server.mjs";
 
 const report = ({ status = "done", tests = "pass", notDone = "none", note = "n/a" } = {}) =>
@@ -1589,4 +1591,80 @@ test("buildConfigSummary: against this repo's own real .nomarmy.yml, the real lo
   assert.equal(summary.valid, true);
   assert.ok(summary.profiles.some(p => p.name === "quick" && p.commands.includes("npm test")),
     "this repo's committed .nomarmy.yml must define a real, working quick profile");
+});
+
+// ---------------------------------------------------------------------------
+// resolveCleanupTarget() / stripRuntimeJunk(): local_worker_cleanup's
+// fallback for a job interrupted before metadata.json/failure.json was ever
+// written (a server restart mid-run, since activeJobs is in-memory only),
+// and its runtime-junk-only worktree removal.
+// ---------------------------------------------------------------------------
+test("resolveCleanupTarget: metadata.json's own worktree/branch win when present", () => {
+  const target = resolveCleanupTarget({
+    jobDir: "/jobs/foo", jobId: "foo",
+    meta: { worktree: "/custom/path", branch: "agent/foo" }, status: null,
+  });
+  assert.deepEqual(target, { worktree: "/custom/path", branch: "agent/foo" });
+});
+
+test("resolveCleanupTarget: falls back to the deterministic worktree/branch when only status.json survives (server-restart orphan)", () => {
+  const target = resolveCleanupTarget({
+    jobDir: "/jobs/foo", jobId: "foo",
+    meta: null, status: { mode: "implement" },
+  });
+  assert.deepEqual(target, { worktree: "/jobs/foo/worktree", branch: "agent/foo" });
+});
+
+test("resolveCleanupTarget: a scout orphan has no branch to derive", () => {
+  const target = resolveCleanupTarget({
+    jobDir: "/jobs/foo", jobId: "foo",
+    meta: null, status: { mode: "scout" },
+  });
+  assert.deepEqual(target, { worktree: "/jobs/foo/worktree", branch: null });
+});
+
+test("resolveCleanupTarget: neither metadata nor status exists -- genuinely unknown", () => {
+  const target = resolveCleanupTarget({ jobDir: "/jobs/foo", jobId: "foo", meta: null, status: null });
+  assert.equal(target, null);
+});
+
+test("stripRuntimeJunk: removes .npm/ and .openclaw/ so a junk-only worktree can be removed without --force", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const dir = await initTempGitRepo();
+  const worktree = path.join(dir, "wt");
+  try {
+    execFileSync("git", ["worktree", "add", "--detach", worktree, "HEAD"], { cwd: dir });
+    fs.mkdirSync(path.join(worktree, ".npm"), { recursive: true });
+    fs.writeFileSync(path.join(worktree, ".npm", "_cacache"), "junk");
+    fs.mkdirSync(path.join(worktree, ".openclaw"), { recursive: true });
+    fs.writeFileSync(path.join(worktree, ".openclaw", "nomarmy-evidence.mjs"), "// tool");
+
+    await stripRuntimeJunk(worktree);
+
+    const statusOut = execFileSync("git", ["status", "--porcelain"], { cwd: worktree, encoding: "utf8" });
+    assert.equal(statusOut, "", "only runtime junk was present; the worktree must be clean after stripping it");
+
+    // The actual point of the fix: a plain (non-force) removal now succeeds.
+    execFileSync("git", ["worktree", "remove", worktree], { cwd: dir });
+    assert.equal(fs.existsSync(worktree), false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("stripRuntimeJunk: leaves real untracked content alone -- a genuine change still requires the caller to pass force", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const dir = await initTempGitRepo();
+  const worktree = path.join(dir, "wt");
+  try {
+    execFileSync("git", ["worktree", "add", "--detach", worktree, "HEAD"], { cwd: dir });
+    fs.writeFileSync(path.join(worktree, "real-work.txt"), "actual worker output");
+
+    await stripRuntimeJunk(worktree);
+
+    assert.equal(fs.existsSync(path.join(worktree, "real-work.txt")), true, "real untracked content must survive the strip");
+    assert.throws(() => execFileSync("git", ["worktree", "remove", worktree], { cwd: dir, stdio: "pipe" }),
+      "a worktree with real untracked content must still refuse a non-force removal");
+  } finally {
+    try { execFileSync("git", ["worktree", "remove", "--force", worktree], { cwd: dir, stdio: "pipe" }); } catch { /* already gone */ }
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -1844,13 +1844,48 @@ async function releaseSandboxLocks(dir) {
     await run("setfacl", ["-R", "-b", dir], { cwd: projectDir }).catch(() => {});
   }
 }
+// metadata.json/failure.json name a job's worktree/branch explicitly once it
+// finishes, but a job interrupted before either was ever written (a server
+// restart mid-run is the common case, since activeJobs is in-memory only)
+// leaves no such record. Both paths are deterministic functions of jobId --
+// the same ones executeImplement/executeScout use -- so cleanup can still
+// find them without one.
+export function resolveCleanupTarget({ jobDir, jobId, meta, status }) {
+  if (meta) return { worktree: meta.worktree ?? path.join(jobDir, "worktree"), branch: meta.branch ?? null };
+  if (status) return { worktree: path.join(jobDir, "worktree"), branch: status.mode === "implement" ? `agent/${jobId}` : null };
+  return null;
+}
+// .npm/, .openclaw/ etc. are the sandbox's own runtime junk (isRuntimeJunk),
+// never real worker output, but `git worktree remove` refuses on ANY
+// untracked file, so a worktree with nothing else left over would otherwise
+// need --force just because of this cruft. Clearing it first lets an
+// ordinary removal succeed when that really is all that's left; a worktree
+// with genuine uncommitted content still requires the caller to pass force.
+export async function stripRuntimeJunk(worktree) {
+  try {
+    const statusOut = await gitRaw(["status", "--porcelain=v1", "-z", "--untracked-files=all"], worktree);
+    for (const entry of parseStatusPorcelainZ(statusOut)) {
+      if (isRuntimeJunk(entry.file)) fs.rmSync(path.join(worktree, entry.file), { recursive: true, force: true });
+    }
+  } catch { /* best-effort; falls through to the normal remove attempt */ }
+}
 server.tool("local_worker_cleanup", "Remove a retained worker worktree and optionally its agent branch after Claude has reviewed/integrated or deliberately discarded it. Refuses to delete the current branch.", {
   job_id: z.string().min(1), delete_branch: z.boolean().default(false), force: z.boolean().default(false)
 }, async ({ job_id, delete_branch, force }) => {
-  await assertRepo(); const jobDir = path.join(ensureJobsRoot(), path.basename(job_id)); const metaPath = path.join(jobDir, "metadata.json"); const failPath = path.join(jobDir, "failure.json");
-  const p = fs.existsSync(metaPath) ? metaPath : failPath; if (!fs.existsSync(p)) throw new Error(`Unknown job: ${job_id}`);
-  const meta = JSON.parse(fs.readFileSync(p, "utf8")); const worktree = meta.worktree, branch = meta.branch;
-  if (worktree && fs.existsSync(worktree)) { await releaseSandboxLocks(worktree); await run("git", ["worktree", "remove", ...(force ? ["--force"] : []), worktree], { cwd: projectDir }); }
+  await assertRepo();
+  const jobId = path.basename(job_id), jobDir = path.join(ensureJobsRoot(), jobId);
+  const metaPath = path.join(jobDir, "metadata.json"), failPath = path.join(jobDir, "failure.json");
+  const p = fs.existsSync(metaPath) ? metaPath : (fs.existsSync(failPath) ? failPath : null);
+  const meta = p ? JSON.parse(fs.readFileSync(p, "utf8")) : null;
+  const status = meta ? null : readJson(path.join(jobDir, "status.json"));
+  const target = resolveCleanupTarget({ jobDir, jobId, meta, status });
+  if (!target) throw new Error(`Unknown job: ${job_id}`);
+  const { worktree, branch } = target;
+  if (worktree && fs.existsSync(worktree)) {
+    await releaseSandboxLocks(worktree);
+    if (!force) await stripRuntimeJunk(worktree);
+    await run("git", ["worktree", "remove", ...(force ? ["--force"] : []), worktree], { cwd: projectDir });
+  }
   if (delete_branch && branch) { const current = await git(["branch", "--show-current"]); if (current === branch) throw new Error("Refusing to delete current branch"); await run("git", ["branch", force ? "-D" : "-d", branch], { cwd: projectDir }); }
   return toolText(JSON.stringify({ jobId: job_id, removedWorktree: worktree || null, deletedBranch: delete_branch ? branch : null }, null, 2));
 });
