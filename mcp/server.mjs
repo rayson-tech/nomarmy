@@ -1898,7 +1898,7 @@ if (isMain) {
   // import this module and inject their own runner, and an unregistered runner
   // yields `not_run`, which can never produce a recovered success.
   const { createVerificationRunner } = await import("../lib/verify.mjs");
-  registerVerificationRunner(createVerificationRunner());
+  registerVerificationRunner(createVerificationRunner({ hostProjectDir: projectDir }));
   // Warm the budget from the profile or the running llama-server. Not awaited:
   // admission refreshes it anyway, and a slow hardware probe must not delay
   // the MCP handshake.

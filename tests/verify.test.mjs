@@ -19,6 +19,7 @@ import {
   capOutput,
   classifyResults,
   createVerificationRunner,
+  resolveNodeModulesMount,
   resolveProfile,
 } from "../lib/verify.mjs";
 
@@ -213,6 +214,82 @@ test("buildPodmanArgs isolates the container and passes the command as one argv 
   assert.equal(args.at(-2), "-c");
   assert.equal(args.at(-3), DEFAULT_AGENT_IMAGE);
   assert.equal(args.filter((a) => a === "npm test; echo $(whoami)").length, 1);
+});
+
+test("buildPodmanArgs adds a read-only node_modules mount only when a source is given", () => {
+  const without = buildPodmanArgs({ cwd: "/jobs/j1/worktree", command: "npm test" });
+  assert.ok(!without.some((a) => typeof a === "string" && a.includes("node_modules")));
+
+  const withMount = buildPodmanArgs({ cwd: "/jobs/j1/worktree", command: "npm test", nodeModulesSource: "/host/node_modules" });
+  assert.ok(withMount.includes(`type=bind,source=/host/node_modules,target=${DEFAULT_WORKDIR}/node_modules,readonly`));
+});
+
+// --------------------------------------------------------------------------
+// resolveNodeModulesMount — pure-ish (real fs, temp dirs)
+// --------------------------------------------------------------------------
+
+test("resolveNodeModulesMount: no host node_modules at all is a no-op, not a block", () => {
+  const host = tempRepo({});
+  const worktree = tempRepo({});
+  const result = resolveNodeModulesMount({ hostProjectDir: host, worktreeCwd: worktree });
+  assert.equal(result.source, null);
+  assert.equal(result.blockedReason, null);
+});
+
+test("resolveNodeModulesMount: host node_modules with no lockfile anywhere to compare is offered", () => {
+  const host = tempRepo({});
+  fs.mkdirSync(path.join(host, "node_modules"), { recursive: true });
+  const worktree = tempRepo({});
+  const result = resolveNodeModulesMount({ hostProjectDir: host, worktreeCwd: worktree });
+  assert.equal(result.source, path.join(host, "node_modules"));
+  assert.equal(result.blockedReason, null);
+});
+
+test("resolveNodeModulesMount: matching package-lock.json on both sides is offered", () => {
+  const lock = '{"name":"nomarmy","lockfileVersion":3}';
+  const host = tempRepo({ "package-lock.json": lock });
+  fs.mkdirSync(path.join(host, "node_modules"), { recursive: true });
+  const worktree = tempRepo({ "package-lock.json": lock });
+  const result = resolveNodeModulesMount({ hostProjectDir: host, worktreeCwd: worktree });
+  assert.equal(result.source, path.join(host, "node_modules"));
+  assert.equal(result.blockedReason, null);
+});
+
+test("resolveNodeModulesMount: a worktree that changed package-lock.json is blocked, not mounted", () => {
+  const host = tempRepo({ "package-lock.json": '{"lockfileVersion":3,"deps":"old"}' });
+  fs.mkdirSync(path.join(host, "node_modules"), { recursive: true });
+  const worktree = tempRepo({ "package-lock.json": '{"lockfileVersion":3,"deps":"new"}' });
+  const result = resolveNodeModulesMount({ hostProjectDir: host, worktreeCwd: worktree });
+  assert.equal(result.source, null);
+  assert.match(result.blockedReason, /package-lock\.json differs/);
+});
+
+test("createVerificationRunner: dependency drift is reported not_run, never silently mounted or run", async () => {
+  const host = tempRepo({ "package-lock.json": '{"deps":"old"}' });
+  fs.mkdirSync(path.join(host, "node_modules"), { recursive: true });
+  const worktree = tempRepo({ "package-lock.json": '{"deps":"new"}' });
+  const executor = fakeExecutor({ fallback: { started: true, exitCode: 0, stdout: "ok", stderr: "" } });
+  const run = createVerificationRunner({ loadConfig: fixedConfig(STANDARD), executor, hostProjectDir: host });
+
+  const verdict = await run({ ...CONTEXT, cwd: worktree });
+
+  assert.equal(verdict.status, "not_run");
+  assert.equal(verdict.basis, "dependency-drift");
+  assert.equal(executor.calls.run.length, 0, "no command may run against a mismatched dependency tree");
+});
+
+test("createVerificationRunner: a matching node_modules is mounted into every command", async () => {
+  const lock = '{"deps":"same"}';
+  const host = tempRepo({ "package-lock.json": lock });
+  fs.mkdirSync(path.join(host, "node_modules"), { recursive: true });
+  const worktree = tempRepo({ "package-lock.json": lock });
+  const executor = fakeExecutor({ fallback: { started: true, exitCode: 0, stdout: "ok", stderr: "" } });
+  const run = createVerificationRunner({ loadConfig: fixedConfig(STANDARD), executor, hostProjectDir: host });
+
+  const verdict = await run({ ...CONTEXT, cwd: worktree });
+
+  assert.equal(verdict.status, "pass");
+  assert.ok(executor.calls.run.every((c) => c.nodeModulesSource === path.join(host, "node_modules")));
 });
 
 // --------------------------------------------------------------------------
