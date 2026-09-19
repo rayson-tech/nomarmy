@@ -3,7 +3,7 @@
 // infrastructure or rewrites configuration on its own. A human applies changes.
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { loadConfig, validateConfig, stringifyConfig, findConfigFile, CONFIG_FILENAMES } from "../lib/config.mjs";
@@ -12,6 +12,7 @@ import { buildConfigProposal } from "../lib/propose.mjs";
 import { detectHardware } from "../lib/hardware.mjs";
 import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf.mjs";
 import { recommend, evaluateConfig } from "../lib/sizing.mjs";
+import { connectClaude, connectCodex } from "../lib/connect.mjs";
 
 const argv = process.argv.slice(2);
 const command = argv[0];
@@ -51,6 +52,10 @@ Usage: nomarmy <command> [options]
                   Prints the install.sh command; never runs it.
   model           Change the configured model later, without the rest of
                   setup's questions.
+  update          Pull the latest nomArmy code and re-sync the installed
+                  MCP copy (fast-forward only; refuses on local changes).
+  connect <claude|codex>
+                  (Re-)register the MCP server with a coordinator.
   validate        Validate .nomarmy.yml against the schema.
   sizing          Recommend context and nom count for this machine.
                   --check   evaluate the loaded profile instead of recommending
@@ -403,6 +408,91 @@ async function cmdModel() {
   }
 }
 
+function git(args) {
+  try { return execFileSync("git", args, { cwd: nomarmyRoot, encoding: "utf8" }).trim(); }
+  catch (error) { throw new Error(`git ${args.join(" ")} failed: ${error.stderr ? String(error.stderr).trim() : error.message}`); }
+}
+
+/**
+ * `nomarmy update`: pull and apply the latest nomArmy code -- NOT a model
+ * swap, see `nomarmy model` for that. Real motivation: the MCP server Claude
+ * Code actually runs is a COPY (scripts/setup-claude-worker.sh copies
+ * mcp/server.mjs + lib/ + package.json into
+ * ~/.local/share/nomarmy-local-worker and registers that path), not this
+ * checkout -- a bare `git pull` here changes nothing Claude Code is running
+ * until that copy step reruns.
+ */
+async function cmdUpdate() {
+  const say = (s) => { if (!json) console.log(s); };
+  const status = git(["status", "--porcelain"]);
+  if (status) {
+    if (json) return out({ error: "working tree is not clean; refusing to pull over local changes", status });
+    console.log(c.red("Working tree is not clean -- refusing to pull over local changes:"));
+    console.log(status);
+    process.exit(1);
+  }
+
+  git(["fetch"]);
+  const local = git(["rev-parse", "HEAD"]);
+  const remote = git(["rev-parse", "@{u}"]);
+  const base = git(["merge-base", "HEAD", "@{u}"]);
+  if (local === remote) {
+    if (json) return out({ updated: false, reason: "already up to date" });
+    console.log(c.green("✓ Already up to date."));
+    return;
+  }
+  if (base !== local) {
+    if (json) return out({ error: "local branch has diverged from upstream; not a clean fast-forward", local, remote, base });
+    console.log(c.red("Local branch has diverged from upstream -- not a clean fast-forward. Resolve by hand (rebase or merge), then rerun.")); process.exit(1);
+  }
+
+  say(c.bold("🍪 nomArmy update\n"));
+  say("Pulling...");
+  git(["merge", "--ff-only", "@{u}"]);
+  say(c.green(`✓ Pulled to ${git(["rev-parse", "--short", "HEAD"])}.`));
+
+  say("\nInstalling dependencies...");
+  execFileSync("npm", ["install", "--omit=dev", "--no-audit", "--no-fund"], { cwd: nomarmyRoot, stdio: json ? "ignore" : "inherit" });
+
+  const resynced = [];
+  const runInherit = (cmd, args, opts = {}) => execFileSync(cmd, args, { stdio: json ? "ignore" : "inherit", ...opts });
+  if (commandExists("claude")) {
+    say("\nRe-syncing the Claude Code MCP install...");
+    connectClaude({ nomarmyRoot, run: runInherit });
+    resynced.push("claude");
+  }
+  if (commandExists("codex")) {
+    say("\nRe-syncing the Codex MCP install...");
+    connectCodex({ nomarmyRoot, run: runInherit });
+    resynced.push("codex");
+  }
+
+  if (json) return out({ updated: true, sha: git(["rev-parse", "HEAD"]), resynced });
+  console.log(c.yellow("\nThe MCP server is a per-session child process: every open Claude Code / Codex session needs a restart to pick this up, not just this one."));
+}
+
+function commandExists(cmd) {
+  try { execFileSync(process.platform === "win32" ? "where" : "which", [cmd], { stdio: "ignore" }); return true; }
+  catch { return false; }
+}
+
+/**
+ * `nomarmy connect <claude|codex>`: (re-)register the MCP server with a
+ * coordinator on its own, without a full `update`. Useful standalone --
+ * e.g. Claude Code installed *after* nomArmy already was -- not only as an
+ * update step.
+ */
+async function cmdConnect() {
+  const target = argv[1];
+  if (target !== "claude" && target !== "codex") throw new Error('nomarmy connect needs a target: "claude" or "codex".');
+  if (!commandExists(target)) throw new Error(`${target} was not found on PATH.`);
+  const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { stdio: json ? "ignore" : "inherit", ...opts });
+  if (!json) console.log(c.bold(`🍪 Connecting nomArmy to ${target}...\n`));
+  const result = target === "claude" ? connectClaude({ nomarmyRoot, run }) : connectCodex({ nomarmyRoot, run });
+  if (json) return out({ connected: target, ...result });
+  console.log(c.green(`\n✓ Registered nomarmy-local-worker with ${target}.`));
+}
+
 async function cmdSizing() {
   const execution = value("execution", process.env.NOMARMY_EXECUTION || "local");
   const hardware = await detectHardware();
@@ -482,7 +572,7 @@ function sizingCheck(hardware, gguf) {
   process.exit((res.warnings ?? []).some((w) => w.severity === "error") ? 1 : 0);
 }
 
-const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, help: () => usage(0) };
+const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, update: cmdUpdate, connect: cmdConnect, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
   // Import lazily to avoid circular dependencies
