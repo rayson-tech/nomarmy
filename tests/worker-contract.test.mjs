@@ -28,6 +28,7 @@ import {
   decomposeOverlapBanner,
   workerPrompt,
   reportRecoveryPrompt,
+  describeRecoveryChanges,
   jobSchema,
   maxTaskChars,
   maxAcceptanceItemChars,
@@ -1254,6 +1255,34 @@ test("reportRecoveryPrompt: no known changes states that plainly instead of sile
   const p = reportRecoveryPrompt({ report: { targetTokens: 256, hardCapTokens: 512 }, changes: null });
   assert.match(p, /shows no changes at all/);
   assert.equal(/already shows:/.test(p), false);
+});
+
+// describeRecoveryChanges: real bug, found live -- a job that only creates
+// new (untracked) files got "0 file(s) changed (+0/-0): new-file.mjs" from
+// the naive version of this (filesChanged/additions/deletions come from
+// `git diff baseSha`, which never sees an untracked file), and the resumed
+// session read that self-contradiction and reported its own real work as
+// never having landed.
+test("describeRecoveryChanges: null when nothing changed", () => {
+  assert.equal(describeRecoveryChanges({ repoStatusFiles: [] }), null);
+  assert.equal(describeRecoveryChanges(null), null);
+  assert.equal(describeRecoveryChanges(undefined), null);
+});
+
+test("describeRecoveryChanges: an untracked-only new file is never described as zero files changed", () => {
+  const s = describeRecoveryChanges({ repoStatusFiles: ["lib/decompose.mjs"] });
+  assert.match(s, /^1 file\(s\) differ from a clean checkout: lib\/decompose\.mjs$/);
+  assert.equal(/0 file/.test(s), false, "must never say '0 file(s)' in the same breath as naming a real file");
+});
+
+test("describeRecoveryChanges: a tracked file modification", () => {
+  const s = describeRecoveryChanges({ repoStatusFiles: ["lib/repo-query.mjs"] });
+  assert.match(s, /^1 file\(s\) differ from a clean checkout: lib\/repo-query\.mjs$/);
+});
+
+test("describeRecoveryChanges: mixed tracked and untracked changes lists every file, none dropped", () => {
+  const s = describeRecoveryChanges({ repoStatusFiles: ["lib/a.mjs", "lib/new.mjs"] });
+  assert.match(s, /^2 file\(s\) differ from a clean checkout: lib\/a\.mjs, lib\/new\.mjs$/);
 });
 
 // ---------------------------------------------------------------------------

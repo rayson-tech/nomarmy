@@ -226,6 +226,36 @@ export function workerPrompt({ task, acceptance, verification, mode, baseRef, ba
 // "no context, don't know what I did" about work that is sitting right there
 // in the worktree. Handing it the actual git state removes the guesswork
 // this prompt used to leave the model to do from a blank slate.
+/**
+ * A one-line, human-readable summary of what a collectGitRecord() snapshot
+ * shows changed, for reportRecoveryPrompt's `changes` parameter -- or null
+ * when nothing did.
+ *
+ * record.filesChanged/additions/deletions come from `git diff baseSha`, which
+ * by definition never sees an untracked file: a job that only creates new
+ * files (never touches a tracked one) produced "0 file(s) changed (+0/-0):
+ * new-file.mjs" from the naive version of this -- a real file named right
+ * next to a claim that nothing changed. Observed live: a resumed session read
+ * exactly that and reported its own real work as never having landed.
+ * record.repoStatusFiles (git status, which does see untracked files) is what
+ * actually answers "does anything differ from a clean checkout", so it drives
+ * both the count and the file list here; additions/deletions are omitted
+ * entirely rather than shown wrong.
+ *
+ * repoStatusFiles (`git status`, tracked and untracked alike) is always the
+ * complete picture on its own -- changedFiles (`git diff baseSha`, tracked
+ * only) is never used here; preferring it for a mixed tracked+untracked
+ * change used to drop the untracked file from the list entirely even though
+ * the count still (correctly) included it.
+ *
+ * @param {{ repoStatusFiles: string[] }} record
+ * @returns {string|null}
+ */
+export function describeRecoveryChanges(record) {
+  if (!record?.repoStatusFiles?.length) return null;
+  return `${record.repoStatusFiles.length} file(s) differ from a clean checkout: ${record.repoStatusFiles.join(", ")}`;
+}
+
 export function reportRecoveryPrompt({ report = { targetTokens: 256, hardCapTokens: 512 }, changes = null } = {}) {
   const changesLine = changes
     ? `\nThe repository (checked independently just now, not from your memory of this session) already shows: ${changes}. Trust this over any uncertainty about what you did or did not do.\n`
@@ -1226,9 +1256,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
       let changes = null;
       try {
         const preRecoveryRecord = await collectGitRecord({ cwd, baseSha: base.sha, branch, baseRef: base.ref, jobId });
-        if (preRecoveryRecord.repoStatusFiles.length > 0) {
-          changes = `${preRecoveryRecord.filesChanged} file(s) changed (+${preRecoveryRecord.additions}/-${preRecoveryRecord.deletions}): ${preRecoveryRecord.changedFiles.join(", ") || preRecoveryRecord.repoStatusFiles.join(", ")}`;
-        }
+        changes = describeRecoveryChanges(preRecoveryRecord);
       } catch { /* evidence is a bonus, not a precondition for attempting recovery */ }
       try {
         const recoveryResult = await runOpenClaw({
