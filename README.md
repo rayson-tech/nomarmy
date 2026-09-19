@@ -188,6 +188,9 @@ Every variable is declared with an explanatory comment right next to it in `conf
 | `NOMARMY_WORKER_MAX_TOKENS` | unset by default | 12% of context, model-scaled | Max tokens a worker may generate in a single turn before being cut off |
 | `NOMARMY_EXECUTION` | common.env / profile | `local` | `local` (llama-server on this machine) or `bedrock` (hosted) |
 | `NOMARMY_ORCHESTRATOR_TRUST` | common.env | `frontier` | `frontier` (coordinator outranks workers) or `degraded` (same capability class — see `policies/reviewer.md`) |
+| `NOMARMY_WORKER_START_STAGGER_MS` | unset by default | `1500` | Delay before each additional concurrent job's sandbox starts, so two Podman containers never launch in the same instant (see below) |
+
+**Why jobs start staggered, not simultaneously:** two OpenClaw sandbox containers created at the exact same instant can hit a Podman/crun race (`crun: mount devpts to dev/pts: Invalid argument`), reproduced on this project independent of memory pressure. `local_worker(s)` staggers each additional concurrent job's start by `NOMARMY_WORKER_START_STAGGER_MS`; raise it if you still see sandbox-provisioning failures under `max_parallel > 1`, or lower it once you've confirmed your Podman/crun version doesn't hit the race.
 
 **The one coupling that trips people up:** `NOMARMY_LLAMA_CONTEXT` is divided by `NOMARMY_LLAMA_PARALLEL`, not handed to each slot whole. `65536` with `2` parallel slots gives each nom `32768`, not `65536`. Size by *context per nom* and multiply up, never the reverse. See [Sizing noms](#sizing-noms) for the full picture, and don't set `NOMARMY_MAX_WORKERS` above `NOMARMY_LLAMA_PARALLEL` on a local profile — the extra workers don't run in parallel, they queue for a slot while each still holds a Podman sandbox.
 

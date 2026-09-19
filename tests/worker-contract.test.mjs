@@ -37,6 +37,7 @@ import {
   formatUnion,
   buildConfigSummary,
   currentMaxWorkers,
+  mapLimit,
   run,
   makeIdleDiffTick,
   planProductionRevert,
@@ -1761,3 +1762,32 @@ test("stripRuntimeJunk: leaves real untracked content alone -- a genuine change 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// fn simulates a real job's non-trivial duration (spawn + model round-trip),
+// never the instant resolve a trivial test callback would give -- with a
+// same-tick resolve, one fast slot can steal a slower slot's queued item
+// before it ever wakes from its stagger, which is not how real jobs behave.
+const REALISTIC_JOB_MS = 25;
+
+test("mapLimit: with no stagger, all runner slots start immediately (existing behavior preserved)", async () => {
+  const startedAt = [];
+  const begin = Date.now();
+  await mapLimit([1, 2, 3], 3, async (item, i) => { startedAt.push(Date.now() - begin); await sleepFor(REALISTIC_JOB_MS); return item; });
+  assert.ok(startedAt.every(t => t < 15), `all three should start immediately without waiting on each other, got ${startedAt}`);
+});
+
+test("mapLimit: with a stagger, later slots begin their first call only after slot * staggerMs (prevents concurrent sandbox starts from racing)", async () => {
+  const startedAt = [];
+  const begin = Date.now();
+  await mapLimit([1, 2], 2, async (item) => { startedAt.push(Date.now() - begin); await sleepFor(REALISTIC_JOB_MS); return item; }, { staggerMs: 150 });
+  assert.ok(startedAt[0] < 30, `slot 0 should start immediately, got ${startedAt[0]}ms`);
+  assert.ok(startedAt[1] >= 100, `slot 1 should wait roughly staggerMs before starting, got ${startedAt[1]}ms`);
+});
+
+test("mapLimit: stagger only delays each slot's first pull -- every item still gets processed exactly once", async () => {
+  const order = [];
+  await mapLimit([1, 2, 3, 4], 2, async (item) => { await sleepFor(REALISTIC_JOB_MS); order.push(item); }, { staggerMs: 30 });
+  assert.deepEqual(order.sort(), [1, 2, 3, 4], "all items must still be processed exactly once");
+});
+
+function sleepFor(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }

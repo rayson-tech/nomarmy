@@ -1731,10 +1731,31 @@ export function formatUnion(union) {
   const artifacts = union.worktree ? `\n\nUnion artifacts: ${path.dirname(union.worktree)}\nWorktree retained for review: ${union.worktree}\nBranch retained for review: ${union.branch}` : "";
   return `${banner}--- UNION RECORD ---\n${JSON.stringify(union, null, 2)}${artifacts}`;
 }
-async function mapLimit(items, limit, fn) {
-  const results = new Array(items.length); let next = 0;
-  async function runner() { while (true) { const i = next++; if (i >= items.length) return; results[i] = await fn(items[i], i); } }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, runner)); return results;
+// Staggers concurrent job starts by `slot * staggerMs` before each runner
+// begins pulling work. Verified root cause: two OpenClaw sandbox containers
+// created in the same instant reliably hit a podman/crun race ("crun: mount
+// `devpts` to `dev/pts`: Invalid argument"), even with ample host and VM
+// memory free -- reproduced twice, unrelated to memory pressure. A short
+// stagger between concurrent `podman create`/`run` invocations gives crun's
+// container-creation critical section enough separation to not collide.
+const WORKER_START_STAGGER_MS = Number.parseInt(process.env.NOMARMY_WORKER_START_STAGGER_MS ?? "", 10) || 1500;
+export async function mapLimit(items, limit, fn, { staggerMs = 0 } = {}) {
+  const results = new Array(items.length);
+  const slots = Math.min(limit, items.length);
+  // Each slot's FIRST item is reserved to that slot (not the shared counter
+  // below), so a fast-finishing slot 0 can never steal slot 1's item before
+  // slot 1 wakes from its stagger delay -- that race defeated the stagger
+  // entirely for any job shorter than staggerMs. Only once every slot has
+  // started does the free-for-all queue take over for any items left beyond
+  // the initial fill; by then slots are already running on naturally offset
+  // schedules, so no further staggering is needed.
+  let next = slots;
+  async function runner(slot) {
+    if (staggerMs && slot > 0) await sleep(staggerMs * slot);
+    results[slot] = await fn(items[slot], slot);
+    while (true) { const i = next++; if (i >= items.length) return; results[i] = await fn(items[i], i); }
+  }
+  await Promise.all(Array.from({ length: slots }, (_, slot) => runner(slot))); return results;
 }
 
 // ---------------------------------------------------------------------------
@@ -1964,7 +1985,7 @@ server.tool("local_workers", "Run independent jobs (implement or scout) with bou
     const workerId = j.worker_id || `${batchId}-w${i + 1}`, jobId = slug(workerId);
     const effectiveJob = auto_union ? { ...j, base_ref: forcedBase.sha } : j;
     return track(jobId, { mode: j.mode, workerId }, executeJob({ ...jobArgs(effectiveJob, workerId), jobId })).promise;
-  });
+  }, { staggerMs: WORKER_START_STAGGER_MS });
 
   // Auto_union is entirely additive and must never suppress or corrupt the
   // real, already-completed per-job results below -- a broken union reports
