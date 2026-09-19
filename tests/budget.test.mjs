@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 
 import {
   CALIBRATED, BUDGET_RULES,
-  deriveBudgets, checkBrief, parseLlamaProps, resolveContextPerNom, assessAdmission, describeBudgets
+  deriveBudgets, checkBrief, parseLlamaProps, resolveContextPerNom, assessAdmission, describeBudgets, deriveTimeBudget
 } from "../lib/budget.mjs";
 import { DEFAULT_TARGET_CONTEXT_PER_NOM, RESERVES, GIB } from "../lib/sizing.mjs";
 
@@ -126,4 +126,41 @@ test("assessAdmission: tight memory admits with a warning; unknown memory admits
   assert.equal(tight.admit, true); assert.equal(tight.level, "tight"); assert.match(tight.reasons[0], /the next may not/);
   const unknown = assessAdmission({ hardware: null, runningJobs: 0, maxWorkers: 2 });
   assert.equal(unknown.admit, true); assert.match(unknown.reasons[0], /could not be read/);
+});
+
+// --- deriveTimeBudget --------------------------------------------------------
+test("deriveTimeBudget: work + reserve always equals what the caller asked for", () => {
+  for (const timeoutSeconds of [30, 45, 100, 600, 1500, 1800]) {
+    const b = deriveTimeBudget({ timeoutSeconds, env: NO_ENV });
+    assert.equal(b.workTimeoutSeconds + b.reportReserveSeconds, timeoutSeconds, `mismatch at ${timeoutSeconds}s`);
+  }
+});
+
+test("deriveTimeBudget: reserve is clamped between its floor and ceiling for a typical job", () => {
+  const b = deriveTimeBudget({ timeoutSeconds: 1500, env: NO_ENV });
+  assert.equal(b.reportReserveSeconds, BUDGET_RULES.reportReserveMax);
+  assert.equal(b.workTimeoutSeconds, 1500 - BUDGET_RULES.reportReserveMax);
+});
+
+test("deriveTimeBudget: at the schema's minimum timeout, the work phase still gets its floor", () => {
+  const b = deriveTimeBudget({ timeoutSeconds: 30, env: NO_ENV });
+  assert.equal(b.workTimeoutSeconds, BUDGET_RULES.workTimeoutMin);
+  assert.equal(b.reportReserveSeconds, 30 - BUDGET_RULES.workTimeoutMin);
+});
+
+test("deriveTimeBudget: NOMARMY_REPORT_RESERVE_SECONDS overrides the derived reserve", () => {
+  const b = deriveTimeBudget({ timeoutSeconds: 600, env: { NOMARMY_REPORT_RESERVE_SECONDS: "50" } });
+  assert.equal(b.reportReserveSeconds, 50);
+  assert.equal(b.workTimeoutSeconds, 550);
+});
+
+test("deriveTimeBudget: idle-break threshold never exceeds the work phase it bounds", () => {
+  const b = deriveTimeBudget({ timeoutSeconds: 30, env: NO_ENV });
+  assert.ok(b.idleBreakSeconds <= b.workTimeoutSeconds);
+  assert.ok(b.idleMinElapsedSeconds <= b.workTimeoutSeconds);
+});
+
+test("deriveTimeBudget: NOMARMY_IDLE_BREAK_SECONDS overrides the derived idle threshold", () => {
+  const b = deriveTimeBudget({ timeoutSeconds: 600, env: { NOMARMY_IDLE_BREAK_SECONDS: "45" } });
+  assert.equal(b.idleBreakSeconds, 45);
 });

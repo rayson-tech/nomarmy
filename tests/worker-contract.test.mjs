@@ -4,6 +4,11 @@
 // and test-change classification. Nothing here touches Git or a worker.
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { ConfigError } from "../lib/config.mjs";
 
 import {
   OUTCOMES,
@@ -16,15 +21,29 @@ import {
   isTestPath,
   testPatternFor,
   resolveOutcome,
+  selectUnionCandidates,
   buildMetrics,
   testChangeBanner,
+  regressionCheckBanner,
   workerPrompt,
   reportRecoveryPrompt,
   jobSchema,
   maxTaskChars,
   maxAcceptanceItemChars,
+  maxEvidenceChars,
   formatResult,
-  currentMaxWorkers
+  formatUnion,
+  buildConfigSummary,
+  currentMaxWorkers,
+  run,
+  makeIdleDiffTick,
+  planProductionRevert,
+  revertToBase,
+  restoreWorkerVersion,
+  blobHash,
+  currentBlobHash,
+  gitShowBuffer,
+  gitModeAtBase
 } from "../mcp/server.mjs";
 
 const report = ({ status = "done", tests = "pass", notDone = "none", note = "n/a" } = {}) =>
@@ -101,6 +120,55 @@ test("gate: a clean done/pass report with no runner registered still commits (v1
   assert.equal(outcome.outcome, OUTCOMES.WORKER_DONE);
   assert.equal(outcome.commitAllowed, true);
   assert.equal(outcome.recovered, false);
+});
+
+// ---------------------------------------------------------------------------
+// 2b. verify_regression: resolveOutcome's regressionCheck veto. Omitting the
+// parameter entirely must reproduce every result above unchanged -- the
+// existing tests already prove that (none of them pass regressionCheck).
+// ---------------------------------------------------------------------------
+test("regression veto: a failed regression check downgrades an otherwise-clean done/pass report to NEEDS_REVIEW", () => {
+  const outcome = resolveOutcome({
+    report: parseWorkerReport(report()), repositoryChanged: true, independentVerification: PASS,
+    regressionCheck: { status: "fail", basis: "registered-runner", reason: "no test demonstrably covers this change" },
+  });
+  assert.equal(outcome.outcome, OUTCOMES.NEEDS_REVIEW);
+  assert.equal(outcome.commitAllowed, false);
+  assert.match(outcome.commitBlockedReason, /no test demonstrably covers this change/);
+});
+
+test("regression veto: an attempted-but-inconclusive regression check also vetoes, not just an explicit fail", () => {
+  const outcome = resolveOutcome({
+    report: parseWorkerReport(report()), repositoryChanged: true, independentVerification: PASS,
+    regressionCheck: { status: "not_run", basis: "revert-error", reason: "failed to revert 1 file(s): lib/x.mjs" },
+  });
+  assert.equal(outcome.outcome, OUTCOMES.NEEDS_REVIEW);
+  assert.equal(outcome.commitAllowed, false);
+  assert.match(outcome.commitBlockedReason, /inconclusive/);
+});
+
+test("regression veto: basis 'not-applicable' never vetoes, regardless of status -- 'not requested' and 'no production files' are not findings", () => {
+  const notRequested = resolveOutcome({
+    report: parseWorkerReport(report()), repositoryChanged: true, independentVerification: PASS,
+    regressionCheck: { status: "not_run", basis: "not-applicable", reason: "no production files changed" },
+  });
+  assert.equal(notRequested.outcome, OUTCOMES.WORKER_DONE);
+  assert.equal(notRequested.commitAllowed, true);
+});
+
+test("regression veto: a passing regression check (coverage proven) does not veto", () => {
+  const outcome = resolveOutcome({
+    report: parseWorkerReport(report()), repositoryChanged: true, independentVerification: PASS,
+    regressionCheck: { status: "pass", basis: "registered-runner", reason: "reverting the production change made the same verification profile fail, as expected" },
+  });
+  assert.equal(outcome.outcome, OUTCOMES.WORKER_DONE);
+  assert.equal(outcome.commitAllowed, true);
+});
+
+test("regression veto: omitting regressionCheck entirely is unaffected by the new branch (backward compatible)", () => {
+  const outcome = resolveOutcome({ report: parseWorkerReport(report()), repositoryChanged: true, independentVerification: PASS });
+  assert.equal(outcome.outcome, OUTCOMES.WORKER_DONE);
+  assert.equal(outcome.commitAllowed, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -295,6 +363,367 @@ test("outcome: only WORKER_DONE and RECOVERED_SUCCESS may ever allow a commit", 
 });
 
 // ---------------------------------------------------------------------------
+// 5b. selectUnionCandidates: mechanical (non-judgment) set-membership filter
+// for which local_workers batch jobs may be merged into one union branch.
+// ---------------------------------------------------------------------------
+const unionJob = (jobId, { mode = "implement", coordinatorStatus = "complete", commitCreated = true, sha = "abc123", nameStatus = [], workerId, branch } = {}) => ({
+  manifest: {
+    jobId,
+    workerId: workerId ?? `worker-${jobId}`,
+    mode,
+    outcome: "WORKER_DONE",
+    coordinatorStatus,
+    commit: { created: commitCreated, sha },
+    branch: branch ?? `agent/${jobId}`,
+    git: { nameStatus }
+  }
+});
+
+test("selectUnionCandidates: two jobs with disjoint changed files are both accepted, in order", () => {
+  const results = [
+    unionJob("job-1", { nameStatus: [{ status: "M", path: "a.txt" }] }),
+    unionJob("job-2", { nameStatus: [{ status: "M", path: "b.txt" }] })
+  ];
+  const { accepted, excluded } = selectUnionCandidates(results);
+  assert.deepEqual(accepted.map(a => a.jobId), ["job-1", "job-2"]);
+  assert.deepEqual(excluded, []);
+});
+
+test("selectUnionCandidates: a second job touching an already-claimed path is excluded, naming the owner and path", () => {
+  const results = [
+    unionJob("job-1", { nameStatus: [{ status: "M", path: "shared.txt" }] }),
+    unionJob("job-2", { nameStatus: [{ status: "M", path: "shared.txt" }] })
+  ];
+  const { accepted, excluded } = selectUnionCandidates(results);
+  assert.deepEqual(accepted.map(a => a.jobId), ["job-1"]);
+  assert.equal(excluded.length, 1);
+  assert.equal(excluded[0].jobId, "job-2");
+  assert.match(excluded[0].reason, /job-1/);
+  assert.match(excluded[0].reason, /shared\.txt/);
+});
+
+test("selectUnionCandidates: a rename's oldPath is claimed, so a later edit of the renamed-away file is excluded", () => {
+  const results = [
+    unionJob("job-a", { nameStatus: [{ status: "R100", path: "b.txt", oldPath: "a.txt" }] }),
+    unionJob("job-b", { nameStatus: [{ status: "M", path: "a.txt" }] })
+  ];
+  const { accepted, excluded } = selectUnionCandidates(results);
+  assert.deepEqual(accepted.map(a => a.jobId), ["job-a"]);
+  assert.equal(excluded.length, 1);
+  assert.equal(excluded[0].jobId, "job-b");
+  assert.match(excluded[0].reason, /a\.txt/);
+  assert.match(excluded[0].reason, /job-a/);
+});
+
+test("selectUnionCandidates: a copy's oldPath is also claimed, excluding a later job touching the copy source", () => {
+  const results = [
+    unionJob("job-a", { nameStatus: [{ status: "C100", path: "new.txt", oldPath: "orig.txt" }] }),
+    unionJob("job-b", { nameStatus: [{ status: "M", path: "orig.txt" }] })
+  ];
+  const { accepted, excluded } = selectUnionCandidates(results);
+  assert.deepEqual(accepted.map(a => a.jobId), ["job-a"]);
+  assert.equal(excluded.length, 1);
+  assert.equal(excluded[0].jobId, "job-b");
+  assert.match(excluded[0].reason, /orig\.txt/);
+  assert.match(excluded[0].reason, /job-a/);
+});
+
+test("selectUnionCandidates: paths that only differ by case are treated as the same claim", () => {
+  const results = [
+    unionJob("job-a", { nameStatus: [{ status: "A", path: "Utils.js" }] }),
+    unionJob("job-b", { nameStatus: [{ status: "A", path: "utils.js" }] })
+  ];
+  const { accepted, excluded } = selectUnionCandidates(results);
+  assert.deepEqual(accepted.map(a => a.jobId), ["job-a"]);
+  assert.equal(excluded.length, 1);
+  assert.equal(excluded[0].jobId, "job-b");
+});
+
+test("selectUnionCandidates: a scout job is excluded specifically for its mode, not incidentally", () => {
+  const results = [
+    unionJob("job-scout", { mode: "scout", nameStatus: [{ status: "M", path: "notes.md" }] })
+  ];
+  const { accepted, excluded } = selectUnionCandidates(results);
+  assert.deepEqual(accepted, []);
+  assert.equal(excluded.length, 1);
+  assert.equal(excluded[0].jobId, "job-scout");
+  assert.match(excluded[0].reason, /mode "scout"/);
+});
+
+test("selectUnionCandidates: a non-complete coordinatorStatus is excluded, reason mentions it", () => {
+  const results = [
+    unionJob("job-blocked", { coordinatorStatus: "blocked", nameStatus: [{ status: "M", path: "x.txt" }] })
+  ];
+  const { accepted, excluded } = selectUnionCandidates(results);
+  assert.deepEqual(accepted, []);
+  assert.equal(excluded.length, 1);
+  assert.match(excluded[0].reason, /blocked/);
+});
+
+test("selectUnionCandidates: coordinatorStatus complete but no commit actually created is excluded", () => {
+  const results = [
+    unionJob("job-nocommit", { commitCreated: false, nameStatus: [{ status: "M", path: "x.txt" }] })
+  ];
+  const { accepted, excluded } = selectUnionCandidates(results);
+  assert.deepEqual(accepted, []);
+  assert.equal(excluded.length, 1);
+  assert.equal(excluded[0].jobId, "job-nocommit");
+});
+
+test("selectUnionCandidates: a created commit with an empty nameStatus is excluded defensively", () => {
+  const results = [
+    unionJob("job-empty", { nameStatus: [] })
+  ];
+  const { accepted, excluded } = selectUnionCandidates(results);
+  assert.deepEqual(accepted, []);
+  assert.equal(excluded.length, 1);
+  assert.equal(excluded[0].jobId, "job-empty");
+  assert.match(excluded[0].reason, /no changed files recorded/);
+});
+
+test("selectUnionCandidates: in a three-job batch, only the overlapping middle job is excluded", () => {
+  const results = [
+    unionJob("job-1", { nameStatus: [{ status: "M", path: "one.txt" }] }),
+    unionJob("job-2", { nameStatus: [{ status: "M", path: "one.txt" }] }),
+    unionJob("job-3", { nameStatus: [{ status: "M", path: "three.txt" }] })
+  ];
+  const { accepted, excluded } = selectUnionCandidates(results);
+  assert.deepEqual(accepted.map(a => a.jobId), ["job-1", "job-3"]);
+  assert.equal(excluded.length, 1);
+  assert.equal(excluded[0].jobId, "job-2");
+});
+
+test("selectUnionCandidates: an empty batch returns empty accepted/excluded without throwing", () => {
+  assert.deepEqual(selectUnionCandidates([]), { accepted: [], excluded: [] });
+});
+
+// ---------------------------------------------------------------------------
+// 5c. buildUnionBranch: real-git integration tests. This function does REAL
+// git operations (worktree add, sequential `git merge --no-ff`), so it is
+// exercised against genuine temporary git repositories, not hand-built
+// fixtures -- following the same real-repo style as initTempGitRepo() below,
+// extended here to actual feature branches with real commits on them.
+//
+// buildUnionBranch closes over this module's own `projectDir` (where the
+// union worktree is created, via `run(..., { cwd: projectDir })`) and
+// `jobsRoot` (via ensureJobsRoot(), where the union job's own directory
+// lives) -- both fixed, at module-import time, from CLAUDE_PROJECT_DIR /
+// NOMARMY_AGENT_STATE. Neither is exported or reassignable from outside.
+// To point a real merge at a disposable temp repo instead of this real one,
+// each test below loads a FRESH instance of mcp/server.mjs (a distinct ESM
+// module registration, forced via a unique dynamic-import query string) with
+// those two env vars pointed at temp directories for the duration of that
+// one import, restoring the prior env values immediately afterward. This
+// never touches this repo's own real job storage or real working directory
+// -- confirmed by inspection: nothing here ever calls buildUnionBranch (or
+// anything else) against the statically-imported module at the top of this
+// file, and every git repo used below is a throwaway under os.tmpdir().
+// ---------------------------------------------------------------------------
+async function initUnionRepo() {
+  const { execFileSync } = await import("node:child_process");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-union-repo-"));
+  const git = (...args) => execFileSync("git", args, { cwd: dir, stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
+  git("init", "-q");
+  git("config", "user.email", "t@example.com");
+  git("config", "user.name", "t");
+  fs.writeFileSync(path.join(dir, "base.txt"), "base\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "init");
+  const baseSha = git("rev-parse", "HEAD");
+  return { dir, baseSha, git };
+}
+// Creates a feature branch off baseSha with the given file contents
+// committed, then returns the repo to a detached HEAD at baseSha so building
+// several branches in a row never disturbs an earlier one.
+function makeBranch({ dir, git, baseSha, branch, files }) {
+  git("checkout", "-q", "-b", branch, baseSha);
+  for (const [name, content] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), content);
+  git("add", "-A");
+  git("commit", "-q", "-m", `${branch} commit`);
+  const sha = git("rev-parse", "HEAD");
+  git("checkout", "-q", baseSha);
+  return sha;
+}
+// Loads a fresh instance of mcp/server.mjs with CLAUDE_PROJECT_DIR/
+// NOMARMY_AGENT_STATE redirected at temp directories for this one import,
+// restoring the real env immediately after (module evaluation is synchronous
+// once the import promise's underlying work runs, so it is safe to restore
+// right after awaiting it). Every prior/subsequent static import of
+// "../mcp/server.mjs" elsewhere in this file keeps resolving to the
+// already-cached real instance, untouched.
+async function loadUnionServerModule(projectDir) {
+  const prevProjectDir = process.env.CLAUDE_PROJECT_DIR;
+  const prevAgentState = process.env.NOMARMY_AGENT_STATE;
+  const agentState = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-union-state-"));
+  process.env.CLAUDE_PROJECT_DIR = projectDir;
+  process.env.NOMARMY_AGENT_STATE = agentState;
+  try {
+    const mod = await import(`../mcp/server.mjs?union-test=${process.hrtime.bigint()}`);
+    return { mod, agentState };
+  } finally {
+    if (prevProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR; else process.env.CLAUDE_PROJECT_DIR = prevProjectDir;
+    if (prevAgentState === undefined) delete process.env.NOMARMY_AGENT_STATE; else process.env.NOMARMY_AGENT_STATE = prevAgentState;
+  }
+}
+function rmrf(...dirs) { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); }
+
+test("buildUnionBranch: two accepted jobs with disjoint changed files merge cleanly", async () => {
+  const repo = await initUnionRepo();
+  let agentState;
+  try {
+    const shaA = makeBranch({ ...repo, branch: "agent/job-1", files: { "a.txt": "from job 1\n" } });
+    const shaB = makeBranch({ ...repo, branch: "agent/job-2", files: { "b.txt": "from job 2\n" } });
+    const loaded = await loadUnionServerModule(repo.dir);
+    agentState = loaded.agentState;
+    const accepted = [
+      { jobId: "job-1", workerId: "worker-1", branch: "agent/job-1", commit: shaA },
+      { jobId: "job-2", workerId: "worker-2", branch: "agent/job-2", commit: shaB }
+    ];
+    const manifest = await loaded.mod.buildUnionBranch({ batchId: "batch-clean", baseSha: repo.baseSha, baseRef: "HEAD", accepted, unionVerification: null });
+    assert.equal(manifest.status, "unioned");
+    assert.deepEqual(manifest.jobsUnioned.map(j => j.jobId), ["job-1", "job-2"]);
+    assert.deepEqual(manifest.jobsMergeFailed, []);
+    assert.equal(fs.readFileSync(path.join(manifest.worktree, "a.txt"), "utf8"), "from job 1\n");
+    assert.equal(fs.readFileSync(path.join(manifest.worktree, "b.txt"), "utf8"), "from job 2\n");
+    assert.equal(fs.readFileSync(path.join(manifest.worktree, "base.txt"), "utf8"), "base\n");
+  } finally { rmrf(repo.dir); if (agentState) rmrf(agentState); }
+});
+
+test("buildUnionBranch: zero accepted jobs returns no_union without creating a job directory or touching git", async () => {
+  const repo = await initUnionRepo();
+  let agentState;
+  try {
+    const loaded = await loadUnionServerModule(repo.dir);
+    agentState = loaded.agentState;
+    const manifest = await loaded.mod.buildUnionBranch({ batchId: "batch-zero", baseSha: repo.baseSha, baseRef: "HEAD", accepted: [], unionVerification: null });
+    assert.equal(manifest.status, "no_union");
+    assert.match(manifest.reason, /no job had a valid, non-overlapping outcome to union/);
+    assert.equal(manifest.branch, null);
+    assert.equal(manifest.worktree, null);
+    assert.equal(fs.existsSync(path.join(agentState, "jobs", "batch-zero-union")), false,
+      "no job-specific directory should be created for the trivial <2 case");
+  } finally { rmrf(repo.dir); if (agentState) rmrf(agentState); }
+});
+
+test("buildUnionBranch: exactly one accepted job returns no_union with a distinct reason, without touching git", async () => {
+  const repo = await initUnionRepo();
+  let agentState;
+  try {
+    const shaA = makeBranch({ ...repo, branch: "agent/job-solo", files: { "solo.txt": "solo\n" } });
+    const loaded = await loadUnionServerModule(repo.dir);
+    agentState = loaded.agentState;
+    const accepted = [{ jobId: "job-solo", workerId: "worker-solo", branch: "agent/job-solo", commit: shaA }];
+    const manifest = await loaded.mod.buildUnionBranch({ batchId: "batch-solo", baseSha: repo.baseSha, baseRef: "HEAD", accepted, unionVerification: null });
+    assert.equal(manifest.status, "no_union");
+    assert.match(manifest.reason, /only one job had a mergeable outcome/);
+    assert.equal(manifest.branch, null);
+    assert.equal(manifest.worktree, null);
+    assert.equal(fs.existsSync(path.join(agentState, "jobs", "batch-solo-union")), false);
+  } finally { rmrf(repo.dir); if (agentState) rmrf(agentState); }
+});
+
+test("buildUnionBranch: a genuine merge conflict demotes only the conflicting job; the other still unions; status is union_partial", async () => {
+  const repo = await initUnionRepo();
+  let agentState;
+  try {
+    // Both branches edit the same line of the same file, contrived on purpose
+    // to exercise this fallback path in isolation from selectUnionCandidates,
+    // which would normally have already filtered an overlap like this out.
+    const shaA = makeBranch({ ...repo, branch: "agent/job-conflict-a", files: { "shared.txt": "version A\n" } });
+    const shaB = makeBranch({ ...repo, branch: "agent/job-conflict-b", files: { "shared.txt": "version B\n" } });
+    const loaded = await loadUnionServerModule(repo.dir);
+    agentState = loaded.agentState;
+    const accepted = [
+      { jobId: "job-conflict-a", workerId: "worker-a", branch: "agent/job-conflict-a", commit: shaA },
+      { jobId: "job-conflict-b", workerId: "worker-b", branch: "agent/job-conflict-b", commit: shaB }
+    ];
+    const manifest = await loaded.mod.buildUnionBranch({ batchId: "batch-conflict", baseSha: repo.baseSha, baseRef: "HEAD", accepted, unionVerification: null });
+    assert.equal(manifest.status, "union_partial");
+    assert.deepEqual(manifest.jobsUnioned.map(j => j.jobId), ["job-conflict-a"]);
+    assert.equal(manifest.jobsMergeFailed.length, 1);
+    assert.equal(manifest.jobsMergeFailed[0].jobId, "job-conflict-b");
+    assert.match(manifest.jobsMergeFailed[0].reason, /^merge failed:/);
+  } finally { rmrf(repo.dir); if (agentState) rmrf(agentState); }
+});
+
+test("buildUnionBranch: every accepted job fails to merge returns union_failed without throwing", async () => {
+  const repo = await initUnionRepo();
+  let agentState;
+  try {
+    const loaded = await loadUnionServerModule(repo.dir);
+    agentState = loaded.agentState;
+    // Branches that were never actually created -- the "branch went missing
+    // between selection and this call" failure mode called out in
+    // buildUnionBranch's own comment -- makes every merge fail, including the
+    // first one (which, given real disjoint branches, always succeeds
+    // trivially since nothing has diverged from base yet; a missing branch is
+    // the one failure mode that can hit the very first merge too).
+    const accepted = [
+      { jobId: "job-missing-1", workerId: "worker-1", branch: "agent/does-not-exist-1", commit: "deadbeef1" },
+      { jobId: "job-missing-2", workerId: "worker-2", branch: "agent/does-not-exist-2", commit: "deadbeef2" }
+    ];
+    const manifest = await loaded.mod.buildUnionBranch({ batchId: "batch-allfail", baseSha: repo.baseSha, baseRef: "HEAD", accepted, unionVerification: null });
+    assert.equal(manifest.status, "union_failed");
+    assert.deepEqual(manifest.jobsUnioned, []);
+    assert.equal(manifest.jobsMergeFailed.length, 2);
+    for (const f of manifest.jobsMergeFailed) assert.match(f.reason, /^merge failed:/);
+  } finally { rmrf(repo.dir); if (agentState) rmrf(agentState); }
+});
+
+test("buildUnionBranch: unionVerification omitted on a successful union reports verification.status not_run", async () => {
+  const repo = await initUnionRepo();
+  let agentState;
+  try {
+    const shaA = makeBranch({ ...repo, branch: "agent/job-v1", files: { "v1.txt": "v1\n" } });
+    const shaB = makeBranch({ ...repo, branch: "agent/job-v2", files: { "v2.txt": "v2\n" } });
+    const loaded = await loadUnionServerModule(repo.dir);
+    agentState = loaded.agentState;
+    const accepted = [
+      { jobId: "job-v1", workerId: "worker-v1", branch: "agent/job-v1", commit: shaA },
+      { jobId: "job-v2", workerId: "worker-v2", branch: "agent/job-v2", commit: shaB }
+    ];
+    // No unionVerification field at all -- a fresh module instance never has
+    // registerVerificationRunner() called on it (that only happens under the
+    // isMain guard in the real server process), so the honest answer, same as
+    // every other unregistered-runner path in this file, is not_run.
+    const manifest = await loaded.mod.buildUnionBranch({ batchId: "batch-verify", baseSha: repo.baseSha, baseRef: "HEAD", accepted });
+    assert.equal(manifest.status, "unioned");
+    assert.equal(manifest.verification.status, "not_run");
+  } finally { rmrf(repo.dir); if (agentState) rmrf(agentState); }
+});
+
+test("buildUnionBranch: writes metadata.json for a successful union, round-tripping the returned manifest", async () => {
+  const repo = await initUnionRepo();
+  let agentState;
+  try {
+    const shaA = makeBranch({ ...repo, branch: "agent/job-m1", files: { "m1.txt": "m1\n" } });
+    const shaB = makeBranch({ ...repo, branch: "agent/job-m2", files: { "m2.txt": "m2\n" } });
+    const loaded = await loadUnionServerModule(repo.dir);
+    agentState = loaded.agentState;
+    const accepted = [
+      { jobId: "job-m1", workerId: "worker-m1", branch: "agent/job-m1", commit: shaA },
+      { jobId: "job-m2", workerId: "worker-m2", branch: "agent/job-m2", commit: shaB }
+    ];
+    const manifest = await loaded.mod.buildUnionBranch({ batchId: "batch-meta", baseSha: repo.baseSha, baseRef: "HEAD", accepted, unionVerification: null });
+    const metadataPath = path.join(agentState, "jobs", "batch-meta-union", "metadata.json");
+    assert.equal(fs.existsSync(metadataPath), true);
+    const onDisk = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+    assert.deepEqual(onDisk, manifest);
+  } finally { rmrf(repo.dir); if (agentState) rmrf(agentState); }
+});
+
+test("buildUnionBranch: no metadata.json (no job directory at all) is written for the no_union <2 case", async () => {
+  const repo = await initUnionRepo();
+  let agentState;
+  try {
+    const loaded = await loadUnionServerModule(repo.dir);
+    agentState = loaded.agentState;
+    await loaded.mod.buildUnionBranch({ batchId: "batch-nometa", baseSha: repo.baseSha, baseRef: "HEAD", accepted: [], unionVerification: null });
+    assert.equal(fs.existsSync(path.join(agentState, "jobs", "batch-nometa-union")), false);
+  } finally { rmrf(repo.dir); if (agentState) rmrf(agentState); }
+});
+
+// ---------------------------------------------------------------------------
 // 6. Test-file classification (plan 16)
 // ---------------------------------------------------------------------------
 test("classification: every documented heuristic pattern matches", () => {
@@ -383,6 +812,29 @@ test("classification: an empty diff produces empty buckets and no flags", () => 
   assert.equal(testChangeBanner(c), "");
 });
 
+// ---------------------------------------------------------------------------
+// regressionCheckBanner: silent unless the (separately wired) regression
+// check actually failed or could not restore the worktree.
+// ---------------------------------------------------------------------------
+test("regressionCheckBanner: silent when there is nothing to report", () => {
+  assert.equal(regressionCheckBanner(null), "");
+  assert.equal(regressionCheckBanner(undefined), "");
+  assert.equal(regressionCheckBanner({ status: "pass" }), "");
+  assert.equal(regressionCheckBanner({ status: "not_run" }), "");
+});
+
+test("regressionCheckBanner: a failed regression check gets its own banner", () => {
+  const text = regressionCheckBanner({ status: "fail" });
+  assert.match(text, /REGRESSION CHECK FAILED/);
+});
+
+test("regressionCheckBanner: a restore failure gets a distinct, unconditional-block banner", () => {
+  const text = regressionCheckBanner({ status: "restore_failed", reason: "no coverage" });
+  assert.match(text, /COULD NOT RESTORE THE WORKTREE/);
+  assert.match(text, /no coverage/);
+  assert.equal(/REGRESSION CHECK FAILED/.test(text), false, "restore_failed must not also read as a fail banner");
+});
+
 test("name-status -z parsing feeds classification, including renames", () => {
   const raw = ["M", "mcp/server.mjs", "A", "tests/new.test.mjs", "R100", "tests/old.test.mjs", "tests/moved.test.mjs", "D", "src/gone.js"].join("\0") + "\0";
   const entries = parseNameStatusZ(raw);
@@ -459,6 +911,19 @@ test("metrics: a recovered, truncated job is visibly marked as such", () => {
   assert.equal(m.report_recovered, true);
 });
 
+test("metrics: regression_check_elapsed stays null when the regression check did not run", () => {
+  const m = buildMetrics({ result: null, record: null, reportValidation: null, outcome: null, workerElapsedMs: 1, totalElapsedMs: 2 });
+  assert.equal(m.regression_check_elapsed, null);
+});
+
+test("metrics: regression_check_elapsed reports the elapsed time when supplied", () => {
+  const m = buildMetrics({
+    result: null, record: null, reportValidation: null, outcome: null,
+    workerElapsedMs: 1, totalElapsedMs: 2, regressionCheckElapsedMs: 1234
+  });
+  assert.equal(m.regression_check_elapsed, 1234);
+});
+
 // ---------------------------------------------------------------------------
 // 8. Worker prompt: objective / acceptance / verification plumbing + hard rules
 // ---------------------------------------------------------------------------
@@ -493,6 +958,13 @@ test("prompt: keeps the hard safety rules and the compact contract", () => {
   assert.equal(/NOT DONE:/.test(p), false, "the old un-underscored field must be gone");
 });
 
+test("prompt: tells the worker to run tests non-interactively and never kill them blind", () => {
+  const p = workerPrompt({ task: "t", mode: "implement", baseRef: "HEAD", baseSha: "abc", workerId: "w1" });
+  assert.match(p, /non-interactive\/CI mode/);
+  assert.match(p, /vitest run/);
+  assert.match(p, /Do not background a test command with your own sleep\/kill\/timeout wrapper/);
+});
+
 test("prompt: tells the worker not to narrate or restate Git facts", () => {
   const p = workerPrompt({ task: "t", mode: "implement", baseRef: "HEAD", baseSha: "abc", workerId: "w1" });
   assert.match(p, /Do NOT narrate your reasoning/);
@@ -500,6 +972,66 @@ test("prompt: tells the worker not to narrate or restate Git facts", () => {
   assert.match(p, /Do NOT include Git metadata/);
   assert.match(p, /Do NOT paste test output, logs, or tool history/);
   assert.match(p, /512 is the hard cap/);
+});
+
+test("prompt: renders coordinator-supplied evidence and tells the worker to trust it", () => {
+  const p = workerPrompt({
+    task: "t", mode: "implement", baseRef: "HEAD", baseSha: "abc", workerId: "w1",
+    evidence: "validatePolarity is defined at lambda/x.ts:42-58 and returns a QueryPolarity enum."
+  });
+  assert.match(p, /KNOWN CONTEXT \(resolved by the coordinator; verified, not a suggestion\)/);
+  assert.match(p, /validatePolarity is defined at lambda\/x\.ts:42-58/);
+  assert.match(p, /Do not re-read or re-derive what it already tells you/);
+  assert.match(p, /explore only for what it does not cover/);
+});
+
+test("prompt: omits the evidence block and keeps the default inspect line when none was passed", () => {
+  const p = workerPrompt({ task: "t", mode: "implement", baseRef: "HEAD", baseSha: "abc", workerId: "w1" });
+  assert.equal(/KNOWN CONTEXT/.test(p), false);
+  assert.match(p, /Inspect the repository and evidence before deciding how to implement the objective/);
+});
+
+// ---------------------------------------------------------------------------
+// evidence: the coordinator can hand a worker a fact it already resolved
+// (e.g. via repo_evidence) instead of hoping the worker reaches for a cheap
+// lookup tool over a raw read -- see jobSchema's `evidence` description.
+// ---------------------------------------------------------------------------
+test("jobSchema: accepts evidence at the character ceiling", () => {
+  const result = jobSchema.safeParse({ task: "t", evidence: "x".repeat(maxEvidenceChars) });
+  assert.equal(result.success, true);
+});
+
+test("jobSchema: rejects evidence one character over the ceiling", () => {
+  const result = jobSchema.safeParse({ task: "t", evidence: "x".repeat(maxEvidenceChars + 1) });
+  assert.equal(result.success, false);
+  assert.match(result.error.issues[0].message, /Evidence exceeds the .*-character budget/);
+});
+
+test("jobSchema: evidence is optional", () => {
+  const result = jobSchema.safeParse({ task: "t" });
+  assert.equal(result.success, true);
+  assert.equal(result.data.evidence, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// verify_regression: schema plumbing for the (separately wired) regression
+// check -- defaults to false, accepts an explicit boolean, rejects anything else.
+// ---------------------------------------------------------------------------
+test("jobSchema: verify_regression defaults to false when omitted", () => {
+  const result = jobSchema.safeParse({ task: "t" });
+  assert.equal(result.success, true);
+  assert.equal(result.data.verify_regression, false);
+});
+
+test("jobSchema: verify_regression accepts true", () => {
+  const result = jobSchema.safeParse({ task: "t", verify_regression: true });
+  assert.equal(result.success, true);
+  assert.equal(result.data.verify_regression, true);
+});
+
+test("jobSchema: verify_regression rejects a non-boolean value", () => {
+  const result = jobSchema.safeParse({ task: "t", verify_regression: "yes" });
+  assert.equal(result.success, false);
 });
 
 // ---------------------------------------------------------------------------
@@ -551,6 +1083,26 @@ test("formatResult: the execution record precedes the worker's report, not the o
   assert.match(text, /WORKER REPORT \(a claim, not evidence\)/);
 });
 
+test("formatResult: surfaces the regression-check banner when the manifest reports a failure", () => {
+  const text = formatResult({
+    ok: true,
+    report: "some worker prose",
+    manifest: { outcome: OUTCOMES.NEEDS_REVIEW, jobId: "job-3", testChanges: null, regressionCheck: { status: "fail", reason: "no coverage" } },
+    jobDir: "/tmp/job-3",
+  });
+  assert.match(text, /REGRESSION CHECK FAILED/);
+});
+
+test("formatResult: omits the regression-check banner when regressionCheck is null (not requested)", () => {
+  const text = formatResult({
+    ok: true,
+    report: "some worker prose",
+    manifest: { outcome: OUTCOMES.WORKER_DONE, jobId: "job-4", testChanges: null, regressionCheck: null },
+    jobDir: "/tmp/job-4",
+  });
+  assert.equal(/REGRESSION CHECK/.test(text), false);
+});
+
 test("formatResult: a scout's record also precedes its report", () => {
   const text = formatResult({
     ok: true,
@@ -562,6 +1114,38 @@ test("formatResult: a scout's record also precedes its report", () => {
   const reportIndex = text.indexOf("FINDING: something");
   assert.ok(recordIndex >= 0 && reportIndex >= 0, "both sections must be present");
   assert.ok(recordIndex < reportIndex, "the record must come before the worker's report");
+});
+
+// ---------------------------------------------------------------------------
+// formatUnion: same banner/JSON-block/artifacts-trailer convention as
+// formatResult, selected by the union's own status.
+// ---------------------------------------------------------------------------
+test("formatUnion: a clean union gets the plain UNION banner and lists its artifacts", () => {
+  const text = formatUnion({ status: "unioned", branch: "union/batch-1", worktree: "/tmp/batch-1-union/worktree", jobsUnioned: [{ jobId: "job-1" }] });
+  assert.match(text, /^!!! UNION: mechanically merged/);
+  assert.equal(/UNION VERIFICATION FAILED|NO UNION FORMED/.test(text), false);
+  assert.match(text, /--- UNION RECORD ---/);
+  assert.match(text, /Union artifacts: \/tmp\/batch-1-union/);
+  assert.match(text, /Worktree retained for review: \/tmp\/batch-1-union\/worktree/);
+  assert.match(text, /Branch retained for review: union\/batch-1/);
+});
+
+test("formatUnion: a union_partial status still gets the plain UNION banner, not a failure banner", () => {
+  const text = formatUnion({ status: "union_partial", branch: "union/batch-2", worktree: "/tmp/batch-2-union/worktree", jobsUnioned: [], jobsMergeFailed: [{ jobId: "job-x", reason: "merge failed: conflict" }] });
+  assert.match(text, /^!!! UNION: mechanically merged/);
+});
+
+test("formatUnion: union_verification_failed gets its own distinct banner", () => {
+  const text = formatUnion({ status: "union_verification_failed", branch: "union/batch-3", worktree: "/tmp/batch-3-union/worktree", jobsUnioned: [{ jobId: "job-1" }] });
+  assert.match(text, /^!!! UNION VERIFICATION FAILED:/);
+  assert.match(text, /retained for review; inspect before integrating/);
+});
+
+test("formatUnion: no_union has its own banner and no artifacts trailer (nothing was created)", () => {
+  const text = formatUnion({ status: "no_union", reason: "no job had a valid, non-overlapping outcome to union", branch: null, worktree: null, jobsUnioned: [] });
+  assert.match(text, /^!!! NO UNION FORMED:/);
+  assert.equal(/Union artifacts:/.test(text), false, "nothing was created for no_union; there is nothing to point at");
+  assert.match(text, /"reason": "no job had a valid, non-overlapping outcome to union"/);
 });
 
 // ---------------------------------------------------------------------------
@@ -580,10 +1164,30 @@ test("reportRecoveryPrompt: asks only for the four report lines, not a retry", (
   assert.match(p, /512 is the hard cap/);
 });
 
-test("reportRecoveryPrompt: tells an uncertain worker to under-claim, not to say done", () => {
+test("reportRecoveryPrompt: with no known changes, tells the worker to under-claim rather than guess done", () => {
   const p = reportRecoveryPrompt({ report: { targetTokens: 256, hardCapTokens: 512 } });
-  assert.match(p, /unsure whether an edit you attempted actually applied/);
-  assert.match(p, /partial or STATUS: blocked rather than STATUS: done/);
+  assert.match(p, /shows no changes at all/);
+  assert.match(p, /report blocked or partial rather than guessing done/);
+});
+
+// A resumed report-recovery session was observed, repeatedly and live,
+// having no memory of the tool calls its own earlier turn made -- even for a
+// single, correct, already-verified edit -- and defensively reporting
+// STATUS: blocked as if nothing happened. `changes` lets the coordinator
+// hand the resumed session its own already-checked git state instead of
+// asking it to recall something the session apparently cannot retain.
+test("reportRecoveryPrompt: known changes are stated as independently-checked fact, not left to the worker's memory", () => {
+  const p = reportRecoveryPrompt({ report: { targetTokens: 256, hardCapTokens: 512 }, changes: "1 file(s) changed (+1/-0): lib/repo-query.mjs" });
+  assert.match(p, /checked independently just now, not from your memory of this session/);
+  assert.match(p, /already shows: 1 file\(s\) changed \(\+1\/-0\): lib\/repo-query\.mjs/);
+  assert.match(p, /Trust this over any uncertainty about what you did or did not do/);
+  assert.equal(/shows no changes at all/.test(p), false);
+});
+
+test("reportRecoveryPrompt: no known changes states that plainly instead of silently omitting it", () => {
+  const p = reportRecoveryPrompt({ report: { targetTokens: 256, hardCapTokens: 512 }, changes: null });
+  assert.match(p, /shows no changes at all/);
+  assert.equal(/already shows:/.test(p), false);
 });
 
 // ---------------------------------------------------------------------------
@@ -623,4 +1227,366 @@ test("currentMaxWorkers: with no explicit override and no known slot count, fall
     if (prior === undefined) delete process.env.NOMARMY_MAX_WORKERS;
     else process.env.NOMARMY_MAX_WORKERS = prior;
   }
+});
+
+// ---------------------------------------------------------------------------
+// run(): the onTick early-stop path a job's reserved-time split and the
+// idle-diff circuit breaker both depend on. A broken or slow watcher must
+// never itself affect the run; only a tick that explicitly asks to stop may.
+// ---------------------------------------------------------------------------
+test("run: onTick requesting a stop kills the process early and labels why", async () => {
+  const start = Date.now();
+  await assert.rejects(
+    run(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      timeoutMs: 10000, tickMs: 30,
+      onTick: async () => ({ stop: true, reason: "idle_diff" }),
+    }),
+    error => {
+      assert.equal(error.timedOut, true);
+      assert.equal(error.stopReason, "idle_diff");
+      return true;
+    }
+  );
+  assert.ok(Date.now() - start < 5000, "onTick should have stopped this well before the 10s hard timeout");
+});
+
+test("run: an onTick that never asks to stop does not block normal completion", async () => {
+  const result = await run(process.execPath, ["-e", "process.stdout.write('ok')"], {
+    timeoutMs: 10000, tickMs: 20, onTick: async () => ({ stop: false }),
+  });
+  assert.equal(result.stdout, "ok");
+});
+
+test("run: a throwing onTick is swallowed and never fails the run", async () => {
+  const result = await run(process.execPath, ["-e", "process.stdout.write('ok')"], {
+    timeoutMs: 10000, tickMs: 20, onTick: async () => { throw new Error("watcher bug"); },
+  });
+  assert.equal(result.stdout, "ok");
+});
+
+test("run: with no onTick, hitting the hard deadline still labels the stop reason", async () => {
+  await assert.rejects(
+    run(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { timeoutMs: 100 }),
+    error => { assert.equal(error.timedOut, true); assert.equal(error.stopReason, "timeout"); return true; }
+  );
+});
+
+// ---------------------------------------------------------------------------
+// makeIdleDiffTick(): the pure decision behind the idle-diff circuit breaker,
+// exercised against a real (temporary, disposable) git worktree.
+// ---------------------------------------------------------------------------
+async function initTempGitRepo() {
+  const { execFileSync } = await import("node:child_process");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-idle-diff-"));
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["config", "user.email", "t@example.com"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+  fs.writeFileSync(path.join(dir, "a.txt"), "x");
+  execFileSync("git", ["add", "-A"], { cwd: dir });
+  execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+  return dir;
+}
+
+test("makeIdleDiffTick: never stops before any change has been observed", async () => {
+  const dir = await initTempGitRepo();
+  try {
+    const tick = makeIdleDiffTick(dir, { idleMs: 1000, minElapsedMs: 0 });
+    assert.equal((await tick(0)).stop, false, "a clean worktree with nothing changed yet is not idle, it just hasn't started");
+    assert.equal((await tick(5000)).stop, false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("makeIdleDiffTick: stops once the worktree has changed and then gone idle past the threshold", async () => {
+  const dir = await initTempGitRepo();
+  try {
+    const tick = makeIdleDiffTick(dir, { idleMs: 1000, minElapsedMs: 500 });
+    assert.equal((await tick(0)).stop, false);
+
+    fs.writeFileSync(path.join(dir, "a.txt"), "changed");
+    const changedAt = 600;
+    assert.equal((await tick(changedAt)).stop, false, "just changed; not idle yet");
+    assert.equal((await tick(changedAt + 200)).stop, false, "200ms idle is under the 1000ms threshold");
+    const r = await tick(changedAt + 1200);
+    assert.equal(r.stop, true);
+    assert.equal(r.reason, "idle_diff");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("makeIdleDiffTick: never stops before minElapsedMs even if already idle", async () => {
+  const dir = await initTempGitRepo();
+  try {
+    const tick = makeIdleDiffTick(dir, { idleMs: 100, minElapsedMs: 10000 });
+    fs.writeFileSync(path.join(dir, "a.txt"), "changed");
+    assert.equal((await tick(50)).stop, false);
+    assert.equal((await tick(9000)).stop, false, "idle for a while, but still short of minElapsedMs");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("makeIdleDiffTick: ignores .npm/ churn -- it never counts as a change and never resets idle", async () => {
+  const dir = await initTempGitRepo();
+  try {
+    const tick = makeIdleDiffTick(dir, { idleMs: 500, minElapsedMs: 0 });
+    // .npm/ writes are the sandbox's own cache churn, not worker progress
+    // (see isRuntimeJunk): a run that has gone idle on the real objective can
+    // still have npm rewriting this continuously underneath it.
+    fs.mkdirSync(path.join(dir, ".npm"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".npm", "_update-notifier-last-checked"), "1");
+    assert.equal((await tick(0)).stop, false, "a .npm-only change is not a real change; nothing to salvage yet");
+
+    fs.writeFileSync(path.join(dir, ".npm", "_update-notifier-last-checked"), "2");
+    const r1 = await tick(1000);
+    assert.equal(r1.stop, false, "still nothing but .npm/ churn");
+
+    fs.writeFileSync(path.join(dir, "a.txt"), "real change");
+    assert.equal((await tick(1100)).stop, false, "just made a real change");
+
+    fs.writeFileSync(path.join(dir, ".npm", "_update-notifier-last-checked"), "3");
+    const r2 = await tick(1300);
+    assert.equal(r2.stop, false, "npm churning again must not look like renewed progress and reset the idle clock");
+
+    // idleMs=500 measured from the real change at 1100ms: 1650 - 1100 = 550ms idle, despite the .npm write at 1300ms.
+    const r3 = await tick(1650);
+    assert.equal(r3.stop, true, "500ms+ past the real change at 1100ms, unaffected by ongoing .npm/ writes");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------
+// planProductionRevert / revertToBase / restoreWorkerVersion / blobHash /
+// currentBlobHash: the capture-and-overwrite mechanics the (separately wired)
+// verify_regression feature drives around a worker's production diff. Real
+// temporary git repos, following the same style as initTempGitRepo() above.
+// ---------------------------------------------------------------------------
+async function initRevertRepo(files) {
+  const { execFileSync } = await import("node:child_process");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-revert-repo-"));
+  const git = (...args) => execFileSync("git", args, { cwd: dir, stdio: ["ignore", "pipe", "pipe"] });
+  git("init", "-q");
+  git("config", "user.email", "t@example.com");
+  git("config", "user.name", "t");
+  for (const [name, spec] of Object.entries(files)) {
+    const full = path.join(dir, name);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, spec.content);
+    if (spec.mode) fs.chmodSync(full, spec.mode);
+  }
+  git("add", "-A");
+  git("commit", "-q", "-m", "init");
+  const baseSha = git("rev-parse", "HEAD").toString().trim();
+  return { dir, baseSha, git };
+}
+
+test("planProductionRevert + revertToBase + restoreWorkerVersion: a modified (M) file round-trips between base and worker content", async () => {
+  const { dir, baseSha } = await initRevertRepo({ "file.txt": { content: "original\n" } });
+  try {
+    fs.writeFileSync(path.join(dir, "file.txt"), "changed\n");
+    const [item] = planProductionRevert({ cwd: dir, baseSha, entries: [{ status: "M", path: "file.txt", oldPath: null }] });
+
+    revertToBase(item);
+    assert.equal(fs.readFileSync(path.join(dir, "file.txt"), "utf8"), "original\n", "reverted to the base commit's content");
+
+    restoreWorkerVersion(item);
+    assert.equal(fs.readFileSync(path.join(dir, "file.txt"), "utf8"), "changed\n", "restored to the worker's real edit");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("planProductionRevert + revertToBase + restoreWorkerVersion: an added (A) untracked file is removed on revert and recreated on restore", async () => {
+  const { dir, baseSha } = await initRevertRepo({ "base.txt": { content: "base\n" } });
+  try {
+    fs.writeFileSync(path.join(dir, "new.txt"), "brand new\n");
+    const [item] = planProductionRevert({ cwd: dir, baseSha, entries: [{ status: "A", path: "new.txt", oldPath: null }] });
+
+    revertToBase(item);
+    assert.equal(fs.existsSync(path.join(dir, "new.txt")), false, "an added file has no base version to revert to; it must be removed");
+
+    restoreWorkerVersion(item);
+    assert.equal(fs.readFileSync(path.join(dir, "new.txt"), "utf8"), "brand new\n", "restored to exactly what the worker added");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("planProductionRevert + revertToBase + restoreWorkerVersion: a deleted (D) file is restored on revert and re-deleted on restore", async () => {
+  const { dir, baseSha } = await initRevertRepo({ "gone.txt": { content: "will be deleted\n" } });
+  try {
+    fs.rmSync(path.join(dir, "gone.txt"));
+    const [item] = planProductionRevert({ cwd: dir, baseSha, entries: [{ status: "D", path: "gone.txt", oldPath: null }] });
+
+    revertToBase(item);
+    assert.equal(fs.readFileSync(path.join(dir, "gone.txt"), "utf8"), "will be deleted\n", "reverting a deletion brings the base content back");
+
+    restoreWorkerVersion(item);
+    assert.equal(fs.existsSync(path.join(dir, "gone.txt")), false, "restoring the worker's real edit means deleting it again");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("planProductionRevert + revertToBase + restoreWorkerVersion: binary content survives byte-for-byte (gitShowBuffer buffer-safety regression)", async () => {
+  const baseBytes = Buffer.from([0x00, 0xff, 0xfe, 0x80, 0x81, 0xc3, 0x28]); // not valid UTF-8
+  const { dir, baseSha } = await initRevertRepo({ "bin.dat": { content: baseBytes } });
+  try {
+    const workerBytes = Buffer.from([0x01, 0xfe, 0x00, 0x9f, 0xc2, 0x28, 0xff, 0x80]); // also not valid UTF-8
+    fs.writeFileSync(path.join(dir, "bin.dat"), workerBytes);
+    const [item] = planProductionRevert({ cwd: dir, baseSha, entries: [{ status: "M", path: "bin.dat", oldPath: null }] });
+
+    revertToBase(item);
+    assert.ok(Buffer.from(fs.readFileSync(path.join(dir, "bin.dat"))).equals(baseBytes),
+      "gitShowBuffer must not corrupt binary content through a text round-trip");
+
+    restoreWorkerVersion(item);
+    assert.ok(Buffer.from(fs.readFileSync(path.join(dir, "bin.dat"))).equals(workerBytes),
+      "restoreWorkerVersion must give back the worker's exact binary bytes");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("gitModeAtBase: reports the executable bit for a 100755 base blob and 0o644 for an ordinary one", async () => {
+  const { dir, baseSha } = await initRevertRepo({
+    "run.sh": { content: "#!/bin/sh\necho hi\n", mode: 0o755 },
+    "plain.txt": { content: "plain\n" },
+  });
+  try {
+    assert.equal(gitModeAtBase(dir, baseSha, "run.sh"), 0o755);
+    assert.equal(gitModeAtBase(dir, baseSha, "plain.txt"), 0o644);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("planProductionRevert + revertToBase + restoreWorkerVersion: the executable bit is preserved correctly at each stage", async () => {
+  const { dir, baseSha } = await initRevertRepo({ "run.sh": { content: "#!/bin/sh\necho base\n", mode: 0o755 } });
+  try {
+    // The worker's edit is still executable -- mode is unrelated to content here.
+    fs.writeFileSync(path.join(dir, "run.sh"), "#!/bin/sh\necho changed\n");
+    fs.chmodSync(path.join(dir, "run.sh"), 0o755);
+    const [item] = planProductionRevert({ cwd: dir, baseSha, entries: [{ status: "M", path: "run.sh", oldPath: null }] });
+
+    revertToBase(item);
+    assert.equal(fs.statSync(path.join(dir, "run.sh")).mode & 0o777, gitModeAtBase(dir, baseSha, "run.sh"));
+    assert.equal(fs.statSync(path.join(dir, "run.sh")).mode & 0o777, 0o755, "base mode was executable");
+
+    restoreWorkerVersion(item);
+    assert.equal(fs.statSync(path.join(dir, "run.sh")).mode & 0o777, 0o755, "worker's captured mode was also executable");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("blobHash: null is the ABSENT sentinel, and currentBlobHash of a missing path matches it", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-blobhash-"));
+  try {
+    assert.equal(blobHash(null), "ABSENT");
+    assert.equal(currentBlobHash(path.join(dir, "does-not-exist.txt")), "ABSENT");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("blobHash: identical content hashes identically across calls; different content changes the hash", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-blobhash-"));
+  try {
+    const file = path.join(dir, "f.txt");
+    fs.writeFileSync(file, "same content\n");
+    const first = currentBlobHash(file);
+    const second = currentBlobHash(file);
+    assert.equal(first, second, "unchanged content hashes identically across calls");
+
+    fs.writeFileSync(file, "different content\n");
+    const third = currentBlobHash(file);
+    assert.notEqual(third, first, "changed content changes the hash");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("blobHash: matches git's own hash-object for the same bytes", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-blobhash-"));
+  try {
+    const file = path.join(dir, "f.txt");
+    const content = "hash me\n";
+    fs.writeFileSync(file, content);
+    const gitHash = execFileSync("git", ["hash-object", file], { cwd: dir }).toString().trim();
+    assert.equal(blobHash(Buffer.from(content)), gitHash);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("planProductionRevert: an unresolvable base path yields base: null, and revertToBase then throws a clear error for an M entry", async () => {
+  const { dir, baseSha } = await initRevertRepo({ "base.txt": { content: "base\n" } });
+  try {
+    // A path that was never committed at baseSha (the worker created it after
+    // the base, but the caller mislabels it "M" -- or, more realistically, a
+    // rename source that no longer resolves).
+    fs.writeFileSync(path.join(dir, "never-committed.txt"), "worker content\n");
+    const [item] = planProductionRevert({
+      cwd: dir, baseSha,
+      entries: [{ status: "M", path: "never-committed.txt", oldPath: null }],
+    });
+
+    assert.equal(item.base, null, "planProductionRevert's own try/catch absorbs the git failure silently");
+    assert.throws(() => revertToBase(item), /no base content resolvable for never-committed\.txt/,
+      "revertToBase is the stage that surfaces the failure, not planProductionRevert");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------
+// buildConfigSummary: the local_worker_config MCP tool's core logic, made
+// testable independent of the tool handler itself via an injectable
+// loadConfig function. Reuses the exact loader lib/verify.mjs's own
+// verification runner uses, so this can never drift out of sync with what a
+// real job would actually resolve.
+// ---------------------------------------------------------------------------
+test("buildConfigSummary: no .nomarmy.yml reports found:false with a clear, actionable note", () => {
+  const summary = buildConfigSummary("/irrelevant", () => ({ found: false, path: null, config: null, elevated: { shared: [], remote: [] } }));
+  assert.equal(summary.found, false);
+  assert.deepEqual(summary.profiles, []);
+  assert.match(summary.note, /No \.nomarmy\.yml/);
+  assert.match(summary.note, /not_run/);
+});
+
+test("buildConfigSummary: a valid config lists every verification profile with its commands and environment", () => {
+  const summary = buildConfigSummary("/irrelevant", () => ({
+    found: true, path: "/repo/.nomarmy.yml",
+    config: { verification: { quick: { environment: "none", commands: ["npm test"] }, full: { commands: ["npm test", "npm run lint"] } } },
+    elevated: { shared: [], remote: [] },
+  }));
+  assert.equal(summary.found, true);
+  assert.equal(summary.valid, true);
+  assert.equal(summary.path, "/repo/.nomarmy.yml");
+  assert.deepEqual(summary.profiles, [
+    { name: "quick", environment: "none", commands: ["npm test"] },
+    { name: "full", environment: "none", commands: ["npm test", "npm run lint"] },
+  ]);
+  assert.equal(summary.note, null);
+});
+
+test("buildConfigSummary: a valid config with no verification block reports zero profiles, not an error", () => {
+  const summary = buildConfigSummary("/irrelevant", () => ({ found: true, path: "/repo/.nomarmy.yml", config: {}, elevated: { shared: [], remote: [] } }));
+  assert.equal(summary.found, true);
+  assert.equal(summary.valid, true);
+  assert.deepEqual(summary.profiles, []);
+  assert.match(summary.note, /defines no verification profiles/);
+});
+
+test("buildConfigSummary: elevated shared/remote services are surfaced, not dropped", () => {
+  const summary = buildConfigSummary("/irrelevant", () => ({
+    found: true, path: "/repo/.nomarmy.yml", config: { verification: {} },
+    elevated: { shared: ["postgres"], remote: ["staging-api"] },
+  }));
+  assert.deepEqual(summary.elevated, { shared: ["postgres"], remote: ["staging-api"] });
+});
+
+test("buildConfigSummary: a broken (invalid) config surfaces valid:false with the real ConfigError's path and errors", () => {
+  const summary = buildConfigSummary("/irrelevant", () => {
+    throw new ConfigError("bad.yml is not a valid nomArmy configuration:\n  - verification.quick.commands: is required", {
+      path: "/repo/.nomarmy.yml", errors: ["verification.quick.commands: is required"],
+    });
+  });
+  assert.equal(summary.found, true);
+  assert.equal(summary.valid, false);
+  assert.equal(summary.path, "/repo/.nomarmy.yml");
+  assert.deepEqual(summary.errors, ["verification.quick.commands: is required"]);
+  assert.match(summary.note, /not.*valid/);
+});
+
+test("buildConfigSummary: an unexpected non-ConfigError throw still degrades cleanly instead of propagating", () => {
+  const summary = buildConfigSummary("/irrelevant", () => { throw new Error("disk exploded"); });
+  assert.equal(summary.valid, false);
+  assert.equal(summary.path, null);
+  assert.deepEqual(summary.errors, ["disk exploded"]);
+});
+
+test("buildConfigSummary: against this repo's own real .nomarmy.yml, the real loader finds the quick profile", () => {
+  const summary = buildConfigSummary(process.cwd());
+  assert.equal(summary.found, true);
+  assert.equal(summary.valid, true);
+  assert.ok(summary.profiles.some(p => p.name === "quick" && p.commands.includes("npm test")),
+    "this repo's committed .nomarmy.yml must define a real, working quick profile");
 });
