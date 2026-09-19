@@ -52,6 +52,28 @@ printf '%s\n' "$API_KEY" | \
     --provider "$PROVIDER" \
     --profile-id "$PROFILE_ID"
 
+if ! nomarmy_is_cloud; then
+  # `openclaw onboard` cannot know a custom base URL's real context -- it has
+  # no catalog entry for it -- so it registers a generic guess (observed:
+  # contextWindow 24576 / contextTokens 20480 / maxTokens 4096) regardless of
+  # what NOMARMY_LLAMA_CONTEXT / NOMARMY_LLAMA_PARALLEL actually say. That
+  # guess then silently outlives every later context change: a job dispatched
+  # against a freshly-resized 65536-token nom still overflowed at ~20K tokens
+  # of prompt, on literally the first turn, because OpenClaw was still
+  # enforcing its onboarding-time guess. NOMARMY_CONTEXT_PER_NOM (exported by
+  # nomarmy_validate_local, above, in load_profile) is nomArmy's own already-
+  # computed truth for this exact number; write it back so OpenClaw's model
+  # registration cannot drift from the server it is actually talking to.
+  # models[0] assumes exactly the one custom local model this script just
+  # onboarded, which is what onboard --custom-model-id always produces here.
+  WORKER_MAX_TOKENS="${NOMARMY_WORKER_MAX_TOKENS:-4096}"
+  CONTEXT_WINDOW="${NOMARMY_CONTEXT_PER_NOM:-24576}"
+  CONTEXT_TOKENS=$(( CONTEXT_WINDOW - WORKER_MAX_TOKENS ))
+  openclaw config set "models.providers.$PROVIDER.models.0.contextWindow" "$CONTEXT_WINDOW" --strict-json
+  openclaw config set "models.providers.$PROVIDER.models.0.contextTokens" "$CONTEXT_TOKENS" --strict-json
+  openclaw config set "models.providers.$PROVIDER.models.0.maxTokens" "$WORKER_MAX_TOKENS" --strict-json
+fi
+
 # A local model on CPU can take many minutes for a single response. OpenClaw
 # times out per model call independently of nomArmy's job timeout, so a slow
 # worker is killed mid-turn unless this ceiling is raised to match. nomArmy's
