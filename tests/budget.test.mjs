@@ -9,6 +9,8 @@ import {
 } from "../lib/budget.mjs";
 import { DEFAULT_TARGET_CONTEXT_PER_NOM, RESERVES, GIB } from "../lib/sizing.mjs";
 
+function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
+
 const NO_ENV = {};
 
 // --- deriveBudgets ----------------------------------------------------------
@@ -29,6 +31,25 @@ test("deriveBudgets: no context means the default target, labelled as such", () 
   assert.equal(deriveBudgets({ contextPerNom: 0, source: "x", env: NO_ENV }).source, "default");
 });
 
+test("deriveBudgets: the decompose report field has the correct shape at the design target", () => {
+  const b = deriveBudgets({ contextPerNom: 32768, source: "test", env: NO_ENV });
+  assert.ok(b.report.decompose);
+  const cap = Math.floor(32768 * BUDGET_RULES.decomposeReportFraction);
+  const target = Math.floor(cap * 0.6);
+  assert.equal(b.report.decompose.targetTokens, target);
+  assert.equal(b.report.decompose.hardCapTokens, cap);
+  assert.equal(b.decompose.maxSubtasks, clamp(Math.floor((cap - 40) / 150), BUDGET_RULES.decomposeSubtasksMin, BUDGET_RULES.decomposeSubtasksMax));
+});
+
+test("deriveBudgets: the decompose top-level object has the correct shape at the design target", () => {
+  const b = deriveBudgets({ contextPerNom: DEFAULT_TARGET_CONTEXT_PER_NOM, source: "test", env: NO_ENV });
+  assert.ok(b.decompose);
+  assert.equal(typeof b.decompose.maxSubtasks, "number");
+  assert.equal(b.decompose.maxAcceptancePerSubtask, BUDGET_RULES.decomposeAcceptancePerSubtask);
+  assert.equal(b.decompose.maxFilesPerSubtask, BUDGET_RULES.decomposeFilesPerSubtask);
+  assert.equal(b.decompose.maxSubtaskChars, BUDGET_RULES.decomposeSubtaskChars);
+});
+
 test("deriveBudgets: a small context shrinks every budget and flags itself below the floor", () => {
   const b = deriveBudgets({ contextPerNom: 4096, source: "test", env: NO_ENV });
   assert.equal(b.brief.maxTaskChars, BUDGET_RULES.briefTokensMin * CALIBRATED.charsPerToken);
@@ -37,6 +58,8 @@ test("deriveBudgets: a small context shrinks every budget and flags itself below
   assert.equal(b.report.scout.hardCapTokens, BUDGET_RULES.scoutReportCapMin);
   assert.ok(b.scout.maxFindings >= BUDGET_RULES.scoutFindingsMin && b.scout.maxFindings < BUDGET_RULES.scoutFindingsMax);
   assert.equal(b.scout.maxExcerptLinesTotal, BUDGET_RULES.scoutExcerptLinesTotalMin);
+  assert.equal(b.report.decompose.hardCapTokens, BUDGET_RULES.decomposeReportCapMin);
+  assert.ok(b.decompose.maxSubtasks >= BUDGET_RULES.decomposeSubtasksMin && b.decompose.maxSubtasks < BUDGET_RULES.decomposeSubtasksMax);
   assert.equal(b.tooSmall, true);
 });
 
@@ -46,6 +69,8 @@ test("deriveBudgets: a huge context never raises the brief above the calibrated 
   assert.equal(b.report.scout.hardCapTokens, BUDGET_RULES.scoutReportCapMax);
   assert.equal(b.scout.maxFindings, BUDGET_RULES.scoutFindingsMax);
   assert.equal(b.scout.maxExcerptLinesTotal, BUDGET_RULES.scoutExcerptLinesTotalMax);
+  assert.equal(b.report.decompose.hardCapTokens, BUDGET_RULES.decomposeReportCapMax);
+  assert.equal(b.decompose.maxSubtasks, BUDGET_RULES.decomposeSubtasksMax);
 });
 
 test("deriveBudgets: explicit environment overrides win and are named", () => {
