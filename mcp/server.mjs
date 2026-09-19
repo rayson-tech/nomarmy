@@ -8,6 +8,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { SCOUT_OUTCOMES, SCOUT_STATUS_BY_OUTCOME, scoutPrompt, parseScoutReport, verifyCitations, resolveScoutOutcome, renderScoutReport } from "../lib/scout.mjs";
+import { DECOMPOSE_OUTCOMES, DECOMPOSE_STATUS_BY_OUTCOME, decomposePrompt, parseDecomposeReport, buildDecomposeFindings, resolveDecomposeOutcome, checkDecompositionOverlap, renderDecomposeReport } from "../lib/decompose.mjs";
 import { deriveBudgets, checkBrief, resolveContextPerNom, assessAdmission, describeBudgets, deriveTimeBudget } from "../lib/budget.mjs";
 import { readOpenClawTranscript, estimateDisplacement } from "../lib/transcript.mjs";
 import { runQuery, formatCitations, OPS as EVIDENCE_OPS } from "../lib/repo-query.mjs";
@@ -306,6 +307,8 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
     NPM_CONFIG_CACHE: npmCache, npm_config_cache: npmCache, NPM_CONFIG_UPDATE_NOTIFIER: "false", npm_config_update_notifier: "false" };
   const prompt = overridePrompt ?? (mode === "scout"
     ? scoutPrompt({ question: task, mustCover: acceptance, baseRef, baseSha, workerId, limits: budgets.scout, report: budgets.report.scout, evidenceTool })
+    : mode === "decompose"
+    ? decomposePrompt({ objective: task, constraints: acceptance, baseRef, baseSha, workerId, limits: budgets.decompose, report: budgets.report.decompose, evidenceTool })
     : workerPrompt({ task, acceptance, verification, mode, baseRef, baseSha, workerId, evidence, report: budgets.report.implement }));
   fs.writeFileSync(path.join(jobDir, `brief${logSuffix}.txt`), prompt + "\n");
   // --state-dir keeps OpenClaw's session state (its transcript database among
@@ -1098,7 +1101,8 @@ export const COORDINATOR_STATUS_BY_OUTCOME = Object.freeze({
   [OUTCOMES.WORKER_REPORT_INVALID]: "incomplete",
   [OUTCOMES.WORKER_TIMEOUT]: "incomplete",
   [OUTCOMES.WORKER_FAILED]: "failed",
-  ...SCOUT_STATUS_BY_OUTCOME
+  ...SCOUT_STATUS_BY_OUTCOME,
+  ...DECOMPOSE_STATUS_BY_OUTCOME
 });
 
 // ---------------------------------------------------------------------------
@@ -1123,7 +1127,7 @@ export async function executeJob({ task, acceptance, verification, mode = "imple
   // behind, without adding container-CLI round-trip latency to this job's own start.
   sweepStaleSandboxContainers().catch(() => {});
   const jobStartedMs = Date.now();
-  const base = await resolveBase(baseRef), jobId = presetJobId || slug(workerId || (mode === "scout" ? "scout" : "worker")), jobDir = path.join(jobsRoot, jobId), runtimeDir = path.join(jobDir, "runtime");
+  const base = await resolveBase(baseRef), jobId = presetJobId || slug(workerId || (mode === "scout" ? "scout" : mode === "decompose" ? "decompose" : "worker")), jobDir = path.join(jobsRoot, jobId), runtimeDir = path.join(jobDir, "runtime");
   fs.mkdirSync(runtimeDir, { recursive: true });
   const progress = (phase, extra = {}) => writeStatus(jobDir, {
     jobId, workerId: workerId || jobId, mode, phase, state: phase === "finished" ? "finished" : "running",
@@ -1132,6 +1136,7 @@ export async function executeJob({ task, acceptance, verification, mode = "imple
   progress("starting", { startedAt: new Date().toISOString() });
   const common = { task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, workerId, progress, jobStartedMs };
   if (mode === "scout") return executeScout(common);
+  if (mode === "decompose") return executeDecompose(common);
   return executeImplement({ ...common, verification, evidence, verifyRegression });
 }
 
@@ -1478,12 +1483,124 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
   }
 }
 
+// A decompose job is scout's read-only chassis (detached worktree, evidence
+// tool, dirty-check, transcript/displacement accounting) with a different
+// question and a different report shape: it proposes independent subtasks
+// instead of answering a question. Written as its own function rather than
+// factored into a shared chassis with executeScout -- both were near-
+// identical already before this, and this codebase's own convention (see
+// executeImplement/executeScout) is separate top-level functions per mode,
+// not a parameterized one. The proposal is informational, exactly like a
+// scout's findings: nothing here ever calls executeJob/local_workers, and
+// commitAllowed/selectUnionCandidates are both hard-gated on mode ===
+// "implement" elsewhere, so a decompose result can never be auto-dispatched
+// or unioned even by accident.
+async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, workerId, progress, jobStartedMs }) {
+  const mode = "decompose", worktree = path.join(jobDir, "worktree");
+  let worktreeRetained = false;
+  try {
+    progress("worktree");
+    await run("git", ["worktree", "add", "--detach", worktree, base.sha], { cwd: projectDir });
+    const startedAt = new Date().toISOString();
+
+    const evidenceTool = ".openclaw/nomarmy-evidence.mjs";
+    try {
+      fs.mkdirSync(path.join(worktree, ".openclaw"), { recursive: true });
+      fs.copyFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "lib", "repo-query.mjs"), path.join(worktree, evidenceTool));
+    } catch (error) { fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} evidence tool not placed: ${error.message}\n`); }
+    const evidencePlaced = fs.existsSync(path.join(worktree, evidenceTool));
+
+    let result = null, workerFailed = false, workerTimedOut = false, workerError = null;
+    const workerStartedMs = Date.now();
+    progress("worker");
+    try {
+      result = await runOpenClaw({ task, acceptance, verification: null, mode, cwd: worktree, baseRef: base.ref, baseSha: base.sha, timeoutSeconds, runtimeDir, profile, reasoning, jobDir, workerId: workerId || jobId, evidenceTool: evidencePlaced ? evidenceTool : null });
+    } catch (error) {
+      workerFailed = true;
+      workerTimedOut = Boolean(error.timedOut);
+      workerError = error.stack || error.message;
+    }
+    const workerElapsedMs = Date.now() - workerStartedMs;
+    if (result && (result.timedOut === true || result.status === "timeout" || result.status === "timed_out")) workerTimedOut = true;
+    const finishedAt = new Date().toISOString(), reportText = workerFailed ? "" : finalText(result);
+
+    progress("verification");
+    const report = parseDecomposeReport(reportText, budgets.decompose);
+    const record = await collectGitRecord({ cwd: worktree, baseSha: base.sha, branch: null, baseRef: base.ref, jobId });
+    const dirty = record.repoStatusFiles.length > 0;
+    const readFile = async p => { try { return await gitRaw(["show", `${base.sha}:${p}`], projectDir); } catch { return null; } };
+    const verified = await verifyCitations(buildDecomposeFindings(report.subtasks), { readFile, limits: budgets.decompose });
+    const overlaps = checkDecompositionOverlap(report.subtasks, verified);
+    const outcome = resolveDecomposeOutcome({ report, verified, workerFailed, workerTimedOut, dirty });
+
+    progress("record");
+    if (outcome.retainWorktree) worktreeRetained = true;
+    else await run("git", ["worktree", "remove", "--force", worktree], { cwd: projectDir }).catch(() => { worktreeRetained = fs.existsSync(worktree); });
+
+    const worker = workerMetadata(result);
+    const issues = [...outcome.reasons];
+    if (workerError) issues.push(`decompose error: ${String(workerError).split("\n")[0]}`);
+    const failures = worker.toolSummary?.failures ?? 0; if (failures > 0) issues.push(`decomposer recorded ${failures} tool failure(s)`);
+    if (dirty) issues.push(`snapshot changed: ${record.repoStatusFiles.join(", ")}`);
+    if (overlaps.length) issues.push(`${overlaps.length} subtask pair(s) claim overlapping files; not safe to dispatch as independent jobs as proposed`);
+
+    const transcript = await readOpenClawTranscript(path.join(runtimeDir, "state"));
+    let rendered = renderDecomposeReport({ report, verified, subtasks: report.subtasks, overlaps, outcome, baseSha: base.sha });
+    const displacement = estimateDisplacement({ readChars: transcript.available ? transcript.repoReadChars : null, deliveredChars: rendered.length + 400 });
+    if (transcript.available) {
+      const harness = transcript.harnessChars ? ` (plus ~${Math.round(transcript.harnessChars / 4)} tokens of harness tool output, not counted)` : "";
+      rendered += `\n\nCONTEXT (estimate): decomposer read ~${displacement.frontier_read_tokens_est} tokens of repository content across ${transcript.filesRead.length} file(s) and ${transcript.toolCalls.length} tool call(s)${harness}; `
+        + `this report is ~${displacement.delivered_tokens_est} tokens -> ${displacement.verdict.toUpperCase()}: ${displacement.note}`;
+    } else rendered += `\n\nCONTEXT (estimate): unavailable (${transcript.reason})`;
+    if (displacement.verdict === "negative") issues.push("negative displacement: this decompose job cost more coordinator context than reading directly would have");
+
+    const metrics = {
+      ...buildMetrics({ result, record: null, reportValidation: null, outcome: null, workerElapsedMs, totalElapsedMs: Date.now() - jobStartedMs }),
+      report_truncated: report.truncated, report_strict: report.strict, worker_timeout: workerTimedOut,
+      decompose_subtasks_supported: verified.supported, decompose_subtasks_unsupported: verified.unsupported,
+      decompose_subtasks_weak: verified.weak, decompose_overlaps: overlaps.length,
+      decompose_model_calls: transcript.available ? transcript.modelCalls : null,
+      decompose_tool_calls: transcript.available ? transcript.toolCalls.length : null,
+      decompose_files_read: transcript.available ? transcript.filesRead.length : null,
+      frontier_read_tokens_est: displacement.frontier_read_tokens_est,
+      delivered_tokens_est: displacement.delivered_tokens_est,
+      displaced_tokens_est: displacement.displaced_tokens_est,
+      displacement_verdict: displacement.verdict
+    };
+    const manifest = { version: VERSION, jobId, workerId: workerId || jobId, mode, projectDir, worktree: worktreeRetained ? worktree : null, branch: null, baseSha: base.sha, startedAt, finishedAt,
+      objective: task, constraints: acceptance ?? [],
+      outcome: outcome.outcome, coordinatorStatus: outcome.coordinatorStatus, reviewRequired: outcome.reviewRequired, issues,
+      decompose: { objective: report.objective, confidence: report.confidence, notSplittable: report.notSplittable,
+        subtasks: report.subtasks.map((s, i) => ({ task: s.task, acceptance: s.acceptance, citations: verified.findings[i]?.citations ?? [], supported: verified.findings[i]?.supported ?? false, weak: verified.findings[i]?.weak ?? false })),
+        overlaps, supported: verified.supported, unsupported: verified.unsupported, weak: verified.weak,
+        reportParse: { present: report.present, strict: report.strict, lenient: report.lenient, truncated: report.truncated, parseMode: report.parseMode, reason: report.reason, droppedSubtasks: report.droppedSubtasks } },
+      transcript: transcript.available
+        ? { modelCalls: transcript.modelCalls, toolCalls: transcript.toolCalls, filesRead: transcript.filesRead, commands: transcript.commands, toolResultChars: transcript.toolResultChars, assistantChars: transcript.assistantChars, dbPath: transcript.dbPath }
+        : { available: false, reason: transcript.reason },
+      displacement,
+      dirty, snapshotChanges: record.repoStatusFiles, worktreeRetained, metrics, worker, workerError,
+      budgets: { contextPerNom: budgets.contextPerNom, source: budgets.source, decompose: budgets.decompose, report: budgets.report.decompose },
+      requestedProfile: profile, requestedReasoning: reasoning, reasoningApplied: profile === "gpt" ? reasoning : "off", execution };
+    fs.writeFileSync(path.join(jobDir, "metadata.json"), JSON.stringify(manifest, null, 2));
+    if (result) fs.writeFileSync(path.join(jobDir, "result.json"), JSON.stringify(result, null, 2));
+    progress("finished", { coordinatorStatus: outcome.coordinatorStatus, outcome: outcome.outcome });
+    return { ok: outcome.coordinatorStatus === "complete", report: rendered, manifest, jobDir };
+  } catch (error) {
+    const failure = { version: VERSION, jobId, workerId: workerId || jobId, mode, branch: null, worktree: fs.existsSync(worktree) ? worktree : null, outcome: OUTCOMES.WORKER_FAILED,
+      coordinatorStatus: "failed", error: error.stack || error.message, worktreeRetained: fs.existsSync(worktree), execution };
+    fs.writeFileSync(path.join(jobDir, "failure.json"), JSON.stringify(failure, null, 2));
+    progress("finished", { coordinatorStatus: "failed", outcome: OUTCOMES.WORKER_FAILED });
+    return { ok: false, report: `DECOMPOSE FAILED:\n${error.stack || error.message}`, manifest: failure, jobDir };
+  }
+}
+
 // A degraded orchestrator grades a peer, not a subordinate. Say so on every
 // record it produces, so the weakened guarantee cannot be missed in review.
 const DEGRADED_BANNER = "!!! DEGRADED ACCEPTANCE: coordinator and worker are the same capability class.\n!!! This record is not an independent check. See policies/reviewer.md.\n\n";
 const RECOVERED_BANNER = "!!! RECOVERED RESULT: the worker's report was invalid or truncated. This job was\n!!! accepted on nomArmy's own independent verification, NOT on a worker claim.\n!!! Weaker evidence than a clean report - review the diff before integrating.\n\n";
 const REVIEW_BANNER = "!!! NEEDS REVIEW: no accepted outcome. Worktree retained. See outcome and issues.\n\n";
 const TAINTED_BANNER = "!!! SCOUT TAINTED: the scout modified its read-only snapshot. Findings below were still\n!!! verified against the base commit through Git, but treat the scout's judgement with suspicion.\n\n";
+const DECOMPOSE_TAINTED_BANNER = "!!! DECOMPOSE TAINTED: the decomposer modified its read-only snapshot. Subtasks below were still\n!!! verified against the base commit through Git, but treat the decomposer's judgement with suspicion.\n\n";
 export function testChangeBanner(testChanges) {
   if (!testChanges?.reviewRequired) return "";
   return `!!! TEST CHANGES REQUIRE REVIEW:\n${testChanges.reviewFlags.map(f => `!!!   ${f}`).join("\n")}\n!!! nomArmy does not reject test changes. It refuses to let them pass unseen.\n\n`;
@@ -1494,6 +1611,10 @@ export function regressionCheckBanner(regressionCheck) {
     return `!!! REGRESSION CHECK COULD NOT RESTORE THE WORKTREE: ${regressionCheck.reason}\n!!! Commit blocked unconditionally. Inspect this worktree by hand before doing anything else with it.\n\n`;
   }
   return `!!! REGRESSION CHECK FAILED: reverting the production change and re-running verification\n!!! still PASSED. No test in this run would catch the change being undone -- the fix\n!!! is unproven, not necessarily wrong.\n\n`;
+}
+export function decomposeOverlapBanner(overlaps) {
+  if (!overlaps?.length) return "";
+  return `!!! SUBTASK FILE OVERLAP: ${overlaps.map(o => `subtask ${o.a + 1} and ${o.b + 1} both claim ${o.files.join(", ")}`).join("; ")}\n!!! These subtasks are not safe to dispatch as independent jobs as proposed. Reconcile before dispatching.\n\n`;
 }
 // The scout record deliberately omits the findings: they are already in the
 // rendered report above it, and repeating the excerpts would spend the very
@@ -1512,6 +1633,23 @@ function compactScoutRecord(m) {
     modelCalls: met.scout_model_calls ?? null, workerModel: met.worker_model ?? null,
     issues: m.issues ?? [], dirty: m.dirty ?? null, worktreeRetained: m.worktreeRetained ?? null, error: m.error ?? null };
 }
+// Same convention as compactScoutRecord: small, only what a listing needs.
+// Full subtask detail (citations, excerpts) stays in the rendered report and
+// metadata.json; repeating it here would spend the context this record
+// exists to save.
+function compactDecomposeRecord(m) {
+  const met = m.metrics ?? {};
+  return { jobId: m.jobId, workerId: m.workerId, mode: m.mode, outcome: m.outcome, coordinatorStatus: m.coordinatorStatus, reviewRequired: m.reviewRequired,
+    baseSha: m.baseSha ? String(m.baseSha).slice(0, 10) : null,
+    subtasks: { proposed: m.decompose?.subtasks?.length ?? null, supported: m.decompose?.supported ?? null, weak: m.decompose?.weak ?? null, unsupported: m.decompose?.unsupported ?? null },
+    overlaps: m.decompose?.overlaps?.length ?? 0, notSplittable: m.decompose?.notSplittable ?? null,
+    report: m.decompose?.reportParse ? { parseMode: m.decompose.reportParse.parseMode, truncated: m.decompose.reportParse.truncated, dropped: m.decompose.reportParse.droppedSubtasks } : null,
+    decomposerRead: m.transcript?.filesRead ?? null,
+    displacement: m.displacement ? { read: m.displacement.frontier_read_tokens_est, delivered: m.displacement.delivered_tokens_est, displaced: m.displacement.displaced_tokens_est, verdict: m.displacement.verdict } : null,
+    elapsedSeconds: Number.isFinite(met.total_elapsed) ? Math.round(met.total_elapsed / 1000) : null,
+    modelCalls: met.decompose_model_calls ?? null, workerModel: met.worker_model ?? null,
+    issues: m.issues ?? [], dirty: m.dirty ?? null, worktreeRetained: m.worktreeRetained ?? null, error: m.error ?? null };
+}
 // Evidence before claim, in the display order too: the record is what
 // nomArmy verified against Git, the worker's report is prose it wrote about
 // itself. Leading with the report buried the record below whatever the
@@ -1524,6 +1662,11 @@ export function formatResult(r) {
   if (r.manifest?.mode === "scout") {
     const tainted = r.manifest?.outcome === OUTCOMES.SCOUT_TAINTED ? TAINTED_BANNER : "";
     return `${banner}${tainted}${outcomeLine}--- SCOUT RECORD ---\n${JSON.stringify(compactScoutRecord(r.manifest), null, 2)}\n\nJob artifacts: ${r.jobDir}${r.manifest.worktree ? `\nWorktree retained for review: ${r.manifest.worktree}` : ""}\n\n${workerReport}`;
+  }
+  if (r.manifest?.mode === "decompose") {
+    const tainted = r.manifest?.outcome === DECOMPOSE_OUTCOMES.DECOMPOSE_TAINTED ? DECOMPOSE_TAINTED_BANNER : "";
+    const overlap = decomposeOverlapBanner(r.manifest?.decompose?.overlaps);
+    return `${banner}${tainted}${overlap}${outcomeLine}--- DECOMPOSE RECORD ---\n${JSON.stringify(compactDecomposeRecord(r.manifest), null, 2)}\n\nJob artifacts: ${r.jobDir}${r.manifest.worktree ? `\nWorktree retained for review: ${r.manifest.worktree}` : ""}\n\n${workerReport}`;
   }
   const recovered = r.manifest?.outcome === OUTCOMES.RECOVERED_SUCCESS ? RECOVERED_BANNER : "";
   const review = r.manifest?.outcome === OUTCOMES.NEEDS_REVIEW ? REVIEW_BANNER : "";
@@ -1649,15 +1792,15 @@ async function summarize(entry, files, jobDir = null) {
 export const jobSchema = z.object({
   task: z.string().min(1).max(maxTaskChars,
     `Objective exceeds the ${maxTaskChars}-character worker context budget. This length limit does not by itself mean the job is too broad: a single-purpose objective that inlines file contents can hit it just from being verbose. If that's the case here, reference exact paths and line ranges instead (the worker can read them, or use \`evidence\` to hand it the answer already resolved) rather than pasting the file into the brief. If the objective genuinely covers multiple files or concerns, split it into separate jobs.`
-  ).describe("implement: the OBJECTIVE the worker must achieve, not the edit it should make. scout: the QUESTION to answer from the repository."),
+  ).describe("implement: the OBJECTIVE the worker must achieve, not the edit it should make. scout: the QUESTION to answer from the repository. decompose: the broad OBJECTIVE to propose a split for."),
   acceptance: z.array(z.string().min(1).max(maxAcceptanceItemChars,
     `Acceptance item exceeds ${maxAcceptanceItemChars} characters. Keep each criterion to one concrete, checkable statement.`
-  )).max(20).optional().describe("implement: acceptance criteria the worker must satisfy. scout: points a complete answer must cover."),
+  )).max(20).optional().describe("implement: acceptance criteria the worker must satisfy. scout: points a complete answer must cover. decompose: constraints a good split must respect."),
   verification: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().describe("Verification profile NAME (e.g. quick, standard, browser). Semantic; nomArmy owns execution. Ignored by scouts."),
   verify_regression: z.boolean().default(false).describe(
     "implement only: after the diff passes `verification` and touches production files, temporarily revert just those production files, re-run the SAME verification profile (expected to fail without the fix), then restore them. A re-run that still PASSES proves no test would catch this regression, and the outcome is downgraded to NEEDS_REVIEW regardless of the worker's report -- never silently committed as done. Runs the full profile a second time; opt in only when that wall-clock cost (can matter on repos with thousands of tests) is worth the guarantee. Requires `verification` to be set. Ignored by scouts."
   ),
-  mode: z.enum(["scout", "implement"]).default("implement").describe("implement: edit in an isolated worktree, coordinator commits on a valid report. scout: read-only research; every finding must cite [path:start-end] and nomArmy attaches the cited lines after verifying them against the base commit."),
+  mode: z.enum(["scout", "implement", "decompose"]).default("implement").describe("implement: edit in an isolated worktree, coordinator commits on a valid report. scout: read-only research; every finding must cite [path:start-end] and nomArmy attaches the cited lines after verifying them against the base commit. decompose: read-only; proposes 2+ independent, evidence-grounded subtasks for a broad objective instead of doing everything in one worker turn. Never auto-dispatched -- the proposal is reviewed like a scout's findings, and the coordinator makes its own separate dispatch call with whatever subtasks it chooses to use."),
   base_ref: z.string().optional(),
   timeout_seconds: z.number().int().min(30).max(1800).default(600),
   profile: z.enum(["coder", "gpt"]).default("coder").describe("coder: Qwen3-Coder-Next, runs with thinking off regardless of `reasoning` (a coding-specialized model, not a hybrid-thinking one). gpt: the gpt-oss-20b fallback, where `reasoning` sets its thinking level."),
@@ -1672,7 +1815,7 @@ function jobArgs(args, workerId) {
     timeoutSeconds: args.timeout_seconds, profile: args.profile, reasoning: args.reasoning, evidence: args.evidence,
     verifyRegression: args.verify_regression, workerId };
 }
-server.tool("local_worker", "Run one isolated local worker and wait for it. mode=implement edits in its own worktree and the coordinator commits only on a valid done report (or a recovered job that passed independent verification); failed or incomplete worktrees are retained. mode=scout answers a question from a read-only snapshot with mandatory [path:line] citations that nomArmy verifies and expands. Refuses under memory pressure or over capacity; use local_worker_start + local_worker_status to avoid blocking.", jobSchema.shape,
+server.tool("local_worker", "Run one isolated local worker and wait for it. mode=implement edits in its own worktree and the coordinator commits only on a valid done report (or a recovered job that passed independent verification); failed or incomplete worktrees are retained. mode=scout answers a question from a read-only snapshot with mandatory [path:line] citations that nomArmy verifies and expands. mode=decompose (also read-only) proposes 2+ independent subtasks for a broad objective instead of one worker turn trying to do too much; the proposal is never auto-dispatched, review it and make a separate call with the subtasks you choose. Refuses under memory pressure or over capacity; use local_worker_start + local_worker_status to avoid blocking.", jobSchema.shape,
   async args => {
     const { problems } = await admit([args]);
     if (problems.length) return refusal(problems);
@@ -1819,7 +1962,7 @@ server.tool("local_worker_jobs", "List recent job records for review/recovery, i
   const rows = await Promise.all(dirs.map(async name => {
     const dir = path.join(jobsRoot, name);
     const meta = readJson(path.join(dir, "metadata.json")) ?? readJson(path.join(dir, "failure.json"));
-    if (meta) return meta.mode === "scout" ? compactScoutRecord(meta) : meta;
+    if (meta) return meta.mode === "scout" ? compactScoutRecord(meta) : meta.mode === "decompose" ? compactDecomposeRecord(meta) : meta;
     const status = readJson(path.join(dir, "status.json"));
     if (status) return summarize(activeJobs.get(name) ?? null, { status, meta: null, failure: null }, dir);
     return { jobId: name, state: "unknown" };

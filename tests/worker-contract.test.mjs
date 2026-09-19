@@ -25,6 +25,7 @@ import {
   buildMetrics,
   testChangeBanner,
   regressionCheckBanner,
+  decomposeOverlapBanner,
   workerPrompt,
   reportRecoveryPrompt,
   jobSchema,
@@ -837,6 +838,23 @@ test("regressionCheckBanner: a restore failure gets a distinct, unconditional-bl
   assert.equal(/REGRESSION CHECK FAILED/.test(text), false, "restore_failed must not also read as a fail banner");
 });
 
+// ---------------------------------------------------------------------------
+// decomposeOverlapBanner: silent unless checkDecompositionOverlap actually
+// found a shared file between two proposed subtasks.
+// ---------------------------------------------------------------------------
+test("decomposeOverlapBanner: silent when there is nothing to report", () => {
+  assert.equal(decomposeOverlapBanner(null), "");
+  assert.equal(decomposeOverlapBanner(undefined), "");
+  assert.equal(decomposeOverlapBanner([]), "");
+});
+
+test("decomposeOverlapBanner: names the overlapping subtasks and their shared files", () => {
+  const text = decomposeOverlapBanner([{ a: 0, b: 2, files: ["lib/auth.mjs"] }]);
+  assert.match(text, /SUBTASK FILE OVERLAP/);
+  assert.match(text, /subtask 1 and 3 both claim lib\/auth\.mjs/);
+  assert.match(text, /not safe to dispatch as independent jobs/);
+});
+
 test("name-status -z parsing feeds classification, including renames", () => {
   const raw = ["M", "mcp/server.mjs", "A", "tests/new.test.mjs", "R100", "tests/old.test.mjs", "tests/moved.test.mjs", "D", "src/gone.js"].join("\0") + "\0";
   const entries = parseNameStatusZ(raw);
@@ -1103,6 +1121,21 @@ test("formatResult: omits the regression-check banner when regressionCheck is nu
     jobDir: "/tmp/job-4",
   });
   assert.equal(/REGRESSION CHECK/.test(text), false);
+});
+
+test("formatResult: a decompose job's record also precedes its report, with an overlap banner when one exists", () => {
+  const text = formatResult({
+    ok: true,
+    report: "SUBTASK: something",
+    manifest: { outcome: "DECOMPOSE_DONE", mode: "decompose", jobId: "job-5", decompose: { overlaps: [{ a: 0, b: 1, files: ["lib/a.mjs"] }] } },
+    jobDir: "/tmp/job-5",
+  });
+  const bannerIndex = text.indexOf("SUBTASK FILE OVERLAP");
+  const recordIndex = text.indexOf("DECOMPOSE RECORD");
+  const reportIndex = text.indexOf("SUBTASK: something");
+  assert.ok(bannerIndex >= 0 && bannerIndex < recordIndex, "the overlap banner must precede the record");
+  assert.ok(recordIndex >= 0 && reportIndex >= 0, "both sections must be present");
+  assert.ok(recordIndex < reportIndex, "the record must come before the worker's report");
 });
 
 test("formatResult: a scout's record also precedes its report", () => {
