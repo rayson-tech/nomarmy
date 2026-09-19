@@ -56,6 +56,9 @@ Usage: nomarmy <command> [options]
                   MCP copy (fast-forward only; refuses on local changes).
   connect <claude|codex>
                   (Re-)register the MCP server with a coordinator.
+  start <profile> Start local inference (wraps scripts/start-inference.sh).
+  stop <profile>  Stop local inference (wraps scripts/stop-inference.sh).
+  uninstall       Remove the MCP registration and install directory.
   validate        Validate .nomarmy.yml against the schema.
   sizing          Recommend context and nom count for this machine.
                   --check   evaluate the loaded profile instead of recommending
@@ -493,6 +496,19 @@ async function cmdConnect() {
   console.log(c.green(`\n✓ Registered nomarmy-local-worker with ${target}.`));
 }
 
+/** Thin, mechanical wrappers around already-working scripts -- unlike connect's port to JS, these are real bash process/PID management with no awkward Node-calling-Node seam to fix, so spawning them is the right amount of wrapping, not under- or over-engineering it. */
+function runScript(name, args = []) {
+  execFileSync("bash", [path.join(nomarmyRoot, "scripts", name), ...args], { cwd: nomarmyRoot, stdio: "inherit" });
+}
+async function cmdStart() { console.log(c.bold("🍪 Starting inference...\n")); runScript("start-inference.sh", argv.slice(1)); }
+async function cmdStop() { runScript("stop-inference.sh", argv.slice(1)); }
+async function cmdUninstall() {
+  if (!json) console.log(c.yellow("Removing the nomArmy local worker MCP installation...\n"));
+  runScript("uninstall.sh");
+  if (json) return out({ uninstalled: true });
+  console.log(c.green("\n✓ Removed. Job records under ~/.local/share/nomarmy-local-agents/jobs were kept for recovery/audit."));
+}
+
 async function cmdSizing() {
   const execution = value("execution", process.env.NOMARMY_EXECUTION || "local");
   const hardware = await detectHardware();
@@ -572,7 +588,7 @@ function sizingCheck(hardware, gguf) {
   process.exit((res.warnings ?? []).some((w) => w.severity === "error") ? 1 : 0);
 }
 
-const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, update: cmdUpdate, connect: cmdConnect, help: () => usage(0) };
+const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, update: cmdUpdate, connect: cmdConnect, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
   // Import lazily to avoid circular dependencies
