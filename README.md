@@ -195,30 +195,24 @@ A config change needs a restart to take effect: `./scripts/stop-inference.sh && 
 
 ### Swapping models
 
-nomArmy runs any GGUF-format model llama.cpp can load, not only the bundled Qwen default, via llama.cpp's own Hugging Face integration:
-
 ```bash
-./scripts/select-model.sh nemotron
+nomarmy model
 ```
 
-This searches Hugging Face, lists the GGUF quantizations available for whatever you pick, and asks you to confirm before writing anything. To skip the search when you already know the repo:
+Offers the shipped default (Qwen3-Coder-Next) or a Hugging Face search for anything else llama.cpp can load — nomArmy runs any GGUF-format model, not only the bundled default. The search path shows the available quantizations, asks you to confirm before writing anything, and only updates `config/common.env`; nothing downloads until you restart inference:
 
 ```bash
-./scripts/select-model.sh --repo nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF
+nomarmy stop <profile>
+nomarmy start <profile>
 ```
 
-It only updates `config/common.env`, and only after you answer `y` — nothing downloads until you restart inference:
+`nomarmy model` is the same menu `nomarmy setup` (below) offers when choosing a model for a fresh profile; reach for it directly when you just want to change the model without redoing the rest of setup. It's a thin wrapper: the search path delegates to `scripts/select-model.mjs` directly, so `./scripts/select-model.sh nemotron` (or `--repo owner/model-GGUF` to skip the search) still works standalone exactly as before, if you'd rather call it without the menu.
 
-```bash
-./scripts/stop-inference.sh
-./scripts/start-inference.sh macbook-pro   # or whichever profile you use
-```
-
-The model itself downloads and caches on that first start. Two things worth knowing: the target repo must actually contain GGUF files (a base-model repo with only PyTorch/safetensors weights won't run here), and a gated repo needs you to accept its license on huggingface.co and authenticate locally before the download will succeed.
+The model itself downloads and caches on first start. Two things worth knowing: the target repo must actually contain GGUF files (a base-model repo with only PyTorch/safetensors weights won't run here), and a gated repo needs you to accept its license on huggingface.co and authenticate locally before the download will succeed.
 
 ## The `nomarmy` CLI
 
-**Is there an `npm install nomarmy`?** No. The package is marked `"private": true` and is not published to the npm registry — there's nothing to `npm install -g nomarmy` from anywhere. What you get instead: clone the repo, then `npm install && npm link` inside it (the installer already does this for you as part of `install.sh`). There's also no single `nomarmy init` wizard the way some mature CLIs have one; setup is the sequence of scripts in [Install](#install) above, and the CLI itself is a small set of read-only inspection commands, not a project scaffolder.
+**Is there an `npm install nomarmy`?** No. The package is marked `"private": true` and is not published to the npm registry — there's nothing to `npm install -g nomarmy` from anywhere. What you get instead: clone the repo, then `npm install && npm link` inside it (the installer already does this for you as part of `install.sh`).
 
 If you only want the CLI — to size a machine or inspect a repo before committing to a full install — it stands alone:
 
@@ -231,14 +225,23 @@ npm link          # optional; puts `nomarmy` on PATH
 
 Without `npm link`, every command works the same run directly: `node bin/nomarmy.mjs doctor`. `npm install` itself is not optional — the CLI imports from `lib/`, which has real dependencies (`zod`, `yaml`), so a fresh clone can't run any command until they're present.
 
+Every command below proposes before it writes anything, showing exactly what would change and writing only after an explicit `[y/N]` confirmation or an explicit non-interactive flag (`--write`, or `--json` with the required choices given up front) — matching `nomarmy sizing`/`nomarmy scan`'s existing "report and propose, never provision" contract. None of them touch system-level infrastructure: `install.sh` (builds llama.cpp, installs OpenClaw, configures the sandbox) stays a separate, manual step every command that would otherwise lead into it just prints, never runs.
+
 | Command | What it does |
 |---|---|
 | `nomarmy doctor` | Checks this host is ready to run nomArmy and prints a fix for anything missing. Start here on any new machine. |
+| `nomarmy setup` | Detects this machine, recommends a profile the same way `sizing` does, offers a model choice, and writes `config/profiles/<name>.env` (+ `config/common.env`). Prints the `install.sh` command; never runs it. |
+| `nomarmy init` | Proposes a `.nomarmy.yml` from this repository's scan evidence and writes it after confirmation. Never overwrites an existing one without `--force`. |
+| `nomarmy model` | Change the configured model later, without the rest of `setup`'s questions. See [Swapping models](#swapping-models) above. |
+| `nomarmy update` | Pulls the latest nomArmy code (fast-forward only; refuses on local changes) and re-syncs the installed MCP copy for whichever coordinator is on PATH. |
+| `nomarmy connect <claude\|codex>` | (Re-)registers the MCP server with a coordinator on its own — e.g. after installing Claude Code or Codex later. |
+| `nomarmy start` / `stop <profile>` | Starts/stops local inference (wraps `scripts/start-inference.sh` / `stop-inference.sh`). |
+| `nomarmy uninstall` | Removes the MCP registration and install directory. Job records under `~/.local/share/nomarmy-local-agents/jobs` are kept for recovery/audit. |
 | `nomarmy sizing` | Recommends context/slot/worker counts from your hardware and the model's own GGUF metadata. `--check` evaluates the profile you already have instead of recommending a new one. |
 | `nomarmy scan` | Reports a repository's execution environment from deterministic evidence. `--check` compares it against a committed `.nomarmy.yml`. |
 | `nomarmy validate` | Validates `.nomarmy.yml` against the schema and flags any service needing explicit policy approval. |
 
-Every command takes `--json` for machine-readable output and `--repo <dir>` to target a repository other than the current directory. None of them change anything on their own: `scan` never executes what it finds, `sizing` never writes a profile, `doctor` never installs anything. They report and propose; you decide what to apply.
+Every command takes `--json` for machine-readable output and `--repo <dir>` to target a repository other than the current directory. `scan`, `sizing`, `doctor` and `validate` never change anything at all — pure report/propose. `init`, `setup`, `model` and `update` do write files, but never without you seeing exactly what first: an explicit confirmation, or an explicit flag standing in for one under `--json`.
 
 ## Sizing noms
 

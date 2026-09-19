@@ -1,6 +1,11 @@
 #!/usr/bin/env node
-// nomArmy CLI. Everything here reports or proposes; nothing here provisions
-// infrastructure or rewrites configuration on its own. A human applies changes.
+// nomArmy CLI. Every command proposes before it writes anything -- init,
+// setup, model and update all show exactly what would change and write only
+// after explicit confirmation ([y/N]) or an explicit non-interactive flag
+// (--write, --json with the required choices given up front). Nothing here
+// provisions SYSTEM-level infrastructure on its own: install.sh (builds
+// llama.cpp, installs OpenClaw, configures the sandbox) stays a separate,
+// manual step in every case, printed but never run.
 import fs from "node:fs";
 import path from "node:path";
 import { spawn, execFileSync } from "node:child_process";
