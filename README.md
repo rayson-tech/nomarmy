@@ -259,6 +259,8 @@ The v1.3 target is 64K context per nom: an autonomous explore/implement/test/rep
 
 Raising `NOMARMY_MAX_WORKERS` is an empirical question, not a capacity one — benchmark accepted-tickets/hour and coordinator interventions before raising it; a second nom that halves the first one's context can lower total throughput.
 
+`nomarmy sizing` and `nomarmy setup` both show two options when they genuinely differ: **More noms** (as many as fit in memory — the number above) and **Nominal** (1 nom at the same context, matching every profile actually shipped in `config/profiles/*.env` regardless of how many more would fit). There's no third "fast" tier: worker count is the only speed-relevant lever this project has real, measured data for (see below); a smaller context per nom has no established speed relationship in this codebase, only a memory one, so a "fast" preset would be a guess presented as a measurement.
+
 ### Speed matters more than fit
 
 `nomarmy sizing` answers "what fits in memory?", not "is this fast enough to be useful?" — on CPU-only hardware those are very different questions.

@@ -144,6 +144,53 @@ test("recommend() never oversubscribes: maxWorkers equals llamaParallel", () => 
   assert.ok(!codes(result).includes("oversubscription"));
 });
 
+// --- nominal preset: "more noms" (the primary recommendation) answers what
+// fits in memory; "nominal" is 1 worker at the same context, matching every
+// profile actually shipped in config/profiles/*.env regardless of how much
+// more would fit. No third "fast" tier: worker count is the only speed-
+// relevant lever this codebase has real data for (README's own measured
+// contention notes), and it collapses to the same thing as nominal.
+// ---------------------------------------------------------------------------
+test("recommend(): nominal is always 1 worker at the same target context as the primary recommendation", () => {
+  const result = recommend({
+    hardware: nvidiaMachine({ freeVramBytes: 80 * GIB, ramBytes: 128 * GIB }),
+    gguf: ggufFound(),
+  });
+  assert.equal(result.nominal.contextPerNom, result.contextPerNom);
+  assert.equal(result.nominal.llamaParallel, 1);
+  assert.equal(result.nominal.maxWorkers, 1);
+  assert.equal(result.nominal.contextTotal, result.contextPerNom);
+  assert.deepEqual(result.nominal.env, {
+    NOMARMY_LLAMA_CONTEXT: result.contextPerNom,
+    NOMARMY_LLAMA_PARALLEL: 1,
+    NOMARMY_MAX_WORKERS: 1,
+  });
+});
+
+test("recommend(): nominal is always guaranteed to fit, even on a machine where only 1 nom fits at all", () => {
+  // A machine so constrained that the primary recommendation itself is
+  // already 1 nom -- nominal must equal it exactly, not something smaller.
+  const result = recommend({ hardware: cpuOnlyMachine(4 * GIB), gguf: ggufFound() });
+  assert.equal(result.maxWorkers, 1);
+  assert.equal(result.nominal.maxWorkers, 1);
+  assert.equal(result.nominal.contextPerNom, result.contextPerNom);
+  assert.equal(result.nominal.sameAsRecommended, true);
+});
+
+test("recommend(): sameAsRecommended is false when more than 1 nom is actually recommended", () => {
+  const result = recommend({
+    hardware: nvidiaMachine({ freeVramBytes: 80 * GIB, ramBytes: 128 * GIB }),
+    gguf: ggufFound(),
+  });
+  assert.ok(result.maxWorkers > 1, "test setup should recommend more than 1 nom");
+  assert.equal(result.nominal.sameAsRecommended, false);
+});
+
+test("recommend(): a cloud (bedrock) execution has no nominal preset -- no local slots to trade off", () => {
+  const result = recommend({ hardware: cpuOnlyMachine(4 * GIB), gguf: ggufMissing, execution: "bedrock" });
+  assert.equal(result.nominal, null);
+});
+
 test("evaluateConfig() warns when maxWorkers exceeds llamaParallel", () => {
   const result = evaluateConfig({
     hardware: nvidiaMachine({ freeVramBytes: 80 * GIB, ramBytes: 128 * GIB }),

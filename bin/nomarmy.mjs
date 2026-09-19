@@ -52,9 +52,11 @@ Usage: nomarmy <command> [options]
                   and write it after confirmation.
                   --force   overwrite an existing .nomarmy.yml
                   --write   with --json, write without prompting (needs a valid proposal)
-  setup           Detect this machine, recommend a profile, choose a model,
-                  and write config/profiles/<name>.env (+ config/common.env).
+  setup           Detect this machine, recommend a profile (offering "more
+                  noms" vs "nominal" when they differ), choose a model, and
+                  write config/profiles/<name>.env (+ config/common.env).
                   Prints the install.sh command; never runs it.
+                  --tier <more|nominal>   with --json, skip the prompt
   model           Change the configured model later, without the rest of
                   setup's questions.
   update          Pull the latest nomArmy code and re-sync the installed
@@ -316,8 +318,32 @@ async function cmdSetup() {
       console.log(isCloud
         ? `Execution is '${execution}' -- hosted inference, local hardware does not bound this.\n`
         : `Hardware: ${c.cyan(`${hardware.platform}/${hardware.arch}`)}, ${hardware.cpu?.logicalCores ?? "?"} logical cores, ${(hardware.memory?.totalBytes / 1024 ** 3).toFixed(1)} GiB RAM\n`);
-      console.log(`Recommended ${c.dim(`(confidence: ${res.confidence})`)}: ${c.green(res.summary ?? JSON.stringify(res.env))}`);
+      console.log(`More noms ${c.dim(`(confidence: ${res.confidence})`)}: ${c.green(res.summary ?? JSON.stringify(res.env))}`);
+      if (res.nominal && !res.nominal.sameAsRecommended) console.log(`Nominal: ${c.dim(res.nominal.summary)}`);
     }
+
+    // "More noms" fits as many noms as memory allows; "nominal" is 1 worker
+    // at the same context, matching every profile actually shipped in
+    // config/profiles/*.env. No genuinely distinct third "fast" tier is
+    // offered: worker count is the only speed-relevant lever this project
+    // has real (measured, README-documented) data for, and a smaller
+    // context per nom has no established speed relationship in this
+    // codebase, only a memory one -- inventing one would be a guess
+    // presented as a measurement.
+    let sizingTier = "more";
+    if (res.nominal && !res.nominal.sameAsRecommended) {
+      if (nonInteractive) {
+        sizingTier = value("tier", "more");
+        if (sizingTier !== "more" && sizingTier !== "nominal") throw new Error('--tier must be "more" or "nominal".');
+      } else {
+        console.log(`\n${c.bold("Which sizing?")}`);
+        console.log(`  ${c.cyan("1.")} More noms -- as many as fit in memory`);
+        console.log(`  ${c.cyan("2.")} Nominal -- 1 nom, matching this project's own shipped profiles`);
+        const choice = (await rl.question(c.bold("Choice [1]: "))).trim() || "1";
+        sizingTier = choice === "2" ? "nominal" : "more";
+      }
+    }
+    const sizingEnv = sizingTier === "nominal" ? res.nominal.env : res.env;
 
     let model = null;
     if (!isCloud) {
@@ -334,7 +360,7 @@ async function cmdSetup() {
     const profilePath = path.join(nomarmyRoot, "config", "profiles", `${profileName}.env`);
     const commonPath = path.join(nomarmyRoot, "config", "common.env");
 
-    const profileWrites = { ...res.env };
+    const profileWrites = { ...sizingEnv };
     if (!isCloud) {
       // recommend() only returns context/parallel/worker counts -- every
       // hand-authored profile also sets these two, and start-inference.sh
@@ -368,7 +394,7 @@ async function cmdSetup() {
     if (model?.kind === "known") writeEnvLine(commonPath, "NOMARMY_MODEL_ALIAS", model.alias);
 
     const installCmd = `./install.sh --profile ${profileName}${isCloud ? "" : ""}`;
-    if (json) return out({ written: { profile: profilePath, common: model?.kind === "known" ? commonPath : null }, env: profileWrites, installCommand: installCmd });
+    if (json) return out({ written: { profile: profilePath, common: model?.kind === "known" ? commonPath : null }, env: profileWrites, sizingTier, installCommand: installCmd });
     console.log(c.green(`\n✓ Wrote ${path.relative(nomarmyRoot, profilePath)}${model?.kind === "known" ? ` and ${path.relative(nomarmyRoot, commonPath)}` : ""}.`));
     console.log(c.dim("\nThis proposes; it does not install. Run:\n"));
     console.log(`  ${c.bold(installCmd)}\n`);
@@ -549,11 +575,24 @@ async function cmdSizing() {
   const doesNotFit = res.memory && res.memory.fits === false;
   console.log(doesNotFit
     ? `\nNOTHING FITS on this machine. Closest fallback (confidence: ${res.confidence}):\n`
-    : `\nRecommended (confidence: ${res.confidence}):\n`);
+    : `\nMore noms (confidence: ${res.confidence}) -- as many as fit in memory:\n`);
   for (const [k, v] of Object.entries(res.env ?? {})) console.log(`  ${k}=${v}`);
   console.log(`\n  ${res.maxWorkers} nom(s) at ${K(res.contextPerNom)} each`
     + (res.contextTotal ? `  (${res.contextTotal} total across ${res.llamaParallel} slot(s))` : ""));
   if (res.limitedBy) console.log(`  limited by: ${res.limitedBy}`);
+
+  // "More noms" answers what fits in memory; it has no model of inference
+  // speed or worker contention at all. Every profile actually shipped in
+  // config/profiles/*.env uses 1-2 workers regardless of how much more
+  // would fit -- "nominal" makes that convention explicit rather than
+  // leaving it as something you only learn by reading the README's
+  // benchmarks. No third "fast" tier: worker count is the only
+  // speed-relevant lever this project has real (measured) data for, and it
+  // collapses to the same thing as nominal.
+  if (res.nominal && !res.nominal.sameAsRecommended) {
+    console.log(`\nNominal -- 1 nom, matching this project's own shipped profiles:\n`);
+    for (const [k, v] of Object.entries(res.nominal.env)) console.log(`  ${k}=${v}`);
+  }
 
   if (res.alternatives?.length) {
     console.log("\nAlternatives:");
