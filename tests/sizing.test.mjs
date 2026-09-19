@@ -256,6 +256,110 @@ test("a truncated GGUF header degrades confidence rather than claiming a measure
   assert.ok(codes(result).includes("partial_model_metadata"));
 });
 
+// --- hybrid (recurrent/SSM) architectures -----------------------------------
+//
+// A hybrid model mixes full-attention layers with recurrent/state-space
+// layers (GGUF exposes the latter as `.ssm.*` header keys) whose state does
+// not grow with context. Treating every layer as full attention -- the naive
+// formula -- overstates KV cache growth for these models. Numbers below are
+// the real Qwen3-Coder-Next-GGUF header values, verified directly against
+// the file and against Qwen's own published 3:1 Gated DeltaNet : full
+// attention ratio.
+function qwen3NextGguf(overrides = {}) {
+  return ggufFound({
+    arch: "qwen3next",
+    fileSizeBytes: 45.1 * GIB,
+    params: {
+      blockCount: 48,
+      headCount: 16,
+      headCountKv: 2,
+      keyLength: 256,
+      valueLength: 256,
+      embeddingLength: 2048,
+      contextLength: 262144,
+      ssmConvKernel: 4,
+      ssmStateSize: 128,
+      ssmGroupCount: 16,
+      ssmTimeStepRank: 32,
+      ssmInnerSize: 4096,
+    },
+    ...overrides,
+  });
+}
+
+test("resolveModel: a recognized hybrid architecture sizes KV cache for its full-attention layers only", () => {
+  const model = resolveModel(qwen3NextGguf());
+  assert.equal(model.isHybrid, true);
+  assert.equal(model.hybridRecognized, true);
+  assert.equal(model.layers, 48, "total block count is unchanged, still reported");
+  assert.equal(model.kvLayers, 12, "48 layers * 1/4 full-attention fraction, rounded");
+  assert.match(model.hybridNote, /qwen3next/);
+  assert.match(model.hybridNote, /12 of 48/);
+  // The correction is a known, cited fact, not a guess for missing data --
+  // it must not read as reduced confidence.
+  assert.equal(model.assumed.length, 0);
+  assert.equal(model.complete, true);
+});
+
+test("resolveModel: ssm keys present but an unrecognized architecture leaves layers uncorrected", () => {
+  const model = resolveModel(qwen3NextGguf({ arch: "some-future-hybrid-arch" }));
+  assert.equal(model.isHybrid, true);
+  assert.equal(model.hybridRecognized, false);
+  assert.equal(model.kvLayers, model.layers, "no known ratio -- fall back to the conservative (safe-direction) assumption");
+  assert.equal(model.hybridNote, null);
+});
+
+test("resolveModel: an ordinary (non-hybrid) model is never treated as hybrid", () => {
+  const model = resolveModel(ggufFound());
+  assert.equal(model.isHybrid, false);
+  assert.equal(model.hybridRecognized, false);
+  assert.equal(model.kvLayers, model.layers);
+});
+
+test("kvBytesPerSlot: uses kvLayers, not the total layer count, for a recognized hybrid model", () => {
+  const model = resolveModel(qwen3NextGguf());
+  const kv = kvBytesPerSlot(model, DEFAULT_TARGET_CONTEXT_PER_NOM);
+  const naiveKv = model.layers * model.kvHeads * (model.keyLength + model.valueLength) * DEFAULT_TARGET_CONTEXT_PER_NOM * 2;
+  assert.equal(kv, model.kvLayers * model.kvHeads * (model.keyLength + model.valueLength) * DEFAULT_TARGET_CONTEXT_PER_NOM * 2);
+  assert.equal(kv, naiveKv / 4, "1 in 4 layers is full attention, so the corrected KV cost is a quarter of the naive one");
+});
+
+test("recommend: the hybrid correction is what makes 64K fit on a machine where the naive formula would refuse it", () => {
+  const gguf = qwen3NextGguf();
+  const model = resolveModel(gguf);
+  const naiveKvPerSlot = model.layers * model.kvHeads * (model.keyLength + model.valueLength) * DEFAULT_TARGET_CONTEXT_PER_NOM * 2;
+  const correctedKvPerSlot = kvBytesPerSlot(model, DEFAULT_TARGET_CONTEXT_PER_NOM);
+  assert.ok(correctedKvPerSlot < naiveKvPerSlot, "sanity: the correction must actually shrink the estimate");
+
+  // Mirrors capacityFor's own "vram" branch exactly: 1 slot fits iff
+  // poolBytes * safetyFraction - runtimeOverhead - weights >= perSlotBudget.
+  // Pick a pool at the corrected threshold (plus a small margin) -- this is
+  // the exact shape of the real discrepancy (64K context, ~45 GiB weights,
+  // works in practice; the naive formula said it would not).
+  const poolFor = (kvPerSlot) =>
+    Math.ceil((model.weightsBytes + kvPerSlot + RESERVES.computeBufferPerSlotBytes + RESERVES.runtimeOverheadBytes) / RESERVES.safetyFraction);
+  const pool = poolFor(correctedKvPerSlot) + 1 * GIB;
+  assert.ok(pool < poolFor(naiveKvPerSlot), "sanity: the naive estimate would still need a bigger pool than this");
+
+  const result = recommend({
+    hardware: nvidiaMachine({ freeVramBytes: pool, ramBytes: pool + 64 * GIB }),
+    gguf,
+  });
+  assert.equal(result.contextPerNom, DEFAULT_TARGET_CONTEXT_PER_NOM, "64K must be reachable, not stepped down");
+  assert.ok(codes(result).includes("hybrid_architecture_corrected"));
+});
+
+test("recommend: an unrecognized hybrid architecture warns instead of silently guessing a ratio", () => {
+  const result = recommend({
+    hardware: nvidiaMachine({ freeVramBytes: 80 * GIB, ramBytes: 128 * GIB }),
+    gguf: qwen3NextGguf({ arch: "unknown-hybrid" }),
+  });
+  const w = result.warnings.find((x) => x.code === "unrecognized_hybrid_architecture");
+  assert.ok(w, "must warn when ssm layers are present but the ratio is unknown");
+  assert.match(w.message, /OVERSTATES/);
+  assert.equal(codes(result).includes("hybrid_architecture_corrected"), false);
+});
+
 // --- headroom --------------------------------------------------------------
 
 test("headroom is actually reserved: a machine that 'just fits' gets fewer noms", () => {
