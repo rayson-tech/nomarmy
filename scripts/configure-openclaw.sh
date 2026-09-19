@@ -66,8 +66,20 @@ if ! nomarmy_is_cloud; then
   # registration cannot drift from the server it is actually talking to.
   # models[0] assumes exactly the one custom local model this script just
   # onboarded, which is what onboard --custom-model-id always produces here.
-  WORKER_MAX_TOKENS="${NOMARMY_WORKER_MAX_TOKENS:-4096}"
   CONTEXT_WINDOW="${NOMARMY_CONTEXT_PER_NOM:-24576}"
+  # A flat 4096-token default (nomArmy's own prior default, independent of
+  # openclaw's onboarding guess above) starved a worker mid-turn tonight: it
+  # hit finish_reason=length while still writing its first file, with 61440
+  # tokens of prompt budget sitting almost entirely unused on a 65536-context
+  # nom. Scale the default with the model's own context window instead of a
+  # number picked for no model in particular: 12% of it, clamped to a floor
+  # that still matches the old default on a small nom and a ceiling that
+  # keeps the prompt side from being starved in turn. NOMARMY_WORKER_MAX_TOKENS
+  # remains the explicit override for a model that needs something else.
+  DEFAULT_WORKER_MAX_TOKENS=$(( CONTEXT_WINDOW * 12 / 100 ))
+  [[ "$DEFAULT_WORKER_MAX_TOKENS" -lt 4096 ]] && DEFAULT_WORKER_MAX_TOKENS=4096
+  [[ "$DEFAULT_WORKER_MAX_TOKENS" -gt 16384 ]] && DEFAULT_WORKER_MAX_TOKENS=16384
+  WORKER_MAX_TOKENS="${NOMARMY_WORKER_MAX_TOKENS:-$DEFAULT_WORKER_MAX_TOKENS}"
   CONTEXT_TOKENS=$(( CONTEXT_WINDOW - WORKER_MAX_TOKENS ))
   openclaw config set "models.providers.$PROVIDER.models.0.contextWindow" "$CONTEXT_WINDOW" --strict-json
   openclaw config set "models.providers.$PROVIDER.models.0.contextTokens" "$CONTEXT_TOKENS" --strict-json
