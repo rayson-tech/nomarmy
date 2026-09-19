@@ -1,9 +1,13 @@
 #!/usr/bin/env node
 // nomArmy CLI. Everything here reports or proposes; nothing here provisions
 // infrastructure or rewrites configuration on its own. A human applies changes.
+import fs from "node:fs";
 import path from "node:path";
-import { loadConfig, validateConfig, CONFIG_FILENAMES } from "../lib/config.mjs";
+import { createInterface } from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
+import { loadConfig, validateConfig, stringifyConfig, findConfigFile, CONFIG_FILENAMES } from "../lib/config.mjs";
 import { scanRepository, compareEvidence } from "../lib/scan.mjs";
+import { buildConfigProposal } from "../lib/propose.mjs";
 import { detectHardware } from "../lib/hardware.mjs";
 import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf.mjs";
 import { recommend, evaluateConfig } from "../lib/sizing.mjs";
@@ -28,6 +32,10 @@ Usage: nomarmy <command> [options]
 
   scan            Inspect this repository and report its execution environment.
                   --check   compare the evidence against a committed .nomarmy.yml
+  init            Propose a .nomarmy.yml from this repository's scan evidence
+                  and write it after confirmation.
+                  --force   overwrite an existing .nomarmy.yml
+                  --write   with --json, write without prompting (needs a valid proposal)
   validate        Validate .nomarmy.yml against the schema.
   sizing          Recommend context and nom count for this machine.
                   --check   evaluate the loaded profile instead of recommending
@@ -37,7 +45,7 @@ Usage: nomarmy <command> [options]
 
 Options:
   --repo <dir>    repository to inspect (default: cwd)
-  --json          machine-readable output
+  --json          machine-readable output; disables interactive prompts
   --model <path>  GGUF file to size against (default: auto-discover)
   --execution <m> local | bedrock (default: $NOMARMY_EXECUTION or local)
 `);
@@ -139,6 +147,61 @@ function cmdValidate() {
   }
 }
 
+/**
+ * `nomarmy init`: scan the repository, propose a `.nomarmy.yml` from the
+ * evidence, and write it only after explicit confirmation (interactive) or
+ * an explicit `--write` flag (non-interactive, `--json`). Never overwrites an
+ * existing file without `--force` -- a human-authored config is never
+ * silently clobbered by a guess.
+ */
+async function cmdInit() {
+  const existing = findConfigFile(repoDir);
+  if (existing && !flag("force")) {
+    if (json) return out({ error: `${path.basename(existing)} already exists`, path: existing });
+    console.log(`${path.basename(existing)} already exists at ${existing}.`);
+    console.log("Not overwriting a config someone already wrote. Re-run with --force to replace it.");
+    process.exit(1);
+  }
+
+  const evidence = scanRepository(repoDir);
+  const { proposal, valid, errors, excludedFixturePaths, notes } = buildConfigProposal(evidence);
+  const targetPath = path.join(repoDir, existing ? path.basename(existing) : CONFIG_FILENAMES[0]);
+
+  if (json) {
+    if (!flag("write")) return out({ proposal, valid, errors, excludedFixturePaths, notes, wouldWriteTo: targetPath });
+    if (!valid) { out({ error: "proposal does not validate; refusing to write", errors }); process.exit(1); }
+    fs.writeFileSync(targetPath, stringifyConfig(proposal));
+    return out({ written: targetPath, proposal });
+  }
+
+  console.log(`Proposed ${path.basename(targetPath)}, built from ${evidence.repoName}'s scan evidence:\n`);
+  console.log(stringifyConfig(proposal));
+  if (excludedFixturePaths.length) {
+    console.log(`Excluded as likely test fixtures (review by hand if any of these is real):`);
+    for (const p of excludedFixturePaths) console.log(`  ${p}`);
+    console.log("");
+  }
+  if (notes.length) { for (const n of notes) console.log(`Note: ${n}`); console.log(""); }
+
+  if (!valid) {
+    console.log("This proposal does not validate against the schema:");
+    for (const e of errors) console.log(`  ${e}`);
+    console.log("\nNot offering to write an invalid config. Fix the evidence or write .nomarmy.yml by hand.");
+    process.exit(1);
+  }
+
+  if (!process.stdin.isTTY) throw new Error("nomarmy init needs an interactive terminal to confirm the write, or --json --write for a non-interactive one.");
+  const rl = createInterface({ input, output });
+  try {
+    const answer = (await rl.question(`Write this to ${path.basename(targetPath)}? [y/N] `)).trim().toLowerCase();
+    if (answer !== "y") { console.log("Cancelled; nothing written."); return; }
+    fs.writeFileSync(targetPath, stringifyConfig(proposal));
+    console.log(`Wrote ${targetPath}. Run 'nomarmy validate' any time to re-check it.`);
+  } finally {
+    rl.close();
+  }
+}
+
 async function cmdSizing() {
   const execution = value("execution", process.env.NOMARMY_EXECUTION || "local");
   const hardware = await detectHardware();
@@ -218,7 +281,7 @@ function sizingCheck(hardware, gguf) {
   process.exit((res.warnings ?? []).some((w) => w.severity === "error") ? 1 : 0);
 }
 
-const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, help: () => usage(0) };
+const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
   // Import lazily to avoid circular dependencies
