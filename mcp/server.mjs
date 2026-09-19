@@ -1049,6 +1049,10 @@ function usageMetrics(result) {
 export function buildMetrics({ result, record, reportValidation, outcome, workerElapsedMs, totalElapsedMs, regressionCheckElapsedMs }) {
   const tools = result?.toolSummary ?? null;
   const tests = record?.testChanges ?? null;
+  const metrics = usageMetrics(result);
+  const workerTokensPerSecond = (metrics.worker_tokens_total !== null && metrics.worker_tokens_total > 0 && workerElapsedMs !== null && workerElapsedMs > 0)
+    ? Number((metrics.worker_tokens_total / (workerElapsedMs / 1000)).toFixed(1))
+    : null;
   return {
     worker_elapsed: intOrNull(workerElapsedMs),
     total_elapsed: intOrNull(totalElapsedMs),
@@ -1064,10 +1068,11 @@ export function buildMetrics({ result, record, reportValidation, outcome, worker
     report_strict: reportValidation ? reportValidation.strict : null,
     report_recovered: outcome ? Boolean(outcome.recovered) : null,
     worker_timeout: outcome ? outcome.outcome === OUTCOMES.WORKER_TIMEOUT : null,
-    ...usageMetrics(result),
+    ...metrics,
     worker_tool_calls: intOrNull(tools?.calls ?? tools?.total ?? tools?.count),
     worker_tool_failures: intOrNull(tools?.failures),
     worker_model: result?.model ?? execution.workerModel ?? null,
+    worker_tokens_per_second: workerTokensPerSecond,
     context_limit: contextLimit
   };
 }

@@ -944,6 +944,36 @@ test("metrics: regression_check_elapsed reports the elapsed time when supplied",
   assert.equal(m.regression_check_elapsed, 1234);
 });
 
+test("metrics: worker_tokens_per_second is computed from tokens and elapsed time", () => {
+  const m = buildMetrics({
+    result: { usage: { inputTokens: 100, outputTokens: 200 } },
+    record: null, reportValidation: null, outcome: null,
+    workerElapsedMs: 2000, totalElapsedMs: 3000
+  });
+  assert.equal(m.worker_tokens_total, 300);
+  assert.equal(m.worker_tokens_per_second, 150.0);
+});
+
+test("metrics: worker_tokens_per_second is null when worker_tokens_total is null", () => {
+  const m = buildMetrics({
+    result: null,
+    record: null, reportValidation: null, outcome: null,
+    workerElapsedMs: 2000, totalElapsedMs: 3000
+  });
+  assert.equal(m.worker_tokens_total, null);
+  assert.equal(m.worker_tokens_per_second, null);
+});
+
+test("metrics: worker_tokens_per_second is null when workerElapsedMs is zero", () => {
+  const m = buildMetrics({
+    result: { usage: { inputTokens: 100, outputTokens: 200 } },
+    record: null, reportValidation: null, outcome: null,
+    workerElapsedMs: 0, totalElapsedMs: 3000
+  });
+  assert.equal(m.worker_tokens_total, 300);
+  assert.equal(m.worker_tokens_per_second, null);
+});
+
 // ---------------------------------------------------------------------------
 // 8. Worker prompt: objective / acceptance / verification plumbing + hard rules
 // ---------------------------------------------------------------------------
