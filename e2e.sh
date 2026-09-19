@@ -92,8 +92,8 @@ trap cleanup EXIT INT TERM
 cd "$TMP"
 
 git init -q
-git config user.email e2e@rayson.local
-git config user.name "Rayson E2E"
+git config user.email e2e@nomarmy.local
+git config user.name "nomArmy E2E"
 
 cat > calc.js <<'JS'
 export function add(a,b){ return a-b; }

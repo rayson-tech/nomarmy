@@ -447,7 +447,7 @@ test("Podman unavailable is not_run and NOTHING is executed on the host", async 
 test("a missing sandbox image is not_run, not a fabricated failure", async () => {
   const executor = fakeExecutor({
     available: false,
-    probeReason: "sandbox image 'openclaw-rayson-coder:bookworm' is not present locally",
+    probeReason: "sandbox image 'openclaw-nomarmy-coder:bookworm' is not present locally",
   });
   const run = createVerificationRunner({ loadConfig: fixedConfig(STANDARD), executor });
 

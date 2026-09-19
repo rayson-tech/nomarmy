@@ -13,7 +13,7 @@ jspm_packages/
 
 # ---- nomArmy runtime state -------------------------------------------------
 # Job artifacts, worktrees, logs and the llama.cpp build normally live under
-# $NOMARMY_INSTALL_ROOT (default ~/.local/share/rayson-local-agents), outside
+# $NOMARMY_INSTALL_ROOT (default ~/.local/share/nomarmy-local-agents), outside
 # the repository. These entries catch the case where someone repoints it here.
 run/
 logs/

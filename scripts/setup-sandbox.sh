@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE="${NOMARMY_AGENT_IMAGE:-openclaw-rayson-coder:bookworm}"
+IMAGE="${NOMARMY_AGENT_IMAGE:-openclaw-nomarmy-coder:bookworm}"
 command -v podman >/dev/null || { echo "ERROR: podman not found"; exit 1; }
 command -v openclaw >/dev/null || { echo "ERROR: openclaw not found"; exit 1; }
 
