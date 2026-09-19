@@ -38,6 +38,10 @@ test("matchesGlob: ** and * and alternation behave", () => {
   assert.equal(matchesGlob("lib/auth.mjs", "src/*.js"), false);
   assert.equal(matchesGlob("src/routes.js", "src/*.{js,ts}"), true);
   assert.equal(matchesGlob("a/b/c.py", "a/**/*.py"), true);
+  assert.equal(matchesGlob("src/barfoo", "**/foo"), false, "barfoo must not match **/foo");
+  assert.equal(matchesGlob("src/nested/foo", "**/foo"), true);
+  assert.equal(matchesGlob("foo", "**/foo"), true);
+  assert.equal(matchesGlob("src/foo.txt", "**/foo"), false);
 });
 
 test("listFiles: skips ignored directories, honours globs, sorted", () => {
