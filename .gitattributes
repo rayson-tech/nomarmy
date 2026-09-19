@@ -17,9 +17,6 @@ Procfile  text eol=lf
 LICENSE   text eol=lf
 NOTICE    text eol=lf
 
-# Checksums must match byte-for-byte on every platform.
-MANIFEST.sha256 text eol=lf
-
 *.png binary
 *.jpg binary
 *.gguf binary
