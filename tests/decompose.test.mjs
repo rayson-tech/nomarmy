@@ -44,6 +44,7 @@ test("decomposePrompt: read-only rules, citation requirement and subtask range a
   assert.match(p, /NOT_SPLITTABLE instead of inventing a fake split/);
   assert.match(p, /Two subtasks should not need to touch the same file/);
   assert.match(p, /a worker generating a substantial new file in one turn can run out of output budget/);
+  assert.match(p, /one short sentence of orientation is fine; do not restate your plan at length/);
   assert.match(p, /Target 500 tokens; 900 is the hard cap/);
   assert.match(p, /CONSTRAINTS\n- a\n- b/);
   assert.doesNotMatch(p, /STATUS: done/, "the implement contract must not leak into the decompose brief");

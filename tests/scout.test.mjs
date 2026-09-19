@@ -34,6 +34,7 @@ test("scoutPrompt: read-only rules, citation requirement and caps are stated", (
   assert.match(p, /never write the words "path", "start" or "end"/);
   assert.match(p, /read the source files that implement it/);
   assert.match(p, /At most 7 findings/);
+  assert.match(p, /one short sentence of orientation is fine; do not restate your plan at length/);
   assert.match(p, /Target 500 tokens; 900 is the hard cap/);
   assert.match(p, /MUST COVER\n- a\n- b/);
   assert.doesNotMatch(p, /STATUS: done/, "the implement contract must not leak into the scout brief");
