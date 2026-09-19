@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  SCOUT_OUTCOMES, DEFAULT_SCOUT_LIMITS,
+  SCOUT_OUTCOMES, SCOUT_STATUS_BY_OUTCOME, DEFAULT_SCOUT_LIMITS,
   scoutPrompt, parseCitation, parseCitationToken, extractCitations, parseScoutReport, verifyCitations, resolveScoutOutcome, renderScoutReport
 } from "../lib/scout.mjs";
 
@@ -307,4 +307,36 @@ test("renderScoutReport: claim and evidence side by side, hearsay fenced off, co
   assert.match(text, /- caching is off  \[no citation given\]/);
   assert.match(text, /NOT_FOUND: no rate limiter/);
   assert.match(text, /NOTE: 1 finding\(s\) had no resolvable citation/);
+});
+
+// --- a well-formed zero-findings report is a negative result, not a broken one ---
+test("parseScoutReport: zero findings with a real NOT_FOUND is a strict, well-formed report", () => {
+  const r = parseScoutReport("SCOUT REPORT\nQUESTION: does auth.mjs leak secrets in logs?\nCONFIDENCE: high\nNOT_FOUND: no logging of secret values found anywhere in the file\nEND");
+  assert.equal(r.present, true);
+  assert.equal(r.findings.length, 0);
+  assert.equal(r.strict, true, "zero FINDING lines must not by itself make the shape non-strict");
+  assert.equal(r.missingFields.includes("FINDING"), false, "FINDING is not missing when NOT_FOUND legitimately explains the negative result");
+  assert.equal(r.reason, null);
+});
+
+test("parseScoutReport: zero findings AND no NOT_FOUND is genuinely incomplete, not a quiet negative", () => {
+  const r = parseScoutReport("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: high\nEND");
+  assert.equal(r.strict, false);
+  assert.ok(r.missingFields.includes("FINDING"));
+  assert.match(r.reason, /no FINDING lines recovered and no NOT_FOUND given/);
+});
+
+test("resolveScoutOutcome: a well-formed zero-findings report is SCOUT_NOT_FOUND, not SCOUT_REPORT_INVALID", () => {
+  const r = parseScoutReport("SCOUT REPORT\nQUESTION: are there race conditions in mapLimit?\nCONFIDENCE: high\nNOT_FOUND: read the full function; found no shared-state race\nEND");
+  const o = resolveScoutOutcome({ report: r, verified: null });
+  assert.equal(o.outcome, SCOUT_OUTCOMES.SCOUT_NOT_FOUND);
+  assert.equal(o.coordinatorStatus, SCOUT_STATUS_BY_OUTCOME.SCOUT_NOT_FOUND);
+  assert.equal(o.coordinatorStatus, "needs_review");
+  assert.equal(o.reviewRequired, true, "an unverifiable negative claim always needs a human's eyes");
+});
+
+test("resolveScoutOutcome: a genuinely empty report (no findings, no NOT_FOUND) stays SCOUT_REPORT_INVALID", () => {
+  const r = parseScoutReport("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: high\nEND");
+  const o = resolveScoutOutcome({ report: r, verified: null });
+  assert.equal(o.outcome, SCOUT_OUTCOMES.SCOUT_REPORT_INVALID);
 });
