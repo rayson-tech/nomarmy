@@ -191,6 +191,25 @@ test("recommend(): a cloud (bedrock) execution has no nominal preset -- no local
   assert.equal(result.nominal, null);
 });
 
+// Caught by a live code-review pass on this exact code: the step-down loop
+// only updates target/capacity when it actually finds a context that fits
+// >=1 nom. On a machine where NOTHING fits even at MIN_CONTEXT_PER_NOM,
+// target stays at its original infeasible value -- nominal must say so
+// (fits: false), not silently inherit that infeasibility with no signal.
+test("recommend(): nominal.fits is false on a machine where nothing fits even at the minimum context", () => {
+  const result = recommend({ hardware: cpuOnlyMachine(1 * 1024 * 1024), gguf: ggufFound() });
+  assert.equal(result.memory.fits, false, "test setup should genuinely not fit");
+  assert.equal(result.nominal.fits, false);
+});
+
+test("recommend(): nominal.fits is true whenever the primary recommendation itself fits", () => {
+  const result = recommend({
+    hardware: nvidiaMachine({ freeVramBytes: 80 * GIB, ramBytes: 128 * GIB }),
+    gguf: ggufFound(),
+  });
+  assert.equal(result.nominal.fits, true);
+});
+
 test("evaluateConfig() warns when maxWorkers exceeds llamaParallel", () => {
   const result = evaluateConfig({
     hardware: nvidiaMachine({ freeVramBytes: 80 * GIB, ramBytes: 128 * GIB }),

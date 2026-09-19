@@ -319,7 +319,9 @@ async function cmdSetup() {
         ? `Execution is '${execution}' -- hosted inference, local hardware does not bound this.\n`
         : `Hardware: ${c.cyan(`${hardware.platform}/${hardware.arch}`)}, ${hardware.cpu?.logicalCores ?? "?"} logical cores, ${(hardware.memory?.totalBytes / 1024 ** 3).toFixed(1)} GiB RAM\n`);
       console.log(`More noms ${c.dim(`(confidence: ${res.confidence})`)}: ${c.green(res.summary ?? JSON.stringify(res.env))}`);
-      if (res.nominal && !res.nominal.sameAsRecommended) console.log(`Nominal: ${c.dim(res.nominal.summary)}`);
+      if (res.nominal && !res.nominal.sameAsRecommended) {
+        console.log(`Nominal: ${res.nominal.fits ? c.dim(res.nominal.summary) : c.red(`${res.nominal.summary} DOES NOT FIT either -- nothing on this machine does.`)}`);
+      }
     }
 
     // "More noms" fits as many noms as memory allows; "nominal" is 1 worker
@@ -590,7 +592,7 @@ async function cmdSizing() {
   // speed-relevant lever this project has real (measured) data for, and it
   // collapses to the same thing as nominal.
   if (res.nominal && !res.nominal.sameAsRecommended) {
-    console.log(`\nNominal -- 1 nom, matching this project's own shipped profiles:\n`);
+    console.log(`\nNominal -- 1 nom, matching this project's own shipped profiles${res.nominal.fits ? "" : " (DOES NOT FIT either -- nothing on this machine does)"}:\n`);
     for (const [k, v] of Object.entries(res.nominal.env)) console.log(`  ${k}=${v}`);
   }
 
