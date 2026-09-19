@@ -22,7 +22,7 @@ import {
   parseVmStatBytes,
 } from "../lib/hardware.mjs";
 
-import { deriveHeadDim, readGGUFMetadata } from "../lib/gguf.mjs";
+import { deriveHeadDim, readGGUFMetadata, findGgufFiles, resolveModelPath, totalSplitBytes } from "../lib/gguf.mjs";
 
 // --- nvidia-smi ------------------------------------------------------------
 
@@ -340,4 +340,146 @@ test("head dimension prefers key_length and falls back to embedding/head_count",
 test("byte unit constants are binary", () => {
   assert.equal(MIB, 1024 * 1024);
   assert.equal(GIB, 1024 * 1024 * 1024);
+});
+
+// ---------------------------------------------------------------------------
+// Model discovery: findGgufFiles / resolveModelPath / totalSplitBytes.
+//
+// llama.cpp's `-hf` pulls land in the real Hugging Face hub cache layout --
+// ~/.cache/huggingface/hub/models--<org>--<repo>/snapshots/<hash>/<file>,
+// every file a symlink to a blob -- not a flat llama.cpp-specific directory.
+// `resolveModelPath` used to only check the latter (and only one directory
+// level), so it never found an `-hf`-downloaded model at all and silently
+// fell back to an assumed ~18 GiB weight figure regardless of the real model
+// loaded. These tests build that real layout in a temp dir and use the
+// `roots` override so they never touch this machine's actual model cache.
+// ---------------------------------------------------------------------------
+function tmpRoot() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-model-cache-"));
+}
+
+/** Write `content` to a real "blob" file and return a symlink to it, mirroring how the HF hub cache stores every file. */
+function writeBlobAndLink(root, snapshotDir, linkName, sizeBytes) {
+  const blobsDir = path.join(root, "blobs");
+  fs.mkdirSync(blobsDir, { recursive: true });
+  const blobPath = path.join(blobsDir, `blob-${linkName}-${sizeBytes}`);
+  fs.writeFileSync(blobPath, Buffer.alloc(sizeBytes, 1));
+  fs.mkdirSync(snapshotDir, { recursive: true });
+  const linkPath = path.join(snapshotDir, linkName);
+  fs.symlinkSync(blobPath, linkPath);
+  return linkPath;
+}
+
+test("findGgufFiles walks nested directories and follows symlinks (the HF cache shape)", () => {
+  const root = tmpRoot();
+  try {
+    const snapshotDir = path.join(root, "models--Qwen--Qwen3-Coder-Next-GGUF", "snapshots", "abc123", "Qwen3-Coder-Next-Q4_K_M");
+    writeBlobAndLink(root, snapshotDir, "model-00001-of-00002.gguf", 1024);
+    writeBlobAndLink(root, snapshotDir, "model-00002-of-00002.gguf", 1024);
+    fs.writeFileSync(path.join(snapshotDir, "README.md"), "not a model");
+
+    const found = findGgufFiles(root).map((f) => path.basename(f.path)).sort();
+    assert.deepEqual(found, ["model-00001-of-00002.gguf", "model-00002-of-00002.gguf"]);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("findGgufFiles skips a broken symlink instead of throwing", () => {
+  const root = tmpRoot();
+  try {
+    fs.symlinkSync(path.join(root, "nowhere"), path.join(root, "dangling.gguf"));
+    assert.doesNotThrow(() => findGgufFiles(root));
+    assert.deepEqual(findGgufFiles(root), []);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("resolveModelPath: an explicit path wins over discovery entirely", () => {
+  const result = resolveModelPath({ explicit: "/some/explicit/model.gguf", roots: ["/should/not/be/scanned"] });
+  assert.equal(result, "/some/explicit/model.gguf");
+});
+
+test("resolveModelPath: finds a model nested under a nested HF-cache-shaped root", () => {
+  const root = tmpRoot();
+  try {
+    const snapshotDir = path.join(root, "models--ggml-org--gpt-oss-20b-GGUF", "snapshots", "def456");
+    const linkPath = writeBlobAndLink(root, snapshotDir, "gpt-oss-20b.gguf", 2048);
+
+    const result = resolveModelPath({ roots: [root] });
+    assert.equal(result, linkPath);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("resolveModelPath: a split model resolves to shard 1, not a later shard", () => {
+  const root = tmpRoot();
+  try {
+    const snapshotDir = path.join(root, "models--Qwen--Qwen3-Coder-Next-GGUF", "snapshots", "abc123", "Qwen3-Coder-Next-Q4_K_M");
+    writeBlobAndLink(root, snapshotDir, "Qwen3-Coder-Next-Q4_K_M-00002-of-00004.gguf", 1024);
+    writeBlobAndLink(root, snapshotDir, "Qwen3-Coder-Next-Q4_K_M-00001-of-00004.gguf", 1024);
+    writeBlobAndLink(root, snapshotDir, "Qwen3-Coder-Next-Q4_K_M-00003-of-00004.gguf", 1024);
+    writeBlobAndLink(root, snapshotDir, "Qwen3-Coder-Next-Q4_K_M-00004-of-00004.gguf", 1024);
+
+    const result = resolveModelPath({ roots: [root] });
+    assert.match(path.basename(result), /-00001-of-00004\.gguf$/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("resolveModelPath: among unrelated candidates, the most recently touched one wins", () => {
+  const root = tmpRoot();
+  try {
+    const older = writeBlobAndLink(root, path.join(root, "models--a--a", "snapshots", "1"), "old.gguf", 16);
+    fs.utimesSync(older, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+    const newer = writeBlobAndLink(root, path.join(root, "models--b--b", "snapshots", "1"), "new.gguf", 16);
+
+    assert.equal(resolveModelPath({ roots: [root] }), newer);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("resolveModelPath: NOMARMY_MODEL_PATH pointing straight at a .gguf file is used as-is", () => {
+  const root = tmpRoot();
+  try {
+    const file = path.join(root, "direct.gguf");
+    fs.writeFileSync(file, Buffer.alloc(16));
+    assert.equal(resolveModelPath({ env: { NOMARMY_MODEL_PATH: file }, roots: [file] }), file);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("resolveModelPath: no candidates anywhere returns null, not a throw", () => {
+  const root = tmpRoot();
+  try {
+    assert.equal(resolveModelPath({ roots: [root, path.join(root, "does-not-exist")] }), null);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("totalSplitBytes: sums every shard's real size for a split model", () => {
+  const root = tmpRoot();
+  try {
+    const dir = path.join(root, "snap");
+    fs.mkdirSync(dir, { recursive: true });
+    const sizes = [100, 200, 150];
+    sizes.forEach((size, i) => {
+      fs.writeFileSync(path.join(dir, `m-0000${i + 1}-of-00003.gguf`), Buffer.alloc(size));
+    });
+    const total = totalSplitBytes(path.join(dir, "m-00001-of-00003.gguf"));
+    assert.equal(total, sizes.reduce((a, b) => a + b, 0));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("totalSplitBytes: a non-split filename just returns its own size", () => {
+  const root = tmpRoot();
+  try {
+    const file = path.join(root, "single.gguf");
+    fs.writeFileSync(file, Buffer.alloc(777));
+    assert.equal(totalSplitBytes(file), 777);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("totalSplitBytes: an incomplete shard set falls back to shard 1's own size rather than throwing", () => {
+  const root = tmpRoot();
+  try {
+    const dir = path.join(root, "snap");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "m-00001-of-00003.gguf"), Buffer.alloc(500));
+    // shards 2 and 3 are missing -- an interrupted download
+    assert.doesNotThrow(() => totalSplitBytes(path.join(dir, "m-00001-of-00003.gguf")));
+    assert.equal(totalSplitBytes(path.join(dir, "m-00001-of-00003.gguf")), 500);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

@@ -1,13 +1,11 @@
 #!/usr/bin/env node
 // nomArmy CLI. Everything here reports or proposes; nothing here provisions
 // infrastructure or rewrites configuration on its own. A human applies changes.
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { loadConfig, validateConfig, CONFIG_FILENAMES } from "../lib/config.mjs";
 import { scanRepository, compareEvidence } from "../lib/scan.mjs";
 import { detectHardware } from "../lib/hardware.mjs";
-import { readGGUFMetadata } from "../lib/gguf.mjs";
+import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf.mjs";
 import { recommend, evaluateConfig } from "../lib/sizing.mjs";
 
 const argv = process.argv.slice(2);
@@ -46,34 +44,10 @@ Options:
   process.exit(code);
 }
 
-// llama.cpp caches Hugging Face pulls; check the usual places rather than
-// making the user pass --model. Absence is normal on a fresh install.
+// Model discovery and split-shard size summing live in lib/gguf.mjs, tested
+// there; this is a thin wrapper binding the CLI's own --model flag.
 function findModel() {
-  const explicit = value("model");
-  if (explicit) return explicit;
-  const installRoot = process.env.NOMARMY_INSTALL_ROOT
-    || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
-  const roots = [
-    process.env.NOMARMY_MODEL_PATH,
-    path.join(os.homedir(), ".cache", "llama.cpp"),
-    path.join(installRoot, "models"),
-  ].filter(Boolean);
-  for (const root of roots) {
-    try {
-      if (!fs.existsSync(root)) continue;
-      if (fs.statSync(root).isFile()) {
-        if (root.endsWith(".gguf")) return root;
-        continue;
-      }
-      const hit = fs.readdirSync(root, { withFileTypes: true })
-        .filter((d) => d.isFile() && d.name.endsWith(".gguf"))
-        .sort((a, b) => b.name.localeCompare(a.name))[0];
-      if (hit) return path.join(root, hit.name);
-    } catch {
-      // An unreadable cache directory is a normal outcome, not an error.
-    }
-  }
-  return null;
+  return resolveModelPath({ explicit: value("model"), env: process.env });
 }
 
 function printWarnings(warnings = []) {
@@ -170,6 +144,7 @@ async function cmdSizing() {
   const hardware = await detectHardware();
   const modelPath = findModel();
   const gguf = modelPath ? await readGGUFMetadata(modelPath) : { found: false };
+  if (gguf.found) gguf.fileSizeBytes = totalSplitBytes(modelPath);
 
   if (flag("check")) return sizingCheck(hardware, gguf);
 
