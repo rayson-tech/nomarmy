@@ -334,6 +334,30 @@ test("a repository with none of the recognised files returns valid empty evidenc
     assert.deepEqual(evidence[category], { items: [], truncated: false, total: 0 }, category);
   }
   assert.deepEqual(evidence, emptyEvidence(EMPTY_REPO));
+  assert.deepEqual(evidence.fixturePaths, []);
+});
+
+// ---------------------------------------------------------------------------
+// fixturePaths: sample data under a fixtures-style directory is labelled,
+// never silently reported as if it were the repo's own real infrastructure.
+// ---------------------------------------------------------------------------
+test("fixturePaths flags evidence found under a fixtures-style directory, without excluding it from the normal evidence categories", () => {
+  const evidence = scanRepository(here); // here = tests/, which contains fixtures/node-stack and fixtures/python-svc
+  assert.ok(evidence.fixturePaths.includes(path.join("fixtures", "node-stack", "compose.yaml")));
+  assert.ok(evidence.fixturePaths.includes(path.join("fixtures", "python-svc", "pyproject.toml")));
+  // Labelled, not excluded: the fixture's fake services still show up normally.
+  const apiService = evidence.services.items.find((s) => s.name === "api" && s.source === path.join("fixtures", "node-stack", "compose.yaml"));
+  assert.ok(apiService, "the fixture's own fake service is still reported as evidence, just flagged separately");
+  assert.ok(evidence.notes.items.some((n) => /looks like test fixture data/.test(n.message) && n.source === path.join("fixtures", "node-stack", "compose.yaml")));
+});
+
+test("fixturePaths does not flag a bare tests/ or __tests__/ path with no fixtures-style segment", () => {
+  // A repo's genuine test infrastructure (its own real docker-compose for an
+  // integration suite) can legitimately live directly under tests/ or
+  // __tests__/ with no "fixtures" segment -- that evidence must not be
+  // second-guessed just for living in a directory named "tests".
+  const evidence = scanRepository(NODE_STACK); // NODE_STACK itself has no "fixtures" segment in its own relative paths
+  assert.deepEqual(evidence.fixturePaths, []);
 });
 
 test("a missing directory is not an error", () => {
