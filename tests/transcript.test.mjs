@@ -72,6 +72,16 @@ test("estimateDisplacement: positive, marginal, negative and unknown, with the s
   assert.equal(unknown.displaced_tokens_est, null);
 });
 
+test("estimateDisplacement: deliveredChars of 0 with readChars > 0 returns note without null/NaN", () => {
+  const result = estimateDisplacement({ readChars: 400, deliveredChars: 0, charsPerToken: 4 });
+  assert.equal(result.verdict, "positive");
+  assert.equal(result.ratio, null);
+  assert.equal(result.displaced_tokens_est, 100);
+  assert.ok(!result.note.includes("null"), "note must not contain 'null'");
+  assert.ok(!result.note.includes("NaN"), "note must not contain 'NaN'");
+  assert.ok(result.note.includes("read content") || result.note.includes("displaced"), "note must describe the displacement");
+});
+
 test("findTranscriptDb / readOpenClawTranscript: absent state is reported, never fabricated", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-transcript-"));
   try {
