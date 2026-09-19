@@ -12,222 +12,40 @@
 
 **An agent harness where the worker's claims are never trusted, and the environment your tests actually need is declared, disposable and reproducible.**
 
-A frontier coordinator decides *what* should be built and whether the result is acceptable. A cheap worker — a *nom* — does the implementing, testing and repairing. nomArmy owns everything in between: worktrees, Git, environments, verification, and the evidence that decides whether work is accepted.
+A frontier coordinator (Claude Code, Codex) decides *what* should be built and whether the result is acceptable. A cheap worker — a *nom* — does the implementing, testing and repairing, usually on a local model running on your own machine at zero token cost. nomArmy owns everything in between: worktrees, Git, environments, verification, and the evidence that decides whether work is accepted.
 
 Developed and maintained by Rayson Technologies.
 
-## Quick start
+## New to local LLMs? Read this first
 
-Pick your host, then follow that link. Each path ends the same way: a passing local end-to-end test.
+A handful of terms come up constantly below. If a later section assumes you know one of these, come back here.
 
-| Host | Use when | Guide |
-|---|---|---|
-| macOS (Apple Silicon) | You have a Mac with an M-series chip | [macOS](#macos-apple-silicon-clean-e2e) |
-| Windows | You're on Windows | [Windows](#windows) |
-| Linux | Ubuntu/Debian/Fedora/Arch/etc., with or without an NVIDIA GPU | [Linux](#linux) |
-| NVIDIA DGX Spark | You're setting up a Spark as a dedicated worker host | [DGX Spark](#dgx-spark-clean-e2e) |
-| Cloud (no GPU needed) | You'd rather not run local inference at all | [Bedrock](#bedrock-clean-e2e) |
-
-All of them need Git and Podman; the local profiles also need enough memory to hold the model. Run `nomarmy doctor` any time to check a host's readiness with a fix for whatever's missing — see [The `nomarmy` CLI](#the-nomarmy-cli).
-
-## The thesis
-
-> Use scarce frontier intelligence for intent, decomposition, architecture and judgment. Use abundant worker intelligence for repository exploration, implementation, testing, repair loops and verification.
-
-That is a hypothesis, not a claim. nomArmy exists to test it, and the project measures whether it holds rather than assuming it. The number that matters is **cost and wall-clock per accepted task**, plus how often a human has to step in — not tokens displaced.
-
-## The invariant
-
-**Worker output is a claim. Repository and environment state are evidence.**
-
-Everything else follows from that one line. The worker never runs Git. It cannot commit, merge, or mark its own work accepted. It writes a four-line report, and nomArmy independently derives every fact that matters — what changed, what was added, whether the tests actually pass — from the repository itself. A worker that says `done` and a repository that disagrees is a failed job.
-
-A malformed or truncated report is not automatically a failure either: if the repository changed, nomArmy verifies independently and may recover the work. **Failing verification stays failed**, the worktree is retained, and no recovery path can launder it into an accepted job.
-
-### Scouts: the same invariant for reading
-
-Not every job is an edit. The frontier's most expensive habit is reading: every file it opens stays in its context until compaction, and most of what it reads is answering a question rather than making a change. A **scout** is a nom that reads and never writes. It gets a question, a detached snapshot of the base commit, and no permission to modify anything. It hands back findings.
-
-The problem is that a scout's claim *is* the deliverable — there is no Git record to check it against, and if the coordinator re-reads everything to verify the answer, the saving is gone. So the scout contract makes citations mandatory and mechanically checkable:
-
-- every `FINDING` must carry `[path:start-end]`;
-- nomArmy resolves each citation against the exact commit the scout read, through Git, not through the worktree — a scout that edits its snapshot cannot forge evidence;
-- the cited lines are attached to the finding, so the coordinator reads claim and evidence side by side without opening the file;
-- a finding with no resolvable citation is not passed through as a fact. It is listed separately as hearsay.
-
-`CONFIDENCE` is recorded as the scout's own estimate and labelled that way. A citation that names a real file but no readable lines counts as weak evidence, and a report made only of those is `SCOUT_WEAK` and goes to review rather than being called complete. A scout that writes to its snapshot gets `SCOUT_TAINTED`, a retained worktree, and a banner. See `policies/scout.md`.
-
-The first live scout run, a 4B model on a CPU-only laptop, produced a perfectly shaped report in about twelve minutes — and cited the documentation instead of the code, with the citation template copied literally as `[path:AGENTS.md:start-55]`. The gate held: zero findings verified as lines read. The second run, with concrete example citations in the brief, cited real line ranges that resolved — and the attached lines were about delegation while the findings were about commit gates. Resolution is not support. So the verifier now also checks whether the cited lines mention any of the finding's distinctive terms; a finding whose citations share no term with it is labelled weak, and a report made only of those is `SCOUT_WEAK`. Heuristic, and labelled as such. That is the same lesson as the implement run above, in a cheaper form.
-
-The third run had the evidence tool in its sandbox. The same 4B model ran `references commit` and `definitions createCoordinatorCommit`, cited real code lines that all resolved, and got the mechanics right — where the commit is made, what blocks it at that point. It also credited the wrong function with the decision, and the relatedness check flagged that finding because its cited line said nothing about it. Fifteen minutes; the coordinator calling the tool directly answered the same question better in under a second and about 530 tokens.
-
-**Most scout questions are not questions for a model.** Where is X defined, who calls it, what does this file declare, which files match this pattern — those are deterministic, and `repo_evidence` answers them from the files in milliseconds with a citation on every hit. The coordinator gets it as an MCP tool; a scout gets the same script inside its sandbox, so its job shrinks to choosing queries and copying real locations, which is the thing a small model does reliably. Every scout job also reports an estimated displacement: repository content the scout read, against the size of what the coordinator received instead, with harness chatter excluded — and says plainly when the number is negative.
-
-Scouts win on breadth, not depth. "Read every test file and list which ones start Docker" is a scout task; a single grep is not. On CPU-only hardware a scout is slower than the frontier doing the lookup itself, so the break-even is a measurement, not a given.
-
-### What that looks like in practice
-
-A real job, run against this repository: *add a `doctor` command to the CLI, with tests.* The worker was a 20B local model. It produced 156 lines that look like competent engineering — JSDoc throughout, pure exported check functions, a distinct remediation message per failed check, `--json` support, logic placed in `lib/` to match the repo's existing layout.
-
-It had six defects:
-
-- an unterminated template literal, so **the file did not parse at all**
-- `process.env.PATH || os.platform() === "win32" ? a : b` — `||` binds tighter than `?:`, so on Linux and macOS it silently searched an empty string and found nothing
-- executable probing that appended only `.exe`, missing `.cmd` and `.bat`
-- output that printed "All checks passed." unconditionally, then appended "Some checks failed."
-- checks against `NOMARMY_MODEL_ENDPOINT`, a variable that **does not exist in this project** — it never read the configuration it claimed to validate
-- no test file, despite an explicit acceptance criterion
-
-A reviewer skimming that diff would plausibly approve it. It has the shape of good code, and every defect is invisible without executing it: a missing backtick, an operator-precedence subtlety, a fabricated environment variable.
-
-nomArmy committed nothing. The record reads:
-
-```
-outcome           WORKER_TIMEOUT
-coordinatorStatus incomplete
-commit.created    false
-worktree          retained
-gate              {satisfied: false, reason: "no report parsed"}
-testChanges       prod: [bin/nomarmy.mjs, lib/doctor.mjs]   newTests: []
-```
-
-Note the last line: production files changed, zero tests added. That is derived from the repository, not from anything the worker said about itself.
-
-This is the entire argument for the design. A review process based on reading the diff fails here. One based on executing it does not.
-
-## Status
-
-nomArmy v1.2 is proven: bounded delegation, isolated worktrees, coordinator-owned Git, retained failed worktrees. v1.3 is in development and extends it toward autonomous workers with real execution environments. Honest state of play:
-
-| Capability | Status |
+| Term | What it means here |
 |---|---|
-| Bounded delegation, coordinator-owned Git, retained worktrees | Working, E2E tested |
-| Local (llama.cpp) and Amazon Bedrock execution profiles | Working |
-| `nomarmy doctor` — host readiness with a fix for every failure | Working, verified on a real host |
-| Hardware detection and nom sizing | Working, calibrated against a real OOM |
-| Objective + acceptance-criteria briefs, compact worker contract | Built, unit tested |
-| Truncated-report recovery, test-change classification, metrics | Built, unit tested |
-| `.nomarmy.yml` environment contract — schema, loader, validator | Built, unit tested |
-| Deterministic environment scanner and evidence normalizer | Built, unit tested |
-| Sandboxed independent verification | Built, unit tested |
-| Scout mode — read-only noms with verified, expanded citations | Built, unit tested; not yet run against a live model |
-| Background jobs with status polling; memory-pressure admission and context-derived brief/report budgets | Built, unit tested |
-| Real worker dispatch against a local model | Run — 6 jobs, 6 correct rejections, 0 accepted |
-| Disposable per-job service environments (Postgres, mocks, app) | Not built |
-| Nom-local browser/E2E and the autonomous repair loop | Not built |
-| Fresh integrated PR-gate environment | Not built |
-| Full-stack acceptance test proving the thesis end to end | **Not yet run** |
+| **GGUF** | The file format `llama.cpp` loads a model from — one file (or a few numbered shards) per model. |
+| **Quantization** (e.g. `Q4_K_M`) | A compressed version of a model's weights. Smaller quantizations use less RAM/VRAM and run faster, at some cost to output quality. `Q4_K_M` is a solid default; it's what nomArmy downloads out of the box. |
+| **Context window** | The total number of tokens (roughly, chunks of text) a model can hold at once: your prompt *plus* everything it reads *plus* everything it writes, all sharing one fixed budget. It's a hard ceiling, not a soft guideline — more of one leaves less room for the others. |
+| **llama.cpp / llama-server** | The open-source engine nomArmy uses to run a local GGUF model and serve it over an OpenAI-compatible HTTP API, the same API shape hosted providers use. |
+| **Sandbox** | An isolated container (Podman here, not Docker) that a worker's file/shell tool calls run inside — no network, no host credentials, nothing outside the one task it was given. |
+| **A "nom"** | nomArmy's own term for one worker: a job dispatched to a local (or hosted) model, running in its own disposable Git worktree. |
 
-"Built, unit tested" means the logic is covered by tests; it does not mean it has survived a live worker on a real ticket. The dispatch row is the one worth dwelling on: six jobs have run against a local model and the gate rejected every one — correctly, including a worker that returned confident, well-structured, unparseable code. That demonstrates the gate works. It does not yet demonstrate that a cheap worker can pass it, and the last row remains open.
+## Install
 
-Known limitations worth knowing up front: the Compose parser does not resolve YAML anchors, aliases or merge keys — affected findings are dropped with an explicit note rather than guessed at. Verification profiles requiring services beyond `environment: none` currently report `not_run` rather than running commands without their dependencies.
+Pick your platform. Each path ends the same way: a passing local end-to-end test that proves inference, the sandbox, and the trust boundary all actually work together on your machine.
 
-On performance: a CPU-only host runs this honestly but slowly — measured at ~3.8 tok/s generation on a 20-core i7 with an 11.3 GiB MoE model, which works out to roughly 11 minutes for two assistant turns. Use a GPU or a hosted profile for interactive work; see [Speed matters more than fit](#speed-matters-more-than-fit).
-
-## The MCP tools
-
-The coordinator drives nomArmy through the `nomarmy-local-worker` MCP server. Every job takes the same brief: a `task` (an objective for `implement`, a question for `scout`), optional `acceptance` items, a `mode`, and a timeout.
-
-| Tool | What it does |
+| Platform | Guide |
 |---|---|
-| `local_worker` | Run one job and wait for it. Blocks the coordinator for the duration. |
-| `local_worker_start` | Start one job in the background and return a `job_id` immediately. |
-| `local_worker_status` | Phase, elapsed time against the timeout, and the result once finished. `wait_seconds` long-polls; `full=true` returns the complete report. |
-| `local_worker_capacity` | Context per nom, the brief and report budgets derived from it, memory pressure, and what is running. Read-only. |
-| `repo_evidence` | Deterministic repository evidence with an exact `[path:line]` on every hit: definitions, references, outline, grep, files. No model, no sandbox, milliseconds. Use it before a scout and instead of one for anything it can answer. |
-| `local_workers` | Run a batch with bounded parallelism and wait for all of them. Never merges. |
-| `local_worker_jobs` | Recent job records, including jobs still running or orphaned by a server restart. |
-| `local_worker_cleanup` | Remove a retained worktree after review. Refuses to delete the current branch. |
+| macOS (Apple Silicon) | [macOS](#macos-apple-silicon) |
+| Linux (with or without an NVIDIA GPU) | [Linux](#linux) |
+| Windows | [Windows](#windows) |
+| NVIDIA DGX Spark | [DGX Spark](#dgx-spark) |
+| No GPU / don't want local inference | [Cloud (Bedrock)](#cloud-bedrock) |
 
-The phases a poller sees — `starting`, `worktree`, `worker`, `verification`, `commit`, `record`, `finished` — are the ones nomArmy itself passes through. Inside the `worker` phase the only honest signal is elapsed time, and the status says so rather than inventing a percentage.
+Every platform needs Git and Podman; local (non-cloud) platforms also need enough memory to hold the model. `nomarmy doctor` checks a host's readiness and prints a fix for anything missing — see [The `nomarmy` CLI](#the-nomarmy-cli) below; you'll have it on PATH after the first step of any guide.
 
-**Admission.** Every job, blocking or backgrounded, passes the same check before anything starts. Two resources, two rules, deliberately not conflated:
+### macOS (Apple Silicon)
 
-- *Context per nom bounds text.* The brief ceiling, the report caps, and a scout's finding and excerpt budgets are derived from the context one nom actually has — from the loaded profile, or from the running llama-server's own `/props`. A smaller context means a shorter brief, not a bigger prompt into a model that cannot hold it. `nomarmy sizing` prints the budgets for its recommendation; `local_worker_capacity` prints the live ones.
-- *Free memory bounds admission.* Starting one more job adds a sandbox container and an OpenClaw process, never a second copy of the model. If the machine cannot hold that right now, or `NOMARMY_MAX_WORKERS` jobs are already running, the job is refused with the reason and the current capacity, and nothing is started. nomArmy does not shrink the brief and hope.
-
-## Security posture
-
-The worker gets a writable worktree and nothing else. No Podman socket, no host credentials, no coordinator state, no arbitrary host ports, and no unrestricted network. Repository content is untrusted input: a file in the repo cannot talk a worker into escaping its brief.
-
-Environment configuration is **data to validate, not authority**. The scanner is deterministic and never executes anything it discovers. An LLM may later propose a `.nomarmy.yml` from bounded scan evidence, but that proposal is schema-validated and independently probed before anything runs. Verification commands execute inside the sandbox, never on the host — if the sandbox is unavailable, verification reports `not_run` rather than falling back.
-
-## What `install.sh` provisions
-
-`install.sh` installs/builds or configures the worker stack:
-
-- llama.cpp from the official `ggml-org/llama.cpp` repository
-- Metal build on Apple Silicon macOS
-- CUDA build on NVIDIA Linux / DGX Spark class machines
-- Qwen3-Coder-Next GGUF (`Q4_K_M` default), downloaded by llama.cpp from the official Qwen Hugging Face repository on first start
-- an OpenAI-compatible `llama-server` with stable alias `qwen3-coder-next`
-- OpenClaw when absent, plus its official llama.cpp provider plugin
-- OpenClaw connection to the local llama-server
-- hardened Podman coding sandbox (no network, no elevated host execution)
-- on a Bedrock profile: no local build at all — workers and coordinator are hosted
-- the nomArmy MCP server, registered with Claude Code when it is installed
-- the `nomarmy` CLI, with its dependencies installed and linked onto your PATH
-- platform profiles, nom sizing, and E2E verification
-
-**Why Podman, not Docker.** Docker Desktop requires a paid commercial license once an organization passes about 250 employees or $10M revenue; Podman is Apache-2.0 with no commercial tier at any size, on any OS. It is also lighter: on the machine this was measured on, Podman's VM ran with a 2 GiB memory ceiling against Docker Desktop's 31.2 GiB for the equivalent job. The sandbox is only ever used for a job's file/shell tool calls — model inference runs on the host (or remotely, on Bedrock) and was never inside it — so the switch changes nothing about GPU access or model performance. One real behavioral difference: on macOS, Podman Machine only allows bind-mounting paths under the host's home directory, a path under `/tmp` is rejected outright. This does not affect nomArmy's own job directories, already under `~/.local/share/nomarmy-local-agents`, but matters if you point `NOMARMY_AGENT_INSTALL_DIR` or similar somewhere else.
-
-It intentionally does **not** install or authenticate Claude Code. Claude credentials are a user/organization concern. A DGX worker can therefore be provisioned with `--no-claude`, while a machine that will run the Claude coordinator can register the MCP locally.
-
-## Profiles
-
-- `macbook-pro`: Apple Silicon / Metal, 64K active llama context, one inference slot, one worker.
-- `dgx-spark`: NVIDIA Linux ARM64 / CUDA, 64K active llama context, two inference slots, two workers initially.
-- `nvidia-linux`: generic NVIDIA Linux/CUDA, conservative 32K/one-worker defaults.
-- `cpu-linux`: generic Linux without CUDA. This is the portable fallback and uses a smaller 16K context.
-
-All values live in `config/common.env` and `config/profiles/*.env`. Hardware tuning is configuration, not coordinator code. Run `nomarmy sizing` before trusting any of these defaults on your actual machine — see [Sizing noms](#sizing-noms).
-
-### Cloud profiles
-
-- `bedrock`: workers and orchestrator both served from Amazon Bedrock. No local inference, so this profile carries no GPU or OS requirement and is the only one that runs on a machine without a GPU. Workers run `qwen.qwen3-coder-next` — the same model the local profiles run, which makes local vs hosted a clean A/B rather than a model swap. The orchestrator is Claude Opus 5, so the coordinator still outranks the workers it reviews.
-- `bedrock-cheap`: same workers, but the orchestrator is the same open-weight model. **Degraded acceptance** — see `policies/reviewer.md` before using it.
-
-Local profiles cost nothing per token and are capped by VRAM. Bedrock profiles are capped by TPM quota and budget, so `NOMARMY_MAX_WORKERS` above 1 is reachable. Measure first-pass accept rate before raising it: coordinator review tokens dominate worker tokens, so a cheaper worker that fails the gate more often is not cheaper.
-
-Cloud profiles send repository content off the machine. That is the decision to weigh, not the engineering.
-
-## The `nomarmy` CLI
-
-`install.sh` installs the repository's dependencies and links `nomarmy` onto your PATH. If you only want the CLI — to inspect a repository or size a machine before committing to a full install — that part stands alone:
-
-```bash
-git clone https://github.com/rayson-tech/nomarmy.git
-cd nomarmy
-npm install
-npm link          # optional; puts `nomarmy` on PATH
-```
-
-Without `npm link`, every command works the same way run directly:
-
-```bash
-node bin/nomarmy.mjs doctor
-```
-
-`npm install` is not optional. The CLI imports from `lib/`, which has real dependencies, so a fresh clone cannot run any command until they are present.
-
-| Command | What it does |
-|---|---|
-| `nomarmy doctor` | Checks this host is ready to run nomArmy and prints a fix for anything missing. Start here. |
-| `nomarmy sizing` | Recommends context and nom count from your hardware and the model's own GGUF metadata, and prints the brief and report budgets a nom at that context can carry. `--check` evaluates the profile you already have. |
-| `nomarmy scan` | Reports a repository's execution environment from deterministic evidence. `--check` compares it against a committed `.nomarmy.yml`. |
-| `nomarmy validate` | Validates `.nomarmy.yml` against the schema and flags services needing explicit policy approval. |
-
-Every command takes `--json` for machine-readable output, and `--repo <dir>` to target a repository other than the working directory.
-
-None of them change anything. `scan` never executes what it discovers, `sizing` never writes a profile, and `doctor` never installs anything — they report and propose, and you apply what you agree with.
-
-## Platform guides
-
-Native support is macOS (Apple Silicon) and Linux. Windows runs nomArmy through WSL2. Each guide below ends with a passing `./e2e.sh` run.
-
-### macOS (Apple Silicon): clean E2E
-
-Prerequisites: Apple Silicon macOS, Homebrew, Podman running (`podman machine start`), Git, Internet access for installation/model download. The reference path expects enough unified memory for the selected Q4_K_M model and context.
+Prerequisites: Homebrew, Podman running (`podman machine start`), Git, internet access for the install and model download.
 
 ```bash
 git clone https://github.com/rayson-tech/nomarmy.git
@@ -237,11 +55,7 @@ chmod +x install.sh e2e.sh scripts/*.sh
 ./e2e.sh --profile macbook-pro
 ```
 
-`install.sh` builds llama.cpp with Metal, installs/configures OpenClaw, starts Qwen, builds the Podman sandbox, and installs the MCP if `claude` is already available.
-
-The E2E test creates a disposable Git repository containing an intentionally broken JavaScript function, asks Qwen through OpenClaw to diagnose/fix it and run the named test, then independently runs the test and checks that the repository actually changed and the worker emitted the required report contract.
-
-Expected end:
+`install.sh` builds llama.cpp with Metal, installs and configures OpenClaw, starts the model, builds the Podman sandbox, and registers the MCP server if Claude Code is already installed. Expected end of `e2e.sh`:
 
 ```text
 PASS inference health
@@ -251,62 +65,26 @@ PASS autonomous edit + verification
 === E2E PASS ===
 ```
 
-If Claude Code is installed, verify the final coordinator connection with:
+If Claude Code is installed, confirm the connection:
 
 ```bash
 claude mcp get nomarmy-local-worker
 ```
 
-Then copy/merge this package's `CLAUDE.md` into a real repository, start `claude` from that repo, run `/mcp`, and delegate one bounded implementation ticket before increasing worker count.
+Then copy/merge this repo's `CLAUDE.md` into a real project, start `claude` from that project, run `/mcp`, and delegate one small bounded ticket before increasing worker count.
 
-**OpenClaw local-provider authentication.** OpenClaw requires an auth profile even when the llama.cpp server is running only on `127.0.0.1` and accepts requests without a key. `scripts/configure-openclaw.sh` creates a local-only placeholder profile (`llama-cpp:nomarmy-local`); it is not a cloud credential or a secret. The profile lets OpenClaw pass provider configuration into the isolated agent used by `e2e.sh`.
-
-If E2E reports `No API key found for provider "llama-cpp"`, rerun the configuration step, then rerun E2E:
+**If `e2e.sh` says `No API key found for provider "llama-cpp"`:** OpenClaw needs an auth profile even though the local server takes no key. Rerun the config step:
 
 ```bash
 ./scripts/configure-openclaw.sh macbook-pro
 ./e2e.sh --profile macbook-pro
 ```
 
-### Windows
-
-`install.sh` does not run natively on Windows (`.sh` scripts, Podman sandboxing, and llama.cpp's build tooling all assume a POSIX host). Three real options, roughly in the order most people should try them:
-
-1. **WSL2, with Podman installed inside the distro (supported path).** Install a Linux distribution under WSL2, install Podman *inside* that distro exactly as in the [Linux](#linux) guide, then follow the rest of that guide entirely inside the distribution. Nothing is required on the Windows host itself — no Docker Desktop, no host-side licensing exposure, since the sandbox is entirely contained within the WSL2 Linux environment.
-
-   One trap: WSL2 defaults to ~50% of host RAM, shared across every distro. On a 32 GB machine that caps the model at ~16 GB. Raise the limit in `%UserProfile%\.wslconfig`, then run `wsl --shutdown` — this restarts every running container, so do it before you start inference, not after.
-
-   A second trap: every job gets its own worktree under the state directory, so every repository path grows by that prefix. Without `git config --global core.longpaths true`, a repository with a deep tree fails at `git worktree add` with `Filename too long`. `nomarmy doctor` checks for this on Windows.
-
-2. **Native Windows llama.cpp, built from source, with nomArmy pointed at it.** Gets the full host RAM instead of WSL2's slice, at the cost of building llama.cpp yourself. Needs a C++ toolchain:
-
-   ```powershell
-   winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
-   ```
-
-   Prebuilt llama.cpp Windows binaries are not a reliable shortcut: on some CPUs every compute backend crashes at startup (access violation) while non-compute binaries run fine, because of dynamic backend loading. Build statically instead — these flags are verified working:
-
-   ```powershell
-   cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_BACKEND_DL=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=ON -DLLAMA_CURL=OFF
-   ```
-
-   `GGML_BACKEND_DL=OFF` is the flag that matters: it links the CPU backend in rather than probing for it at runtime.
-
-3. **Skip local inference entirely and run workers on Bedrock:**
-
-   ```bash
-   ./install.sh --profile bedrock
-   ```
-
-   See [Bedrock: clean E2E](#bedrock-clean-e2e).
-
-Whichever you're leaning toward, run `nomarmy sizing` first (see [The `nomarmy` CLI](#the-nomarmy-cli)) — it reports which of these your actual hardware can support before you commit to one.
-
 ### Linux
 
-The installer detects Ubuntu/Debian (`apt`), Fedora/RHEL (`dnf` or `yum`), openSUSE (`zypper`), Arch (`pacman`), and Alpine (`apk`), then installs the C++ build toolchain, CMake, Git, curl, Node.js, and npm when missing. Podman is a deliberate prerequisite: install it before running the installer (`apt install podman`, `dnf install podman`, `zypper install podman`, `pacman -S podman`, or `apk add podman`, depending on your distro). Unlike Docker, Podman needs no separate daemon on Linux and can run fully rootless.
+The installer detects Ubuntu/Debian, Fedora/RHEL, openSUSE, Arch and Alpine and installs the C++ toolchain, CMake, Git, curl, Node and npm when missing. Install Podman yourself first (`apt install podman`, `dnf install podman`, `zypper install podman`, `pacman -S podman`, or `apk add podman`) — it's a deliberate prerequisite, not something the installer does for you.
 
-On a Linux system **without** an NVIDIA GPU, use the CPU profile — this is the portable fallback, with a smaller 16K context to match:
+**No NVIDIA GPU** — the portable fallback, smaller 16K context to match:
 
 ```bash
 git clone https://github.com/rayson-tech/nomarmy.git
@@ -316,20 +94,38 @@ chmod +x install.sh e2e.sh scripts/*.sh
 ./e2e.sh --profile cpu-linux
 ```
 
-On a Linux system **with** an NVIDIA GPU (an RTX workstation, a GB10 OEM system, or similar — not a DGX Spark, which has its own profile below):
+**With an NVIDIA GPU** (a workstation RTX card, a GB10-class OEM box — not a DGX Spark, which has its own profile below):
 
 ```bash
 ./install.sh --profile nvidia-linux --no-claude
 ./e2e.sh --profile nvidia-linux
 ```
 
-Copy `config/profiles/nvidia-linux.env` to a new profile when a machine needs different context, thread, or parallel-worker settings.
+Copy `config/profiles/nvidia-linux.env` to a new profile file if your machine needs different context/thread/worker settings.
 
-CPU-only Linux is viable but slow for interactive use — read [Speed matters more than fit](#speed-matters-more-than-fit) before you plan around it.
+CPU-only Linux works but is genuinely slow for interactive use — read [Speed matters more than fit](#speed-matters-more-than-fit) before planning around it.
 
-### DGX Spark: clean E2E
+### Windows
 
-The DGX Spark profile assumes Linux ARM64, NVIDIA drivers/CUDA toolkit, Podman, Git, Internet access for initial installation/model download, and `sudo` for missing build packages. NVIDIA lists DGX Spark as a Grace Blackwell system with a 20-core Arm CPU and 128 GB coherent unified memory; nomArmy therefore does not assume x86_64 binaries.
+`install.sh` doesn't run natively on Windows. Three real options, roughly in the order most people should try them:
+
+1. **WSL2, with Podman installed inside the distro (the supported path).** Install a Linux distro under WSL2, install Podman *inside* it exactly as in the [Linux](#linux) guide above, then run that guide entirely inside the distro. Nothing is needed on the Windows host itself.
+
+   Two traps: WSL2 defaults to ~50% of host RAM shared across every distro (raise it in `%UserProfile%\.wslconfig`, then `wsl --shutdown` — this restarts every running container, so do it *before* starting inference). And a repo with a deep tree can fail `git worktree add` with `Filename too long` unless you set `git config --global core.longpaths true` — `nomarmy doctor` checks for this on Windows.
+
+2. **Native Windows llama.cpp, built from source.** Uses the full host RAM instead of WSL2's slice, at the cost of building llama.cpp yourself with a C++ toolchain. Prebuilt Windows binaries are not a safe shortcut (some CPUs crash every compute backend at startup); build statically:
+   ```powershell
+   winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+   cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_BACKEND_DL=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=ON -DLLAMA_CURL=OFF
+   ```
+
+3. **Skip local inference and run on Bedrock:** `./install.sh --profile bedrock` — see [Cloud (Bedrock)](#cloud-bedrock).
+
+Unsure which? Run `nomarmy sizing` first — it reports which of these your actual hardware can support.
+
+### DGX Spark
+
+Assumes Linux ARM64, NVIDIA drivers/CUDA, Podman, Git, internet access, and `sudo` for missing build packages.
 
 ```bash
 git clone https://github.com/rayson-tech/nomarmy.git
@@ -339,22 +135,18 @@ chmod +x install.sh e2e.sh scripts/*.sh
 ./e2e.sh --profile dgx-spark
 ```
 
-That validates the Spark as a self-contained local worker host. If you also install/authenticate Claude Code on the Spark, rerun:
+If you also install Claude Code on the Spark itself:
 
 ```bash
 ./scripts/setup-claude-worker.sh
 ./scripts/verify-install.sh dgx-spark
 ```
 
-and use Claude there exactly as on the Mac.
+**Moving from a Mac install:** don't copy a Mac binary or model cache over. The repo is the deployment unit — clone fresh, select `dgx-spark`, and let `install.sh` build CUDA-native llama.cpp on that host.
 
-**Moving from Mac to Spark.** The repository is the deployment unit. Do not copy a Mac llama.cpp binary or a Mac model runtime directory to the Spark. Clone the repo, select `dgx-spark`, and let `install.sh` build CUDA-native llama.cpp and fetch/cache the model on that host. The coordinator/MCP code is the same on both platforms, so a successful Mac E2E validates agent behavior and packaging, while a successful Spark E2E separately validates CUDA/runtime behavior on the target hardware.
+### Cloud (Bedrock)
 
-### Bedrock: clean E2E
-
-No GPU, no local build — the option to reach for on Windows, on underpowered hardware, or whenever you'd rather not run inference locally at all.
-
-Enable the Anthropic and Qwen models you intend to use in the Bedrock console first, then:
+No GPU, no local build — reach for this on Windows, on underpowered hardware, or whenever you'd rather not run inference locally.
 
 ```bash
 export AWS_BEARER_TOKEN_BEDROCK=...        # or configure an AWS profile
@@ -362,52 +154,95 @@ export AWS_BEARER_TOKEN_BEDROCK=...        # or configure an AWS profile
 ./e2e.sh --profile bedrock
 ```
 
-`install.sh` skips the llama.cpp build entirely on a cloud profile, configures the Podman sandbox before storing any credential, and points OpenClaw at `https://bedrock-runtime.<region>.amazonaws.com/openai/v1`.
+Enable the Anthropic and Qwen models you intend to use in the Bedrock console first. `NOMARMY_BEDROCK_REGION` (in `config/profiles/bedrock.env`) is a data-residency decision as much as a latency one.
 
-Region is a profile variable, not a constant. Set `NOMARMY_BEDROCK_REGION` in `config/profiles/bedrock.env`; it is validated at load, and `scripts/verify-install.sh` confirms each worker model is actually listed in that region before you hit it in a job. Region is also a data-residency decision, not only a latency one.
-
-To point the orchestrator at Bedrock:
+To point the *orchestrator* (Claude Code itself) at Bedrock too:
 
 ```bash
 ./scripts/configure-orchestrator.sh bedrock           # print the settings
 ./scripts/configure-orchestrator.sh bedrock --apply   # write them to Claude Code
 ```
 
-`--apply` merges into the `env` block of `~/.claude/settings.json` and keeps a timestamped backup. Restart Claude Code and run `/status` to confirm the provider and region. Prompt caching is supported on Bedrock and is the single biggest lever on coordinator spend — leave it on. Note that the WebSearch tool is unavailable when Claude Code runs on Bedrock.
+`bedrock-cheap` runs the orchestrator on the same open-weight model as the workers — real cost savings, but a materially weaker guarantee. See [How nomArmy works](#how-nomarmy-works-and-why) and `policies/reviewer.md` before using it.
 
-**Degraded acceptance.** `bedrock-cheap` runs the orchestrator on the same open-weight model as the workers. The mechanical gates still hold — report shape, commit presence, worktree pointer integrity, and `STATUS: done` requiring `TESTS: pass` are all verified against Git by the MCP coordinator regardless of model. What stops working is judgement: a plausible-looking wrong diff, a test that passes for the wrong reason, a regression test that does not pin what it claims.
+## Configuration
 
-Every job record under this profile carries `execution.orchestratorTrust: "degraded"` and prints a banner. `policies/reviewer.md` lists what is and is not permitted.
+### Where settings live
 
-## Codex support
+- **`config/common.env`** — defaults shared by every profile: which model, host/port, execution layer.
+- **`config/profiles/<name>.env`** — per-machine overrides: context size, GPU layers, thread count, worker count. Every script in this repo loads one via `source scripts/lib.sh && load_profile <name>`.
+- **A variable already exported in your shell** wins over both of the above.
 
-Codex uses `AGENTS.md` for repository guidance. This package includes it alongside `CLAUDE.md` so both coordinators follow the same trust boundary and integration rules.
+Every variable is declared with an explanatory comment right next to it in `config/common.env` and whichever profile file you're using — that's the actual source of truth. The table below is an index, not a replacement for reading those two files.
 
-When the `codex` command is available, `install.sh` also registers the nomArmy MCP server. To register it later, run:
+### The settings you'll actually touch
+
+| Variable | Lives in | Default | Controls |
+|---|---|---|---|
+| `NOMARMY_WORKER_MODEL` | common.env | `qwen3-coder-next` | Which model runs implement/scout/decompose jobs |
+| `NOMARMY_MODEL_REPO` | common.env | `Qwen/Qwen3-Coder-Next-GGUF` | Hugging Face repo the GGUF is downloaded from |
+| `NOMARMY_MODEL_QUANT` | common.env | `Q4_K_M` | Which quantization to download |
+| `NOMARMY_LLAMA_CONTEXT` | profile | `65536` (varies by profile) | **Total** context across every inference slot |
+| `NOMARMY_LLAMA_PARALLEL` | profile | `1` | Inference slots — total context is divided across these |
+| `NOMARMY_MAX_WORKERS` | profile | `1` | How many jobs the coordinator runs at once |
+| `NOMARMY_WORKER_MAX_TOKENS` | unset by default | 12% of context, model-scaled | Max tokens a worker may generate in a single turn before being cut off |
+| `NOMARMY_EXECUTION` | common.env / profile | `local` | `local` (llama-server on this machine) or `bedrock` (hosted) |
+| `NOMARMY_ORCHESTRATOR_TRUST` | common.env | `frontier` | `frontier` (coordinator outranks workers) or `degraded` (same capability class — see `policies/reviewer.md`) |
+
+**The one coupling that trips people up:** `NOMARMY_LLAMA_CONTEXT` is divided by `NOMARMY_LLAMA_PARALLEL`, not handed to each slot whole. `65536` with `2` parallel slots gives each nom `32768`, not `65536`. Size by *context per nom* and multiply up, never the reverse. See [Sizing noms](#sizing-noms) for the full picture, and don't set `NOMARMY_MAX_WORKERS` above `NOMARMY_LLAMA_PARALLEL` on a local profile — the extra workers don't run in parallel, they queue for a slot while each still holds a Podman sandbox.
+
+A config change needs a restart to take effect: `./scripts/stop-inference.sh && ./scripts/start-inference.sh <profile>`. Nothing here writes automatically — `nomarmy sizing`/`nomarmy scan` propose, they never provision.
+
+### Swapping models
+
+nomArmy runs any GGUF-format model llama.cpp can load, not only the bundled Qwen default, via llama.cpp's own Hugging Face integration:
 
 ```bash
-./scripts/setup-codex-worker.sh
-codex mcp list
+./scripts/select-model.sh nemotron
 ```
 
-The Codex desktop app, CLI, and IDE extension share this local MCP configuration. In Codex, use `/mcp` to confirm that `nomarmy-local-worker` is available.
-
-## Configuration naming
-
-Configuration variables are `NOMARMY_*`. Anything still exported as `RAYSON_*` is translated once at profile load with a deprecation warning, so existing installs and unit files keep working. The MCP server itself is registered as `nomarmy-local-worker`.
-
-## Starting/stopping inference
+This searches Hugging Face, lists the GGUF quantizations available for whatever you pick, and asks you to confirm before writing anything. To skip the search when you already know the repo:
 
 ```bash
-./scripts/start-inference.sh macbook-pro   # or dgx-spark
-./scripts/stop-inference.sh macbook-pro
+./scripts/select-model.sh --repo nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF
 ```
 
-Logs are under `$HOME/.local/share/nomarmy-local-agents/logs/`.
+It only updates `config/common.env`, and only after you answer `y` — nothing downloads until you restart inference:
+
+```bash
+./scripts/stop-inference.sh
+./scripts/start-inference.sh macbook-pro   # or whichever profile you use
+```
+
+The model itself downloads and caches on that first start. Two things worth knowing: the target repo must actually contain GGUF files (a base-model repo with only PyTorch/safetensors weights won't run here), and a gated repo needs you to accept its license on huggingface.co and authenticate locally before the download will succeed.
+
+## The `nomarmy` CLI
+
+**Is there an `npm install nomarmy`?** No. The package is marked `"private": true` and is not published to the npm registry — there's nothing to `npm install -g nomarmy` from anywhere. What you get instead: clone the repo, then `npm install && npm link` inside it (the installer already does this for you as part of `install.sh`). There's also no single `nomarmy init` wizard the way some mature CLIs have one; setup is the sequence of scripts in [Install](#install) above, and the CLI itself is a small set of read-only inspection commands, not a project scaffolder.
+
+If you only want the CLI — to size a machine or inspect a repo before committing to a full install — it stands alone:
+
+```bash
+git clone https://github.com/rayson-tech/nomarmy.git
+cd nomarmy
+npm install
+npm link          # optional; puts `nomarmy` on PATH
+```
+
+Without `npm link`, every command works the same run directly: `node bin/nomarmy.mjs doctor`. `npm install` itself is not optional — the CLI imports from `lib/`, which has real dependencies (`zod`, `yaml`), so a fresh clone can't run any command until they're present.
+
+| Command | What it does |
+|---|---|
+| `nomarmy doctor` | Checks this host is ready to run nomArmy and prints a fix for anything missing. Start here on any new machine. |
+| `nomarmy sizing` | Recommends context/slot/worker counts from your hardware and the model's own GGUF metadata. `--check` evaluates the profile you already have instead of recommending a new one. |
+| `nomarmy scan` | Reports a repository's execution environment from deterministic evidence. `--check` compares it against a committed `.nomarmy.yml`. |
+| `nomarmy validate` | Validates `.nomarmy.yml` against the schema and flags any service needing explicit policy approval. |
+
+Every command takes `--json` for machine-readable output and `--repo <dir>` to target a repository other than the current directory. None of them change anything on their own: `scan` never executes what it finds, `sizing` never writes a profile, `doctor` never installs anything. They report and propose; you decide what to apply.
 
 ## Sizing noms
 
-Three knobs decide how many noms you get and how much room each one has. They are coupled, and the coupling is easy to get wrong:
+Three knobs decide how many noms you get and how much room each one has, and they're coupled:
 
 | Variable | llama.cpp flag | Meaning |
 |---|---|---|
@@ -415,25 +250,17 @@ Three knobs decide how many noms you get and how much room each one has. They ar
 | `NOMARMY_LLAMA_PARALLEL` | `-np` | Inference slots |
 | `NOMARMY_MAX_WORKERS` | — | Coordinator job concurrency (noms in flight) |
 
-**`-c` is divided across `-np`.** Each nom gets `NOMARMY_LLAMA_CONTEXT / NOMARMY_LLAMA_PARALLEL`, not the full figure. So `65536` with `2` slots gives each nom 32K. To give two noms 64K each you need `NOMARMY_LLAMA_CONTEXT=131072`. Size by context *per nom* and multiply, never the other way round.
+`nomarmy sizing` inspects the machine (cores, RAM, VRAM, unified memory) and the model's own GGUF metadata, and recommends a combination with the memory arithmetic shown, plus the brief/report budgets a nom at that context can actually carry. It also checks memory pressure at the moment you run it — a recommendation that fits your total RAM can still refuse to admit a job right now if something else has most of it in use.
 
-**Do not set `NOMARMY_MAX_WORKERS` above `NOMARMY_LLAMA_PARALLEL` on a local profile.** The extra noms do not run in parallel; they queue for a slot and add latency while consuming a Podman sandbox each. On a Bedrock profile there are no local slots, so `NOMARMY_LLAMA_PARALLEL` is inert and `NOMARMY_MAX_WORKERS` is bounded by your API quota and budget instead.
+The v1.3 target is 64K context per nom: an autonomous explore/implement/test/repair loop needs more room than a one-shot edit, and a nom that runs out of context mid-repair fails the job outright, whereas one that waits for a free slot merely finishes later. Trading context for parallelism below that line is usually the wrong trade.
 
-The v1.3 target is 64K per nom — the autonomous explore/implement/test/repair loop needs more room than a one-shot edit. Trading context for parallelism below that is usually the wrong trade: a nom that exhausts its context mid-repair fails the job, whereas a nom that waits for a slot merely finishes later.
-
-### Measuring instead of guessing
-
-`nomarmy sizing` inspects the machine — cores, RAM, VRAM, unified memory, and the model's own GGUF metadata — and recommends a context/slot/worker combination with the memory arithmetic shown. It also evaluates the profile you already have and reports oversubscription or over-commitment. It checks memory pressure at the moment you run it, too: a recommendation that fits the machine's total RAM can still refuse to start right now if something else already has most of it in use.
-
-It proposes; it does not write. Apply what you agree with, the same way `nomarmy scan` proposes environment configuration rather than provisioning it. Restarting inference to pick up a changed value is a separate manual step — `start-inference.sh` does nothing if a server is already running, so a config change alone does not take effect until you stop and start it.
-
-Raising concurrency is an empirical question, not a capacity one. Benchmark accepted tickets/hour, memory pressure, latency, and coordinator interventions before increasing it — a second nom that halves the first one's context can lower throughput.
+Raising `NOMARMY_MAX_WORKERS` is an empirical question, not a capacity one — benchmark accepted-tickets/hour and coordinator interventions before raising it; a second nom that halves the first one's context can lower total throughput.
 
 ### Speed matters more than fit
 
-`nomarmy sizing` answers *"what fits in memory?"* It does not answer *"is this fast enough to be useful?"*, and on CPU-only hardware those are very different questions.
+`nomarmy sizing` answers "what fits in memory?", not "is this fast enough to be useful?" — on CPU-only hardware those are very different questions.
 
-Measured on a 20-core i7-1280P, no GPU, running gpt-oss-20b (MXFP4, 11.3 GiB, MoE with ~3.6B active parameters — a favourable case, not a worst case):
+Measured on a 20-core i7-1280P, no GPU, gpt-oss-20b (MXFP4, 11.3 GiB):
 
 | | |
 |---|---|
@@ -441,57 +268,114 @@ Measured on a 20-core i7-1280P, no GPU, running gpt-oss-20b (MXFP4, 11.3 GiB, Mo
 | Prompt processing | ~6.7 tokens/sec |
 | Two assistant turns on a real job | **11.5 minutes** |
 
-A smaller model helps less than its size suggests. Same machine, Qwen3-4B-Instruct-2507 (Q4_K_M, 2.3 GiB), 32K context, first live scout run:
+A smaller model helps less than its size suggests — the harness itself (sandbox, agent loop, tool calls) costs more than the model call on CPU-only hardware. Turn count dominates over token count: every tool-call round re-reads context, so a tighter objective is worth more than a bigger context window. And provider timeouts must match the model, not a vendor default — a single slow call can exceed a hosted-inference-shaped timeout and get killed mid-turn regardless of nomArmy's own job timeout; `configure-openclaw.sh` sets both, raise them with `NOMARMY_PROVIDER_TIMEOUT_SECONDS` / `NOMARMY_AGENT_TIMEOUT_SECONDS` on slower hardware.
 
-| | Idle server, short prompt | During the scout, sandbox and OpenClaw running |
-|---|---|---|
-| Generation | ~9.8 tokens/sec | ~1.6–2.1 tokens/sec |
-| Prompt processing | ~65 tokens/sec | ~11–22 tokens/sec |
-| First prompt | | ~5,400 tokens, of which the nomArmy brief is ~700; the rest is the agent harness |
-| Whole scout (4 model calls, 2 file reads) | | **12.5 minutes** |
+**Rule of thumb: GPU or a hosted profile for interactive work.** CPU-only is genuinely useful as a correctness testbed — it exercises the whole pipeline honestly — but treat it as something you're testing, not depending on.
 
-Two things fall out of that table. The harness costs more than the brief: at CPU prefill speeds the first prompt alone is minutes before the model reads a single file, so keep the tool surface lean. And contention matters as much as model size: the same server ran five times faster once the sandbox and OpenClaw were idle. Thread count was measured rather than guessed on this 6P+8E i7 — generation at 6, 12, 16 and 20 threads was 5.5, 6.3, 9.8 and 3.3 tokens/sec, so more threads helped right up until the cores were oversubscribed.
-
-Sizing will happily report that this machine runs *2 noms at 64K each*, and that is true. It is also close to unusable for interactive work: an autonomous explore → implement → test → repair loop needs many turns, so a single bounded job runs to an hour or more.
-
-Two consequences worth planning around:
-
-**Turn count dominates, not token count.** Every tool-call round re-reads context. llama.cpp caches the prefix within a slot so growth is incremental rather than a full reprocess, but a worker that explores widely pays for it repeatedly. A tighter objective is worth more than a bigger context.
-
-**Provider timeouts must match the model, not the vendor default.** A single model call can exceed a hosted-inference-shaped timeout, and the worker is then killed mid-turn regardless of nomArmy's own job timeout — the two ceilings are independent. `configure-openclaw.sh` sets both; raise them with `NOMARMY_PROVIDER_TIMEOUT_SECONDS` and `NOMARMY_AGENT_TIMEOUT_SECONDS` if your hardware is slower still.
-
-Rules of thumb: **GPU or a hosted profile for interactive work.** CPU-only is viable for overnight or batch runs, and genuinely useful as a correctness testbed — it exercises the whole pipeline honestly, just slowly. Treat a CPU-only local profile as something you are testing, not something you are depending on.
-
-## Choose another local model
-
-nomArmy uses llama.cpp's Hugging Face integration, so it can run any compatible GGUF language model—not only the bundled Qwen default. Use the interactive selector to search Hugging Face, inspect GGUF quantizations, select an alias, and explicitly confirm the configuration update:
+## Starting/stopping inference
 
 ```bash
-./scripts/select-model.sh nemotron
+./scripts/start-inference.sh macbook-pro   # or dgx-spark, cpu-linux, nvidia-linux
+./scripts/stop-inference.sh macbook-pro
 ```
 
-For NVIDIA's official 4B Nemotron GGUF repository, skip the search step:
+Logs land under `$HOME/.local/share/nomarmy-local-agents/logs/`.
+
+## Codex support
+
+Codex reads `AGENTS.md` for repository guidance, kept alongside `CLAUDE.md` so both coordinators follow the same trust boundary and integration rules. `install.sh` registers the nomArmy MCP server for Codex automatically when the `codex` command is available; to register it later:
 
 ```bash
-./scripts/select-model.sh --repo nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF
+./scripts/setup-codex-worker.sh
+codex mcp list
 ```
 
-The selector updates `config/common.env` only after you answer `y`; it does not download anything until inference restarts. Select a quantization that fits your memory, then restart with the profile you use:
+Use `/mcp` inside Codex to confirm `nomarmy-local-worker` is available.
 
-```bash
-./scripts/stop-inference.sh
-./scripts/start-inference.sh nvidia-linux  # or macbook-pro, dgx-spark, cpu-linux
-```
+## How nomArmy works (and why)
 
-The model is downloaded and cached by llama.cpp on first start. A repository must contain GGUF files; base-model repositories containing only PyTorch or safetensors weights are not directly runnable by this package. For gated repositories, authenticate with Hugging Face and make the required license acceptance before restarting inference.
+### The thesis
 
-## Security boundary
+> Use scarce frontier intelligence for intent, decomposition, architecture and judgment. Use abundant worker intelligence for repository exploration, implementation, testing, repair loops and verification.
 
-The coder receives a writable `/workspace` inside Podman but no outbound network and no host AWS/SSH credentials. OpenClaw is configured for per-session Podman sandboxing and elevated host execution is disabled. The MCP coordinator owns Git state outside the worker sandbox. Failed or incomplete implementation worktrees are retained rather than silently merged.
+That's a hypothesis, not a claim — nomArmy exists to test it, and measures whether it holds rather than assuming it. The number that matters is **cost and wall-clock per accepted task**, plus how often a human has to step in, not tokens displaced.
 
-Do not give the general-purpose coder AWS credentials, production credentials, deployment access, SSH keys, Kubernetes contexts, or production Terraform state.
+### The invariant
 
-On cloud profiles the model call is made by the host-side OpenClaw process, not from inside the sandbox, so hosted inference does not widen the coder's blast radius — the sandbox stays `network: none` and `scripts/configure-openclaw.sh` refuses to store a Bedrock credential if it is not. Scope the Bedrock key to `bedrock:InvokeModel` on the worker model ARNs only. What changes on a cloud profile is data flow, not sandbox reach: repository content leaves the machine.
+**Worker output is a claim. Repository and environment state are evidence.**
+
+Everything else follows from that one line. The worker never runs Git. It cannot commit, merge, or mark its own work accepted. It writes a four-line report, and nomArmy independently derives every fact that matters — what changed, what was added, whether the tests actually pass — from the repository itself. A worker that says `done` and a repository that disagrees is a failed job.
+
+A malformed or truncated report isn't automatically a failure either: if the repository changed, nomArmy verifies independently and may recover the work. **Failing verification stays failed** — the worktree is retained, and no recovery path can launder it into an accepted job.
+
+### Scouts and decomposers: the same invariant for reading and planning
+
+Not every job is an edit. A **scout** is a nom that reads and never writes — it gets a question, a detached snapshot of the base commit, and no permission to modify anything. A **decomposer** is the same read-only chassis pointed at a different question: instead of "answer this," it's "propose independent pieces this objective splits into" — useful for keeping any one worker turn from having to do too much at once. Neither mode's output is trusted on its word: every claim carries a `[path:start-end]` citation, and nomArmy resolves each one against the exact commit that was read, through Git, never through the worktree — a scout or decomposer that edits its own snapshot can't forge evidence. A citation that resolves to a real file but says nothing relevant to the claim is labelled weak, and a report made only of those goes to review rather than being called complete.
+
+**Most scout-shaped questions aren't questions for a model at all.** Where is X defined, who calls it, what does this file declare — those are deterministic, and `repo_evidence` answers them from the files in milliseconds with a citation on every hit, at zero token cost to anyone. Reach for a nom only for what that can't answer.
+
+### What that looks like in practice
+
+A real job, run against this repository: *add a `doctor` command to the CLI, with tests.* The worker was a 20B local model. It produced 156 lines that look like competent engineering — JSDoc throughout, pure exported check functions, a distinct remediation message per failed check.
+
+It had six defects, every one invisible without executing it: an unterminated template literal (the file didn't parse at all), an operator-precedence bug that silently searched an empty string on Linux/macOS, executable probing that missed two of three Windows extensions, output that printed "All checks passed." unconditionally then appended "Some checks failed.", a check against an environment variable that doesn't exist in this project, and no test file despite an explicit acceptance criterion.
+
+A reviewer skimming that diff would plausibly approve it. nomArmy committed nothing — the record showed `production files changed: 2, tests added: 0`, derived from the repository itself, not from anything the worker claimed. That's the entire argument for the design: a review process based on reading the diff fails here; one based on executing it doesn't.
+
+## Status
+
+nomArmy v1.2 is proven: bounded delegation, isolated worktrees, coordinator-owned Git, retained failed worktrees. v1.3 extends it toward autonomous workers with real execution environments and is still in development. Honest state of play:
+
+| Capability | Status |
+|---|---|
+| Bounded delegation, coordinator-owned Git, retained worktrees | Working, E2E tested |
+| Local (llama.cpp) and Amazon Bedrock execution profiles | Working |
+| `nomarmy doctor` — host readiness with a fix for every failure | Working, verified on a real host |
+| Scout and decompose modes — read-only noms with verified citations | Built, unit + live tested |
+| `auto_union`, `verify_regression`, sandboxed independent verification | Built, unit tested |
+| `.nomarmy.yml` environment contract — schema, loader, validator | Built, unit tested |
+| Disposable per-job service environments (Postgres, mocks, app) | Not built |
+| Nom-local browser/E2E and the autonomous repair loop | Not built |
+| Full-stack acceptance test proving the thesis end to end | **Not yet run** |
+
+Known limitations worth knowing up front: verification profiles requiring services beyond `environment: none` currently report `not_run` rather than running commands without their dependencies, and the environment scanner's Compose parser doesn't resolve YAML anchors/aliases/merge keys — affected findings are dropped with an explicit note rather than guessed at.
+
+## The MCP tools
+
+The coordinator drives nomArmy through the `nomarmy-local-worker` MCP server. Every job takes the same brief shape: a `task` (an objective for `implement`, a question for `scout`, a broad goal for `decompose`), optional `acceptance` items, a `mode`, and a timeout.
+
+| Tool | What it does |
+|---|---|
+| `local_worker` | Run one job and wait for it. Blocks the coordinator for the duration. |
+| `local_worker_start` | Start one job in the background and return a `job_id` immediately. |
+| `local_worker_status` | Phase, elapsed time against the timeout, and the result once finished. `wait_seconds` long-polls; `full=true` returns the complete report. |
+| `local_worker_capacity` | Context per nom, the brief/report budgets derived from it, memory pressure, and what's running. Read-only. |
+| `repo_evidence` | Deterministic repository evidence with an exact `[path:line]` on every hit: definitions, references, outline, grep, files. No model, no sandbox, milliseconds. |
+| `local_workers` | Run a batch with bounded parallelism and wait for all of them. `auto_union: true` mechanically merges independent implement jobs into one integration branch for review — never into your branch. |
+| `local_worker_jobs` | Recent job records, including jobs still running or orphaned by a server restart. |
+| `local_worker_cleanup` | Remove a retained worktree after review. Refuses to delete the current branch. |
+| `local_worker_config` | Surfaces `.nomarmy.yml`'s defined verification profiles to the calling session. |
+
+**Admission**, checked before any job starts: *context per nom bounds text* (brief/report caps come from the context one nom actually has, never a bigger prompt than it can hold), and *free memory bounds whether one more job starts at all* (a new job costs a sandbox container, never a second copy of the model — under pressure nomArmy refuses to start rather than shrinking the brief and hoping).
+
+## Security posture
+
+The worker gets a writable worktree inside Podman and nothing else: no Podman socket, no host credentials, no coordinator state, no arbitrary host ports, no network. Repository content is treated as untrusted input — a file in the repo cannot talk a worker into escaping its brief. Environment configuration (`.nomarmy.yml`) is data to validate, never authority: the scanner never executes anything it discovers, and verification commands run inside the sandbox or not at all, never falling back to the host.
+
+**Never hand the general-purpose coder** AWS/production credentials, deployment access, SSH keys, Kubernetes contexts, or production Terraform state.
+
+On cloud (Bedrock) profiles, the model call itself is made by the host-side OpenClaw process, never from inside the sandbox — the sandbox stays `network: none` regardless, and `configure-openclaw.sh` refuses to store a Bedrock credential unless that's already true. Scope the Bedrock key to `bedrock:InvokeModel` on the worker model ARNs only. What changes on a cloud profile is data flow, not sandbox reach: repository content leaves the machine, which is the decision to weigh, not the engineering.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `No API key found for provider "llama-cpp"` during `e2e.sh` | `./scripts/configure-openclaw.sh <profile>`, then rerun `e2e.sh`. OpenClaw needs an auth profile even for a keyless local server. |
+| `git worktree add` fails with `Filename too long` (Windows/WSL2) | `git config --global core.longpaths true`. `nomarmy doctor` checks for this. |
+| A config change didn't take effect | Inference must be restarted to pick it up: `./scripts/stop-inference.sh && ./scripts/start-inference.sh <profile>`. |
+| A job's verification always fails on a missing package | The coordinator's own `node_modules` can be bind-mounted read-only into the sandbox for a Node repo when the worktree's lockfile matches — see `resolveNodeModulesMount` in `lib/verify.mjs` if it isn't happening automatically. |
+| Not sure a setting is right for your hardware | `nomarmy sizing` — it measures rather than guesses, and evaluates a loaded profile with `--check`. |
+| General "is this host ready" question | `nomarmy doctor` — checks and proposes a fix for anything missing. |
 
 ## Files
 
@@ -514,15 +398,12 @@ scripts/setup-sandbox.sh
 scripts/setup-claude-worker.sh
 scripts/setup-codex-worker.sh
 scripts/select-model.sh
-scripts/select-model.mjs
 scripts/verify-install.sh
-setup-claude-local-worker.sh
-setup-codex-local-worker.sh
-setup-nomarmy-agents.sh
 mcp/server.mjs
 bin/nomarmy.mjs
 lib/budget.mjs        context-derived budgets, memory-pressure admission
 lib/scout.mjs         scout report contract, citation verification
+lib/decompose.mjs     decompose report contract, subtask overlap check
 lib/repo-query.mjs    deterministic repository evidence (repo_evidence tool, scout CLI)
 lib/transcript.mjs    worker transcript summary, displacement estimate
 lib/sizing.mjs        hardware -> context/nom recommendation
@@ -538,4 +419,8 @@ policies/coder.md  policies/scout.md  policies/orchestrator.md  policies/reviewe
 
 ## Important deployment distinction
 
-nomArmy is portable across Mac and NVIDIA Linux **as a same-host worker/coordinator stack**. The current MCP launches OpenClaw on the machine where the MCP runs. A future centralized-worker release can put Claude/MCP on developer Macs while dispatching complete worker jobs to remote Spark nodes. That remote job-control plane is not falsely claimed here; a remote llama-server alone is not equivalent to remote sandbox/tool execution.
+nomArmy is portable across Mac and NVIDIA Linux **as a same-host worker/coordinator stack** — the current MCP server launches OpenClaw on the same machine the MCP runs on. A future centralized-worker release could put Claude/MCP on developer laptops while dispatching complete worker jobs to remote nodes; that remote job-control plane doesn't exist yet, and a remote llama-server alone would not be equivalent to remote sandbox/tool execution.
+
+## Configuration naming
+
+Configuration variables are `NOMARMY_*`. Anything still exported as `RAYSON_*` is translated once at profile load with a deprecation warning, so older installs and unit files keep working. The MCP server itself is registered as `nomarmy-local-worker`.
