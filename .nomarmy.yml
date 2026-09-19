@@ -1,0 +1,10 @@
+# nomArmy's own environment contract (v1.3).
+#
+# This repo's tests are plain node:test with no services, no network, and no
+# provisioning -- environment: none (the default) is correct here, and it's
+# also the only environment level the sandbox actually executes today (see
+# lib/verify.mjs: "only 'environment: none' is executable").
+verification:
+  quick:
+    commands:
+      - "npm test"
