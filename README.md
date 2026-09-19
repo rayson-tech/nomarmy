@@ -388,46 +388,6 @@ On cloud (Bedrock) profiles, the model call itself is made by the host-side Open
 | Not sure a setting is right for your hardware | `nomarmy sizing` — it measures rather than guesses, and evaluates a loaded profile with `--check`. |
 | General "is this host ready" question | `nomarmy doctor` — checks and proposes a fix for anything missing. |
 
-## Files
-
-```text
-config/common.env
-config/profiles/macbook-pro.env
-config/profiles/dgx-spark.env
-config/profiles/nvidia-linux.env
-config/profiles/cpu-linux.env
-config/profiles/bedrock.env
-config/profiles/bedrock-cheap.env
-install.sh
-e2e.sh
-scripts/install-llama-cpp.sh
-scripts/start-inference.sh
-scripts/stop-inference.sh
-scripts/configure-openclaw.sh
-scripts/configure-orchestrator.sh
-scripts/setup-sandbox.sh
-scripts/setup-claude-worker.sh
-scripts/setup-codex-worker.sh
-scripts/select-model.sh
-scripts/verify-install.sh
-mcp/server.mjs
-bin/nomarmy.mjs
-lib/budget.mjs        context-derived budgets, memory-pressure admission
-lib/scout.mjs         scout report contract, citation verification
-lib/decompose.mjs     decompose report contract, subtask overlap check
-lib/repo-query.mjs    deterministic repository evidence (repo_evidence tool, scout CLI)
-lib/transcript.mjs    worker transcript summary, displacement estimate
-lib/sizing.mjs        hardware -> context/nom recommendation
-lib/hardware.mjs  lib/gguf.mjs  lib/doctor.mjs
-lib/config.mjs    lib/schema.mjs  lib/scan.mjs  lib/evidence.mjs  lib/verify.mjs
-tests/
-docs/experiments/     dated runbooks and results
-CLAUDE.md
-AGENTS.md
-docker/Dockerfile
-policies/coder.md  policies/scout.md  policies/orchestrator.md  policies/reviewer.md
-```
-
 ## Important deployment distinction
 
 nomArmy is portable across Mac and NVIDIA Linux **as a same-host worker/coordinator stack** — the current MCP server launches OpenClaw on the same machine the MCP runs on. A future centralized-worker release could put Claude/MCP on developer laptops while dispatching complete worker jobs to remote nodes; that remote job-control plane doesn't exist yet, and a remote llama-server alone would not be equivalent to remote sandbox/tool execution.
