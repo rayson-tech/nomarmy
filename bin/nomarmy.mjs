@@ -3,6 +3,7 @@
 // infrastructure or rewrites configuration on its own. A human applies changes.
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { loadConfig, validateConfig, stringifyConfig, findConfigFile, CONFIG_FILENAMES } from "../lib/config.mjs";
@@ -25,6 +26,15 @@ const out = (obj) => console.log(JSON.stringify(obj, null, 2));
 const gib = (n) => (typeof n === "number" ? `${(n / 1024 ** 3).toFixed(1)} GiB` : "unknown");
 const K = (n) => (typeof n === "number" ? `${Math.round(n / 1024)}K` : "?");
 
+// A plain wall of text doesn't match this project's own tone (a mascot, a
+// tagline). Used only by the newer interactive commands (init/setup/model);
+// the rest of the CLI's output is untouched, on purpose, to keep this change
+// scoped. Off under --json and when stdout isn't a real terminal (piped,
+// redirected) so color codes never leak into something meant to be parsed.
+const useColor = process.stdout.isTTY && !json;
+const paint = (code) => (s) => (useColor ? `\x1b[${code}m${s}\x1b[0m` : String(s));
+const c = { bold: paint(1), dim: paint(2), red: paint(31), green: paint(32), yellow: paint(33), cyan: paint(36) };
+
 function usage(code = 0) {
   console.log(`nomArmy - bounded coding workers with independently verified results
 
@@ -36,6 +46,11 @@ Usage: nomarmy <command> [options]
                   and write it after confirmation.
                   --force   overwrite an existing .nomarmy.yml
                   --write   with --json, write without prompting (needs a valid proposal)
+  setup           Detect this machine, recommend a profile, choose a model,
+                  and write config/profiles/<name>.env (+ config/common.env).
+                  Prints the install.sh command; never runs it.
+  model           Change the configured model later, without the rest of
+                  setup's questions.
   validate        Validate .nomarmy.yml against the schema.
   sizing          Recommend context and nom count for this machine.
                   --check   evaluate the loaded profile instead of recommending
@@ -158,7 +173,7 @@ async function cmdInit() {
   const existing = findConfigFile(repoDir);
   if (existing && !flag("force")) {
     if (json) return out({ error: `${path.basename(existing)} already exists`, path: existing });
-    console.log(`${path.basename(existing)} already exists at ${existing}.`);
+    console.log(c.yellow(`${path.basename(existing)} already exists at ${existing}.`));
     console.log("Not overwriting a config someone already wrote. Re-run with --force to replace it.");
     process.exit(1);
   }
@@ -174,18 +189,18 @@ async function cmdInit() {
     return out({ written: targetPath, proposal });
   }
 
-  console.log(`Proposed ${path.basename(targetPath)}, built from ${evidence.repoName}'s scan evidence:\n`);
+  console.log(c.bold(`🍪 Proposed ${path.basename(targetPath)}`) + c.dim(`, built from ${evidence.repoName}'s scan evidence:`) + "\n");
   console.log(stringifyConfig(proposal));
   if (excludedFixturePaths.length) {
-    console.log(`Excluded as likely test fixtures (review by hand if any of these is real):`);
-    for (const p of excludedFixturePaths) console.log(`  ${p}`);
+    console.log(c.yellow("Excluded as likely test fixtures (review by hand if any of these is real):"));
+    for (const p of excludedFixturePaths) console.log(c.dim(`  ${p}`));
     console.log("");
   }
-  if (notes.length) { for (const n of notes) console.log(`Note: ${n}`); console.log(""); }
+  if (notes.length) { for (const n of notes) console.log(c.dim(`Note: ${n}`)); console.log(""); }
 
   if (!valid) {
-    console.log("This proposal does not validate against the schema:");
-    for (const e of errors) console.log(`  ${e}`);
+    console.log(c.red("This proposal does not validate against the schema:"));
+    for (const e of errors) console.log(c.red(`  ${e}`));
     console.log("\nNot offering to write an invalid config. Fix the evidence or write .nomarmy.yml by hand.");
     process.exit(1);
   }
@@ -193,10 +208,196 @@ async function cmdInit() {
   if (!process.stdin.isTTY) throw new Error("nomarmy init needs an interactive terminal to confirm the write, or --json --write for a non-interactive one.");
   const rl = createInterface({ input, output });
   try {
-    const answer = (await rl.question(`Write this to ${path.basename(targetPath)}? [y/N] `)).trim().toLowerCase();
-    if (answer !== "y") { console.log("Cancelled; nothing written."); return; }
+    const answer = (await rl.question(c.bold(`Write this to ${path.basename(targetPath)}? [y/N] `))).trim().toLowerCase();
+    if (answer !== "y") { console.log(c.dim("Cancelled; nothing written.")); return; }
     fs.writeFileSync(targetPath, stringifyConfig(proposal));
-    console.log(`Wrote ${targetPath}. Run 'nomarmy validate' any time to re-check it.`);
+    console.log(c.green(`✓ Wrote ${targetPath}.`) + " Run 'nomarmy validate' any time to re-check it.");
+  } finally {
+    rl.close();
+  }
+}
+
+// This file's own location, not --repo (the target repo being scanned) --
+// setup/model need to find THIS package's config/ and scripts/ as siblings
+// of bin/, the same way select-model.mjs resolves its own root.
+const nomarmyRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+
+/** Read-modify-write one KEY=VALUE line, replacing it if present, appending if not -- the exact pattern scripts/select-model.mjs already uses for config/common.env. */
+function writeEnvLine(filePath, key, value) {
+  const existingText = fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : "";
+  const line = `${key}=${value}`;
+  const updated = new RegExp(`^${key}=.*$`, "m").test(existingText)
+    ? existingText.replace(new RegExp(`^${key}=.*$`, "m"), line)
+    : `${existingText.trimEnd()}\n${line}\n`.replace(/^\n/, "");
+  fs.writeFileSync(filePath, updated);
+}
+
+// gpt-oss-20b is NOT a second curated entry here, on purpose: it's real (the
+// README's own benchmark ran it), but NOMARMY_WORKER_MODEL_FALLBACK (its only
+// reference anywhere in this codebase) is a separate routing identity for
+// profile: "gpt" job dispatch, not a GGUF repo/quant this command could point
+// NOMARMY_MODEL_REPO/QUANT at -- no verified repo string for it exists in this
+// project's history, and fabricating one here would be worse than not
+// offering it. Confirmed by grepping every config file and git history.
+const KNOWN_MODELS = {
+  default: { label: "Qwen3-Coder-Next (shipped default, coding-specialized)", repo: "Qwen/Qwen3-Coder-Next-GGUF", quant: "Q4_K_M", alias: "qwen3-coder-next" },
+};
+
+/**
+ * The one model-choice menu both `setup` and `model` show. Returns
+ * `{ kind: "known", repo, quant, alias }` for the curated default, or
+ * `{ kind: "search" }` once scripts/select-model.mjs (spawned as a child
+ * process, not reimplemented -- it already owns the Hugging Face search,
+ * confirm and write flow) has finished.
+ */
+async function chooseModel(rl) {
+  console.log("\n" + c.bold("Which model?"));
+  console.log(`  ${c.cyan("1.")} ${KNOWN_MODELS.default.label}`);
+  console.log(`  ${c.cyan("2.")} Search Hugging Face for something else`);
+  const choice = (await rl.question(c.bold("Choice [1]: "))).trim() || "1";
+  if (choice === "2") {
+    const term = (await rl.question("Search term (or owner/model-GGUF repo): ")).trim();
+    if (!term) throw new Error("A search term or repo is required for the Hugging Face search path.");
+    await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [path.join(nomarmyRoot, "scripts", "select-model.mjs"), term], { stdio: "inherit" });
+      child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`select-model.mjs exited ${code}`))));
+      child.on("error", reject);
+    });
+    return { kind: "search" };
+  }
+  return { kind: "known", ...KNOWN_MODELS.default };
+}
+
+/**
+ * `nomarmy setup`: detect hardware, recommend a profile the same way
+ * `nomarmy sizing` already does, let the user pick a model, then write the
+ * result to config/profiles/<name>.env and (for the two curated model
+ * choices) config/common.env. Stops there -- prints the exact `install.sh`
+ * command rather than running it. install.sh builds llama.cpp, curl-pipes an
+ * installer and touches sandbox/provider config; that is not a proportionate
+ * thing for an opt-in flag on a CLI whose whole brand is "reports or
+ * proposes" to cross, unlike the cheap, reversible, single-file writes this
+ * command itself does.
+ */
+async function cmdSetup() {
+  const execution = value("execution", process.env.NOMARMY_EXECUTION || "local");
+  const isCloud = execution !== "local";
+  const hardware = isCloud ? null : await detectHardware();
+  const modelPath = isCloud ? null : findModel();
+  const gguf = modelPath ? await readGGUFMetadata(modelPath) : { found: false };
+  const res = recommend({ hardware, gguf, execution });
+
+  const nonInteractive = json;
+  if (nonInteractive && !flag("profile-name")) throw new Error("--json requires --profile-name <name>.");
+  if (nonInteractive && !isCloud && !flag("model")) throw new Error("--json requires --model default for a local profile (Hugging Face search is interactive-only).");
+
+  let rl = null;
+  if (!nonInteractive) {
+    if (!process.stdin.isTTY) throw new Error("nomarmy setup needs an interactive terminal, or --json with --profile-name (and --model for a local profile).");
+    rl = createInterface({ input, output });
+  }
+
+  try {
+    if (!json) {
+      console.log(c.bold("🍪 nomArmy setup\n"));
+      console.log(isCloud
+        ? `Execution is '${execution}' -- hosted inference, local hardware does not bound this.\n`
+        : `Hardware: ${c.cyan(`${hardware.platform}/${hardware.arch}`)}, ${hardware.cpu?.logicalCores ?? "?"} logical cores, ${(hardware.memory?.totalBytes / 1024 ** 3).toFixed(1)} GiB RAM\n`);
+      console.log(`Recommended ${c.dim(`(confidence: ${res.confidence})`)}: ${c.green(res.summary ?? JSON.stringify(res.env))}`);
+    }
+
+    let model = null;
+    if (!isCloud) {
+      if (nonInteractive) {
+        const which = value("model");
+        if (!KNOWN_MODELS[which]) throw new Error(`--model must be "default" under --json, got "${which}".`);
+        model = { kind: "known", ...KNOWN_MODELS[which] };
+      } else {
+        model = await chooseModel(rl);
+      }
+    }
+
+    const profileName = nonInteractive ? value("profile-name") : (await rl.question(`\nProfile name [${hardware?.appleSilicon ? "macbook-pro" : "custom"}]: `)).trim() || (hardware?.appleSilicon ? "macbook-pro" : "custom");
+    const profilePath = path.join(nomarmyRoot, "config", "profiles", `${profileName}.env`);
+    const commonPath = path.join(nomarmyRoot, "config", "common.env");
+
+    const profileWrites = { ...res.env };
+    if (!isCloud) {
+      // recommend() only returns context/parallel/worker counts -- every
+      // hand-authored profile also sets these two, and start-inference.sh
+      // references both unconditionally under `set -euo pipefail`, so a
+      // profile missing them fails outright on first use, not gracefully.
+      profileWrites.NOMARMY_LLAMA_GPU_LAYERS = (hardware.gpu?.count > 0 || hardware.platform === "darwin") ? 999 : 0;
+      profileWrites.NOMARMY_LLAMA_THREADS = hardware.cpu?.physicalCores ?? hardware.cpu?.logicalCores ?? 4;
+    }
+
+    if (!json) {
+      console.log(c.bold(`\nAbout to write ${path.relative(nomarmyRoot, profilePath)}:`));
+      for (const [k, v] of Object.entries(profileWrites)) console.log(c.dim(`  ${k}=${v}`));
+      if (model?.kind === "known") {
+        console.log(c.bold(`\nAnd ${path.relative(nomarmyRoot, commonPath)}:`));
+        console.log(c.dim(`  NOMARMY_MODEL_REPO=${model.repo}`));
+        console.log(c.dim(`  NOMARMY_MODEL_QUANT=${model.quant}`));
+        console.log(c.dim(`  NOMARMY_MODEL_ALIAS=${model.alias}`));
+      }
+      if (!nonInteractive) {
+        const answer = (await rl.question(c.bold("\nWrite this configuration? [y/N] "))).trim().toLowerCase();
+        if (answer !== "y") { console.log(c.dim("Cancelled; nothing written.")); return; }
+      }
+    }
+
+    fs.mkdirSync(path.dirname(profilePath), { recursive: true });
+    for (const [k, v] of Object.entries(profileWrites)) writeEnvLine(profilePath, k, v);
+    if (model?.kind === "known" && model.repo) {
+      writeEnvLine(commonPath, "NOMARMY_MODEL_REPO", model.repo);
+      writeEnvLine(commonPath, "NOMARMY_MODEL_QUANT", model.quant);
+    }
+    if (model?.kind === "known") writeEnvLine(commonPath, "NOMARMY_MODEL_ALIAS", model.alias);
+
+    const installCmd = `./install.sh --profile ${profileName}${isCloud ? "" : ""}`;
+    if (json) return out({ written: { profile: profilePath, common: model?.kind === "known" ? commonPath : null }, env: profileWrites, installCommand: installCmd });
+    console.log(c.green(`\n✓ Wrote ${path.relative(nomarmyRoot, profilePath)}${model?.kind === "known" ? ` and ${path.relative(nomarmyRoot, commonPath)}` : ""}.`));
+    console.log(c.dim("\nThis proposes; it does not install. Run:\n"));
+    console.log(`  ${c.bold(installCmd)}\n`);
+  } finally {
+    rl?.close();
+  }
+}
+
+/**
+ * `nomarmy model`: swap the configured model later without re-running the
+ * whole `setup` wizard. Same menu `setup` offers; never restarts inference
+ * itself, matching every other "propose a config change" command in this
+ * CLI.
+ */
+async function cmdModel() {
+  if (json) {
+    const which = value("model");
+    if (!KNOWN_MODELS[which]) throw new Error('--json requires --model default (Hugging Face search is interactive-only).');
+    const m = KNOWN_MODELS[which];
+    const commonPath = path.join(nomarmyRoot, "config", "common.env");
+    if (m.repo) { writeEnvLine(commonPath, "NOMARMY_MODEL_REPO", m.repo); writeEnvLine(commonPath, "NOMARMY_MODEL_QUANT", m.quant); }
+    writeEnvLine(commonPath, "NOMARMY_MODEL_ALIAS", m.alias);
+    return out({ written: commonPath, model: m });
+  }
+  if (!process.stdin.isTTY) throw new Error("nomarmy model needs an interactive terminal, or --json --model default.");
+  const rl = createInterface({ input, output });
+  try {
+    console.log(c.bold("🍪 nomArmy model"));
+    const model = await chooseModel(rl);
+    if (model.kind === "search") { console.log(c.green("\n✓ Done") + " -- config/common.env was already updated by the search above."); }
+    else {
+      const commonPath = path.join(nomarmyRoot, "config", "common.env");
+      console.log(c.bold(`\nAbout to write ${path.relative(nomarmyRoot, commonPath)}:`));
+      console.log(c.dim(`  NOMARMY_MODEL_REPO=${model.repo}\n  NOMARMY_MODEL_QUANT=${model.quant}\n  NOMARMY_MODEL_ALIAS=${model.alias}`));
+      const answer = (await rl.question(c.bold("\nApply this model configuration? [y/N] "))).trim().toLowerCase();
+      if (answer !== "y") { console.log(c.dim("Cancelled; nothing changed.")); return; }
+      writeEnvLine(commonPath, "NOMARMY_MODEL_REPO", model.repo);
+      writeEnvLine(commonPath, "NOMARMY_MODEL_QUANT", model.quant);
+      writeEnvLine(commonPath, "NOMARMY_MODEL_ALIAS", model.alias);
+      console.log(c.green(`✓ Wrote ${path.relative(nomarmyRoot, commonPath)}.`));
+    }
+    console.log(c.dim("\nRestart inference to pick this up:\n  ./scripts/stop-inference.sh\n  ./scripts/start-inference.sh <profile>"));
   } finally {
     rl.close();
   }
@@ -281,7 +482,7 @@ function sizingCheck(hardware, gguf) {
   process.exit((res.warnings ?? []).some((w) => w.severity === "error") ? 1 : 0);
 }
 
-const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, help: () => usage(0) };
+const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
   // Import lazily to avoid circular dependencies
