@@ -233,6 +233,17 @@ test("scoutPrompt: the evidence tool section appears only when the tool was plac
   assert.match(with_, /copy verbatim into a FINDING/);
 });
 
+test("scoutPrompt: requires rereading each citation before reporting, anchored to a real wrong claim", () => {
+  // Found live: a scout claimed padStart(1, "0") would turn "10" into "01",
+  // which is false -- padStart never shortens a string already long enough.
+  // Rereading the cited call against real output would have caught it.
+  const p = scoutPrompt({ question: "q", baseRef: "HEAD", baseSha: "abc", workerId: "s" });
+  assert.match(p, /re-check each FINDING: reread the exact cited lines one more time/);
+  assert.match(p, /padStart\(1, "0"\)/, "the real wrong claim must be quoted, not a generic hypothetical");
+  assert.match(p, /weaken it to NOT_FOUND rather than assert it/);
+  assert.ok(p.indexOf("re-check each FINDING") < p.indexOf("FINAL REPORT"), "self-review must come before the report section, not after");
+});
+
 // --- outcome ----------------------------------------------------------------
 async function verifiedGood() { const r = parseScoutReport(GOOD); return { report: r, verified: await verifyCitations(r.findings, { readFile }) }; }
 

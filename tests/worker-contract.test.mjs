@@ -1022,6 +1022,19 @@ test("prompt: a prose summary is explicitly named as a failure, not a substitute
   assert.match(p, /Created site\/architecture\.html with a static page/, "the real failed example must be quoted, not a generic hypothetical");
 });
 
+test("prompt: requires a self-review pass against real file content before the report, anchored to a real fabrication", () => {
+  // Found live: a worker credited a maintainer with a link to a domain
+  // (rayson.tech) that appears nowhere in the repository -- invented while
+  // writing the sentence, not caught because nothing required checking it.
+  const p = workerPrompt({ task: "t", mode: "implement", baseRef: "HEAD", baseSha: "abc", workerId: "w1" });
+  assert.match(p, /SELF-REVIEW \(required before you write the final report/);
+  assert.match(p, /Re-open every file you changed and read its current content/);
+  assert.match(p, /confirm you actually verified it in this sandbox/);
+  assert.match(p, /a domain that appears nowhere in the repository/, "the real fabrication must be quoted, not a generic hypothetical");
+  assert.match(p, /A test that would fail if your change were reverted is evidence; your belief that the code is right is not/);
+  assert.ok(p.indexOf("SELF-REVIEW") < p.indexOf("FINAL REPORT (mandatory"), "self-review must come before the report section, not after");
+});
+
 test("prompt: tells the worker to run tests non-interactively and never kill them blind", () => {
   const p = workerPrompt({ task: "t", mode: "implement", baseRef: "HEAD", baseSha: "abc", workerId: "w1" });
   assert.match(p, /non-interactive\/CI mode/);
