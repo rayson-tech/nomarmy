@@ -917,7 +917,15 @@ export function resolveOutcome({ report, repositoryChanged = false, independentV
         commitBlockedReason: "worker reported done/pass but the repository has no changes from the base commit",
         reasons: ["worker claimed done/pass but the repository is unchanged from the base commit"] };
     }
+    // A clean done/pass report with no independent verification evidence
+    // still commits (the v1.2 acceptance gate, preserved on purpose -- see
+    // the test guarding it) but must not say a human need not look: the
+    // record is honest that nothing here checked the claim against reality,
+    // and reviewRequired: false was letting a coordinator read WORKER_DONE
+    // and stop there. This does not change what commits; only what gets
+    // flagged for a human to see.
     return { ...base, outcome: OUTCOMES.WORKER_DONE, commitAllowed: mode === "implement",
+      reviewRequired: verification === "not_run",
       commitBlockedReason: mode === "implement" ? null : `${mode} mode does not create commits` };
   }
 

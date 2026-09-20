@@ -127,6 +127,23 @@ test("gate: a clean done/pass report with no runner registered still commits (v1
   assert.equal(outcome.recovered, false);
 });
 
+test("gate: a WORKER_DONE commit with no independent verification evidence is flagged for review, even though it still commits", () => {
+  // The commit behavior above (v1.2, preserved on purpose) is unchanged --
+  // this only asks whether a human is told to look. Reported live: a
+  // WORKER_DONE record with verification: not_run had reviewRequired:
+  // false, so the outcome line read as "nothing to see here" when nothing
+  // had actually checked the claim against reality.
+  const outcome = resolveOutcome({ report: parseWorkerReport(report()), repositoryChanged: true, independentVerification: NOT_RUN });
+  assert.equal(outcome.reviewRequired, true);
+});
+
+test("gate: a WORKER_DONE commit backed by a real passing verification is NOT flagged for review", () => {
+  const outcome = resolveOutcome({ report: parseWorkerReport(report()), repositoryChanged: true, independentVerification: PASS });
+  assert.equal(outcome.outcome, OUTCOMES.WORKER_DONE);
+  assert.equal(outcome.commitAllowed, true);
+  assert.equal(outcome.reviewRequired, false, "real evidence backs this commit; no review flag needed");
+});
+
 // ---------------------------------------------------------------------------
 // 2b. verify_regression: resolveOutcome's regressionCheck veto. Omitting the
 // parameter entirely must reproduce every result above unchanged -- the

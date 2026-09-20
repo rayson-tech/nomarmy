@@ -6,7 +6,8 @@ import assert from "node:assert/strict";
 
 import {
   SCOUT_OUTCOMES, SCOUT_STATUS_BY_OUTCOME, DEFAULT_SCOUT_LIMITS,
-  scoutPrompt, parseCitation, parseCitationToken, extractCitations, parseScoutReport, verifyCitations, resolveScoutOutcome, renderScoutReport
+  scoutPrompt, parseCitation, parseCitationToken, extractCitations, parseScoutReport, verifyCitations, resolveScoutOutcome, renderScoutReport,
+  distinctiveTerms,
 } from "../lib/scout.mjs";
 
 const FILES = {
@@ -344,6 +345,65 @@ test("resolveScoutOutcome: a well-formed zero-findings report is SCOUT_NOT_FOUND
   assert.equal(o.coordinatorStatus, SCOUT_STATUS_BY_OUTCOME.SCOUT_NOT_FOUND);
   assert.equal(o.coordinatorStatus, "needs_review");
   assert.equal(o.reviewRequired, true, "an unverifiable negative claim always needs a human's eyes");
+});
+
+// ---------------------------------------------------------------------------
+// cleanValue (via parseScoutReport's finding.text): must not destroy
+// identifiers. Reported live: cleanValue stripped every underscore, so
+// "row_key" became "row key" and "_validate_tabular_mapping" became
+// "validate tabular mapping" -- exactly the tokens distinctiveTerms()'s
+// `/_|\./.test(t)` check exists to recognise, gutted before it ever ran.
+// ---------------------------------------------------------------------------
+
+test("parseScoutReport: a snake_case identifier in a finding survives cleanValue intact", () => {
+  const r = parseScoutReport(
+    "SCOUT REPORT\nQUESTION: q\nCONFIDENCE: high\n" +
+    "FINDING: The row_key uniqueness rule is enforced in _validate_tabular_mapping [lib/x.py:1]\n" +
+    "NOT_FOUND: none\nEND"
+  );
+  assert.equal(r.findings[0].text, "The row_key uniqueness rule is enforced in _validate_tabular_mapping");
+});
+
+test("distinctiveTerms: row_key stays one distinctive term, not shattered into row + key", () => {
+  const terms = distinctiveTerms("The row_key uniqueness rule is enforced in _validate_tabular_mapping");
+  assert.ok(terms.has("row_key"), "row_key must survive as its own identifier token");
+  assert.ok(terms.has("_validate_tabular_mapping"));
+  // row/key alone are 3 letters and not identifier-shaped -- they must never
+  // appear as if cleanValue had split row_key into two ordinary words.
+  assert.ok(!terms.has("row"));
+  assert.ok(!terms.has("key"));
+});
+
+test("cleanValue (via parseScoutReport): real markdown emphasis is still cleaned, only mid-identifier underscores are spared", () => {
+  const r = parseScoutReport(
+    "SCOUT REPORT\nQUESTION: q\nCONFIDENCE: high\n" +
+    "FINDING: This is *very* important and uses `row_key` for lookups [lib/x.py:1]\n" +
+    "NOT_FOUND: none\nEND"
+  );
+  assert.equal(r.findings[0].text, "This is very important and uses row_key for lookups");
+});
+
+// ---------------------------------------------------------------------------
+// Citation stripping from a finding's body: only an actually-resolved
+// citation should be removed, never code syntax that merely looks
+// bracketed. Reported live: `descriptor["mapping"]["columns"]` lost the
+// entire expression because the citation-stripping regex matched every
+// `[...]` span, subscripts included.
+// ---------------------------------------------------------------------------
+
+test("parseScoutReport: a dict/list subscript in a finding is not eaten as a phantom citation", () => {
+  const r = parseScoutReport(
+    "SCOUT REPORT\nQUESTION: q\nCONFIDENCE: high\n" +
+    'FINDING: the executor reads descriptor["mapping"]["columns"] at [lib/x.py:5-6]\n' +
+    "NOT_FOUND: none\nEND"
+  );
+  assert.equal(r.findings[0].text, 'the executor reads descriptor["mapping"]["columns"] at');
+  // The real citation is still extracted correctly, exactly once.
+  assert.equal(r.findings[0].citations.length, 3, "the two subscripts are still reported as citation attempts, just not removed from the body");
+  const real = r.findings[0].citations.find((c) => c.path === "lib/x.py");
+  assert.ok(real, "the real [lib/x.py:5-6] citation must still resolve");
+  assert.equal(real.start, 5);
+  assert.equal(real.end, 6);
 });
 
 test("resolveScoutOutcome: a genuinely empty report (no findings, no NOT_FOUND) stays SCOUT_REPORT_INVALID", () => {
