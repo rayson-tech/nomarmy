@@ -143,7 +143,7 @@ chmod +x install.sh e2e.sh scripts/*.sh
 If you also install Claude Code on the Spark itself:
 
 ```bash
-./scripts/setup-claude-worker.sh
+nomarmy connect claude
 ./scripts/verify-install.sh dgx-spark
 ```
 
@@ -207,14 +207,17 @@ A config change needs a restart to take effect: `./scripts/stop-inference.sh && 
 nomarmy model
 ```
 
-Offers the shipped default (Qwen3-Coder-Next) or a Hugging Face search for anything else llama.cpp can load — nomArmy runs any GGUF-format model, not only the bundled default. The search path shows the available quantizations, asks you to confirm before writing anything, and only updates `config/common.env`; nothing downloads until you restart inference:
+Offers three curated choices verified against this project's own real usage (downloaded, loaded, dispatched against, all measured in `docs/experiments/2026-09-20-model-bakeoff-and-economics.md`) — Qwen3-Coder-Next (shipped default, no thinking mode), gpt-oss-20b, and Qwen3.6-27B — or a Hugging Face search for anything else llama.cpp can load. Each curated choice's menu line states its measured tradeoff plainly (speed, reliability, and the right `reasoning` effort) rather than leaving you to rediscover it. The search path shows the available quantizations and asks you to confirm before writing anything.
+
+Writing the model config also updates the *worker-routing* env vars (`NOMARMY_WORKER_MODEL`, `NOMARMY_MODEL_THINKING`) in the same file, and `nomarmy model` then offers to resync the MCP registration right then — the gap that used to mean picking a model here had no effect on which model workers actually dispatched to until someone separately, manually, re-ran the registration by hand. It still won't restart inference or your coordinator session for you:
 
 ```bash
 nomarmy stop <profile>
 nomarmy start <profile>
+# then restart Claude Code / Codex -- the MCP server is a per-session child process
 ```
 
-`nomarmy model` is the same menu `nomarmy setup` (below) offers when choosing a model for a fresh profile; reach for it directly when you just want to change the model without redoing the rest of setup. It's a thin wrapper: the search path delegates to `scripts/select-model.mjs` directly, so `./scripts/select-model.sh nemotron` (or `--repo owner/model-GGUF` to skip the search) still works standalone exactly as before, if you'd rather call it without the menu.
+`nomarmy model` is the same menu `nomarmy setup` (below) offers when choosing a model for a fresh profile; reach for it directly when you just want to change the model without redoing the rest of setup. It's a thin wrapper: the search path delegates to `scripts/select-model.mjs` directly, so `./scripts/select-model.sh nemotron` (or `--repo owner/model-GGUF` to skip the search) still works standalone exactly as before, if you'd rather call it without the menu. A searched model's thinking support isn't knowable from a repo/quant alone, so it's asked directly rather than guessed.
 
 The model itself downloads and caches on first start. Two things worth knowing: the target repo must actually contain GGUF files (a base-model repo with only PyTorch/safetensors weights won't run here), and a gated repo needs you to accept its license on huggingface.co and authenticate locally before the download will succeed.
 
@@ -240,7 +243,7 @@ Every command below proposes before it writes anything, showing exactly what wou
 | `nomarmy doctor` | Checks this host is ready to run nomArmy and prints a fix for anything missing. Start here on any new machine. |
 | `nomarmy setup` | Detects this machine, recommends a profile the same way `sizing` does, offers a model choice, and writes `config/profiles/<name>.env` (+ `config/common.env`). Prints the `install.sh` command; never runs it. |
 | `nomarmy init` | Proposes a `.nomarmy.yml` from this repository's scan evidence and writes it after confirmation. Never overwrites an existing one without `--force`. |
-| `nomarmy model` | Change the configured model later, without the rest of `setup`'s questions. See [Swapping models](#swapping-models) above. |
+| `nomarmy model` | Change the configured model later, without the rest of `setup`'s questions. Also updates the MCP registration's worker-routing env vars and offers to resync it right then. See [Swapping models](#swapping-models) above. |
 | `nomarmy update` | Pulls the latest nomArmy code (fast-forward only; refuses on local changes) and re-syncs the installed MCP copy for whichever coordinator(s) are already connected. |
 | `nomarmy connect [claude] [cursor] [codex]` | (Re-)registers the MCP server with one or more coordinators on its own — e.g. after installing one later. No target and not `--json` prompts an interactive multi-select. |
 | `nomarmy start` / `stop <profile>` | Starts/stops local inference (wraps `scripts/start-inference.sh` / `stop-inference.sh`). |

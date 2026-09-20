@@ -6,7 +6,7 @@ import test from "node:test";
 
 import {
   installMcpCopy, connectClaude, connectCodex, connectCursor, defaultInstallDir, parseClaudeEnv,
-  readCursorConfig, cursorAlreadyConnected,
+  readCursorConfig, cursorAlreadyConnected, deriveWorkerModelEnv,
 } from "../lib/connect.mjs";
 
 function fakeRoot() {
@@ -179,6 +179,72 @@ test("connectClaude: preserves an existing registration's environment variables 
     const addCall = calls.find((c) => c.includes("mcp add"));
     assert.match(addCall, /-e NOMARMY_WORKER_MODEL_THINKING=true/);
     assert.match(addCall, /-e NOMARMY_WORKER_MODEL=gpt-oss-20b/);
+  } finally {
+    fs.rmSync(nomarmyRoot, { recursive: true, force: true });
+    fs.rmSync(installDir, { recursive: true, force: true });
+  }
+});
+
+test("deriveWorkerModelEnv: reads NOMARMY_WORKER_MODEL/NOMARMY_MODEL_THINKING from config/common.env", () => {
+  const nomarmyRoot = fakeRoot();
+  fs.mkdirSync(path.join(nomarmyRoot, "config"), { recursive: true });
+  fs.writeFileSync(path.join(nomarmyRoot, "config", "common.env"), "NOMARMY_WORKER_MODEL=qwen3.6-27b\nNOMARMY_MODEL_THINKING=true\n");
+  try {
+    assert.deepEqual(deriveWorkerModelEnv(nomarmyRoot), { NOMARMY_WORKER_MODEL: "qwen3.6-27b", NOMARMY_WORKER_MODEL_THINKING: "true" });
+  } finally {
+    fs.rmSync(nomarmyRoot, { recursive: true, force: true });
+  }
+});
+
+test("deriveWorkerModelEnv: no config/common.env (or missing keys) contributes nothing, not an error", () => {
+  const nomarmyRoot = fakeRoot();
+  try {
+    assert.deepEqual(deriveWorkerModelEnv(nomarmyRoot), {});
+  } finally {
+    fs.rmSync(nomarmyRoot, { recursive: true, force: true });
+  }
+});
+
+test("connectClaude: resyncs the worker model from config/common.env, overriding a stale registered value", () => {
+  // The actual bug this closes: NOMARMY_WORKER_MODEL in config/common.env
+  // was written by `nomarmy setup`/`model` but never read back by anything,
+  // so the registration could silently keep pointing at a completely
+  // different, previously-configured model.
+  const nomarmyRoot = fakeRoot();
+  fs.mkdirSync(path.join(nomarmyRoot, "config"), { recursive: true });
+  fs.writeFileSync(path.join(nomarmyRoot, "config", "common.env"), "NOMARMY_WORKER_MODEL=qwen3.6-27b\nNOMARMY_MODEL_THINKING=true\n");
+  const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
+  const staleEnvOutput = [
+    "nomarmy-local-worker:",
+    "  Environment:",
+    "    NOMARMY_WORKER_MODEL=gpt-oss-20b",
+    "    NOMARMY_WORKER_MODEL_THINKING=false",
+    "",
+  ].join("\n");
+  try {
+    const result = connectClaude({
+      nomarmyRoot, installDir,
+      run: (cmd, args) => (cmd === "claude" && args[0] === "mcp" && args[1] === "get" ? staleEnvOutput : ""),
+    });
+    assert.deepEqual(result.preservedEnv, { NOMARMY_WORKER_MODEL: "qwen3.6-27b", NOMARMY_WORKER_MODEL_THINKING: "true" });
+  } finally {
+    fs.rmSync(nomarmyRoot, { recursive: true, force: true });
+    fs.rmSync(installDir, { recursive: true, force: true });
+  }
+});
+
+test("connectClaude: config/common.env's model keys are added even with no prior registration at all", () => {
+  const nomarmyRoot = fakeRoot();
+  fs.mkdirSync(path.join(nomarmyRoot, "config"), { recursive: true });
+  fs.writeFileSync(path.join(nomarmyRoot, "config", "common.env"), "NOMARMY_WORKER_MODEL=qwen3-coder-next\nNOMARMY_MODEL_THINKING=false\n");
+  const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
+  const calls = [];
+  try {
+    const result = connectClaude({ nomarmyRoot, installDir, run: (cmd, args) => { calls.push([cmd, ...args].join(" ")); return ""; } });
+    assert.deepEqual(result.preservedEnv, { NOMARMY_WORKER_MODEL: "qwen3-coder-next", NOMARMY_WORKER_MODEL_THINKING: "false" });
+    const addCall = calls.find((c) => c.includes("mcp add"));
+    assert.match(addCall, /-e NOMARMY_WORKER_MODEL=qwen3-coder-next/);
+    assert.match(addCall, /-e NOMARMY_WORKER_MODEL_THINKING=false/);
   } finally {
     fs.rmSync(nomarmyRoot, { recursive: true, force: true });
     fs.rmSync(installDir, { recursive: true, force: true });

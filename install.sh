@@ -112,9 +112,9 @@ if ! nomarmy_is_cloud; then openclaw plugins install @openclaw/llama-cpp-provide
 "$ROOT/scripts/setup-sandbox.sh"
 "$ROOT/scripts/configure-openclaw.sh" "$NOMARMY_PROFILE"
 if [[ "$WITH_CLAUDE" == 1 ]]; then
-  if command -v claude >/dev/null 2>&1; then "$ROOT/scripts/setup-claude-worker.sh"; else echo 'NOTE: Claude Code not found; worker stack installed. Install Claude Code then run scripts/setup-claude-worker.sh.'; fi
+  if command -v claude >/dev/null 2>&1; then node "$ROOT/bin/nomarmy.mjs" connect claude; else echo 'NOTE: Claude Code not found; worker stack installed. Install Claude Code then run: nomarmy connect claude'; fi
 fi
-if command -v codex >/dev/null 2>&1; then "$ROOT/scripts/setup-codex-worker.sh"; else echo 'NOTE: Codex not found; run scripts/setup-codex-worker.sh after installing Codex.'; fi
+if command -v codex >/dev/null 2>&1; then node "$ROOT/bin/nomarmy.mjs" connect codex; else echo 'NOTE: Codex not found; run: nomarmy connect codex (after installing Codex)'; fi
 "$ROOT/scripts/verify-install.sh" "$NOMARMY_PROFILE"
 if nomarmy_is_cloud && [[ "${NOMARMY_ORCHESTRATOR_RUNTIME:-}" == "claude-code" ]]; then
   echo

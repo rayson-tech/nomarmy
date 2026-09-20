@@ -194,17 +194,32 @@ changed tonight -- it is the same class of decision as `reviewRequired` on
 a `not_run` verification earlier this session: a tested, intentional
 tradeoff, not a bug to silently patch.
 
-## A real gap this surfaced
+## A real gap this surfaced (since closed)
 
-Comparing models currently means a manual restart-and-re-register dance for
-every swap (stop/start inference, fix OpenClaw's auto-detected context and
-reasoning metadata, update the MCP registration's `NOMARMY_WORKER_MODEL` env
-var, restart the coordinator session). Two real bugs were found and fixed via
-exactly this dance: `connectClaude`'s re-add silently dropped previously-set
-env vars on every reinstall, and separately had the `-e` flag argument order
-backwards, both now fixed in `lib/connect.mjs`. `nomarmy model` doesn't yet
-manage the MCP env vars at all, only the llama-server model — that's the next
-concrete tooling gap, not a research question.
+Comparing models used to mean a fully manual restart-and-re-register dance
+for every swap (stop/start inference, fix OpenClaw's auto-detected context
+and reasoning metadata, update the MCP registration's `NOMARMY_WORKER_MODEL`
+env var by hand, restart the coordinator session). Several real bugs were
+found and fixed via exactly this dance: `connectClaude`'s re-add silently
+dropped previously-set env vars on every reinstall, separately had the `-e`
+flag argument order backwards, and — the deepest one — `config/common.env`
+already had a `NOMARMY_WORKER_MODEL` key, but nothing ever read it back out;
+picking a non-default model in `nomarmy setup`/`model` silently had zero
+effect on which model workers actually dispatched to, for every model choice
+ever made through the documented path, not just this session's. Compounding
+it: `install.sh` called a separate, older bash implementation
+(`scripts/setup-claude-worker.sh`) that never got any of these fixes at all,
+so the documented "correct" install path was broken the whole time regardless
+of what `lib/connect.mjs` did.
+
+Fixed: `config/common.env` is now the single source of truth `nomarmy
+connect` reads to keep the registration in sync, `nomarmy setup`/`model`
+write it consistently, `install.sh` calls the one (now-correct) JS
+implementation instead of the old bash script, and the bash script is
+deleted rather than left as an untested second copy of the same logic.
+`nomarmy model` also now offers to resync the registration in the same
+command, and its curated model menu was expanded from the one default entry
+to the three real, measured options from this document's own findings.
 
 ## Sources for Qwen3.6-27B's cited benchmark score
 

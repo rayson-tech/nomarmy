@@ -71,7 +71,10 @@ Usage: nomarmy <command> [options]
                   Prints the install.sh command; never runs it.
                   --tier <more|nominal>   with --json, skip the prompt
   model           Change the configured model later, without the rest of
-                  setup's questions.
+                  setup's questions. Offers to also resync the MCP
+                  registration's worker-routing env vars right then.
+                  --update-mcp  with --json, also resync the MCP
+                                registration (never done silently)
   update          Pull the latest nomArmy code and re-sync the installed
                   MCP copy (fast-forward only; refuses on local changes).
   connect [claude] [codex] [cursor]
@@ -283,40 +286,58 @@ function writeEnvLine(filePath, key, value) {
   fs.writeFileSync(filePath, updated);
 }
 
-// gpt-oss-20b is NOT a second curated entry here, on purpose: it's real (the
-// README's own benchmark ran it), but NOMARMY_WORKER_MODEL_FALLBACK (its only
-// reference anywhere in this codebase) is a separate routing identity for
-// profile: "gpt" job dispatch, not a GGUF repo/quant this command could point
-// NOMARMY_MODEL_REPO/QUANT at -- no verified repo string for it exists in this
-// project's history, and fabricating one here would be worse than not
-// offering it. Confirmed by grepping every config file and git history.
+// Each entry's repo/quant/alias is verified against this project's own real
+// usage (downloaded, loaded, dispatched against), not guessed from a model
+// card. `thinking` records whether the model has a reasoning mode at all --
+// Coder-Next does not, the other two do, at reasoning: medium specifically
+// (see docs/experiments/2026-09-20-model-bakeoff-and-economics.md): high
+// reasoning was a strict downgrade on every model tested, from a full
+// timeout (Qwen3.6-27B on an open-ended task) to a 5x slowdown with real
+// failures (gpt-oss-20b: 318s/4 failures at high vs 62s/0 failures at
+// medium on an identical ticket). `recommended` is this project's own
+// honest opinion given everything measured so far, not a formula -- it
+// prints as a note, never a hidden default no one chose.
 const KNOWN_MODELS = {
-  default: { label: "Qwen3-Coder-Next (shipped default, coding-specialized)", repo: "Qwen/Qwen3-Coder-Next-GGUF", quant: "Q4_K_M", alias: "qwen3-coder-next" },
+  default: {
+    label: "Qwen3-Coder-Next (shipped default; no thinking mode -- 0 failures across every case tested tonight)",
+    repo: "Qwen/Qwen3-Coder-Next-GGUF", quant: "Q4_K_M", alias: "qwen3-coder-next", thinking: false, recommended: true,
+  },
+  "gpt-oss-20b": {
+    label: "gpt-oss-20b (thinking, use reasoning: medium -- fastest of every model tested on the hardest case: 62s/0 failures; reasoning: high on the SAME ticket was the worst result measured: 318s/4 failures)",
+    repo: "ggml-org/gpt-oss-20b-GGUF", quant: "MXFP4", alias: "gpt-oss-20b", thinking: true,
+  },
+  "qwen3.6-27b": {
+    label: "Qwen3.6-27B (thinking, use reasoning: medium -- best measured reliability, noticeably slower per-token; reasoning: high caused a full timeout on an open-ended task)",
+    repo: "unsloth/Qwen3.6-27B-GGUF", quant: "Q4_K_M", alias: "qwen3.6-27b", thinking: true,
+  },
 };
 
 /**
  * The one model-choice menu both `setup` and `model` show. Returns
- * `{ kind: "known", repo, quant, alias }` for the curated default, or
+ * `{ kind: "known", repo, quant, alias, thinking }` for a curated entry, or
  * `{ kind: "search" }` once scripts/select-model.mjs (spawned as a child
  * process, not reimplemented -- it already owns the Hugging Face search,
- * confirm and write flow) has finished.
+ * confirm and write flow) has finished. A searched model's `thinking`
+ * support isn't knowable from a repo/quant alone, so it's asked directly.
  */
 async function chooseModel(rl) {
+  const entries = Object.entries(KNOWN_MODELS);
   console.log("\n" + c.bold("Which model?"));
-  console.log(`  ${c.cyan("1.")} ${KNOWN_MODELS.default.label}`);
-  console.log(`  ${c.cyan("2.")} Search Hugging Face for something else`);
-  const choice = (await rl.question(c.bold("Choice [1]: "))).trim() || "1";
-  if (choice === "2") {
-    const term = (await rl.question("Search term (or owner/model-GGUF repo): ")).trim();
-    if (!term) throw new Error("A search term or repo is required for the Hugging Face search path.");
-    await new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [path.join(nomarmyRoot, "scripts", "select-model.mjs"), term], { stdio: "inherit" });
-      child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`select-model.mjs exited ${code}`))));
-      child.on("error", reject);
-    });
-    return { kind: "search" };
-  }
-  return { kind: "known", ...KNOWN_MODELS.default };
+  entries.forEach(([, m], i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${m.label}`));
+  console.log(`  ${c.cyan(`${entries.length + 1}.`)} Search Hugging Face for something else`);
+  const defaultChoice = String(entries.findIndex(([, m]) => m.recommended) + 1 || 1);
+  const choice = (await rl.question(c.bold(`Choice [${defaultChoice}]: `))).trim() || defaultChoice;
+  const picked = entries[Number(choice) - 1];
+  if (picked) return { kind: "known", ...picked[1] };
+  const term = (await rl.question("Search term (or owner/model-GGUF repo): ")).trim();
+  if (!term) throw new Error("A search term or repo is required for the Hugging Face search path.");
+  await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(nomarmyRoot, "scripts", "select-model.mjs"), term], { stdio: "inherit" });
+    child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`select-model.mjs exited ${code}`))));
+    child.on("error", reject);
+  });
+  const thinkingAnswer = (await rl.question(c.bold("Does this model have a thinking/reasoning mode? [y/N] "))).trim().toLowerCase();
+  return { kind: "search", thinking: thinkingAnswer === "y" || thinkingAnswer === "yes" };
 }
 
 /**
@@ -340,7 +361,7 @@ async function cmdSetup() {
 
   const nonInteractive = json;
   if (nonInteractive && !flag("profile-name")) throw new Error("--json requires --profile-name <name>.");
-  if (nonInteractive && !isCloud && !flag("model")) throw new Error("--json requires --model default for a local profile (Hugging Face search is interactive-only).");
+  if (nonInteractive && !isCloud && !flag("model")) throw new Error(`--json requires --model <${Object.keys(KNOWN_MODELS).join("|")}> for a local profile (Hugging Face search is interactive-only).`);
 
   let rl = null;
   if (!nonInteractive) {
@@ -387,7 +408,7 @@ async function cmdSetup() {
     if (!isCloud) {
       if (nonInteractive) {
         const which = value("model");
-        if (!KNOWN_MODELS[which]) throw new Error(`--model must be "default" under --json, got "${which}".`);
+        if (!KNOWN_MODELS[which]) throw new Error(`--model must be one of ${Object.keys(KNOWN_MODELS).join(", ")} under --json, got "${which}".`);
         model = { kind: "known", ...KNOWN_MODELS[which] };
       } else {
         model = await chooseModel(rl);
@@ -416,6 +437,8 @@ async function cmdSetup() {
         console.log(c.dim(`  NOMARMY_MODEL_REPO=${model.repo}`));
         console.log(c.dim(`  NOMARMY_MODEL_QUANT=${model.quant}`));
         console.log(c.dim(`  NOMARMY_MODEL_ALIAS=${model.alias}`));
+        console.log(c.dim(`  NOMARMY_WORKER_MODEL=${model.alias}`));
+        console.log(c.dim(`  NOMARMY_MODEL_THINKING=${model.thinking}`));
       }
       if (!nonInteractive) {
         const answer = (await rl.question(c.bold("\nWrite this configuration? [y/N] "))).trim().toLowerCase();
@@ -429,7 +452,21 @@ async function cmdSetup() {
       writeEnvLine(commonPath, "NOMARMY_MODEL_REPO", model.repo);
       writeEnvLine(commonPath, "NOMARMY_MODEL_QUANT", model.quant);
     }
-    if (model?.kind === "known") writeEnvLine(commonPath, "NOMARMY_MODEL_ALIAS", model.alias);
+    if (model?.kind === "known") {
+      writeEnvLine(commonPath, "NOMARMY_MODEL_ALIAS", model.alias);
+      // The keys `nomarmy connect` actually reads to route worker dispatch --
+      // writing NOMARMY_MODEL_ALIAS alone (the old behavior) left the MCP
+      // registration permanently pointed at whatever it last had, regardless
+      // of what was chosen here.
+      writeEnvLine(commonPath, "NOMARMY_WORKER_MODEL", model.alias);
+      writeEnvLine(commonPath, "NOMARMY_MODEL_THINKING", String(model.thinking));
+    } else if (model?.kind === "search") {
+      const searchedAlias = readEnvValue(commonPath, "NOMARMY_MODEL_ALIAS");
+      if (searchedAlias) {
+        writeEnvLine(commonPath, "NOMARMY_WORKER_MODEL", searchedAlias);
+        writeEnvLine(commonPath, "NOMARMY_MODEL_THINKING", String(model.thinking));
+      }
+    }
 
     const installCmd = `./install.sh --profile ${profileName}${isCloud ? "" : ""}`;
     if (json) return out({ written: { profile: profilePath, common: model?.kind === "known" ? commonPath : null }, env: profileWrites, sizingTier, installCommand: installCmd });
@@ -448,23 +485,30 @@ async function cmdSetup() {
  * CLI.
  */
 async function cmdModel() {
+  const commonPath = path.join(nomarmyRoot, "config", "common.env");
   if (json) {
     const which = value("model");
-    if (!KNOWN_MODELS[which]) throw new Error('--json requires --model default (Hugging Face search is interactive-only).');
+    if (!KNOWN_MODELS[which]) throw new Error(`--json requires --model one of ${Object.keys(KNOWN_MODELS).join(", ")} (Hugging Face search is interactive-only).`);
     const m = KNOWN_MODELS[which];
-    const commonPath = path.join(nomarmyRoot, "config", "common.env");
     if (m.repo) { writeEnvLine(commonPath, "NOMARMY_MODEL_REPO", m.repo); writeEnvLine(commonPath, "NOMARMY_MODEL_QUANT", m.quant); }
     writeEnvLine(commonPath, "NOMARMY_MODEL_ALIAS", m.alias);
-    return out({ written: commonPath, model: m });
+    writeEnvLine(commonPath, "NOMARMY_WORKER_MODEL", m.alias);
+    writeEnvLine(commonPath, "NOMARMY_MODEL_THINKING", String(m.thinking));
+    // Same destructive-action-needs-explicit-opt-in-under-json rule as
+    // uninstall's --clear-*: this runs claude mcp remove/add for real.
+    if (flag("update-mcp")) connectClaude({ nomarmyRoot, run: (cmd, args, opts = {}) => execFileSync(cmd, args, { stdio: "ignore", ...opts }) });
+    return out({ written: commonPath, model: m, mcpUpdated: flag("update-mcp") });
   }
-  if (!process.stdin.isTTY) throw new Error("nomarmy model needs an interactive terminal, or --json --model default.");
+  if (!process.stdin.isTTY) throw new Error(`nomarmy model needs an interactive terminal, or --json --model <${Object.keys(KNOWN_MODELS).join("|")}> (add --update-mcp to also resync the MCP registration).`);
   const rl = createInterface({ input, output });
   try {
     console.log(c.bold("🍪 nomArmy model"));
     const model = await chooseModel(rl);
-    if (model.kind === "search") { console.log(c.green("\n✓ Done") + " -- config/common.env was already updated by the search above."); }
-    else {
-      const commonPath = path.join(nomarmyRoot, "config", "common.env");
+    let alias;
+    if (model.kind === "search") {
+      console.log(c.green("\n✓ Done") + " -- config/common.env was already updated by the search above.");
+      alias = readEnvValue(commonPath, "NOMARMY_MODEL_ALIAS");
+    } else {
       console.log(c.bold(`\nAbout to write ${path.relative(nomarmyRoot, commonPath)}:`));
       console.log(c.dim(`  NOMARMY_MODEL_REPO=${model.repo}\n  NOMARMY_MODEL_QUANT=${model.quant}\n  NOMARMY_MODEL_ALIAS=${model.alias}`));
       const answer = (await rl.question(c.bold("\nApply this model configuration? [y/N] "))).trim().toLowerCase();
@@ -473,8 +517,26 @@ async function cmdModel() {
       writeEnvLine(commonPath, "NOMARMY_MODEL_QUANT", model.quant);
       writeEnvLine(commonPath, "NOMARMY_MODEL_ALIAS", model.alias);
       console.log(c.green(`✓ Wrote ${path.relative(nomarmyRoot, commonPath)}.`));
+      alias = model.alias;
     }
-    console.log(c.dim("\nRestart inference to pick this up:\n  ./scripts/stop-inference.sh\n  ./scripts/start-inference.sh <profile>"));
+    if (alias) {
+      writeEnvLine(commonPath, "NOMARMY_WORKER_MODEL", alias);
+      writeEnvLine(commonPath, "NOMARMY_MODEL_THINKING", String(model.thinking));
+    }
+
+    // The gap this closes: NOMARMY_WORKER_MODEL above was, until now, never
+    // read back by anything -- picking a model here had no effect on which
+    // model workers actually dispatched to until someone separately, and
+    // manually, re-ran the MCP registration by hand.
+    if (alias && commandExists("claude")) {
+      const answer = (await rl.question(c.bold(`\nAlso update the Claude Code MCP registration to use "${alias}" now? [y/N] `))).trim().toLowerCase();
+      if (answer === "y" || answer === "yes") {
+        const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { stdio: "inherit", ...opts });
+        connectClaude({ nomarmyRoot, run });
+        console.log(c.green("✓ MCP registration updated.") + " Restart your Claude Code session to pick this up (the MCP server is a per-session child process).");
+      }
+    }
+    console.log(c.dim("\nRestart inference to load this model:\n  ./scripts/stop-inference.sh\n  ./scripts/start-inference.sh <profile>"));
   } finally {
     rl.close();
   }
@@ -488,7 +550,7 @@ function git(args) {
 /**
  * `nomarmy update`: pull and apply the latest nomArmy code -- NOT a model
  * swap, see `nomarmy model` for that. Real motivation: the MCP server Claude
- * Code actually runs is a COPY (scripts/setup-claude-worker.sh copies
+ * Code actually runs is a COPY (installMcpCopy, in lib/connect.mjs, copies
  * mcp/server.mjs + lib/ + package.json into
  * ~/.local/share/nomarmy-local-worker and registers that path), not this
  * checkout -- a bare `git pull` here changes nothing Claude Code is running
