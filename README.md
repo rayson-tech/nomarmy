@@ -327,6 +327,8 @@ Use `/mcp` inside Codex to confirm `nomarmy-local-worker` is available.
 
 That's a hypothesis, not a claim — nomArmy exists to test it, and measures whether it holds rather than assuming it. The number that matters is **cost and wall-clock per accepted task**, plus how often a human has to step in, not tokens displaced.
 
+The honest, measured answer so far (see `docs/experiments/2026-09-20-model-bakeoff-and-economics.md` for the full numbers): **it depends on task size, not on model choice.** Small, precisely-diagnosed fixes lose to just doing them directly — the fixed cost of a dispatch brief plus the mandatory independent verification doesn't shrink just because a worker got it right. A task where the surrounding context needed to safely make the fix is meaningfully larger than the fix itself is where delegation starts to pay off, because a local worker reads that context for free and the coordinator only pays for the verified result, not for reading the whole file itself. Three different local models were tested on an identical, genuinely subtle bug (a real `Map` re-insertion gotcha in a 144-line module) and all three found and fixed it correctly — the differentiator between them was wall-clock and how many tool calls it took to get there, not whether they could.
+
 ### The invariant
 
 **Worker output is a claim. Repository and environment state are evidence.**
@@ -363,7 +365,8 @@ nomArmy v1.2 is proven: bounded delegation, isolated worktrees, coordinator-owne
 | `.nomarmy.yml` environment contract — schema, loader, validator | Built, unit tested |
 | Disposable per-job service environments (Postgres, mocks, app) | Not built |
 | Nom-local browser/E2E and the autonomous repair loop | Not built |
-| Full-stack acceptance test proving the thesis end to end | **Not yet run** |
+| Full-stack acceptance test proving the thesis end to end | Run on 7 tickets across 3 local models — see `docs/experiments/2026-09-20-model-bakeoff-and-economics.md`. **Task-size-dependent, not unconditionally true**; a larger real ticket is the next test |
+| Comparing local models against each other | Works, but manual — no single command swaps the active model and its MCP registration together yet |
 
 Known limitations worth knowing up front: verification profiles requiring services beyond `environment: none` currently report `not_run` rather than running commands without their dependencies, and the environment scanner's Compose parser doesn't resolve YAML anchors/aliases/merge keys — affected findings are dropped with an explicit note rather than guessed at.
 
