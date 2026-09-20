@@ -241,8 +241,8 @@ Every command below proposes before it writes anything, showing exactly what wou
 | `nomarmy setup` | Detects this machine, recommends a profile the same way `sizing` does, offers a model choice, and writes `config/profiles/<name>.env` (+ `config/common.env`). Prints the `install.sh` command; never runs it. |
 | `nomarmy init` | Proposes a `.nomarmy.yml` from this repository's scan evidence and writes it after confirmation. Never overwrites an existing one without `--force`. |
 | `nomarmy model` | Change the configured model later, without the rest of `setup`'s questions. See [Swapping models](#swapping-models) above. |
-| `nomarmy update` | Pulls the latest nomArmy code (fast-forward only; refuses on local changes) and re-syncs the installed MCP copy for whichever coordinator is on PATH. |
-| `nomarmy connect <claude\|codex>` | (Re-)registers the MCP server with a coordinator on its own — e.g. after installing Claude Code or Codex later. |
+| `nomarmy update` | Pulls the latest nomArmy code (fast-forward only; refuses on local changes) and re-syncs the installed MCP copy for whichever coordinator(s) are already connected. |
+| `nomarmy connect [claude] [cursor] [codex]` | (Re-)registers the MCP server with one or more coordinators on its own — e.g. after installing one later. No target and not `--json` prompts an interactive multi-select. |
 | `nomarmy start` / `stop <profile>` | Starts/stops local inference (wraps `scripts/start-inference.sh` / `stop-inference.sh`). |
 | `nomarmy uninstall` | Removes the MCP registration and install directory. Job records under `~/.local/share/nomarmy-local-agents/jobs` are kept for recovery/audit. |
 | `nomarmy sizing` | Recommends context/slot/worker counts from your hardware and the model's own GGUF metadata. `--check` evaluates the profile you already have instead of recommending a new one. |
@@ -308,16 +308,22 @@ None of these are validated by nomArmy — a bad value is llama-server's own err
 
 Logs land under `$HOME/.local/share/nomarmy-local-agents/logs/`.
 
-## Codex support
+## Other coordinators: Codex and Cursor
 
-Codex reads `AGENTS.md` for repository guidance, kept alongside `CLAUDE.md` so both coordinators follow the same trust boundary and integration rules. `install.sh` registers the nomArmy MCP server for Codex automatically when the `codex` command is available; to register it later:
+Codex reads `AGENTS.md` for repository guidance, kept alongside `CLAUDE.md` so both coordinators follow the same trust boundary and integration rules. `install.sh` registers the nomArmy MCP server for Codex automatically when the `codex` command is available.
+
+Cursor doesn't have a CLI for this — registration is a JSON file (`~/.cursor/mcp.json`), which nomArmy edits directly (read-modify-write, preserving every other server already configured there).
+
+To register with one or more coordinators at any time, not just during install:
 
 ```bash
-./scripts/setup-codex-worker.sh
-codex mcp list
+nomarmy connect claude codex cursor   # any subset, in any order
+nomarmy connect                       # no target: interactive multi-select
 ```
 
-Use `/mcp` inside Codex to confirm `nomarmy-local-worker` is available.
+Each target is attempted independently — one missing (e.g. `codex` not on PATH) doesn't block the others, and the command reports per-target success/failure. `nomarmy update` re-syncs whichever coordinators are already connected automatically.
+
+Use `/mcp` inside Codex, or Cursor's MCP settings panel, to confirm `nomarmy-local-worker` is available.
 
 ## How nomArmy works (and why)
 

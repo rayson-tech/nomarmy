@@ -4,7 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { installMcpCopy, connectClaude, connectCodex, defaultInstallDir, parseClaudeEnv } from "../lib/connect.mjs";
+import {
+  installMcpCopy, connectClaude, connectCodex, connectCursor, defaultInstallDir, parseClaudeEnv,
+  readCursorConfig, cursorAlreadyConnected,
+} from "../lib/connect.mjs";
 
 function fakeRoot() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-root-"));
@@ -164,5 +167,88 @@ test("connectCodex: installs the copy, best-effort removes old registrations, ad
   } finally {
     fs.rmSync(nomarmyRoot, { recursive: true, force: true });
     fs.rmSync(installDir, { recursive: true, force: true });
+  }
+});
+
+function fakeCursorConfigPath() {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-cursor-")), "mcp.json");
+}
+
+test("readCursorConfig: a missing file is an empty object, not an error", () => {
+  assert.deepEqual(readCursorConfig(path.join(os.tmpdir(), "does-not-exist-nomarmy", "mcp.json")), {});
+});
+
+test("readCursorConfig: invalid JSON is refused, never silently overwritten", () => {
+  const configPath = fakeCursorConfigPath();
+  fs.writeFileSync(configPath, "{ not valid json");
+  try {
+    assert.throws(() => readCursorConfig(configPath), /not valid JSON/);
+  } finally {
+    fs.rmSync(path.dirname(configPath), { recursive: true, force: true });
+  }
+});
+
+test("readCursorConfig: a JSON array at the top level is refused", () => {
+  const configPath = fakeCursorConfigPath();
+  fs.writeFileSync(configPath, "[]");
+  try {
+    assert.throws(() => readCursorConfig(configPath), /not a JSON object/);
+  } finally {
+    fs.rmSync(path.dirname(configPath), { recursive: true, force: true });
+  }
+});
+
+test("connectCursor: creates mcp.json with the nomArmy entry when none exists", () => {
+  const nomarmyRoot = fakeRoot();
+  const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
+  const configPath = fakeCursorConfigPath();
+  fs.rmSync(configPath, { force: true });
+  try {
+    const result = connectCursor({ nomarmyRoot, installDir, configPath, run: () => {} });
+    const written = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    assert.deepEqual(written.mcpServers["nomarmy-local-worker"], {
+      command: "node", args: [path.join(installDir, "mcp", "server.mjs")], env: {},
+    });
+    assert.equal(result.configPath, configPath);
+  } finally {
+    fs.rmSync(nomarmyRoot, { recursive: true, force: true });
+    fs.rmSync(installDir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(configPath), { recursive: true, force: true });
+  }
+});
+
+test("connectCursor: preserves this entry's env vars and every other configured server, untouched", () => {
+  const nomarmyRoot = fakeRoot();
+  const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
+  const configPath = fakeCursorConfigPath();
+  fs.writeFileSync(configPath, JSON.stringify({
+    mcpServers: {
+      "some-other-server": { command: "npx", args: ["-y", "other-mcp"] },
+      "nomarmy-local-worker": { command: "node", args: ["/old/stale/path.mjs"], env: { NOMARMY_WORKER_MODEL: "gpt-oss-20b" } },
+    },
+  }));
+  try {
+    const result = connectCursor({ nomarmyRoot, installDir, configPath, run: () => {} });
+    const written = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    assert.deepEqual(written.mcpServers["some-other-server"], { command: "npx", args: ["-y", "other-mcp"] });
+    assert.deepEqual(written.mcpServers["nomarmy-local-worker"].env, { NOMARMY_WORKER_MODEL: "gpt-oss-20b" });
+    assert.equal(written.mcpServers["nomarmy-local-worker"].args[0], path.join(installDir, "mcp", "server.mjs"));
+    assert.deepEqual(result.preservedEnv, { NOMARMY_WORKER_MODEL: "gpt-oss-20b" });
+  } finally {
+    fs.rmSync(nomarmyRoot, { recursive: true, force: true });
+    fs.rmSync(installDir, { recursive: true, force: true });
+    fs.rmSync(path.dirname(configPath), { recursive: true, force: true });
+  }
+});
+
+test("cursorAlreadyConnected: true only when the file exists and has our entry", () => {
+  const configPath = fakeCursorConfigPath();
+  fs.rmSync(configPath, { force: true });
+  assert.equal(cursorAlreadyConnected(configPath), false);
+  fs.writeFileSync(configPath, JSON.stringify({ mcpServers: { "nomarmy-local-worker": { command: "node", args: [] } } }));
+  try {
+    assert.equal(cursorAlreadyConnected(configPath), true);
+  } finally {
+    fs.rmSync(path.dirname(configPath), { recursive: true, force: true });
   }
 });

@@ -17,7 +17,20 @@ import { buildConfigProposal } from "../lib/propose.mjs";
 import { detectHardware } from "../lib/hardware.mjs";
 import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf.mjs";
 import { recommend, evaluateConfig, bytesPerKvElementForCacheTypes } from "../lib/sizing.mjs";
-import { connectClaude, connectCodex } from "../lib/connect.mjs";
+import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected } from "../lib/connect.mjs";
+
+// Add a new coordinator: add its name here, teach commandExists/connectTarget
+// about it below (a JSON-file target like Cursor has no PATH binary to check
+// and should short-circuit commandExists to true), and give cmdUpdate its own
+// "already connected, so resync" detection if it has no CLI to probe.
+const KNOWN_TARGETS = ["claude", "codex", "cursor"];
+
+function connectTarget(target, { nomarmyRoot, run }) {
+  if (target === "claude") return connectClaude({ nomarmyRoot, run });
+  if (target === "codex") return connectCodex({ nomarmyRoot, run });
+  if (target === "cursor") return connectCursor({ nomarmyRoot, run });
+  throw new Error(`unknown connect target: ${target}`);
+}
 
 const argv = process.argv.slice(2);
 const command = argv[0];
@@ -61,8 +74,10 @@ Usage: nomarmy <command> [options]
                   setup's questions.
   update          Pull the latest nomArmy code and re-sync the installed
                   MCP copy (fast-forward only; refuses on local changes).
-  connect <claude|codex>
-                  (Re-)register the MCP server with a coordinator.
+  connect [claude] [codex] [cursor]
+                  (Re-)register the MCP server with one or more coordinators.
+                  With no target and not --json, prompts an interactive
+                  multi-select instead.
   start <profile> Start local inference (wraps scripts/start-inference.sh).
   stop <profile>  Stop local inference (wraps scripts/stop-inference.sh).
   uninstall       Remove the MCP registration and install directory.
@@ -502,9 +517,16 @@ async function cmdUpdate() {
     connectCodex({ nomarmyRoot, run: runInherit });
     resynced.push("codex");
   }
+  // Cursor has no CLI/PATH binary to probe with commandExists -- "already
+  // connected" is read from its own config file instead.
+  if (cursorAlreadyConnected()) {
+    say("\nRe-syncing the Cursor MCP install...");
+    connectCursor({ nomarmyRoot, run: runInherit });
+    resynced.push("cursor");
+  }
 
   if (json) return out({ updated: true, sha: git(["rev-parse", "HEAD"]), resynced });
-  console.log(c.yellow("\nThe MCP server is a per-session child process: every open Claude Code / Codex session needs a restart to pick this up, not just this one."));
+  console.log(c.yellow("\nThe MCP server is a per-session child process: every open Claude Code / Codex / Cursor session needs a restart to pick this up, not just this one."));
 }
 
 function commandExists(cmd) {
@@ -512,25 +534,79 @@ function commandExists(cmd) {
   catch { return false; }
 }
 
+/** A dependency-free multi-select: numbered checklist, comma-separated
+ * answer, matching the plain-readline style already used elsewhere in this
+ * CLI (setup's numbered "Choice [1]:" prompts) rather than pulling in an
+ * arrow-key TUI library for one prompt. */
+async function promptMultiSelect(options, question) {
+  const rl = createInterface({ input, output });
+  try {
+    console.log(c.bold(question));
+    options.forEach((opt, i) => console.log(`  ${i + 1}. ${opt}`));
+    const answer = (await rl.question(c.bold('Choice(s) [comma-separated numbers, or "all"]: '))).trim().toLowerCase();
+    if (!answer) return [];
+    if (answer === "all") return [...options];
+    const picked = new Set();
+    for (const token of answer.split(",").map((s) => s.trim()).filter(Boolean)) {
+      const idx = Number(token);
+      if (Number.isInteger(idx) && idx >= 1 && idx <= options.length) picked.add(options[idx - 1]);
+    }
+    return [...picked];
+  } finally {
+    rl.close();
+  }
+}
+
 /**
- * `nomarmy connect <claude|codex>`: (re-)register the MCP server with a
- * coordinator on its own, without a full `update`. Useful standalone --
- * e.g. Claude Code installed *after* nomArmy already was -- not only as an
- * update step.
+ * `nomarmy connect [claude] [codex] [cursor]`: (re-)register the MCP server
+ * with one or more coordinators on its own, without a full `update`. Useful
+ * standalone -- e.g. a coordinator installed *after* nomArmy already was --
+ * not only as an update step. With no target named and not --json, prompts
+ * an interactive multi-select instead of requiring one call per target.
  */
 async function cmdConnect() {
-  // Positional, but not argv[1] verbatim: every other command in this CLI is
-  // position-independent with respect to global flags (flag()/value() scan
-  // the whole argv), and `nomarmy connect --json claude` broke that promise
-  // by reading argv[1] directly -- --json landed in target's slot instead.
-  const target = argv.slice(1).find(a => !a.startsWith("--"));
-  if (target !== "claude" && target !== "codex") throw new Error('nomarmy connect needs a target: "claude" or "codex".');
-  if (!commandExists(target)) throw new Error(`${target} was not found on PATH.`);
+  // Positional, but never a fixed argv index: every other command in this
+  // CLI is position-independent with respect to global flags (flag()/value()
+  // scan the whole argv), and `nomarmy connect --json claude` once broke
+  // that promise by reading argv[1] directly -- --json landed in target's
+  // slot instead. Multiple bare tokens are now allowed too, for multi-select.
+  const requested = argv.slice(1).filter((a) => !a.startsWith("--"));
+  let targets;
+  if (requested.length > 0) {
+    const unknown = requested.filter((t) => !KNOWN_TARGETS.includes(t));
+    if (unknown.length) throw new Error(`unknown target(s) ${unknown.join(", ")}. Known: ${KNOWN_TARGETS.join(", ")}.`);
+    targets = [...new Set(requested)];
+  } else if (json) {
+    throw new Error(`nomarmy connect --json needs at least one target: ${KNOWN_TARGETS.join(", ")}.`);
+  } else {
+    targets = await promptMultiSelect(KNOWN_TARGETS, "🍪 Which coordinator(s) should nomArmy register with?");
+    if (targets.length === 0) { console.log("Nothing selected."); return; }
+  }
+
   const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { stdio: json ? "ignore" : "inherit", ...opts });
-  if (!json) console.log(c.bold(`🍪 Connecting nomArmy to ${target}...\n`));
-  const result = target === "claude" ? connectClaude({ nomarmyRoot, run }) : connectCodex({ nomarmyRoot, run });
-  if (json) return out({ connected: target, ...result });
-  console.log(c.green(`\n✓ Registered nomarmy-local-worker with ${target}.`));
+  const results = [];
+  for (const target of targets) {
+    // Cursor is a JSON file, not a CLI on PATH -- nothing to probe there.
+    if (target !== "cursor" && !commandExists(target)) {
+      const error = `${target} was not found on PATH.`;
+      results.push({ target, connected: false, error });
+      if (!json) console.log(c.red(`✗ ${target}: ${error}`));
+      continue;
+    }
+    try {
+      if (!json) console.log(c.bold(`\n🍪 Connecting nomArmy to ${target}...`));
+      const result = connectTarget(target, { nomarmyRoot, run });
+      results.push({ target, connected: true, ...result });
+      if (!json) console.log(c.green(`✓ Registered nomarmy-local-worker with ${target}.`));
+    } catch (error) {
+      results.push({ target, connected: false, error: error.message });
+      if (!json) console.log(c.red(`✗ ${target}: ${error.message}`));
+    }
+  }
+
+  const failed = results.filter((r) => !r.connected);
+  if (failed.length) process.exitCode = 1;
+  if (json) return out({ results });
 }
 
 /** Thin, mechanical wrappers around already-working scripts -- unlike connect's port to JS, these are real bash process/PID management with no awkward Node-calling-Node seam to fix, so spawning them is the right amount of wrapping, not under- or over-engineering it. */
