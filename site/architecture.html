@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>nomArmy Architecture</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <header class="hero">
+      <div class="logo">
+        <img src="nomarmy-logo.png" alt="nomArmy logo" width="240">
+      </div>
+      <h1>Architecture</h1>
+      <p class="subtitle">How nomArmy's trust boundary works</p>
+    </header>
+    <section class="intro">
+      <h2>Worker / Coordinator split</h2>
+      <p>The coordinator orchestrates work, while a worker (nom) executes a task inside an isolated sandbox and writes a brief report. The worker never touches Git; only the coordinator can commit or merge.</p>
+    </section>
+    <section class="core-idea">
+      <h2>Claim vs Evidence</h2>
+      <p><strong>Worker output is a claim.</strong> An implement worker's report is a four-line statement that the coordinator verifies against the repository state. The repository and environment are evidence.</p>
+    </section>
+    <section class="core-idea">
+      <h2>Git diffs as evidence</h2>
+      <p>After a job finishes, the coordinator reads the Git diff between the base commit and the new commit. The diff shows exactly what changed, and the coordinator uses the diff to validate the worker's claim.</p>
+    </section>
+    <section class="core-idea">
+      <h2>Scout citations</h2>
+      <p>Scouts are read-only workers that answer research questions a deterministic tool can't. Every claim carries a citation <code>[path:line]</code> that the coordinator resolves to the exact file and line in the committed code, ensuring the claim can be independently verified.</p>
+    </section>
+    <footer>
+      <p><a href="index.html">Home</a> - <a href="https://github.com/rayson-tech/nomarmy/blob/main/LICENSE">License: Apache-2.0</a> - Maintained by Rayson Technologies</p>
+    </footer>
+  </main>
+</body>
+</html>
