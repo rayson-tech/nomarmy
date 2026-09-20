@@ -308,6 +308,21 @@ None of these are validated by nomArmy — a bad value is llama-server's own err
 
 Logs land under `$HOME/.local/share/nomarmy-local-agents/logs/`.
 
+## Target repository languages
+
+nomArmy's own independent verification (the step that re-runs a job's real test commands, never trusting the worker's self-report) works against a target repository written in any language whose toolchain exists in the sandbox image. Today that's:
+
+| Language | Detection (`nomarmy scan`) | Sandbox toolchain |
+|---|---|---|
+| Node | `package.json` | Built into the base image |
+| Python | `pyproject.toml`, `requirements.txt` | Built into the base image (`python3`/`pip`/`venv`) |
+| Go | `go.mod` | Built **lazily**, on first use |
+| Rust | `Cargo.toml` | Built **lazily**, on first use |
+
+Go and Rust images aren't baked into the shared base image — a native compiler is real memory pressure competing with the same local-inference budget `nomarmy sizing` protects, and most installs never touch either. The first time a job's target repo is detected as Go or Rust, nomArmy builds that language's image once via Podman (a few minutes; needs network for that one build, same as the base image); every job after reuses the cached image. `NOMARMY_AGENT_IMAGE` (or the `image` option) always overrides auto-detection, same as everywhere else in this codebase.
+
+**Current limitation:** this only covers nomArmy's own final verification step. The worker's own tool calls (the actual editing) still run inside whatever sandbox OpenClaw is configured with globally (`agents.defaults.sandbox.docker.image`, set by `scripts/setup-sandbox.sh`) — `openclaw agent exec` has no per-job sandbox override today, so switching that automatically per job is unresolved (there's a promising lead in OpenClaw's `agents.entries.<name>.sandbox` config, unverified). Until that's solved, a worker fixing a Go or Rust bug can propose and verify a diff, but can't run `go test`/`cargo test` itself mid-task unless you manually point `setup-sandbox.sh` at a Go/Rust-equipped image first.
+
 ## Other coordinators: Codex and Cursor
 
 Codex reads `AGENTS.md` for repository guidance, kept alongside `CLAUDE.md` so both coordinators follow the same trust boundary and integration rules. `install.sh` registers the nomArmy MCP server for Codex automatically when the `codex` command is available.
@@ -377,6 +392,7 @@ nomArmy v1.2 is proven: bounded delegation, isolated worktrees, coordinator-owne
 | Nom-local browser/E2E and the autonomous repair loop | Not built |
 | Full-stack acceptance test proving the thesis end to end | Run on 7 tickets across 3 local models — see `docs/experiments/2026-09-20-model-bakeoff-and-economics.md`. **Task-size-dependent, not unconditionally true**; a larger real ticket is the next test |
 | Comparing local models against each other | Works, but manual — no single command swaps the active model and its MCP registration together yet |
+| Go/Rust target repos — detection + lazy sandbox image | Independent verification works, live-verified (real `go test`/`cargo test` pass and fail correctly). Worker's own live tool execution still uses the single globally-configured OpenClaw sandbox — see [Target repository languages](#target-repository-languages) |
 
 Known limitations worth knowing up front: verification profiles requiring services beyond `environment: none` currently report `not_run` rather than running commands without their dependencies, and the environment scanner's Compose parser doesn't resolve YAML anchors/aliases/merge keys — affected findings are dropped with an explicit note rather than guessed at.
 

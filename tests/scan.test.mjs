@@ -428,6 +428,38 @@ test("python repository evidence: deps, scripts, make targets, Procfile", () => 
   }
 });
 
+test("go repository evidence: module name, build and test commands", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-scan-go-"));
+  try {
+    fs.writeFileSync(path.join(dir, "go.mod"), "module github.com/example/widget\n\ngo 1.23\n");
+    const evidence = scanRepository(dir);
+    assert.ok(names(evidence, "tooling").includes("go"));
+    const goTool = find(evidence, "tooling", (t) => t.name === "go");
+    assert.equal(goTool.detail, "module github.com/example/widget");
+    const commands = new Map(items(evidence, "commands").map((c) => [c.name, c]));
+    assert.equal(commands.get("go build").command, "go build ./...");
+    assert.equal(commands.get("go test").kind, "test");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("rust repository evidence: package name, build and test commands", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-scan-rust-"));
+  try {
+    fs.writeFileSync(path.join(dir, "Cargo.toml"), '[package]\nname = "widget"\nversion = "0.1.0"\nedition = "2021"\n');
+    const evidence = scanRepository(dir);
+    assert.ok(names(evidence, "tooling").includes("cargo"));
+    const cargoTool = find(evidence, "tooling", (t) => t.name === "cargo");
+    assert.equal(cargoTool.detail, "package widget");
+    const commands = new Map(items(evidence, "commands").map((c) => [c.name, c]));
+    assert.equal(commands.get("cargo build").command, "cargo build");
+    assert.equal(commands.get("cargo test").kind, "test");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Drift comparison
 // ---------------------------------------------------------------------------

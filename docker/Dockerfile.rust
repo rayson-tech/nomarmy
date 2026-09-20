@@ -1,0 +1,19 @@
+FROM node:24-bookworm-slim
+ENV DEBIAN_FRONTEND=noninteractive
+# Same base as docker/Dockerfile plus a Rust toolchain -- the worker's own
+# tool-calling harness needs Node regardless of the target repo's language.
+# Debian bookworm's packaged rustc/cargo lags stable Rust noticeably, and
+# real Cargo.toml files routinely need a recent edition/toolchain, so this
+# uses rustup (network access is fine here -- this is the BUILD step,
+# offline, on the host; the running container it produces still gets
+# --network none like every other job sandbox).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash ca-certificates curl git jq python3 python3-pip python3-venv ripgrep build-essential \
+    && rm -rf /var/lib/apt/lists/*
+USER node
+ENV RUSTUP_HOME=/home/node/.rustup
+ENV CARGO_HOME=/home/node/.cargo
+ENV PATH="${CARGO_HOME}/bin:${PATH}"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+WORKDIR /workspace
+CMD ["sleep", "infinity"]

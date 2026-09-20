@@ -49,6 +49,35 @@ test("installMcpCopy: copies package.json, mcp/server.mjs and lib/ into installD
   }
 });
 
+test("installMcpCopy: also copies docker/ so a lazy Go/Rust image build works from the installed copy", () => {
+  const nomarmyRoot = fakeRoot();
+  fs.mkdirSync(path.join(nomarmyRoot, "docker"), { recursive: true });
+  fs.writeFileSync(path.join(nomarmyRoot, "docker", "Dockerfile.go"), "FROM node:24-bookworm-slim\n");
+  const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
+  try {
+    installMcpCopy({ nomarmyRoot, installDir, run: () => {} });
+    assert.equal(
+      fs.readFileSync(path.join(installDir, "docker", "Dockerfile.go"), "utf8"),
+      "FROM node:24-bookworm-slim\n",
+    );
+  } finally {
+    fs.rmSync(nomarmyRoot, { recursive: true, force: true });
+    fs.rmSync(installDir, { recursive: true, force: true });
+  }
+});
+
+test("installMcpCopy: no docker/ in nomarmyRoot is fine, not an error (older checkout, or a test fixture)", () => {
+  const nomarmyRoot = fakeRoot();
+  const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
+  try {
+    installMcpCopy({ nomarmyRoot, installDir, run: () => {} });
+    assert.equal(fs.existsSync(path.join(installDir, "docker")), false);
+  } finally {
+    fs.rmSync(nomarmyRoot, { recursive: true, force: true });
+    fs.rmSync(installDir, { recursive: true, force: true });
+  }
+});
+
 test("installMcpCopy: a stale lib/ directory in installDir is fully replaced, not merged", () => {
   const nomarmyRoot = fakeRoot();
   const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));

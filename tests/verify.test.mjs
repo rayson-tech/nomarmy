@@ -315,6 +315,52 @@ test("all commands passing yields pass with a basis naming the profile", async (
   }
 });
 
+test("a detected Go repo resolves to the Go sandbox image, built lazily via the injected run", async () => {
+  const dir = tempRepo({ "go.mod": "module example.com/x\n" });
+  const executor = fakeExecutor({ fallback: { started: true, exitCode: 0, stdout: "ok", stderr: "" } });
+  const runCalls = [];
+  const sandboxImageRun = (cmd, args) => {
+    runCalls.push([cmd, ...args]);
+    return args[0] === "images" ? "" : "";
+  };
+  const run = createVerificationRunner({ loadConfig: fixedConfig(STANDARD), executor, sandboxImageRun });
+
+  const verdict = await run({ ...CONTEXT, cwd: dir });
+
+  assert.equal(verdict.status, "pass");
+  assert.ok(runCalls.some((c) => c[1] === "build" && c.some((a) => String(a).includes("openclaw-nomarmy-coder-go"))));
+  for (const call of executor.calls.run) assert.equal(call.image, "openclaw-nomarmy-coder-go:bookworm");
+});
+
+test("an explicit image wins over a detected Go repo -- no build attempted", async () => {
+  const dir = tempRepo({ "go.mod": "module example.com/x\n" });
+  const executor = fakeExecutor({ fallback: { started: true, exitCode: 0, stdout: "ok", stderr: "" } });
+  const sandboxImageRun = () => { throw new Error("must not be called when an explicit image is set"); };
+  const run = createVerificationRunner({ loadConfig: fixedConfig(STANDARD), executor, image: "custom:image", sandboxImageRun });
+
+  const verdict = await run({ ...CONTEXT, cwd: dir });
+
+  assert.equal(verdict.status, "pass");
+  for (const call of executor.calls.run) assert.equal(call.image, "custom:image");
+});
+
+test("a failed lazy image build is not_run, never runs commands against the wrong image", async () => {
+  const dir = tempRepo({ "Cargo.toml": '[package]\nname = "x"\n' });
+  const executor = fakeExecutor({ fallback: { started: true, exitCode: 0, stdout: "ok", stderr: "" } });
+  const sandboxImageRun = (cmd, args) => {
+    if (args[0] === "images") return "";
+    throw new Error("network unreachable");
+  };
+  const run = createVerificationRunner({ loadConfig: fixedConfig(STANDARD), executor, sandboxImageRun });
+
+  const verdict = await run({ ...CONTEXT, cwd: dir });
+
+  assert.equal(verdict.status, "not_run");
+  assert.equal(verdict.basis, "sandbox-image-build-failed");
+  assert.match(verdict.reason, /rust sandbox image/);
+  assert.equal(executor.calls.run.length, 0, "no command may run once the sandbox image itself is unavailable");
+});
+
 test("a non-zero exit yields fail naming the command and exit code, and stops there", async () => {
   const executor = fakeExecutor({
     responses: {
