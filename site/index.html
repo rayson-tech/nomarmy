@@ -59,8 +59,13 @@ chmod +x install.sh e2e.sh scripts/*.sh
         <li><code>nomarmy doctor</code> - Host readiness with a fix for every failure - Working</li>
         <li>Scout and decompose modes - Read-only noms with verified citations - Built, tested</li>
         <li>Disposable per-job service environments - Not yet built</li>
-        <li>Full-stack acceptance test proving the thesis end to end - Not yet run</li>
+        <li>Full-stack acceptance test proving the thesis end to end - Run across 3 local models on 7 tickets; task-size-dependent, not unconditionally true - see the README</li>
       </ul>
+    </section>
+
+    <section class="core-idea">
+      <h2>What we actually measured</h2>
+      <p>Delegating to a local worker does not save tokens unconditionally. Small, precisely-diagnosed fixes lose to just doing them directly - the fixed cost of a dispatch brief plus mandatory independent verification does not shrink because a worker got it right. It starts paying off once the context needed to safely make a fix meaningfully exceeds the fix itself, since a local worker reads that context for free. Three different local models were tested on an identical, genuinely subtle bug and all three found and fixed it correctly - the real differentiator was wall-clock and turn count, not whether they could do it.</p>
     </section>
 
     <section class="cli">
