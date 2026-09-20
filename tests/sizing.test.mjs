@@ -9,8 +9,10 @@ import assert from "node:assert/strict";
 
 import {
   DEFAULT_TARGET_CONTEXT_PER_NOM,
+  DEFAULT_BYTES_PER_KV_ELEMENT,
   GIB,
   RESERVES,
+  bytesPerKvElementForCacheTypes,
   evaluateConfig,
   kvBytesPerSlot,
   recommend,
@@ -668,4 +670,39 @@ test("a WSL2 host is told its memory figure is the VM's, not the machine's", () 
   hardware.isWSL = true;
   const result = recommend({ hardware, gguf: ggufFound() });
   assert.ok(codes(result).includes("wsl_memory"));
+});
+
+// --- bytesPerKvElementForCacheTypes -----------------------------------------
+test("bytesPerKvElementForCacheTypes: neither set falls back to the fp16 default", () => {
+  assert.equal(bytesPerKvElementForCacheTypes(undefined, undefined), DEFAULT_BYTES_PER_KV_ELEMENT);
+  assert.equal(bytesPerKvElementForCacheTypes(null, ""), DEFAULT_BYTES_PER_KV_ELEMENT);
+});
+
+test("bytesPerKvElementForCacheTypes: a single recognized type is used directly", () => {
+  assert.equal(bytesPerKvElementForCacheTypes("q8_0", undefined), 1);
+  assert.equal(bytesPerKvElementForCacheTypes(undefined, "q4_0"), 0.5);
+});
+
+test("bytesPerKvElementForCacheTypes: matches llama-server's flag values case-insensitively", () => {
+  assert.equal(bytesPerKvElementForCacheTypes("Q8_0", "Q8_0"), 1);
+});
+
+test("bytesPerKvElementForCacheTypes: K and V both set to the same type use that type", () => {
+  assert.equal(bytesPerKvElementForCacheTypes("q4_0", "q4_0"), 0.5);
+});
+
+test("bytesPerKvElementForCacheTypes: mixed K/V types use the smaller (cheaper) one, not an average", () => {
+  assert.equal(bytesPerKvElementForCacheTypes("f16", "q4_0"), 0.5);
+  assert.equal(bytesPerKvElementForCacheTypes("q4_0", "f16"), 0.5);
+});
+
+test("bytesPerKvElementForCacheTypes: an unrecognized type is ignored, not treated as 0", () => {
+  assert.equal(bytesPerKvElementForCacheTypes("not-a-real-type", undefined), DEFAULT_BYTES_PER_KV_ELEMENT);
+});
+
+test("recommend: a quantized KV cache lets more context fit than the fp16 default estimate", () => {
+  const hardware = cpuOnlyMachine(16 * GIB);
+  const fp16 = recommend({ hardware, gguf: ggufFound(), bytesPerKvElement: 2 });
+  const quantized = recommend({ hardware, gguf: ggufFound(), bytesPerKvElement: bytesPerKvElementForCacheTypes("q8_0", "q8_0") });
+  assert.ok(quantized.contextTotal >= fp16.contextTotal, "halving KV bytes-per-element must never recommend less total context");
 });

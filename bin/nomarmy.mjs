@@ -16,7 +16,7 @@ import { scanRepository, compareEvidence } from "../lib/scan.mjs";
 import { buildConfigProposal } from "../lib/propose.mjs";
 import { detectHardware } from "../lib/hardware.mjs";
 import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf.mjs";
-import { recommend, evaluateConfig } from "../lib/sizing.mjs";
+import { recommend, evaluateConfig, bytesPerKvElementForCacheTypes } from "../lib/sizing.mjs";
 import { connectClaude, connectCodex } from "../lib/connect.mjs";
 
 const argv = process.argv.slice(2);
@@ -551,7 +551,13 @@ async function cmdSizing() {
 
   if (flag("check")) return sizingCheck(hardware, gguf);
 
-  const res = recommend({ hardware, gguf, execution });
+  // Optional: if NOMARMY_LLAMA_CACHE_TYPE_K/V are set (quantizing the KV
+  // cache to fit more context), reflect that in the estimate instead of
+  // silently assuming fp16. Unset by default -- nothing changes for anyone
+  // who hasn't touched these.
+  const bytesPerKvElement = bytesPerKvElementForCacheTypes(
+    process.env.NOMARMY_LLAMA_CACHE_TYPE_K, process.env.NOMARMY_LLAMA_CACHE_TYPE_V);
+  const res = recommend({ hardware, gguf, execution, bytesPerKvElement });
   if (json) {
     return out({ hardware, gguf: { found: gguf.found, path: gguf.path ?? null }, recommendation: res });
   }

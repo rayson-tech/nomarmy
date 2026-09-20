@@ -285,6 +285,20 @@ A smaller model helps less than its size suggests — the harness itself (sandbo
 
 **Rule of thumb: GPU or a hosted profile for interactive work.** CPU-only is genuinely useful as a correctness testbed — it exercises the whole pipeline honestly — but treat it as something you're testing, not depending on.
 
+### Advanced llama-server tuning
+
+Everything below is optional and unset by default — nothing here changes behavior until you set it. Most people should never need this section; `nomarmy setup` gets you a working config without it. These exist for hardware- or model-specific tuning once you know what you're reaching for:
+
+| Variable | Passes | What it's for |
+|---|---|---|
+| `NOMARMY_LLAMA_CACHE_TYPE_K` / `_V` | `--cache-type-k` / `-v` | Quantize the KV cache (e.g. `q8_0`, `q4_0`) to fit more context in the same memory. `nomarmy sizing` reflects this in its estimate automatically once set. |
+| `NOMARMY_LLAMA_FLASH_ATTN` | `--flash-attn` | `on`, `off`, or `auto` (llama-server's default). |
+| `NOMARMY_LLAMA_REASONING_BUDGET` | `--reasoning-budget` | Hard token cap on a reasoning model's thinking, independent of the `reasoning` effort level a job requests. `-1` unrestricted, `0` disables thinking. |
+| `NOMARMY_LLAMA_REASONING_PRESERVE` | `--reasoning-preserve` / `--no-reasoning-preserve` | `true` or `false`. Some chat templates keep the full thinking trace in context across every turn by default, which can be the difference between a long job finishing and one that overflows its context — see the worked example in `docs/experiments/`. |
+| `NOMARMY_LLAMA_EXTRA_ARGS` | anything | Raw, space-separated llama-server flags this list doesn't name explicitly. Word-split, so flag values containing spaces aren't supported. |
+
+None of these are validated by nomArmy — a bad value is llama-server's own error to report, the same as if you'd typed it on the command line yourself.
+
 ## Starting/stopping inference
 
 ```bash
