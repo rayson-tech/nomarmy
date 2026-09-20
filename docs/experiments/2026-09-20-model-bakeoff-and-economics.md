@@ -118,6 +118,30 @@ a clean trade even when the model is technically capable of it. Practically:
 model nomArmy ships against; `medium` is the better starting point, with
 `high` reserved for tasks that fail at `medium` first.
 
+## Finding 4: what going local actually buys you, compared to a hosted model
+
+The LRU cache ticket was also run against Claude Haiku 4.5 directly (not
+through nomArmy's dispatch tooling, which only targets local profiles —
+via a plain subagent pointed at the same worktree, same task, same
+failing-tests-only brief, independently verified the same way):
+
+| Model | Result | Duration | Tool calls | Cost |
+|---|---|---|---|---|
+| Haiku 4.5 | 16/16, correct | 51s | 6 | ~$0.05-0.07 (estimated; exact input/output token split unavailable, only a combined count) |
+| gpt-oss-20b (`reasoning: medium`) | 16/16, correct | 62s | 9 | $0 |
+
+Haiku solved it correctly and was the fastest of every model tested tonight,
+including every local one. This matters for the honest pitch: **the case for
+local was never "beats a frontier-family hosted model on speed or quality,"
+it's marginal cost at volume.** A nickel a ticket is nothing once. It is
+something at the volume a real fleet of tickets implies, where the local
+runs in this experiment cost the same $0 whether it's one job or ten
+thousand. Local inference trades a real, nonzero hardware and wall-clock cost
+for a marginal-dollar-cost curve that stays flat instead of scaling with
+usage — that is the actual claim, not "local models are just as good," which
+this same session's earlier findings (six trivial cases, the reasoning-effort
+results) already show is task- and configuration-dependent, not automatic.
+
 ## A real gap this surfaced
 
 Comparing models currently means a manual restart-and-re-register dance for

@@ -66,6 +66,7 @@ chmod +x install.sh e2e.sh scripts/*.sh
     <section class="core-idea">
       <h2>What we actually measured</h2>
       <p>Delegating to a local worker does not save tokens unconditionally. Small, precisely-diagnosed fixes lose to just doing them directly - the fixed cost of a dispatch brief plus mandatory independent verification does not shrink because a worker got it right. It starts paying off once the context needed to safely make a fix meaningfully exceeds the fix itself, since a local worker reads that context for free. Three different local models were tested on an identical, genuinely subtle bug and all three found and fixed it correctly - the real differentiator was wall-clock and turn count, not whether they could do it.</p>
+      <p>The case for local specifically: the same bug solved via Claude Haiku 4.5 cost roughly a nickel; solved locally it cost nothing. A nickel a ticket is trivial once - it's the volume that changes the answer, since local cost stays flat at any scale. And the worker seat isn't fixed to one model - better hardware later means a more capable local model in the same harness, with the same verification, unchanged.</p>
     </section>
 
     <section class="cli">

@@ -321,7 +321,15 @@ Use `/mcp` inside Codex to confirm `nomarmy-local-worker` is available.
 
 ## How nomArmy works (and why)
 
-### The thesis
+### The invariant
+
+**Worker output is a claim. Repository and environment state are evidence.**
+
+This is the thesis, not the local-vs-hosted question below it — and it doesn't depend on the worker being local. Plug a hosted model into the worker seat and the same rule holds: the worker never runs Git, it cannot commit, merge, or mark its own work accepted, and it writes a four-line report that nomArmy independently checks against the repository rather than trusting. A worker that says `done` and a repository that disagrees is a failed job, regardless of which model said it.
+
+A malformed or truncated report isn't automatically a failure either: if the repository changed, nomArmy verifies independently and may recover the work. **Failing verification stays failed** — the worktree is retained, and no recovery path can launder it into an accepted job.
+
+### The economics of going local
 
 > Use scarce frontier intelligence for intent, decomposition, architecture and judgment. Use abundant worker intelligence for repository exploration, implementation, testing, repair loops and verification.
 
@@ -329,13 +337,9 @@ That's a hypothesis, not a claim — nomArmy exists to test it, and measures whe
 
 The honest, measured answer so far (see `docs/experiments/2026-09-20-model-bakeoff-and-economics.md` for the full numbers): **it depends on task size, not on model choice.** Small, precisely-diagnosed fixes lose to just doing them directly — the fixed cost of a dispatch brief plus the mandatory independent verification doesn't shrink just because a worker got it right. A task where the surrounding context needed to safely make the fix is meaningfully larger than the fix itself is where delegation starts to pay off, because a local worker reads that context for free and the coordinator only pays for the verified result, not for reading the whole file itself. Three different local models were tested on an identical, genuinely subtle bug (a real `Map` re-insertion gotcha in a 144-line module) and all three found and fixed it correctly — the differentiator between them was wall-clock and how many tool calls it took to get there, not whether they could.
 
-### The invariant
+The case for *local* specifically, not just for delegation: a same-ticket comparison against Claude Haiku 4.5 put it at 51s and roughly $0.05-0.07 (estimated from total token count; the exact input/output split wasn't available) to solve the identical bug that a local 20B model solved for $0 in 62s. A nickel a ticket is nothing at n=1. It's the volume story that changes: that nickel repeats on every ticket, forever, while the local runs in this experiment cost the same $0 whether it's one job or ten thousand — the tradeoff is your own hardware and wall-clock against a marginal dollar cost that scales with usage instead of staying flat.
 
-**Worker output is a claim. Repository and environment state are evidence.**
-
-Everything else follows from that one line. The worker never runs Git. It cannot commit, merge, or mark its own work accepted. It writes a four-line report, and nomArmy independently derives every fact that matters — what changed, what was added, whether the tests actually pass — from the repository itself. A worker that says `done` and a repository that disagrees is a failed job.
-
-A malformed or truncated report isn't automatically a failure either: if the repository changed, nomArmy verifies independently and may recover the work. **Failing verification stays failed** — the worktree is retained, and no recovery path can launder it into an accepted job.
+One more thing this buys you: the local model in that seat is not fixed. As your hardware improves, the same harness points at a more capable model without anything else changing — the invariant above doesn't care whether the worker behind it is a 20B model on a laptop or something larger on better hardware later. That's a real property of the design, not yet a proven trend — tonight's evidence is a single hard case, not a scaling curve.
 
 ### Scouts and decomposers: the same invariant for reading and planning
 
