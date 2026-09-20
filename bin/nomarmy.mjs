@@ -16,7 +16,7 @@ import { scanRepository, compareEvidence } from "../lib/scan.mjs";
 import { buildConfigProposal } from "../lib/propose.mjs";
 import { detectHardware } from "../lib/hardware.mjs";
 import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf.mjs";
-import { recommend, evaluateConfig, bytesPerKvElementForCacheTypes } from "../lib/sizing.mjs";
+import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
 import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected } from "../lib/connect.mjs";
 
 // Add a new coordinator: add its name here, teach commandExists/connectTarget
@@ -92,7 +92,12 @@ Usage: nomarmy <command> [options]
                                   (required alongside --json)
   validate        Validate .nomarmy.yml against the schema.
   sizing          Recommend context and nom count for this machine.
-                  --check   evaluate the loaded profile instead of recommending
+                  --check     evaluate the loaded profile instead of recommending
+                  --noms <N>  size for exactly N workers instead of the max
+                              that fits ("more noms") or the fixed
+                              shipped-profile default ("nominal"); also
+                              offered as an interactive prompt at the end
+                              of the plain (non --json) report
   doctor          Check this host is ready to run nomArmy, with a fix for
                   anything missing.
   help
@@ -741,6 +746,21 @@ async function cmdSizing() {
   // who hasn't touched these.
   const bytesPerKvElement = bytesPerKvElementForCacheTypes(
     process.env.NOMARMY_LLAMA_CACHE_TYPE_K, process.env.NOMARMY_LLAMA_CACHE_TYPE_V);
+
+  // --noms N: size for an EXACT worker count instead of "more noms" (max
+  // that fits) or "nominal" (fixed at 1). Bypasses the rest of the report
+  // entirely -- scriptable, and works in --json too.
+  const nomsFlag = value("noms");
+  if (nomsFlag !== null) {
+    const noms = Number(nomsFlag);
+    if (!Number.isFinite(noms) || noms < 1) throw new Error(`--noms must be a positive number, got "${nomsFlag}".`);
+    const custom = customRecommendation({ hardware, gguf, execution, noms, bytesPerKvElement });
+    if (json) return out({ hardware, gguf: { found: gguf.found, path: gguf.path ?? null }, recommendation: custom });
+    printHardwareAndModel(hardware, gguf);
+    printCustomResult(custom);
+    return;
+  }
+
   const res = recommend({ hardware, gguf, execution, bytesPerKvElement });
   if (json) {
     return out({ hardware, gguf: { found: gguf.found, path: gguf.path ?? null }, recommendation: res });
@@ -754,13 +774,7 @@ async function cmdSizing() {
     return;
   }
 
-  console.log(`Hardware: ${hardware.platform}/${hardware.arch}`
-    + `, ${hardware.cpu?.logicalCores ?? "?"} logical cores`
-    + `, ${gib(hardware.memory?.totalBytes)} RAM`
-    + (hardware.gpu?.count ? `, ${hardware.gpu.count} GPU` : ", no NVIDIA GPU"));
-  console.log(`Model: ${gguf.found
-    ? `${path.basename(gguf.path)} (${gib(gguf.fileSizeBytes)})`
-    : "not found - using assumed architecture"}`);
+  printHardwareAndModel(hardware, gguf);
 
   // Never present a configuration as "recommended" when the arithmetic says it
   // does not fit. The fallback is a floor to start from, not an endorsement.
@@ -812,6 +826,54 @@ async function cmdSizing() {
   console.log("\nWorker budgets at this context:");
   for (const line of describeBudgets(deriveBudgets({ contextPerNom: res.contextPerNom, source: "this recommendation" }))) console.log(`  ${line}`);
   console.log("\nThis is a recommendation. Apply it by editing config/profiles/<profile>.env.");
+
+  // "More noms"/"nominal" are both already fully printed above; the one
+  // thing this command couldn't answer without a re-run was "what about N
+  // workers specifically". Skipped entirely for cloud (no local slots to
+  // size) and whenever stdin isn't interactive -- readline resolves an
+  // unanswerable question with "" on EOF, so this degrades safely under a
+  // pipe or in CI rather than hanging.
+  if (res.kind === "local") {
+    const rl = createInterface({ input, output });
+    let answer;
+    try {
+      answer = (await rl.question(c.bold("\nSize for a specific worker count instead? Enter a number, or press Enter to skip: "))).trim();
+    } finally {
+      rl.close();
+    }
+    if (answer) {
+      const noms = Number(answer);
+      if (!Number.isFinite(noms) || noms < 1) console.log(`Not a positive number: "${answer}". Skipped.`);
+      else printCustomResult(customRecommendation({ hardware, gguf, execution, noms, bytesPerKvElement }));
+    }
+  }
+}
+
+function printHardwareAndModel(hardware, gguf) {
+  console.log(`Hardware: ${hardware.platform}/${hardware.arch}`
+    + `, ${hardware.cpu?.logicalCores ?? "?"} logical cores`
+    + `, ${gib(hardware.memory?.totalBytes)} RAM`
+    + (hardware.gpu?.count ? `, ${hardware.gpu.count} GPU` : ", no NVIDIA GPU"));
+  console.log(`Model: ${gguf.found
+    ? `${path.basename(gguf.path)} (${gib(gguf.fileSizeBytes)})`
+    : "not found - using assumed architecture"}`);
+}
+
+function printCustomResult(res) {
+  if (res.kind === "cloud") {
+    console.log(`\nCustom -- ${res.requestedNoms} worker(s), hosted execution (no local memory ceiling):\n`);
+    for (const [k, v] of Object.entries(res.env)) console.log(`  ${k}=${v}`);
+    return;
+  }
+  if (!res.fits) {
+    console.log(`\nCustom -- ${res.requestedNoms} worker(s) DOES NOT FIT on this machine, even at the minimum context (${K(MIN_CONTEXT_PER_NOM)}).`);
+    return;
+  }
+  console.log(`\nCustom -- ${res.requestedNoms} worker(s) as requested`
+    + (res.steppedDownFrom ? `, context stepped down from ${K(res.steppedDownFrom)} to fit` : "") + ":\n");
+  for (const [k, v] of Object.entries(res.env)) console.log(`  ${k}=${v}`);
+  console.log(`\n  ${res.requestedNoms} nom(s) at ${K(res.contextPerNom)} each  (${res.contextTotal} total across ${res.llamaParallel} slot(s))`);
+  if (res.limitedBy) console.log(`  limited by: ${res.limitedBy}`);
 }
 
 function sizingCheck(hardware, gguf) {

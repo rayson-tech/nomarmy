@@ -245,7 +245,7 @@ Every command below proposes before it writes anything, showing exactly what wou
 | `nomarmy connect [claude] [cursor] [codex]` | (Re-)registers the MCP server with one or more coordinators on its own — e.g. after installing one later. No target and not `--json` prompts an interactive multi-select. |
 | `nomarmy start` / `stop <profile>` | Starts/stops local inference (wraps `scripts/start-inference.sh` / `stop-inference.sh`). |
 | `nomarmy uninstall` | Removes the MCP registration and install directory. Job records, logs and the built llama.cpp binary under `~/.local/share/nomarmy-local-agents` are kept by default — add `--clear-agents` to also remove them, `--clear-models` to also remove the model repo `config/common.env` references from the local Hugging Face cache, or `--all` for both. Each prompts for confirmation unless `--force` (required alongside `--json`). Models tested via a one-off `NOMARMY_MODEL_REPO` override, never saved to config, aren't tracked and need manual cleanup. |
-| `nomarmy sizing` | Recommends context/slot/worker counts from your hardware and the model's own GGUF metadata. `--check` evaluates the profile you already have instead of recommending a new one. |
+| `nomarmy sizing` | Recommends context/slot/worker counts from your hardware and the model's own GGUF metadata. `--check` evaluates the profile you already have instead of recommending a new one. `--noms N` sizes for an exact worker count instead (also offered as an interactive prompt in the plain report). |
 | `nomarmy scan` | Reports a repository's execution environment from deterministic evidence. `--check` compares it against a committed `.nomarmy.yml`. |
 | `nomarmy validate` | Validates `.nomarmy.yml` against the schema and flags any service needing explicit policy approval. |
 
@@ -268,6 +268,8 @@ The v1.3 target is 64K context per nom: an autonomous explore/implement/test/rep
 Raising `NOMARMY_MAX_WORKERS` is an empirical question, not a capacity one — benchmark accepted-tickets/hour and coordinator interventions before raising it; a second nom that halves the first one's context can lower total throughput.
 
 `nomarmy sizing` and `nomarmy setup` both show two options when they genuinely differ: **More noms** (as many as fit in memory — the number above) and **Nominal** (1 nom at the same context, matching every profile actually shipped in `config/profiles/*.env` regardless of how many more would fit). There's no third "fast" tier: worker count is the only speed-relevant lever this project has real, measured data for (see below); a smaller context per nom has no established speed relationship in this codebase, only a memory one, so a "fast" preset would be a guess presented as a measurement.
+
+Neither of those two is a hardware-derived "right" number for real concurrent throughput — sizing has no model at all for GPU/memory-bandwidth contention between concurrently running slots, only for whether they fit in memory at once. Every benchmark this project has run used a single worker (`NOMARMY_LLAMA_PARALLEL=1`); whether going to 4 or 8 actually delivers more useful throughput on shared unified memory, versus each stream just crawling, is untested. `nomarmy sizing --noms N` sizes for an exact worker count you pick, without recommending it — the same command also offers this as an interactive prompt when run without `--json`.
 
 ### Speed matters more than fit
 

@@ -135,6 +135,30 @@ test("uninstall --clear-agents --all --json without --force refuses before touch
   assert.match(JSON.parse(allResult.stdout).error, /needs --force/);
 });
 
+test("sizing --noms N --json sizes for the exact requested worker count", () => {
+  const { exitCode, stdout } = runCLI(["sizing", "--noms", "4", "--json"]);
+  assert.equal(exitCode, 0);
+  const { recommendation } = JSON.parse(stdout);
+  assert.equal(recommendation.requestedNoms, 4);
+  assert.equal(recommendation.llamaParallel, 4);
+  assert.equal(recommendation.maxWorkers, 4);
+  assert.equal(recommendation.env.NOMARMY_LLAMA_PARALLEL, 4);
+});
+
+test("sizing --noms with a non-numeric value is refused with a clear error, not a crash", () => {
+  const { exitCode, stdout } = runCLI(["sizing", "--noms", "banana", "--json"]);
+  assert.notEqual(exitCode, 0);
+  assert.match(JSON.parse(stdout).error, /--noms must be a positive number/);
+});
+
+test("sizing --noms an unreasonable count reports fits:false, not a crash or a silently smaller count", () => {
+  const { exitCode, stdout } = runCLI(["sizing", "--noms", "9999", "--json"]);
+  assert.equal(exitCode, 0);
+  const { recommendation } = JSON.parse(stdout);
+  assert.equal(recommendation.requestedNoms, 9999);
+  assert.equal(recommendation.fits, false);
+});
+
 test("scan --json against empty temp directory returns evidence with zero counts", () => {
   const tmpDir = mkdtempSync(path.join(tmpdir(), "nomarmy-scan-empty-test-"));
   try {

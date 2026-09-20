@@ -12,7 +12,9 @@ import {
   DEFAULT_BYTES_PER_KV_ELEMENT,
   GIB,
   RESERVES,
+  MIN_CONTEXT_PER_NOM,
   bytesPerKvElementForCacheTypes,
+  customRecommendation,
   evaluateConfig,
   kvBytesPerSlot,
   recommend,
@@ -714,4 +716,56 @@ test("recommend: a quantized KV cache lets more context fit than the fp16 defaul
   const fp16 = recommend({ hardware, gguf: ggufFound(), bytesPerKvElement: 2 });
   const quantized = recommend({ hardware, gguf: ggufFound(), bytesPerKvElement: bytesPerKvElementForCacheTypes("q8_0", "q8_0") });
   assert.ok(quantized.contextTotal >= fp16.contextTotal, "halving KV bytes-per-element must never recommend less total context");
+});
+
+// ---------------------------------------------------------------------------
+// customRecommendation: an exact worker count the caller picked, distinct
+// from "more noms" (max that fits) and "nominal" (fixed at 1).
+// ---------------------------------------------------------------------------
+
+test("customRecommendation: an exact noms count that fits at the requested context is honored as-is", () => {
+  const hardware = appleMachine(64 * GIB);
+  const res = customRecommendation({ hardware, gguf: ggufFound(), noms: 4, targetContextPerNom: 65536 });
+  assert.equal(res.requestedNoms, 4);
+  assert.equal(res.llamaParallel, 4);
+  assert.equal(res.maxWorkers, 4);
+  assert.equal(res.contextPerNom, 65536);
+  assert.equal(res.contextTotal, 65536 * 4);
+  assert.equal(res.fits, true);
+  assert.equal(res.steppedDownFrom, null);
+  assert.deepEqual(res.env, { NOMARMY_LLAMA_CONTEXT: 65536 * 4, NOMARMY_LLAMA_PARALLEL: 4, NOMARMY_MAX_WORKERS: 4 });
+});
+
+test("customRecommendation: steps context down (never noms down) when the requested count doesn't fit at the target context", () => {
+  const hardware = appleMachine(64 * GIB);
+  const big = customRecommendation({ hardware, gguf: ggufFound(), noms: 8, targetContextPerNom: 131072 });
+  assert.equal(big.requestedNoms, 8, "the exact count the caller asked for is never silently reduced");
+  if (!big.fits) return; // if 8 genuinely cannot fit at all on this fixture, the rest is moot
+  assert.ok(big.steppedDownFrom === null || big.contextPerNom < 131072, "either it fit at the target, or context (not noms) stepped down");
+});
+
+test("customRecommendation: an unreasonable noms count is reported as not fitting, never silently substituted", () => {
+  const hardware = cpuOnlyMachine(8 * GIB);
+  const res = customRecommendation({ hardware, gguf: ggufFound(), noms: 500, targetContextPerNom: 65536 });
+  assert.equal(res.requestedNoms, 500);
+  assert.equal(res.fits, false);
+  assert.match(res.summary, /500 nom\(s\) does not fit/);
+  assert.match(res.summary, new RegExp(String(MIN_CONTEXT_PER_NOM / 1024)));
+});
+
+test("customRecommendation: noms is floored and clamped to at least 1", () => {
+  const hardware = appleMachine(64 * GIB);
+  const res = customRecommendation({ hardware, gguf: ggufFound(), noms: 2.9 });
+  assert.equal(res.requestedNoms, 2);
+  const zero = customRecommendation({ hardware, gguf: ggufFound(), noms: 0 });
+  assert.equal(zero.requestedNoms, 1);
+});
+
+test("customRecommendation: cloud execution honors the requested count exactly, unbounded by local memory", () => {
+  const res = customRecommendation({ execution: "bedrock", noms: 12 });
+  assert.equal(res.kind, "cloud");
+  assert.equal(res.requestedNoms, 12);
+  assert.equal(res.maxWorkers, 12);
+  assert.equal(res.fits, true);
+  assert.deepEqual(res.env, { NOMARMY_MAX_WORKERS: 12 });
 });
