@@ -13,6 +13,8 @@ import { deriveBudgets, checkBrief, resolveContextPerNom, assessAdmission, descr
 import { readOpenClawTranscript, estimateDisplacement } from "../lib/transcript.mjs";
 import { runQuery, formatCitations, OPS as EVIDENCE_OPS } from "../lib/repo-query.mjs";
 import { loadConfig, ConfigError } from "../lib/config.mjs";
+import { resolveSandboxImage, detectPrimaryLanguage, EXEC_PATH_PREPEND } from "../lib/sandbox-images.mjs";
+import { DEFAULT_AGENT_IMAGE } from "../lib/verify.mjs";
 
 const VERSION = "1.3.0";
 const server = new McpServer({ name: "nomarmy-local-worker", version: VERSION });
@@ -337,6 +339,97 @@ function profileConfig(profile, reasoning) {
   if (!profiles[profile]) throw new Error(`Unknown worker profile: ${profile}`);
   return profiles[profile];
 }
+
+let cachedAmbientOpenClawConfigPath;
+function ambientOpenClawConfigPath() {
+  if (cachedAmbientOpenClawConfigPath === undefined) {
+    // Same shim resolution run() uses for the real job dispatch below --
+    // `execFileSync("openclaw", ...)` unresolved hits the identical
+    // Windows .cmd-shim ENOENT/EINVAL problem documented at resolveExecutable.
+    const exe = resolveExecutable("openclaw");
+    try { cachedAmbientOpenClawConfigPath = execFileSync(exe.file, [...exe.prefixArgs, "config", "file"], { encoding: "utf8" }).trim(); }
+    catch { cachedAmbientOpenClawConfigPath = null; }
+  }
+  return cachedAmbientOpenClawConfigPath;
+}
+
+// `openclaw agent exec` has no per-call --image/--sandbox flag (checked: not
+// in its --help), so a job whose target repo needs a non-default sandbox
+// image (Go/Rust/a Python repo with real dependencies -- see
+// lib/sandbox-images.mjs) had no way to get that image into the WORKER's own
+// tool calls; only nomArmy's own separate verification executor
+// (lib/verify.mjs) ever saw it. `agent exec --config <path>` runs against a
+// given config file "instead of the ambient config" (its own --help text),
+// which is the one per-call lever that does reach the sandbox OpenClaw
+// starts for that run. This clones the ambient config, points
+// agents.defaults.sandbox.docker.image at the resolved image, and adds
+// EXEC_PATH_PREPEND's extra PATH entries -- verified live: OpenClaw's exec
+// tool does not inherit a sandbox image's own baked ENV PATH on its own (a
+// freshly built Go image's `go` resolved fine under a direct `podman exec`
+// but came back "not found" through `openclaw agent exec` until
+// tools.exec.pathPrepend carried those paths explicitly).
+//
+// The clone necessarily carries whatever the ambient config's `auth` section
+// holds, including a real credential on a cloud profile. That is not a new
+// exposure: the host-side OpenClaw process this function's caller spawns
+// already holds and uses that same credential from its one permanent copy
+// (see CLAUDE.md's Bedrock-credential note). This is a second copy at the
+// same trust level -- written 0600, under this job's own runtimeDir (never
+// bind-mounted into the sandbox, same as agentHome/stateDir), and deleted by
+// the caller immediately after the run. Returns null (never throws) for the
+// ordinary case -- default image, nothing to override -- which is every
+// Node repo and every Go/Rust/Python repo before this existed.
+export function resolveWorkerSandboxOverride(cwd, runtimeDir, {
+  loadConfigFn = loadConfig,
+  resolveSandboxImageFn = resolveSandboxImage,
+  detectPrimaryLanguageFn = detectPrimaryLanguage,
+  ambientConfigPathFn = ambientOpenClawConfigPath,
+  readAmbientConfig = (p) => JSON.parse(fs.readFileSync(p, "utf8")),
+} = {}) {
+  let config = null;
+  try {
+    const loaded = loadConfigFn(cwd);
+    config = loaded && loaded.found ? loaded.config : null;
+  } catch { /* a broken .nomarmy.yml is verification's problem to report, not this one's */ }
+
+  let image;
+  try {
+    image = resolveSandboxImageFn({ cwd, explicitImage: process.env.NOMARMY_AGENT_IMAGE || null, defaultImage: DEFAULT_AGENT_IMAGE, config });
+  } catch {
+    // A lazy Go/Rust/Python image build failure here should not fail the
+    // worker's turn -- it runs in the default image instead, same as before
+    // this existed; independent verification is what surfaces the real gap.
+    return null;
+  }
+  if (image === DEFAULT_AGENT_IMAGE) return null;
+
+  const ambientPath = ambientConfigPathFn();
+  if (!ambientPath) return null;
+  let ambient;
+  try { ambient = readAmbientConfig(ambientPath); }
+  catch { return null; }
+
+  const overridden = structuredClone(ambient);
+  overridden.agents ??= {};
+  overridden.agents.defaults ??= {};
+  overridden.agents.defaults.sandbox ??= {};
+  overridden.agents.defaults.sandbox.docker ??= {};
+  overridden.agents.defaults.sandbox.docker.image = image;
+
+  const lang = detectPrimaryLanguageFn(cwd, config);
+  const pathPrepend = EXEC_PATH_PREPEND[lang] || [];
+  if (pathPrepend.length) {
+    overridden.tools ??= {};
+    overridden.tools.exec ??= {};
+    const existing = Array.isArray(overridden.tools.exec.pathPrepend) ? overridden.tools.exec.pathPrepend : [];
+    overridden.tools.exec.pathPrepend = [...new Set([...pathPrepend, ...existing])];
+  }
+
+  const configPath = path.join(runtimeDir, "sandbox-override.openclaw.json");
+  fs.writeFileSync(configPath, JSON.stringify(overridden), { mode: 0o600 });
+  return configPath;
+}
+
 async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef, baseSha, timeoutSeconds, runtimeDir, profile, reasoning, jobDir, workerId, evidence = null, evidenceTool = null, overridePrompt = null, logSuffix = "", idleDiff = null }) {
   const selected = profileConfig(profile, reasoning);
   const agentHome = path.join(runtimeDir, "home");
@@ -359,9 +452,11 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
   // purpose, so it resumes the run it is recovering rather than starting cold.
   const stateDir = path.join(runtimeDir, "state");
   fs.mkdirSync(stateDir, { recursive: true });
+  const sandboxOverridePath = resolveWorkerSandboxOverride(cwd, runtimeDir);
   const args = ["agent", "exec", prompt, "--model", selected.model,
     "--cwd", cwd, "--code-mode", "direct", "--local-model-lean", "--thinking", selected.thinking,
-    "--timeout", String(timeoutSeconds), "--state-dir", stateDir, "--json"];
+    "--timeout", String(timeoutSeconds), "--state-dir", stateDir, "--json",
+    ...(sandboxOverridePath ? ["--config", sandboxOverridePath] : [])];
   const onTick = idleDiff ? makeIdleDiffTick(cwd, idleDiff) : null;
   try {
     const { stdout, stderr } = await withSandboxProvisioningRetry(
@@ -376,6 +471,10 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
     fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} OpenClaw failure${logSuffix}\n${error.stack || error.message}\n`);
     throw error;
   } finally {
+    // A cloned copy of the ambient OpenClaw config (which may carry a real
+    // cloud credential -- see resolveWorkerSandboxOverride) has no reason to
+    // outlive this one run.
+    if (sandboxOverridePath) fs.rmSync(sandboxOverridePath, { force: true });
     await reapSandboxContainers(stateDir, jobDir);
   }
 }

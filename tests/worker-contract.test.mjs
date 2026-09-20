@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { ConfigError } from "../lib/config.mjs";
+import { DEFAULT_AGENT_IMAGE } from "../lib/verify.mjs";
 
 import {
   OUTCOMES,
@@ -49,7 +50,8 @@ import {
   gitShowBuffer,
   gitModeAtBase,
   resolveCleanupTarget,
-  stripRuntimeJunk
+  stripRuntimeJunk,
+  resolveWorkerSandboxOverride
 } from "../mcp/server.mjs";
 
 const report = ({ status = "done", tests = "pass", notDone = "none", note = "n/a" } = {}) =>
@@ -1917,4 +1919,116 @@ test("withSandboxProvisioningRetry: a worker that started and genuinely failed o
     /timed out/,
   );
   assert.equal(calls, 1, "an unrelated failure must propagate on the first attempt, not be retried");
+});
+
+// resolveWorkerSandboxOverride: the worker's own `openclaw agent exec` calls
+// have no per-call --image flag, so a Go/Rust/Python-with-dependencies repo
+// needs a cloned, overridden OpenClaw config to reach a non-default sandbox
+// image at all (see mcp/server.mjs's own comment for the live verification
+// that motivated this). All external process calls (resolveSandboxImage's
+// Podman check, the ambient config's real path) are injected fakes here --
+// this never touches Podman or a real ~/.openclaw/openclaw.json.
+function makeRuntimeDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-sbx-override-"));
+}
+
+test("resolveWorkerSandboxOverride: the default image needs no override at all", () => {
+  const runtimeDir = makeRuntimeDir();
+  const result = resolveWorkerSandboxOverride("/repo", runtimeDir, {
+    loadConfigFn: () => ({ found: false }),
+    resolveSandboxImageFn: () => DEFAULT_AGENT_IMAGE,
+    ambientConfigPathFn: () => { throw new Error("must not be reached for the default image"); },
+  });
+  assert.equal(result, null);
+  assert.deepEqual(fs.readdirSync(runtimeDir), []);
+});
+
+test("resolveWorkerSandboxOverride: a non-default image clones the ambient config with the image swapped in", () => {
+  const runtimeDir = makeRuntimeDir();
+  const ambient = { agents: { defaults: { sandbox: { docker: { image: DEFAULT_AGENT_IMAGE, network: "none" } } } }, auth: { untouched: "left alone" } };
+  const result = resolveWorkerSandboxOverride("/repo", runtimeDir, {
+    loadConfigFn: () => ({ found: false }),
+    resolveSandboxImageFn: () => "openclaw-nomarmy-coder-rust:bookworm",
+    detectPrimaryLanguageFn: () => "rust",
+    ambientConfigPathFn: () => "/fake/openclaw.json",
+    readAmbientConfig: () => ambient,
+  });
+  assert.ok(result && result.startsWith(runtimeDir));
+  const written = JSON.parse(fs.readFileSync(result, "utf8"));
+  assert.equal(written.agents.defaults.sandbox.docker.image, "openclaw-nomarmy-coder-rust:bookworm");
+  assert.equal(written.agents.defaults.sandbox.docker.network, "none", "unrelated ambient sandbox keys survive the clone");
+  assert.deepEqual(written.auth, { untouched: "left alone" }, "auth is carried through untouched, never stripped or fabricated");
+  assert.deepEqual(written.tools.exec.pathPrepend, ["/home/node/.cargo/bin"]);
+});
+
+test("resolveWorkerSandboxOverride: an existing ambient pathPrepend is preserved and deduped, not replaced", () => {
+  const runtimeDir = makeRuntimeDir();
+  const ambient = { tools: { exec: { pathPrepend: ["/usr/local/go/bin", "/opt/custom/bin"] } } };
+  const result = resolveWorkerSandboxOverride("/repo", runtimeDir, {
+    loadConfigFn: () => ({ found: false }),
+    resolveSandboxImageFn: () => "openclaw-nomarmy-coder-go:bookworm",
+    detectPrimaryLanguageFn: () => "go",
+    ambientConfigPathFn: () => "/fake/openclaw.json",
+    readAmbientConfig: () => ambient,
+  });
+  const written = JSON.parse(fs.readFileSync(result, "utf8"));
+  assert.deepEqual(written.tools.exec.pathPrepend, ["/usr/local/go/bin", "/home/node/go/bin", "/opt/custom/bin"]);
+});
+
+test("resolveWorkerSandboxOverride: a language with no PATH needs (Python) touches tools.exec not at all", () => {
+  const runtimeDir = makeRuntimeDir();
+  const result = resolveWorkerSandboxOverride("/repo", runtimeDir, {
+    loadConfigFn: () => ({ found: false }),
+    resolveSandboxImageFn: () => "openclaw-nomarmy-coder-python-abc12345:bookworm",
+    detectPrimaryLanguageFn: () => "python",
+    ambientConfigPathFn: () => "/fake/openclaw.json",
+    readAmbientConfig: () => ({}),
+  });
+  const written = JSON.parse(fs.readFileSync(result, "utf8"));
+  assert.equal(written.tools, undefined);
+});
+
+test("resolveWorkerSandboxOverride: a lazy image build failure is not fatal -- the worker still runs, in the default image", () => {
+  const runtimeDir = makeRuntimeDir();
+  const result = resolveWorkerSandboxOverride("/repo", runtimeDir, {
+    loadConfigFn: () => ({ found: false }),
+    resolveSandboxImageFn: () => { throw new Error("podman build failed: offline"); },
+    ambientConfigPathFn: () => { throw new Error("must not be reached"); },
+  });
+  assert.equal(result, null);
+});
+
+test("resolveWorkerSandboxOverride: no reachable ambient config degrades to null, not a throw", () => {
+  const runtimeDir = makeRuntimeDir();
+  const result = resolveWorkerSandboxOverride("/repo", runtimeDir, {
+    loadConfigFn: () => ({ found: false }),
+    resolveSandboxImageFn: () => "openclaw-nomarmy-coder-go:bookworm",
+    ambientConfigPathFn: () => null,
+  });
+  assert.equal(result, null);
+});
+
+test("resolveWorkerSandboxOverride: a broken .nomarmy.yml does not block the override -- that's verification's failure to report", () => {
+  const runtimeDir = makeRuntimeDir();
+  const result = resolveWorkerSandboxOverride("/repo", runtimeDir, {
+    loadConfigFn: () => { throw new ConfigError("bad yaml", "/repo/.nomarmy.yml", []); },
+    resolveSandboxImageFn: () => "openclaw-nomarmy-coder-go:bookworm",
+    detectPrimaryLanguageFn: () => "go",
+    ambientConfigPathFn: () => "/fake/openclaw.json",
+    readAmbientConfig: () => ({}),
+  });
+  assert.ok(result);
+});
+
+test("resolveWorkerSandboxOverride: the written config file is not world/group readable", () => {
+  const runtimeDir = makeRuntimeDir();
+  const result = resolveWorkerSandboxOverride("/repo", runtimeDir, {
+    loadConfigFn: () => ({ found: false }),
+    resolveSandboxImageFn: () => "openclaw-nomarmy-coder-go:bookworm",
+    detectPrimaryLanguageFn: () => "go",
+    ambientConfigPathFn: () => "/fake/openclaw.json",
+    readAmbientConfig: () => ({ auth: { fakeBedrockKey: "shh" } }),
+  });
+  const mode = fs.statSync(result).mode & 0o777;
+  assert.equal(mode, 0o600, "a clone that may carry a real cloud credential must not be group/world readable");
 });
