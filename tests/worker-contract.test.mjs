@@ -1011,6 +1011,17 @@ test("prompt: keeps the hard safety rules and the compact contract", () => {
   assert.equal(/NOT DONE:/.test(p), false, "the old un-underscored field must be gone");
 });
 
+test("prompt: a prose summary is explicitly named as a failure, not a substitute for the report", () => {
+  // gpt-oss-20b, live: finished a real implement job and signed off with a
+  // friendly natural-language summary instead of the four-line report,
+  // which the coordinator correctly could not accept as a report at all.
+  const p = workerPrompt({ task: "t", mode: "implement", baseRef: "HEAD", baseSha: "abc", workerId: "w1" });
+  assert.match(p, /very last message is the four-line FINAL REPORT/);
+  assert.match(p, /a friendly natural-language summary instead of it is treated as a blocked job/);
+  assert.match(p, /A prose summary of what you did is NOT this report, no matter how accurate/);
+  assert.match(p, /Created site\/architecture\.html with a static page/, "the real failed example must be quoted, not a generic hypothetical");
+});
+
 test("prompt: tells the worker to run tests non-interactively and never kill them blind", () => {
   const p = workerPrompt({ task: "t", mode: "implement", baseRef: "HEAD", baseSha: "abc", workerId: "w1" });
   assert.match(p, /non-interactive\/CI mode/);
