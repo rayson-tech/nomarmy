@@ -227,6 +227,15 @@ test("missing report is invalid but not 'truncated'", () => {
   assert.equal(r.reason, "missing final report");
 });
 
+test("lenient: the LAST occurrence of a field wins, not the first -- the contract is the final message", () => {
+  const r = parseWorkerReport(
+    "Here's the report format I was given, for reference:\nSTATUS: done | partial | blocked\nTESTS: pass | fail | not_run\n\n" +
+    "STATUS: blocked\nTESTS: fail\nNOT_DONE: hit a permissions error\nNOTE: could not proceed"
+  );
+  assert.equal(r.status, "blocked", "the real, final STATUS must win over an earlier echoed template line");
+  assert.equal(r.tests, "fail");
+});
+
 test("narration before the contract breaks strict but is still recoverable", () => {
   const r = parseWorkerReport("I explored the repo and then edited three files.\n\nSTATUS: done\nTESTS: pass\nNOT_DONE: none\nNOTE: ok");
   assert.equal(r.strict, false);
@@ -300,6 +309,14 @@ test("recovery: an invalid report with NO repository change is simply invalid", 
   assert.equal(outcome.outcome, OUTCOMES.WORKER_REPORT_INVALID);
   assert.equal(outcome.recoveryAttempted, false);
   assert.equal(outcome.commitAllowed, false);
+});
+
+test("outcome: a valid done/pass report with NO repository change is NEEDS_REVIEW, not silently complete", () => {
+  const outcome = resolveOutcome({ report: parseWorkerReport(report()), repositoryChanged: false, independentVerification: NOT_RUN });
+  assert.equal(outcome.outcome, OUTCOMES.NEEDS_REVIEW);
+  assert.equal(outcome.commitAllowed, false);
+  assert.equal(outcome.reviewRequired, true);
+  assert.notEqual(COORDINATOR_STATUS_BY_OUTCOME[outcome.outcome], "complete");
 });
 
 test("recovery never commits in scout mode", () => {

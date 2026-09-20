@@ -700,6 +700,15 @@ test("bytesPerKvElementForCacheTypes: an unrecognized type is ignored, not treat
   assert.equal(bytesPerKvElementForCacheTypes("not-a-real-type", undefined), DEFAULT_BYTES_PER_KV_ELEMENT);
 });
 
+test("bytesPerKvElementForCacheTypes: an unset side still compares against the real fp16 default, not itself", () => {
+  // Setting a wider-than-default type on only one side (unusual, but valid)
+  // must compare against the OTHER side's true fp16 default, not just return
+  // the explicitly-set value verbatim -- the smaller of the two real sides
+  // still wins, matching this function's own "smaller of the two" contract.
+  assert.equal(bytesPerKvElementForCacheTypes("f32", undefined), DEFAULT_BYTES_PER_KV_ELEMENT);
+  assert.equal(bytesPerKvElementForCacheTypes(undefined, "f32"), DEFAULT_BYTES_PER_KV_ELEMENT);
+});
+
 test("recommend: a quantized KV cache lets more context fit than the fp16 default estimate", () => {
   const hardware = cpuOnlyMachine(16 * GIB);
   const fp16 = recommend({ hardware, gguf: ggufFound(), bytesPerKvElement: 2 });

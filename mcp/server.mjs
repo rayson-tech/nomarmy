@@ -767,7 +767,11 @@ export function parseWorkerReport(text) {
     if (!m) continue;
     const key = m[1].toUpperCase().replace(/[ -]/g, "_");
     if (!REPORT_FIELD_NAMES.includes(key)) continue;
-    if (!(key in fields)) fields[key] = m[2] ?? "";
+    // Last occurrence wins, not first: the contract is the worker's FINAL
+    // message. An earlier incidental match (quoted instructions, echoed
+    // template text, pasted file/tool content) must not outrank the real
+    // report the worker actually ends on.
+    fields[key] = m[2] ?? "";
   }
   out.fields = { ...fields };
   out.missingFields = REPORT_FIELD_NAMES.filter(k => !(k in fields));
@@ -901,6 +905,17 @@ export function resolveOutcome({ report, repositoryChanged = false, independentV
           ? "reverting the production change did not fail verification; no test demonstrably covers this change"
           : `regression check was inconclusive: ${regressionCheck.reason}`,
         reasons: [`regression check: ${regressionCheck.status} (${regressionCheck.reason})`] };
+    }
+    // A valid done/pass report on an implement job that left the repository
+    // byte-for-byte unchanged is indistinguishable from a worker that simply
+    // failed to act -- the claim is internally consistent but nothing here
+    // checks it against reality. The invalid-report path below already
+    // refuses to recover without a real repository change; a well-formed
+    // report deserves the same scrutiny, not less.
+    if (mode === "implement" && !repositoryChanged) {
+      return { ...base, outcome: OUTCOMES.NEEDS_REVIEW, reviewRequired: true, commitAllowed: false,
+        commitBlockedReason: "worker reported done/pass but the repository has no changes from the base commit",
+        reasons: ["worker claimed done/pass but the repository is unchanged from the base commit"] };
     }
     return { ...base, outcome: OUTCOMES.WORKER_DONE, commitAllowed: mode === "implement",
       commitBlockedReason: mode === "implement" ? null : `${mode} mode does not create commits` };

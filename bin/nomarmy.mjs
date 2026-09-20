@@ -519,7 +519,11 @@ function commandExists(cmd) {
  * update step.
  */
 async function cmdConnect() {
-  const target = argv[1];
+  // Positional, but not argv[1] verbatim: every other command in this CLI is
+  // position-independent with respect to global flags (flag()/value() scan
+  // the whole argv), and `nomarmy connect --json claude` broke that promise
+  // by reading argv[1] directly -- --json landed in target's slot instead.
+  const target = argv.slice(1).find(a => !a.startsWith("--"));
   if (target !== "claude" && target !== "codex") throw new Error('nomarmy connect needs a target: "claude" or "codex".');
   if (!commandExists(target)) throw new Error(`${target} was not found on PATH.`);
   const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { stdio: json ? "ignore" : "inherit", ...opts });
@@ -580,9 +584,16 @@ async function cmdSizing() {
 
   // Never present a configuration as "recommended" when the arithmetic says it
   // does not fit. The fallback is a floor to start from, not an endorsement.
+  // fits is a tri-state (true/false/null): null means hardware was totally
+  // unmeasurable, not that it fits -- `null !== false` must not fall through
+  // to the "measured, fits" message, or an unmeasured machine gets the exact
+  // same confident framing as a real recommendation.
   const doesNotFit = res.memory && res.memory.fits === false;
+  const unmeasured = res.memory && res.memory.fits === null;
   console.log(doesNotFit
     ? `\nNOTHING FITS on this machine. Closest fallback (confidence: ${res.confidence}):\n`
+    : unmeasured
+    ? `\nHARDWARE COULD NOT BE MEASURED. This is an unverified floor, not a recommendation (confidence: ${res.confidence}):\n`
     : `\nMore noms (confidence: ${res.confidence}) -- as many as fit in memory:\n`);
   for (const [k, v] of Object.entries(res.env ?? {})) console.log(`  ${k}=${v}`);
   console.log(`\n  ${res.maxWorkers} nom(s) at ${K(res.contextPerNom)} each`

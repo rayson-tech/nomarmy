@@ -244,6 +244,28 @@ test("redactCommand strips credential-shaped values", () => {
   assert.equal(redactCommand("npm run db:migrate"), "npm run db:migrate");
 });
 
+test("redactCommand strips an Authorization header's Bearer/Basic/Token value", () => {
+  const out = redactCommand('curl -H "Authorization: Bearer sk-abcdef1234567890" https://api.example.com/deploy');
+  assert.ok(!out.includes("sk-abcdef1234567890"), out);
+  assert.ok(out.includes("Authorization: Bearer <redacted>"), out);
+});
+
+test("redactCommand strips a user:pass value after -u/--user", () => {
+  const out = redactCommand("curl -u admin:hunter2 https://internal/health");
+  assert.ok(!out.includes("hunter2"), out);
+  assert.ok(!out.includes("admin"), out);
+});
+
+test("redactCommand strips a glued mysql -p<password>, scoped to known DB CLIs", () => {
+  const out = redactCommand("mysql -h db -uroot -pMyRealSecret123 mydb");
+  assert.ok(!out.includes("MyRealSecret123"), out);
+});
+
+test("redactCommand leaves an unrelated single-dash flag alone (-p is not glued to a DB CLI)", () => {
+  assert.equal(redactCommand("go test -parallel 4 ./..."), "go test -parallel 4 ./...");
+  assert.equal(redactCommand("sort -u file.txt"), "sort -u file.txt");
+});
+
 // ---------------------------------------------------------------------------
 // Traceability, determinism, side-effect freedom
 // ---------------------------------------------------------------------------
