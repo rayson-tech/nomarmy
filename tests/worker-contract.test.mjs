@@ -38,6 +38,7 @@ import {
   buildConfigSummary,
   currentMaxWorkers,
   mapLimit,
+  withSandboxProvisioningRetry,
   run,
   makeIdleDiffTick,
   planProductionRevert,
@@ -1858,3 +1859,62 @@ test("mapLimit: stagger only delays each slot's first pull -- every item still g
 });
 
 function sleepFor(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+// ---------------------------------------------------------------------------
+// withSandboxProvisioningRetry: retries ONLY the diagnosed-transient
+// crun/devpts sandbox race, re-verified at 4-way concurrency this session
+// (the original 1500ms stagger fix was only proven at 2-way).
+// ---------------------------------------------------------------------------
+
+test("withSandboxProvisioningRetry: succeeds on the first try with no retry at all", async () => {
+  let calls = 0;
+  const result = await withSandboxProvisioningRetry(async () => { calls++; return "ok"; });
+  assert.equal(result, "ok");
+  assert.equal(calls, 1);
+});
+
+test("withSandboxProvisioningRetry: retries a crun/devpts failure and succeeds once the sandbox starts", async () => {
+  let calls = 0;
+  const retries = [];
+  const result = await withSandboxProvisioningRetry(async () => {
+    calls++;
+    if (calls < 2) throw new Error('lane task error: ...crun: mount `devpts` to `dev/pts`: Invalid argument: OCI runtime error | 125');
+    return "ok";
+  }, { onRetry: (attempt) => retries.push(attempt), delayMs: 1 });
+  assert.equal(result, "ok");
+  assert.equal(calls, 2);
+  assert.deepEqual(retries, [1]);
+});
+
+test("withSandboxProvisioningRetry: also matches OpenClaw's own errorName=SandboxProvisioningError", async () => {
+  let calls = 0;
+  await withSandboxProvisioningRetry(async () => {
+    calls++;
+    if (calls < 2) throw new Error("model fallback chain stopped: reason=sandbox_provisioning errorName=SandboxProvisioningError");
+    return "ok";
+  }, { delayMs: 1 });
+  assert.equal(calls, 2);
+});
+
+test("withSandboxProvisioningRetry: gives up after MAX_SANDBOX_PROVISIONING_RETRIES and rethrows the real error", async () => {
+  let calls = 0;
+  const retries = [];
+  await assert.rejects(
+    withSandboxProvisioningRetry(async () => {
+      calls++;
+      throw new Error("crun: mount `devpts` to `dev/pts`: Invalid argument");
+    }, { onRetry: (attempt) => retries.push(attempt), delayMs: 1 }),
+    /crun: mount/,
+  );
+  assert.equal(calls, 3, "the original attempt plus exactly 2 retries, never more");
+  assert.deepEqual(retries, [1, 2]);
+});
+
+test("withSandboxProvisioningRetry: a worker that started and genuinely failed on its own is never retried", async () => {
+  let calls = 0;
+  await assert.rejects(
+    withSandboxProvisioningRetry(async () => { calls++; throw new Error("openclaw exited 2\nSTDERR:\nRequest timed out before a response was generated."); }),
+    /timed out/,
+  );
+  assert.equal(calls, 1, "an unrelated failure must propagate on the first attempt, not be retried");
+});

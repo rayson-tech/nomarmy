@@ -364,7 +364,11 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
     "--timeout", String(timeoutSeconds), "--state-dir", stateDir, "--json"];
   const onTick = idleDiff ? makeIdleDiffTick(cwd, idleDiff) : null;
   try {
-    const { stdout, stderr } = await run("openclaw", args, { cwd, env, timeoutMs: (timeoutSeconds + 30) * 1000, onTick, tickMs: (idleDiff?.pollSeconds ?? 15) * 1000 });
+    const { stdout, stderr } = await withSandboxProvisioningRetry(
+      () => run("openclaw", args, { cwd, env, timeoutMs: (timeoutSeconds + 30) * 1000, onTick, tickMs: (idleDiff?.pollSeconds ?? 15) * 1000 }),
+      { onRetry: (attempt, error) => fs.appendFileSync(path.join(jobDir, "coordinator.log"),
+          `${new Date().toISOString()} transient sandbox provisioning error${logSuffix}, retry ${attempt}/${MAX_SANDBOX_PROVISIONING_RETRIES}\n${error.message}\n`) },
+    );
     fs.writeFileSync(path.join(jobDir, `openclaw${logSuffix}.stdout.log`), stdout + "\n");
     fs.writeFileSync(path.join(jobDir, `openclaw${logSuffix}.stderr.log`), stderr + "\n");
     try { return JSON.parse(stdout); } catch { throw new Error(`OpenClaw returned invalid JSON:\n${stdout}`); }
@@ -1761,7 +1765,50 @@ export function formatUnion(union) {
 // memory free -- reproduced twice, unrelated to memory pressure. A short
 // stagger between concurrent `podman create`/`run` invocations gives crun's
 // container-creation critical section enough separation to not collide.
-const WORKER_START_STAGGER_MS = Number.parseInt(process.env.NOMARMY_WORKER_START_STAGGER_MS ?? "", 10) || 1500;
+//
+// That original fix/measurement was only verified at 2-way concurrency.
+// Re-verified at 4-way (this session): the same race still fired with the
+// stagger active -- one job failed on this exact error within 5.2s of a
+// 4-job concurrent dispatch. 1500ms of separation between ADJACENT slot
+// starts is not consistently enough once 4 containers are all competing for
+// the same crun critical section under real system load, not 2. Raised to
+// 3000ms as a direct response to that reproduction; RETRY_TRANSIENT_SANDBOX_ERRORS
+// below is the second, more robust layer -- no fixed stagger value can be
+// proven sufficient for every load condition, only likely-sufficient.
+const WORKER_START_STAGGER_MS = Number.parseInt(process.env.NOMARMY_WORKER_START_STAGGER_MS ?? "", 10) || 3000;
+
+// The same already-diagnosed, transient crun/devpts race (see
+// WORKER_START_STAGGER_MS above) surfaced again even with the stagger
+// active. Detected by message pattern (OpenClaw's own error carries
+// `errorName=SandboxProvisioningError` and/or the raw crun message) and
+// retried a bounded number of times with a short backoff -- this failure
+// mode is a container never starting, observed to fail within seconds
+// with zero work attempted, so retrying the whole call is safe and cheap
+// relative to a 600s job timeout. Never retries anything else: a worker
+// that started and then failed on its own is a real result, not a race.
+const SANDBOX_PROVISIONING_RETRY_PATTERN = /SandboxProvisioningError|crun:\s*mount\s*`?devpts`?/i;
+const MAX_SANDBOX_PROVISIONING_RETRIES = 2;
+const SANDBOX_PROVISIONING_RETRY_DELAY_MS = 2000;
+
+/**
+ * Runs `fn`, retrying only on the diagnosed-transient crun/devpts sandbox
+ * race (see WORKER_START_STAGGER_MS's comment), up to
+ * MAX_SANDBOX_PROVISIONING_RETRIES times with linear backoff. Any other
+ * error -- including a worker that started fine and then genuinely failed
+ * -- propagates on the first attempt, unretried.
+ */
+export async function withSandboxProvisioningRetry(fn, { onRetry = () => {}, delayMs = SANDBOX_PROVISIONING_RETRY_DELAY_MS } = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt > MAX_SANDBOX_PROVISIONING_RETRIES || !SANDBOX_PROVISIONING_RETRY_PATTERN.test(error.message)) throw error;
+      onRetry(attempt, error);
+      await sleep(delayMs * attempt);
+    }
+  }
+}
+
 export async function mapLimit(items, limit, fn, { staggerMs = 0 } = {}) {
   const results = new Array(items.length);
   const slots = Math.min(limit, items.length);
