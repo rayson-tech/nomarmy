@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { installMcpCopy, connectClaude, connectCodex, defaultInstallDir } from "../lib/connect.mjs";
+import { installMcpCopy, connectClaude, connectCodex, defaultInstallDir, parseClaudeEnv } from "../lib/connect.mjs";
 
 function fakeRoot() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-root-"));
@@ -91,6 +91,62 @@ test("connectClaude: falls back to a scope-less add when --scope user is rejecte
       },
     });
     assert.ok(calls.some((c) => c === `claude mcp add nomarmy-local-worker -- node ${path.join(installDir, "mcp", "server.mjs")}`));
+  } finally {
+    fs.rmSync(nomarmyRoot, { recursive: true, force: true });
+    fs.rmSync(installDir, { recursive: true, force: true });
+  }
+});
+
+test("parseClaudeEnv: reads KEY=value lines from the Environment: block, stops at the first non-matching line", () => {
+  const output = [
+    "nomarmy-local-worker:",
+    "  Scope: User config (available in all your projects)",
+    "  Status: ✔ Connected",
+    "  Type: stdio",
+    "  Command: node",
+    "  Args: /path/to/server.mjs",
+    "  Environment:",
+    "    NOMARMY_WORKER_MODEL_THINKING=true",
+    "    NOMARMY_WORKER_MODEL=qwen3.6-27b",
+    "",
+    "To remove this server, run: claude mcp remove nomarmy-local-worker -s user",
+  ].join("\n");
+  assert.deepEqual(parseClaudeEnv(output), { NOMARMY_WORKER_MODEL_THINKING: "true", NOMARMY_WORKER_MODEL: "qwen3.6-27b" });
+});
+
+test("parseClaudeEnv: no Environment: block, or nothing registered yet, is an empty object rather than an error", () => {
+  assert.deepEqual(parseClaudeEnv(""), {});
+  assert.deepEqual(parseClaudeEnv("nomarmy-local-worker:\n  Scope: User config\n  Environment:\n\nTo remove..."), {});
+  assert.deepEqual(parseClaudeEnv(undefined), {});
+});
+
+test("connectClaude: preserves an existing registration's environment variables across a reinstall", () => {
+  // Found live: reinstalling to pick up a code change silently dropped
+  // NOMARMY_WORKER_MODEL, reverting every dispatch to the default model
+  // with no warning, because the re-add passed no -e flags at all.
+  const nomarmyRoot = fakeRoot();
+  const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
+  const calls = [];
+  const existingEnvOutput = [
+    "nomarmy-local-worker:",
+    "  Environment:",
+    "    NOMARMY_WORKER_MODEL_THINKING=true",
+    "    NOMARMY_WORKER_MODEL=gpt-oss-20b",
+    "",
+  ].join("\n");
+  try {
+    const result = connectClaude({
+      nomarmyRoot, installDir,
+      run: (cmd, args) => {
+        calls.push([cmd, ...args].join(" "));
+        if (cmd === "claude" && args[0] === "mcp" && args[1] === "get") return existingEnvOutput;
+        return "";
+      },
+    });
+    assert.deepEqual(result.preservedEnv, { NOMARMY_WORKER_MODEL_THINKING: "true", NOMARMY_WORKER_MODEL: "gpt-oss-20b" });
+    const addCall = calls.find((c) => c.includes("mcp add"));
+    assert.match(addCall, /-e NOMARMY_WORKER_MODEL_THINKING=true/);
+    assert.match(addCall, /-e NOMARMY_WORKER_MODEL=gpt-oss-20b/);
   } finally {
     fs.rmSync(nomarmyRoot, { recursive: true, force: true });
     fs.rmSync(installDir, { recursive: true, force: true });
