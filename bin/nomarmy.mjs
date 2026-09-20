@@ -81,6 +81,15 @@ Usage: nomarmy <command> [options]
   start <profile> Start local inference (wraps scripts/start-inference.sh).
   stop <profile>  Stop local inference (wraps scripts/stop-inference.sh).
   uninstall       Remove the MCP registration and install directory.
+                  --clear-agents  also remove job records, logs and the
+                                  built llama.cpp binary (rebuilt on next
+                                  install)
+                  --clear-models  also remove the model repo config/
+                                  common.env references from the local
+                                  Hugging Face cache
+                  --all           both of the above
+                  --force         skip the confirmation prompt for either
+                                  (required alongside --json)
   validate        Validate .nomarmy.yml against the schema.
   sizing          Recommend context and nom count for this machine.
                   --check   evaluate the loaded profile instead of recommending
@@ -251,6 +260,13 @@ async function cmdInit() {
 // setup/model need to find THIS package's config/ and scripts/ as siblings
 // of bin/, the same way select-model.mjs resolves its own root.
 const nomarmyRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+
+/** Read one KEY=VALUE line's value, or null if the file or key doesn't exist. */
+function readEnvValue(filePath, key) {
+  if (!fs.existsSync(filePath)) return null;
+  const m = fs.readFileSync(filePath, "utf8").match(new RegExp(`^${key}=(.*)$`, "m"));
+  return m ? m[1].trim() : null;
+}
 
 /** Read-modify-write one KEY=VALUE line, replacing it if present, appending if not -- the exact pattern scripts/select-model.mjs already uses for config/common.env. */
 function writeEnvLine(filePath, key, value) {
@@ -615,11 +631,99 @@ function runScript(name, args = []) {
 }
 async function cmdStart() { console.log(c.bold("🍪 Starting inference...\n")); runScript("start-inference.sh", argv.slice(1)); }
 async function cmdStop() { runScript("stop-inference.sh", argv.slice(1)); }
+function safeDu(dir) {
+  try { return execFileSync("du", ["-sh", dir], { encoding: "utf8" }).trim().split(/\s+/)[0]; }
+  catch { return "unknown size"; }
+}
+
+/** The llama.cpp build + job/log records live here, separate from the small
+ * MCP install dir uninstall.sh already removes -- see install-llama-cpp.sh
+ * and start-inference.sh, which both default to this same path. */
+function agentsDirDefault() {
+  return process.env.NOMARMY_INSTALL_ROOT
+    || path.join(process.env.HOME ?? process.env.USERPROFILE ?? ".", ".local", "share", "nomarmy-local-agents");
+}
+
+async function confirmDestructive(question, force) {
+  if (force) return true;
+  const rl = createInterface({ input, output });
+  try {
+    const answer = (await rl.question(c.bold(question))).trim().toLowerCase();
+    return answer === "y" || answer === "yes";
+  } finally {
+    rl.close();
+  }
+}
+
+async function maybeRemoveAgentsDir({ force }) {
+  const dir = agentsDirDefault();
+  if (!fs.existsSync(dir)) return null;
+  const size = safeDu(dir);
+  const ok = await confirmDestructive(
+    `\nAlso remove ${dir} (${size}) -- job records, logs, and the built llama.cpp binary? A fresh install will need to rebuild it. [y/N] `,
+    force,
+  );
+  if (!ok) { console.log("  Skipped -- left in place."); return false; }
+  fs.rmSync(dir, { recursive: true, force: true });
+  console.log(c.green(`  Removed ${dir} (${size}).`));
+  return true;
+}
+
+/** Only the repo(s) nomArmy's OWN config declares -- never a blanket sweep
+ * of ~/.cache/huggingface/hub, which is shared with any other tool using
+ * huggingface_hub's standard cache. A model tested via a one-off
+ * NOMARMY_MODEL_REPO override (never written to config/common.env, the way
+ * most of tonight's model comparisons were run) is not tracked here and
+ * needs manual cleanup -- an honest, bounded scope beats guessing at which
+ * cache entries are "ours". */
+function resolveConfiguredModelRepos() {
+  const repo = readEnvValue(path.join(nomarmyRoot, "config", "common.env"), "NOMARMY_MODEL_REPO");
+  return repo ? [repo] : [];
+}
+
+function hfCacheDirFor(repo) {
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? ".";
+  return path.join(home, ".cache", "huggingface", "hub", `models--${repo.replace(/\//g, "--")}`);
+}
+
+async function maybeRemoveModelCaches({ force }) {
+  const removed = [];
+  for (const repo of resolveConfiguredModelRepos()) {
+    const dir = hfCacheDirFor(repo);
+    if (!fs.existsSync(dir)) continue;
+    const size = safeDu(dir);
+    const ok = await confirmDestructive(`Also remove cached model ${repo} (${size}) from ~/.cache/huggingface/hub? [y/N] `, force);
+    if (!ok) { console.log(`  Skipped ${repo} -- left in place.`); continue; }
+    fs.rmSync(dir, { recursive: true, force: true });
+    console.log(c.green(`  Removed cached model ${repo} (${size}).`));
+    removed.push(repo);
+  }
+  if (!removed.length) {
+    console.log("  No configured model repo found cached locally, or it was skipped above. Note: models tested via a manual NOMARMY_MODEL_REPO override, never saved to config/common.env, are not tracked here and need manual cleanup.");
+  }
+  return removed;
+}
+
 async function cmdUninstall() {
+  const clearModels = flag("clear-models") || flag("all");
+  const clearAgents = flag("clear-agents") || flag("all");
+  const force = flag("force");
+
+  if ((clearModels || clearAgents) && json && !force) {
+    throw new Error("--clear-models/--clear-agents with --json needs --force -- these delete real, possibly multi-GB local state, and nothing is removed without explicit confirmation.");
+  }
+
   if (!json) console.log(c.yellow("Removing the nomArmy local worker MCP installation...\n"));
   runScript("uninstall.sh");
-  if (json) return out({ uninstalled: true });
-  console.log(c.green("\n✓ Removed. Job records under ~/.local/share/nomarmy-local-agents/jobs were kept for recovery/audit."));
+
+  const result = { uninstalled: true, agentsRemoved: null, modelsRemoved: [] };
+  if (clearAgents) result.agentsRemoved = await maybeRemoveAgentsDir({ force });
+  if (clearModels) result.modelsRemoved = await maybeRemoveModelCaches({ force });
+
+  if (json) return out(result);
+  console.log(c.green("\n✓ Removed."));
+  if (!clearAgents) console.log("  Job records, logs, and the built llama.cpp binary under ~/.local/share/nomarmy-local-agents were kept -- pass --clear-agents to also remove them.");
+  if (!clearModels) console.log("  Downloaded model files under ~/.cache/huggingface/hub were kept -- pass --clear-models to also remove the one(s) nomArmy's config references.");
 }
 
 async function cmdSizing() {

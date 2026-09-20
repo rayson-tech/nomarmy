@@ -22,6 +22,7 @@ function runCLI(args, options = {}) {
       cwd,
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
+      env: options.env ? { ...process.env, ...options.env } : process.env,
     });
     return { exitCode: 0, stdout: result, stderr: "" };
   } catch (error) {
@@ -109,6 +110,29 @@ test("init --json --write against fresh directory writes .nomarmy.yml and exits 
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+// uninstall --clear-models/--clear-agents: real removal is NOT exercised
+// here. uninstall.sh unconditionally runs `claude mcp remove
+// nomarmy-local-worker` -- this session's own live registration -- so any
+// test that got past the refusal gate below would disconnect the real
+// session running this suite. Only the safe-to-call-automatically part (the
+// refusal that runs BEFORE uninstall.sh) is covered.
+test("uninstall --clear-models --json without --force refuses before touching anything", () => {
+  const { exitCode, stdout } = runCLI(["uninstall", "--clear-models", "--json"]);
+  assert.notEqual(exitCode, 0);
+  const output = JSON.parse(stdout);
+  assert.match(output.error, /needs --force/);
+});
+
+test("uninstall --clear-agents --all --json without --force refuses before touching anything", () => {
+  const { exitCode, stdout } = runCLI(["uninstall", "--clear-agents", "--json"]);
+  assert.notEqual(exitCode, 0);
+  assert.match(JSON.parse(stdout).error, /needs --force/);
+
+  const allResult = runCLI(["uninstall", "--all", "--json"]);
+  assert.notEqual(allResult.exitCode, 0);
+  assert.match(JSON.parse(allResult.stdout).error, /needs --force/);
 });
 
 test("scan --json against empty temp directory returns evidence with zero counts", () => {
