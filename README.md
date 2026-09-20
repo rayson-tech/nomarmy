@@ -319,16 +319,29 @@ Logs land under `$HOME/.local/share/nomarmy-local-agents/logs/`.
 
 nomArmy's own independent verification (the step that re-runs a job's real test commands, never trusting the worker's self-report) works against a target repository written in any language whose toolchain exists in the sandbox image. Today that's:
 
-| Language | Detection (`nomarmy scan`) | Sandbox toolchain |
+| Language | Detection | Sandbox toolchain |
 |---|---|---|
 | Node | `package.json` | Built into the base image |
-| Python | `pyproject.toml`, `requirements.txt` | Built into the base image (`python3`/`pip`/`venv`) |
+| Python (runtime only) | `pyproject.toml` | Built into the base image (`python3`/`pip`/`venv`) |
 | Go | `go.mod` | Built **lazily**, on first use |
 | Rust | `Cargo.toml` | Built **lazily**, on first use |
+| Python (with dependencies) | bare `requirements.txt`, or `environment.python.requirements` in `.nomarmy.yml` | Built **lazily**, per repo, keyed on dependency content |
 
 Go and Rust images aren't baked into the shared base image — a native compiler is real memory pressure competing with the same local-inference budget `nomarmy sizing` protects, and most installs never touch either. The first time a job's target repo is detected as Go or Rust, nomArmy builds that language's image once via Podman (a few minutes; needs network for that one build, same as the base image); every job after reuses the cached image. `NOMARMY_AGENT_IMAGE` (or the `image` option) always overrides auto-detection, same as everywhere else in this codebase.
 
-**Current limitation:** this only covers nomArmy's own final verification step. The worker's own tool calls (the actual editing) still run inside whatever sandbox OpenClaw is configured with globally (`agents.defaults.sandbox.docker.image`, set by `scripts/setup-sandbox.sh`) — `openclaw agent exec` has no per-job sandbox override today, so switching that automatically per job is unresolved (there's a promising lead in OpenClaw's `agents.entries.<name>.sandbox` config, unverified). Until that's solved, a worker fixing a Go or Rust bug can propose and verify a diff, but can't run `go test`/`cargo test` itself mid-task unless you manually point `setup-sandbox.sh` at a Go/Rust-equipped image first.
+Python is different: the base image's `python3`/`pip` covers the *language*, but a real repo's actual verification step needs its own third-party packages (`boto3`, `pandas`, ...), and those are the repo's own, not something one shared image could ever carry. The sandbox also runs with `--network none`, so `pip install` inside a job has nothing to install *from* — that is the actual failure this closes, not a missing package list. The fix mirrors Go/Rust's lazy-build pattern with one real difference: the image is built *from the target worktree as its build context* (so a generated Dockerfile's `COPY` can reach the real requirements files at their real paths) and tagged by a hash of those files' content, not a fixed name — a dependency change is a cache miss that rebuilds once; an unchanged file is a cache hit against the exact same tag. `.nomarmy.yml`:
+
+```yaml
+environment:
+  python:
+    requirements:
+      - requirements-dev.txt
+      - lambda/requirements.txt
+```
+
+A bare `requirements.txt` at the repo root is picked up with no config at all. A repo with several requirements files (an app one, a dev one, a sub-package's own) has no single conventional name nomArmy could guess, so those are declared explicitly. A repo with neither gets the base image, unchanged from before this existed.
+
+**Current limitation:** this only covers nomArmy's own final verification step. The worker's own tool calls (the actual editing) still run inside whatever sandbox OpenClaw is configured with globally (`agents.defaults.sandbox.docker.image`, set by `scripts/setup-sandbox.sh`) — `openclaw agent exec` has no per-job sandbox override today, so switching that automatically per job is unresolved (there's a promising lead in OpenClaw's `agents.entries.<name>.sandbox` config, unverified). Until that's solved, a worker fixing a Go/Rust bug, or one needing a Python repo's own dependencies, can propose and verify a diff, but can't run `go test`/`cargo test`/the repo's own `import boto3` code itself mid-task unless you manually point `setup-sandbox.sh` at an equipped image first.
 
 ## Other coordinators: Codex and Cursor
 

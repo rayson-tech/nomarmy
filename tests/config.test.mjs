@@ -244,6 +244,27 @@ test("an unknown key inside a verification profile is rejected", () => {
 });
 
 // --------------------------------------------------------------------------
+// environment.python
+// --------------------------------------------------------------------------
+
+test("environment.python.requirements accepts a list of paths", () => {
+  const reqs = ["requirements-dev.txt", "lambda/requirements.txt", "lambda/frontend_api/requirements-dev.txt"];
+  const result = validateConfig({ environment: { python: { requirements: reqs } } });
+  assert.equal(result.valid, true, JSON.stringify(result.errors));
+  assert.deepEqual(result.config.environment.python.requirements, reqs);
+});
+
+test("environment.python.requirements rejects an empty list", () => {
+  const result = validateConfig({ environment: { python: { requirements: [] } } });
+  assertInvalid(result, "at least one requirements file");
+});
+
+test("environment.python rejects unrecognized fields, same as every other environment block", () => {
+  const result = validateConfig({ environment: { python: { requirements: ["requirements.txt"], extra: true } } });
+  assertInvalid(result, "extra");
+});
+
+// --------------------------------------------------------------------------
 // allowed_hosts
 // --------------------------------------------------------------------------
 
