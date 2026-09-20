@@ -142,6 +142,58 @@ usage — that is the actual claim, not "local models are just as good," which
 this same session's earlier findings (six trivial cases, the reasoning-effort
 results) already show is task- and configuration-dependent, not automatic.
 
+## Finding 5: `NOMARMY_LLAMA_PARALLEL` above 1 bought nothing on this hardware, and broke a job
+
+`nomarmy sizing` recommends up to 8 concurrent noms on this machine ("more
+noms," bounded by memory) against a fixed default of 1 ("nominal," matching
+every shipped profile) -- a gap large enough to question. Tested directly:
+the same 4 trivial benchmark tickets (case1-4), once dispatched serially
+(`max_parallel: 1`) and once concurrently (`max_parallel: 4`), same model
+(Qwen3.6-27B), same 4-slot llama-server, same machine, same session.
+
+| | Total wall-clock | Outcome |
+|---|---|---|
+| Serial (`parallel: 1`) | 532.8s | 3/4 clean, 1 needs-review |
+| Concurrent (`parallel: 4`) | 535.9s | 3/4 clean, **1 outright failed (timeout)** |
+
+**Zero net throughput gain.** Individual jobs that completed took 3.4-4.6x
+longer each when run concurrently than the same job run alone (case1: 103s
+solo vs 467s at 4x; case3: 142s vs 529s; case4: 156s vs 531s) -- worse than
+even a naive "split evenly" model would predict. This is a real, measured
+answer, not the inference from a memory-fits calculation: this machine's
+GPU/unified-memory bandwidth is a shared, saturating bottleneck across
+concurrent slots, and `nominal: 1` is not overly conservative here, it is
+approximately correct. `nomarmy sizing --noms N` (added this session) now
+lets anyone measure their own hardware the same way instead of trusting
+either extreme.
+
+One job (case2) didn't just run slow under concurrency, it failed outright:
+`stat failed for /workspace/workspace/benchmark/case2-null-truncate/truncate.mjs`
+-- the worker's own tool call used a path already containing a redundant
+`workspace/` prefix, which the sandbox joined against its own `/workspace`
+root and never found. Two things are true about this and both matter for
+being honest about what was actually found: the path-joining that failed
+lives inside OpenClaw's own sandbox-fs tool, not this codebase, so there is
+no fix available here for the underlying join; and at n=1 there is no way to
+confirm this was *caused* by concurrency rather than being independent model
+flakiness that happened to land in this trial. The one thing confirmed and
+fixed here: the worker prompt now explicitly warns against the exact
+observed mistake (repeating "workspace" as a path segment), regardless of
+which layer ultimately failed on it.
+
+A related, deliberately UNCHANGED finding: the idle-diff circuit breaker
+(`makeIdleDiffTick`) never fires until at least one real worktree change has
+been observed, by design (`tests/worker-contract.test.mjs`'s
+`"never stops before any change has been observed"`) -- a worker still
+reading/exploring before its first edit looks identical to one that's
+stuck. This means a worker that never makes any progress at all (as case2's
+did, if the path failure blocked every subsequent attempt) burns its entire
+timeout budget with no early exit, unlike a worker that edits once and then
+stalls. That is a real, known cost of the current design, not something
+changed tonight -- it is the same class of decision as `reviewRequired` on
+a `not_run` verification earlier this session: a tested, intentional
+tradeoff, not a bug to silently patch.
+
 ## A real gap this surfaced
 
 Comparing models currently means a manual restart-and-re-register dance for

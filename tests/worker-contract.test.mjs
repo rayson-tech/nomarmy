@@ -1045,6 +1045,15 @@ test("prompt: keeps the hard safety rules and the compact contract", () => {
   assert.equal(/NOT DONE:/.test(p), false, "the old un-underscored field must be gone");
 });
 
+test("prompt: warns against repeating 'workspace' as a path segment, anchored to a real observed failure", () => {
+  // Observed live: a worker's own tool call used "workspace/lib/x.mjs" as a
+  // path, which the sandbox joined against its own /workspace root and
+  // failed on /workspace/workspace/lib/x.mjs -- the file was never found.
+  const p = workerPrompt({ task: "t", mode: "implement", baseRef: "HEAD", baseSha: "abc", workerId: "w1" });
+  assert.match(p, /never repeat "workspace" as a path segment/);
+  assert.match(p, /workspace\/workspace\/lib\/x\.mjs/);
+});
+
 test("prompt: a prose summary is explicitly named as a failure, not a substitute for the report", () => {
   // gpt-oss-20b, live: finished a real implement job and signed off with a
   // friendly natural-language summary instead of the four-line report,
