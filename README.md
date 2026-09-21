@@ -243,6 +243,8 @@ nomarmy providers list    # see every configured pool and which entries have the
 
 A pool entry never carries a raw credential — only `auth_env`, the *name* of an environment variable nomArmy reads at dispatch time (the same convention `NOMARMY_BEDROCK_API_KEY` already established). An entry whose `auth_env` isn't set is simply invisible to dispatch, never a per-job failure. Selection is weighted-random over whichever entries in the named pool are currently authenticated: an entry with weight 3 is picked three times as often as one with weight 1. Each entry also gets its own `max_concurrent` (default 2) — a static, operator-declared ceiling, since nomArmy does not yet do real rate-limit-aware admission per provider — and pool-routed jobs get their own separate concurrency ceiling from local jobs (`NOMARMY_MAX_POOL_WORKERS`, default 4), additive to `NOMARMY_MAX_WORKERS`: a pool-routed job's inference runs on someone else's hardware and was never competing for the local llama-server's own slots.
 
+That truthiness check runs inside the MCP *server's own* process, not whichever shell an operator happens to type `export FOO=...` into — a GUI-launched coordinator never inherited a later shell export in the first place, and a terminal-launched one only did if the export predated that specific launch. `nomarmy connect claude` (which `nomarmy providers add` also offers to run for you right after registration) closes that gap by baking a placeholder for every configured pool's `auth_env` directly into the registration — never the real credential, which lives only in OpenClaw's own store — so it's picked up on any later reconnect (a model swap, `nomarmy update`, a fresh install) even if you skip that prompt.
+
 ```yaml
 # config/providers.yml
 pools:
@@ -266,6 +268,43 @@ pools:
 Dispatch against a named pool with `local_worker`'s `pool` field (`pool: "cheap"`) instead of (or alongside) `profile` — omitting `pool` entirely preserves today's `profile`-only behavior byte for byte. Independent verification stays exactly as strict regardless of which provider produced a job's diff; nomArmy's whole trust boundary is "never trust the worker's self-report," which was already provider-agnostic before this existed.
 
 **Two honest gaps, not papered over.** First, `worker_cost_usd` in job metrics is best-effort: present in `agent exec`'s JSON envelope for at least some providers, but not confirmed reliable or nonzero across every provider type here — treat it as a hint, not an authoritative bill. Second, the exact registered provider id and model-catalog behavior for `anthropic`/`openai`/`xai`/`deepinfra`'s native onboarding flags is built on OpenClaw's documented `--help` output but has not been exercised against a real credential for every one of the four during this feature's own development — `nomarmy providers add`'s registration step says so directly and points you at `openclaw models list` to confirm before trusting a new provider type in production. (This is also why riding a Claude Pro/Max or ChatGPT Plus/Pro *subscription* isn't an option here: Anthropic now meters any automated/headless use as a separate, capped credit at API rates rather than free bonus capacity, and OpenAI's consumer subscription grants no API access at all — every provider above is a plain, metered API key.)
+
+### Which pool for which job
+
+The pools are a tier, not a preference, and the line between them is what the
+job asks the worker to *decide*. Every tier is still a worker: the trust
+boundary does not move, and nothing below is a reason to read a diff instead of
+executing it.
+
+| Tier | Reach for it when | Archetype |
+|---|---|---|
+| `pool: "cheap"` (local) | The decision is already made and written down. A bounded change against a spec, with a test that proves it. | Add a validation rule that is fully described, with a passing and a failing case. |
+| `pool: "capable"` (Grok and similar) | The design is settled but the change needs real comprehension of code the brief does not quote. The judgment is "did I preserve behavior", not "what should this be". | Extract two values into parameters across a 2,000-line module and prove every caller still behaves identically. |
+| No pool, frontier coordinator | The answer is not yet known, spans several files, or its value is noticing something nobody asked about. | Diagnose why a feature dies in production; survey four subsystems and come back with the pattern already solved elsewhere. |
+
+Measured against real tickets rather than guessed at. A `cheap` worker closed a
+specified validator hole in 92 seconds for nothing, correct, with two cosmetic
+nits a reviewer fixed in a minute. The same day, a frontier subagent spent
+roughly 99,000 tokens on a mechanical parameter-extraction refactor whose only
+real question was whether behavior changed. That second job is the shape
+`capable` exists for, and it is the most common way a coordinator overspends.
+
+Two things the tier table does not capture, and both matter more than cost:
+
+**`cheap` is local, `capable` is not.** A local nom reads the worktree on your
+own hardware and nothing leaves the machine. A pool entry pointing at a hosted
+provider sends the code that worker reads to a third party. For a private
+repository that is a deliberate decision about where source may travel, and the
+trust boundary says nothing about it, because refusing to trust a worker's
+claims is a different problem from choosing who sees the code.
+
+**Task size still decides whether to delegate at all.** A small,
+precisely-diagnosed fix loses to making it yourself at any tier, because the
+brief plus the verification record plus the mandatory re-check is fixed
+overhead that does not shrink when the worker gets it right. The lever is the
+ratio of context needed to make the change safely against the size of the
+change. Delegating a one-line fix in a file you have already read is the
+clearest way to spend more and wait longer for the same diff.
 
 ## The `nomarmy` CLI
 

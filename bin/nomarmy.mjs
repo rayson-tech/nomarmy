@@ -921,10 +921,14 @@ async function cmdProvidersAdd() {
     // credential already lives in OpenClaw's own store from registration
     // above. But that check runs inside the server's OWN process.env, which
     // is whatever was baked into its registration, not whatever an operator
-    // happens to have exported in some shell. --update-mcp bakes a
-    // placeholder value in directly (same destructive-under-json-needs-
-    // explicit-flag rule as `model --update-mcp`), the one path guaranteed
-    // to reach the server regardless of shell/launch-method timing.
+    // happens to have exported in some shell. connectClaude now derives and
+    // bakes in a placeholder for EVERY configured pool's auth_env
+    // automatically on every connect (see derivePoolAuthEnvPlaceholders in
+    // lib/connect.mjs) -- this entry will get picked up the next time this
+    // operator reconnects for any reason regardless. --update-mcp is just
+    // the immediate-feedback path, so it does not have to wait for that
+    // next reconnect (same destructive-under-json-needs-explicit-flag rule
+    // as `model --update-mcp`).
     let mcpUpdated = false;
     if (flag("update-mcp") && written.auth_env) {
       connectClaude({ nomarmyRoot, run: (cmd, args2, opts = {}) => execFileSync(cmd, args2, { stdio: "ignore", ...opts }), extraEnv: { [written.auth_env]: "registered" } });
@@ -948,15 +952,20 @@ async function cmdProvidersAdd() {
       // exporting it in a terminal has no reliable path to that server
       // process (a GUI-launched Claude Code never inherited it in the
       // first place; a terminal-launched one only did if it happened to be
-      // exported before that specific launch). Baking it into the
-      // registration itself is the one mechanism guaranteed to reach it.
+      // exported before that specific launch). connectClaude now derives
+      // this automatically on every connect for every configured pool
+      // (lib/connect.mjs's derivePoolAuthEnvPlaceholders) -- this entry
+      // will get picked up the next time this operator reconnects for any
+      // reason regardless of whether they say yes here. This prompt is
+      // just the immediate-feedback path, so dispatch can work right now
+      // instead of waiting for that next reconnect.
       if (written.auth_env && commandExists("claude")) {
-        const mcpAnswer = (await rl2.question(c.bold(`\nAlso add ${written.auth_env} to the Claude Code MCP registration now, so dispatch actually sees it's configured? [y/N] `))).trim().toLowerCase();
+        const mcpAnswer = (await rl2.question(c.bold(`\nAlso add ${written.auth_env} to the Claude Code MCP registration now, so dispatch sees it right away (it'll be picked up automatically next time you reconnect either way)? [y/N] `))).trim().toLowerCase();
         if (mcpAnswer === "y" || mcpAnswer === "yes") {
           connectClaude({ nomarmyRoot, run: (cmd, args2, opts = {}) => execFileSync(cmd, args2, { stdio: "inherit", ...opts }), extraEnv: { [written.auth_env]: "registered" } });
           console.log(c.green(`✓ MCP registration updated with a placeholder for ${written.auth_env}.`) + " The real credential is never stored here -- only OpenClaw's own credential store holds it.");
         } else {
-          console.log(c.dim(`Skipped -- until ${written.auth_env} is set in the MCP server's own environment, this entry is invisible to dispatch (auth-missing, same as before it was registered).`));
+          console.log(c.dim(`Skipped for now -- it'll still be picked up automatically the next time you run \`nomarmy connect claude\` or reconnect for any other reason (a model swap, an update).`));
         }
       }
     } finally {

@@ -6,7 +6,7 @@ import test from "node:test";
 
 import {
   installMcpCopy, connectClaude, connectCodex, connectCursor, defaultInstallDir, parseClaudeEnv,
-  readCursorConfig, cursorAlreadyConnected, deriveWorkerModelEnv,
+  readCursorConfig, cursorAlreadyConnected, deriveWorkerModelEnv, derivePoolAuthEnvPlaceholders,
 } from "../lib/connect.mjs";
 
 function fakeRoot() {
@@ -288,6 +288,94 @@ test("connectClaude: config/common.env's model keys are added even with no prior
 // regardless of shell/launch-method timing (see lib/connect.mjs's own
 // comment on this parameter for why "just export it in your shell" isn't
 // reliable).
+// derivePoolAuthEnvPlaceholders: closes the gap extraEnv alone left open --
+// a pool entry added at ANY point in the past (not just "in this same
+// connect call") must get its auth_env picked up automatically on every
+// later connect (a model swap, `nomarmy update`, a fresh install), not only
+// if an operator remembers `--update-mcp` at the moment they added it.
+test("derivePoolAuthEnvPlaceholders: collects auth_env across every pool, as placeholders never the real value", () => {
+  const nomarmyRoot = fakeRoot();
+  fs.mkdirSync(path.join(nomarmyRoot, "config"), { recursive: true });
+  fs.writeFileSync(path.join(nomarmyRoot, "config", "providers.yml"), `
+pools:
+  cheap:
+    - id: local
+      provider: llama-cpp
+      weight: 1
+  capable:
+    - id: grok
+      provider: xai
+      model: grok-4.6
+      weight: 1
+      auth_env: NOMARMY_XAI_API_KEY
+    - id: sonnet
+      provider: anthropic
+      model: claude-sonnet-4-6
+      weight: 1
+      auth_env: NOMARMY_ANTHROPIC_API_KEY
+`);
+  try {
+    assert.deepEqual(derivePoolAuthEnvPlaceholders(nomarmyRoot), {
+      NOMARMY_XAI_API_KEY: "registered",
+      NOMARMY_ANTHROPIC_API_KEY: "registered",
+    });
+  } finally {
+    fs.rmSync(nomarmyRoot, { recursive: true, force: true });
+  }
+});
+
+test("derivePoolAuthEnvPlaceholders: no config/providers.yml (or an invalid one) contributes nothing, not an error", () => {
+  const nomarmyRoot = fakeRoot();
+  try {
+    assert.deepEqual(derivePoolAuthEnvPlaceholders(nomarmyRoot), {});
+    fs.mkdirSync(path.join(nomarmyRoot, "config"), { recursive: true });
+    fs.writeFileSync(path.join(nomarmyRoot, "config", "providers.yml"), "pools:\n  broken: [this is not: valid: yaml");
+    assert.deepEqual(derivePoolAuthEnvPlaceholders(nomarmyRoot), {});
+  } finally {
+    fs.rmSync(nomarmyRoot, { recursive: true, force: true });
+  }
+});
+
+test("connectClaude: a pool entry's auth_env is baked in automatically, with no extraEnv needed at all", () => {
+  const nomarmyRoot = fakeRoot();
+  fs.mkdirSync(path.join(nomarmyRoot, "config"), { recursive: true });
+  fs.writeFileSync(path.join(nomarmyRoot, "config", "providers.yml"), "pools:\n  capable:\n    - id: grok\n      provider: xai\n      model: grok-4.6\n      weight: 1\n      auth_env: NOMARMY_XAI_API_KEY\n");
+  const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
+  const calls = [];
+  try {
+    connectClaude({ nomarmyRoot, installDir, run: (cmd, args) => { calls.push([cmd, ...args].join(" ")); return ""; } });
+    const addCall = calls.find((c) => c.includes("mcp add"));
+    assert.match(addCall, /-e NOMARMY_XAI_API_KEY=registered/, "a pool entry added at any point in the past must be picked up on an ordinary connect, not only via --update-mcp at add-time");
+  } finally {
+    fs.rmSync(nomarmyRoot, { recursive: true, force: true });
+    fs.rmSync(installDir, { recursive: true, force: true });
+  }
+});
+
+test("connectClaude: an already-registered real value for a pool's auth_env is never clobbered by the derived placeholder", () => {
+  const nomarmyRoot = fakeRoot();
+  fs.mkdirSync(path.join(nomarmyRoot, "config"), { recursive: true });
+  fs.writeFileSync(path.join(nomarmyRoot, "config", "providers.yml"), "pools:\n  capable:\n    - id: grok\n      provider: xai\n      model: grok-4.6\n      weight: 1\n      auth_env: NOMARMY_XAI_API_KEY\n");
+  const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
+  const calls = [];
+  const existingEnvOutput = ["nomarmy-local-worker:", "  Environment:", "    NOMARMY_XAI_API_KEY=some-non-placeholder-value", ""].join("\n");
+  try {
+    connectClaude({
+      nomarmyRoot, installDir,
+      run: (cmd, args) => {
+        calls.push([cmd, ...args].join(" "));
+        if (cmd === "claude" && args[0] === "mcp" && args[1] === "get") return existingEnvOutput;
+        return "";
+      },
+    });
+    const addCall = calls.find((c) => c.includes("mcp add"));
+    assert.match(addCall, /-e NOMARMY_XAI_API_KEY=some-non-placeholder-value/);
+  } finally {
+    fs.rmSync(nomarmyRoot, { recursive: true, force: true });
+    fs.rmSync(installDir, { recursive: true, force: true });
+  }
+});
+
 test("connectClaude: extraEnv bakes a new key into the registration alongside everything else", () => {
   const nomarmyRoot = fakeRoot();
   const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
