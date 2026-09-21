@@ -1,6 +1,6 @@
 # nomArmy by Rayson Technologies — local agent instructions (v1.3)
 
-Use `nomarmy-local-worker` as the default execution layer for bounded engineering work that is cheap to verify. Qwen3-Coder-Next is the default local coder; GPT-OSS 20B is a fallback/control.
+Use `nomarmy-local-worker` as the default execution layer for bounded engineering work that is cheap to verify. GPT-OSS 20B is the default local coder; Qwen3-Coder-Next is the alternative (swap with `nomarmy model`).
 
 ## Coordinator responsibilities
 You own planning, decomposition, uncertain diagnosis, architecture, security decisions, review, integration, merge/conflict decisions, and final acceptance. You also own all Git operations. Local workers must never be treated as Git or acceptance authorities.

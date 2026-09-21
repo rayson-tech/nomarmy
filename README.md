@@ -267,7 +267,9 @@ pools:
 
 Dispatch against a named pool with `local_worker`'s `pool` field (`pool: "cheap"`) instead of (or alongside) `profile` — omitting `pool` entirely preserves today's `profile`-only behavior byte for byte. Independent verification stays exactly as strict regardless of which provider produced a job's diff; nomArmy's whole trust boundary is "never trust the worker's self-report," which was already provider-agnostic before this existed.
 
-**Two honest gaps, not papered over.** First, `worker_cost_usd` in job metrics is best-effort: present in `agent exec`'s JSON envelope for at least some providers, but not confirmed reliable or nonzero across every provider type here — treat it as a hint, not an authoritative bill. Second, the exact registered provider id and model-catalog behavior for `anthropic`/`openai`/`xai`/`deepinfra`'s native onboarding flags is built on OpenClaw's documented `--help` output but has not been exercised against a real credential for every one of the four during this feature's own development — `nomarmy providers add`'s registration step says so directly and points you at `openclaw models list` to confirm before trusting a new provider type in production. (This is also why riding a Claude Pro/Max or ChatGPT Plus/Pro *subscription* isn't an option here: Anthropic now meters any automated/headless use as a separate, capped credit at API rates rather than free bonus capacity, and OpenAI's consumer subscription grants no API access at all — every provider above is a plain, metered API key.)
+**A pool-routed job's brief/report is sized for its own model, not the local machine's.** Early on, every job — local or pool-routed — was budgeted against the single local llama-server's context, which meant a hosted model with a genuinely huge window got needlessly capped down to local-hardware sizing it never needed. Instead, a hosted entry's real context window is looked up from OpenClaw's own model catalog (`openclaw models list --all --json`) at dispatch time — not a second, hand-maintained table inside nomArmy that would only go stale — with a 25% safety margin always reserved off whatever number is used. An explicit `context_window` on the entry overrides the lookup, for a model newer than OpenClaw's cached catalog knows about yet (run `openclaw models list --refresh` first) or to be more conservative than the rated maximum; a model in neither the override nor the catalog gets a conservative 32,000-token fallback rather than an optimistic guess.
+
+**Three honest gaps, not papered over.** First, `worker_cost_usd` in job metrics is best-effort: present in `agent exec`'s JSON envelope for at least some providers, but not confirmed reliable or nonzero across every provider type here — treat it as a hint, not an authoritative bill. Second, the exact registered provider id and model-catalog behavior for `anthropic`/`openai`/`xai`/`deepinfra`'s native onboarding flags is built on OpenClaw's documented `--help` output but has not been exercised against a real credential for every one of the four during this feature's own development — `nomarmy providers add`'s registration step says so directly and points you at `openclaw models list` to confirm before trusting a new provider type in production. Third, the context-window lookup above depends on `openclaw` being reachable as a subprocess from wherever the MCP server runs; if it isn't, every hosted entry silently gets the conservative 32,000-token fallback rather than an error — set `context_window` explicitly if you'd rather not depend on that lookup succeeding. (This is also why riding a Claude Pro/Max or ChatGPT Plus/Pro *subscription* isn't an option here: Anthropic now meters any automated/headless use as a separate, capped credit at API rates rather than free bonus capacity, and OpenAI's consumer subscription grants no API access at all — every provider above is a plain, metered API key.)
 
 ### Which pool for which job
 
@@ -329,7 +331,7 @@ Every command below proposes before it writes anything, showing exactly what wou
 | `nomarmy setup` | Detects this machine, recommends a profile the same way `sizing` does, offers a model choice, and writes `config/profiles/<name>.env` (+ `config/common.env`). Prints the `install.sh` command; never runs it. |
 | `nomarmy init` | Proposes a `.nomarmy.yml` from this repository's scan evidence and writes it after confirmation. Never overwrites an existing one without `--force`. |
 | `nomarmy model` | Change the configured model later, without the rest of `setup`'s questions. Also updates the MCP registration's worker-routing env vars and offers to resync it right then. See [Swapping models](#swapping-models) above. |
-| `nomarmy providers list/add/remove/validate` | Manage `config/providers.yml`'s optional weighted multi-provider dispatch pools. See [Multi-provider dispatch pools](#multi-provider-dispatch-pools) above. |
+| `nomarmy providers list/add/update/remove/validate` | Manage `config/providers.yml`'s optional weighted multi-provider dispatch pools. See [Multi-provider dispatch pools](#multi-provider-dispatch-pools) above. |
 | `nomarmy update` | Pulls the latest nomArmy code (fast-forward only; refuses on local changes) and re-syncs the installed MCP copy for whichever coordinator(s) are already connected. |
 | `nomarmy connect [claude] [cursor] [codex]` | (Re-)registers the MCP server with one or more coordinators on its own — e.g. after installing one later. No target and not `--json` prompts an interactive multi-select. |
 | `nomarmy start` / `stop <profile>` | Starts/stops local inference (wraps `scripts/start-inference.sh` / `stop-inference.sh`). |
@@ -352,7 +354,7 @@ Three knobs decide how many noms you get and how much room each one has, and the
 
 `nomarmy sizing` inspects the machine (cores, RAM, VRAM, unified memory) and the model's own GGUF metadata, and recommends a combination with the memory arithmetic shown, plus the brief/report budgets a nom at that context can actually carry. It also checks memory pressure at the moment you run it — a recommendation that fits your total RAM can still refuse to admit a job right now if something else has most of it in use.
 
-The v1.3 target is 64K context per nom: an autonomous explore/implement/test/repair loop needs more room than a one-shot edit, and a nom that runs out of context mid-repair fails the job outright, whereas one that waits for a free slot merely finishes later. Trading context for parallelism below that line is usually the wrong trade.
+The target is 64K context per nom: an autonomous explore/implement/test/repair loop needs more room than a one-shot edit, and a nom that runs out of context mid-repair fails the job outright, whereas one that waits for a free slot merely finishes later. Trading context for parallelism below that line is usually the wrong trade.
 
 Raising `NOMARMY_MAX_WORKERS` is an empirical question, not a capacity one — benchmark accepted-tickets/hour and coordinator interventions before raising it; a second nom that halves the first one's context can lower total throughput.
 
@@ -484,7 +486,7 @@ A reviewer skimming that diff would plausibly approve it. nomArmy committed noth
 
 ## Status
 
-nomArmy v1.2 is proven: bounded delegation, isolated worktrees, coordinator-owned Git, retained failed worktrees. v1.3 extends it toward autonomous workers with real execution environments and is still in development. Honest state of play:
+The bounded-delegation core is proven: coordinator-owned Git, isolated worktrees, retained failed worktrees. This public release (`0.1.0-alpha`) extends it toward autonomous workers with real execution environments, and that extension is still in development. Honest state of play:
 
 | Capability | Status |
 |---|---|
@@ -492,13 +494,14 @@ nomArmy v1.2 is proven: bounded delegation, isolated worktrees, coordinator-owne
 | Local (llama.cpp) and Amazon Bedrock execution profiles | Working |
 | `nomarmy doctor` — host readiness with a fix for every failure | Working, verified on a real host |
 | Scout and decompose modes — read-only noms with verified citations | Built, unit + live tested |
-| `auto_union`, `verify_regression`, sandboxed independent verification | Built, unit tested |
+| `auto_union`, `verify_regression`, sandboxed independent verification | Built, unit tested. `verify_regression` defaults ON whenever a job sets `verification` (pass `verify_regression: false` to opt out of the doubled wall-clock cost) -- a verification profile's exit code alone cannot tell a genuine pass from a test-selection flag (`-k`, `--grep`, ...) that accidentally excluded the changed file's own tests; a separate, always-on, zero-cost check (`detectScopedTestSelectionRisk`) flags that specific pattern for review immediately, without waiting for the regression rerun |
 | `.nomarmy.yml` environment contract — schema, loader, validator | Built, unit tested |
 | Disposable per-job service environments (Postgres, mocks, app) | Not built |
 | Nom-local browser/E2E and the autonomous repair loop | Not built |
 | Full-stack acceptance test proving the thesis end to end | Run on 7 tickets across 3 local models — see `docs/experiments/2026-09-20-model-bakeoff-and-economics.md`. **Task-size-dependent, not unconditionally true**; a larger real ticket is the next test |
-| Comparing local models against each other | Works, but manual — no single command swaps the active model and its MCP registration together yet |
+| Swapping the active local model | Working — `nomarmy model` picks it and, with `--update-mcp`, resyncs the MCP registration in the same command |
 | Go/Rust target repos — detection + lazy sandbox image | Independent verification works, live-verified (real `go test`/`cargo test` pass and fail correctly). Worker's own live tool execution still uses the single globally-configured OpenClaw sandbox — see [Target repository languages](#target-repository-languages) |
+| Multi-provider dispatch pools (`config/providers.yml`, `nomarmy providers`) | Built, unit tested, live-verified for `llama-cpp` and a real `xai` (Grok) key end to end, including model-dependent context budgeting from OpenClaw's own model catalog (verified live). `anthropic`/`openai`/`deepinfra`'s native registration flags are unverified against a real credential — see [Multi-provider dispatch pools](#multi-provider-dispatch-pools) for the honest gaps |
 
 Known limitations worth knowing up front: verification profiles requiring services beyond `environment: none` currently report `not_run` rather than running commands without their dependencies, and the environment scanner's Compose parser doesn't resolve YAML anchors/aliases/merge keys — affected findings are dropped with an explicit note rather than guessed at.
 
@@ -514,8 +517,9 @@ The coordinator drives nomArmy through the `nomarmy-local-worker` MCP server. Ev
 | `local_worker_capacity` | Context per nom, the brief/report budgets derived from it, memory pressure, and what's running. Read-only. |
 | `repo_evidence` | Deterministic repository evidence with an exact `[path:line]` on every hit: definitions, references, outline, grep, files. No model, no sandbox, milliseconds. |
 | `local_workers` | Run a batch with bounded parallelism and wait for all of them. `auto_union: true` mechanically merges independent implement jobs into one integration branch for review — never into your branch. |
-| `local_worker_jobs` | Recent job records, including jobs still running or orphaned by a server restart. |
-| `local_worker_cleanup` | Remove a retained worktree after review. Refuses to delete the current branch. |
+| `local_worker_jobs` | Recent job records, including jobs still running or orphaned by a server restart. A small projection by default (one summary per job); `full: true` returns the complete manifest. |
+| `local_worker_cleanup` | Remove one retained worktree/branch after review or a deliberate discard. Refuses to delete the current branch; recognizes a cherry-picked (not merged) branch as integrated by content, so a genuinely-integrated job doesn't need `force`. |
+| `local_worker_sweep` | Bulk-reap worktrees/branches that are provably empty — zero commits and nothing uncommitted either — regardless of age. Never touches a worktree holding any real work; `dry_run: true` previews first. |
 | `local_worker_config` | Surfaces `.nomarmy.yml`'s defined verification profiles to the calling session. |
 
 **Admission**, checked before any job starts: *context per nom bounds text* (brief/report caps come from the context one nom actually has, never a bigger prompt than it can hold), and *free memory bounds whether one more job starts at all* (a new job costs a sandbox container, never a second copy of the model — under pressure nomArmy refuses to start rather than shrinking the brief and hoping).
