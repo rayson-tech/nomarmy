@@ -42,6 +42,21 @@ const value = (name, fallback = null) => {
   return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[i + 1] : fallback;
 };
 const repoDir = path.resolve(value("repo", process.cwd()));
+// --json shape for `providers add`/`providers update`'s thinking field:
+// `--thinking low|medium|high` sets that entry's own fixed reasoning floor
+// (see thinkingSchema's doc comment); a bare `--thinking` (no value, or a
+// value that isn't a real level) keeps the original boolean meaning (pass
+// through the job's requested reasoning); `--no-thinking` is always false.
+// Returns undefined when none of these flags were passed at all, so the
+// caller can tell "not touched" apart from "explicitly set".
+const THINKING_LEVELS = ["low", "medium", "high"];
+function resolveThinkingFlag() {
+  const level = value("thinking");
+  if (level && THINKING_LEVELS.includes(level)) return level;
+  if (flag("no-thinking")) return false;
+  if (flag("thinking")) return true;
+  return undefined;
+}
 const json = flag("json");
 const out = (obj) => console.log(JSON.stringify(obj, null, 2));
 const gib = (n) => (typeof n === "number" ? `${(n / 1024 ** 3).toFixed(1)} GiB` : "unknown");
@@ -79,7 +94,7 @@ Usage: nomarmy <command> [options]
                                 registration (never done silently)
   update          Pull the latest nomArmy code and re-sync the installed
                   MCP copy (fast-forward only; refuses on local changes).
-  providers <list|add|remove|validate>
+  providers <list|add|update|remove|validate>
                   Manage config/providers.yml -- optional, weighted pools of
                   worker providers (local, Bedrock, DeepInfra, Anthropic,
                   OpenAI, xAI, Azure OpenAI, or a custom OpenAI-compatible
@@ -91,8 +106,15 @@ Usage: nomarmy <command> [options]
                   add       interactive wizard to add one entry to a pool
                             (or --json --pool --provider --id [--model]
                             [--auth-env] [--base-url] [--weight]
-                            [--max-concurrent] [--no-thinking] [--register]
-                            [--update-mcp])
+                            [--max-concurrent] [--context-window]
+                            [--thinking [low|medium|high]] [--no-thinking]
+                            [--register] [--update-mcp])
+                            --thinking          follow the job's requested
+                                                 reasoning level (default)
+                            --thinking <level>  always use this level for
+                                                 this entry, regardless of
+                                                 what the job requested --
+                                                 the entry's own floor
                             --register    also register the credential with
                                           OpenClaw right away (needs
                                           auth_env set in this shell)
@@ -103,6 +125,20 @@ Usage: nomarmy <command> [options]
                                           launch-method timing (never the
                                           real credential -- that only ever
                                           lives in OpenClaw's own store)
+                            --context-window <tokens>
+                                          override this model's context
+                                          window instead of looking it up
+                                          from openclaw's own model catalog
+                                          at dispatch time -- for a model
+                                          newer than that catalog's cache
+                  update <pool> <id>
+                            change an existing entry's model, weight,
+                            max_concurrent, auth_env, base_url,
+                            context_window or thinking flag (or --json with
+                            the matching flags). A model swap on a native
+                            provider (anthropic/openai/xai/deepinfra) needs
+                            no re-registration -- the model is composed
+                            fresh at dispatch time.
                   remove <pool> <id>
                             remove one entry (or the whole pool if now empty)
                   validate  check config/providers.yml against the schema
@@ -712,7 +748,9 @@ async function cmdProvidersList() {
     for (const entry of entries) {
       const authOk = !entry.auth_env || Boolean(process.env[entry.auth_env]);
       const authNote = entry.auth_env ? `  auth_env=${entry.auth_env} ${authOk ? c.green("✓") : c.red("✗ unset")}` : "";
-      console.log(`  - ${c.cyan(entry.id)}  (${entry.provider}${entry.model ? `/${entry.model}` : ""})  weight=${entry.weight}  max_concurrent=${entry.max_concurrent}${authNote}`);
+      const contextNote = entry.context_window ? `  context_window=${entry.context_window}` : "";
+      const thinkingNote = entry.thinking === false ? "  thinking=off" : typeof entry.thinking === "string" ? `  thinking=${entry.thinking} (fixed)` : "";
+      console.log(`  - ${c.cyan(entry.id)}  (${entry.provider}${entry.model ? `/${entry.model}` : ""})  weight=${entry.weight}  max_concurrent=${entry.max_concurrent}${contextNote}${thinkingNote}${authNote}`);
     }
   }
   console.log(c.dim(`\nDispatch a job against one of these with local_worker's \`pool\` field, e.g. pool: "${Object.keys(loaded.config.pools)[0] ?? "cheap"}".`));
@@ -766,6 +804,114 @@ async function cmdProvidersRemove() {
   console.log(c.green(`✓ Removed "${id}" from pool "${poolName}".`));
 }
 
+// Changes fields on an EXISTING entry in place (model, weight,
+// max_concurrent, auth_env, base_url, thinking). Provider type and id are
+// immutable here -- `remove` then `add` is the path for either, since
+// changing them is really "a different entry," not an edit. A model swap on
+// a native provider (anthropic/openai/xai/deepinfra) needs no re-
+// registration with OpenClaw at all: registration there is per-PROVIDER
+// (the credential/profile), not per-model -- resolvePoolSelection composes
+// "<provider>/<model>" fresh at dispatch time, so editing this file's
+// `model:` field is the entire fix (see registerProviderWithOpenClaw).
+async function cmdProvidersUpdate() {
+  const poolName = argv[2], id = argv[3];
+  if (!poolName || !id) throw new Error("Usage: nomarmy providers update <pool> <id> [--model <m>] [--weight <n>] [--max-concurrent <n>] [--auth-env <NAME>] [--base-url <url>] [--context-window <tokens>] [--thinking|--no-thinking]");
+  if (RESERVED_POOL_NAMES.includes(poolName)) throw new Error(`Unknown pool "${poolName}" (that name is reserved and can never be a real pool).`);
+  const loaded = loadDispatchConfig(nomarmyRoot);
+  if (!loaded.found) throw new Error("No config/providers.yml exists yet -- nothing to update.");
+  const pool = Object.prototype.hasOwnProperty.call(loaded.config.pools, poolName) ? loaded.config.pools[poolName] : undefined;
+  if (!pool) throw new Error(`Unknown pool "${poolName}". Configured pools: ${Object.keys(loaded.config.pools).join(", ") || "(none)"}`);
+  const index = pool.findIndex((e) => e.id === id);
+  if (index === -1) throw new Error(`No entry with id "${id}" in pool "${poolName}".`);
+  const current = pool[index];
+
+  const changes = {};
+  if (json) {
+    if (value("model") !== null) changes.model = value("model");
+    if (value("weight") !== null) changes.weight = Number(value("weight"));
+    if (value("max-concurrent") !== null) changes.max_concurrent = Number(value("max-concurrent"));
+    if (value("auth-env") !== null) changes.auth_env = value("auth-env");
+    if (value("base-url") !== null) changes.base_url = value("base-url");
+    if (value("context-window") !== null) changes.context_window = Number(value("context-window"));
+    const thinkingFlag = resolveThinkingFlag();
+    if (thinkingFlag !== undefined) changes.thinking = thinkingFlag;
+    if (Object.keys(changes).length === 0) throw new Error("Nothing to update -- pass at least one of --model/--weight/--max-concurrent/--auth-env/--base-url/--context-window/--thinking [low|medium|high]/--no-thinking.");
+  } else {
+    if (!process.stdin.isTTY) throw new Error("nomarmy providers update needs an interactive terminal, or --json with explicit flags (see `nomarmy help`).");
+    const rl = createInterface({ input, output });
+    try {
+      console.log(c.bold(`🍪 nomArmy providers update`) + c.dim(`  (${current.provider}, pool "${poolName}", id "${id}")`));
+      console.log(c.dim("Blank keeps the current value.\n"));
+
+      if (current.provider !== "llama-cpp") {
+        const modelAnswer = (await rl.question(c.bold(`Model [${current.model ?? "(none)"}]: `))).trim();
+        if (modelAnswer) changes.model = modelAnswer;
+      }
+
+      const weightAnswer = (await rl.question(c.bold(`Weight [${current.weight}]: `))).trim();
+      if (weightAnswer) changes.weight = Number(weightAnswer);
+
+      const maxConcurrentAnswer = (await rl.question(c.bold(`max_concurrent [${current.max_concurrent}]: `))).trim();
+      if (maxConcurrentAnswer) changes.max_concurrent = Number(maxConcurrentAnswer);
+
+      if (current.provider !== "llama-cpp") {
+        const authEnvAnswer = await askUntilValid(rl, `Environment variable NAME holding the API key [${current.auth_env}]: `, {
+          allowEmpty: true, fallback: current.auth_env, pattern: AUTH_ENV_NAME_RE,
+          invalidMessage: "must look like an ENVIRONMENT VARIABLE NAME, not the credential itself.",
+        });
+        if (authEnvAnswer !== current.auth_env) changes.auth_env = authEnvAnswer;
+
+        const currentThinkingLabel = current.thinking === false ? "off" : current.thinking === true ? "on, follows the job" : `fixed at "${current.thinking}"`;
+        const thinkingAnswer = (await rl.question(c.bold(`Thinking/reasoning: y = follow the job's requested level, n = off, or type a level (low/medium/high) to always use that regardless of the job [current: ${currentThinkingLabel}]: `))).trim().toLowerCase();
+        if (thinkingAnswer === "y" || thinkingAnswer === "yes") changes.thinking = true;
+        else if (thinkingAnswer === "n" || thinkingAnswer === "no") changes.thinking = false;
+        else if (THINKING_LEVELS.includes(thinkingAnswer)) changes.thinking = thinkingAnswer;
+
+        const contextWindowAnswer = (await rl.question(c.bold(`Context window override in tokens [${current.context_window ?? "looked up from openclaw's catalog"}]: `))).trim();
+        if (contextWindowAnswer) changes.context_window = Number(contextWindowAnswer);
+      }
+
+      if (["bedrock", "azure-openai", "openai-compatible"].includes(current.provider)) {
+        const baseUrlAnswer = (await rl.question(c.bold(`Base URL [${current.base_url}]: `))).trim();
+        if (baseUrlAnswer) changes.base_url = baseUrlAnswer;
+      }
+    } finally {
+      rl.close();
+    }
+    if (Object.keys(changes).length === 0) {
+      console.log(c.dim("\nNothing changed."));
+      return;
+    }
+  }
+
+  const updatedEntry = { ...current, ...changes };
+  const nextPool = [...pool];
+  nextPool[index] = updatedEntry;
+  const nextPools = { ...loaded.config.pools, [poolName]: nextPool };
+  const parsed = dispatchConfigSchema.safeParse({ pools: nextPools });
+  if (!parsed.success) {
+    const errors = formatDispatchIssues(parsed.error);
+    if (json) { out({ error: "invalid update", errors }); process.exit(1); }
+    console.error(c.red("That update is not valid:"));
+    for (const line of errors) console.error(`  - ${line}`);
+    process.exit(1);
+  }
+
+  fs.writeFileSync(dispatchConfigPath(nomarmyRoot), stringifyDispatchConfig(parsed.data));
+  const written = parsed.data.pools[poolName][index];
+
+  if (json) return out({ updated: true, pool: poolName, id, entry: written, changed: Object.keys(changes) });
+
+  console.log(c.green(`\n✓ Updated "${id}" in pool "${poolName}".`));
+  if (changes.model && NATIVE_PROVIDER_TYPES.includes(current.provider)) {
+    console.log(c.dim(`No OpenClaw re-registration needed for a model swap on a native provider -- "${current.provider}/${written.model}" is composed fresh at dispatch time.`));
+  }
+  if (changes.auth_env) {
+    console.log(c.yellow(`auth_env changed to ${changes.auth_env} -- run \`nomarmy connect claude\` (or reconnect) so the MCP registration picks up the new name.`));
+  }
+  console.log(c.yellow("Restart your Claude Code / Codex session to pick this up -- config/providers.yml is read once per MCP server process."));
+}
+
 async function cmdProvidersAdd() {
   const configPath = dispatchConfigPath(nomarmyRoot);
   let existingPools = {};
@@ -776,7 +922,7 @@ async function cmdProvidersAdd() {
     throw new Error(`config/providers.yml already exists but is invalid -- fix it by hand or delete it before adding: ${error.message}`);
   }
 
-  let poolName, providerType, id, model, weight, authEnv, baseUrl, maxConcurrent, thinking, providedApiKey;
+  let poolName, providerType, id, model, weight, authEnv, baseUrl, maxConcurrent, thinking, contextWindow, providedApiKey;
 
   if (json) {
     poolName = value("pool");
@@ -787,7 +933,8 @@ async function cmdProvidersAdd() {
     authEnv = value("auth-env");
     baseUrl = value("base-url");
     maxConcurrent = value("max-concurrent") ? Number(value("max-concurrent")) : undefined;
-    thinking = flag("no-thinking") ? false : undefined;
+    thinking = resolveThinkingFlag();
+    contextWindow = value("context-window") ? Number(value("context-window")) : undefined;
     if (!poolName || !providerType || !id) {
       throw new Error(`--json requires --pool <name> --provider <${PROVIDER_TYPES.join("|")}> --id <id>, plus --model/--auth-env/--base-url as that provider type needs.`);
     }
@@ -846,8 +993,16 @@ async function cmdProvidersAdd() {
       if (maxConcurrentAnswer) maxConcurrent = Number(maxConcurrentAnswer);
 
       if (providerType !== "llama-cpp") {
-        const thinkingAnswer = (await rl.question(c.bold("Does this model have a thinking/reasoning mode? [Y/n] "))).trim().toLowerCase();
-        thinking = !(thinkingAnswer === "n" || thinkingAnswer === "no");
+        const thinkingAnswer = (await rl.question(c.bold("Thinking/reasoning: Y = follow the job's requested level (default), n = off, or type a level (low/medium/high) to always use that regardless of the job: "))).trim().toLowerCase();
+        thinking = THINKING_LEVELS.includes(thinkingAnswer) ? thinkingAnswer : !(thinkingAnswer === "n" || thinkingAnswer === "no");
+
+        // Optional. Left blank, dispatch looks this up from OpenClaw's own
+        // model catalog at job time (see lib/model-catalog.mjs) -- this is
+        // only for a model newer than that catalog's cache (the exact
+        // situation a brand-new model release creates on day one) or an
+        // operator who wants to be more conservative than the rated max.
+        const contextWindowAnswer = (await rl.question(c.bold("Context window override in tokens (blank -> looked up from openclaw's catalog automatically): "))).trim();
+        if (contextWindowAnswer) contextWindow = Number(contextWindowAnswer);
       }
 
       // The actual credential is never typed into a question above -- only
@@ -892,6 +1047,7 @@ async function cmdProvidersAdd() {
   if (baseUrl) entry.base_url = baseUrl;
   if (maxConcurrent !== undefined) entry.max_concurrent = maxConcurrent;
   if (thinking !== undefined) entry.thinking = thinking;
+  if (contextWindow !== undefined) entry.context_window = contextWindow;
 
   const nextPools = { ...existingPools, [poolName]: [...(existingPools[poolName] ?? []), entry] };
   const reservedName = findReservedPoolName({ pools: nextPools });
@@ -981,9 +1137,10 @@ async function cmdProviders() {
   const sub = argv[1];
   if (sub === "list") return cmdProvidersList();
   if (sub === "add") return cmdProvidersAdd();
+  if (sub === "update") return cmdProvidersUpdate();
   if (sub === "remove") return cmdProvidersRemove();
   if (sub === "validate") return cmdProvidersValidate();
-  throw new Error(`Unknown providers subcommand "${sub ?? ""}". Use: nomarmy providers <list|add|remove|validate>`);
+  throw new Error(`Unknown providers subcommand "${sub ?? ""}". Use: nomarmy providers <list|add|update|remove|validate>`);
 }
 
 function git(args) {

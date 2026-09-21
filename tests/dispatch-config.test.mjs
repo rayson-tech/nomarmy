@@ -8,11 +8,16 @@ import path from "node:path";
 import { after, test } from "node:test";
 
 import {
+  CONTEXT_WINDOW_BUFFER,
   DispatchConfigError,
+  UNKNOWN_MODEL_CONTEXT_FALLBACK,
   availableEntries,
   dispatchConfigPath,
+  entryContextPerNom,
   loadDispatchConfig,
   pickProvider,
+  poolContextPerNom,
+  resolveEntryContext,
   resolvePool,
   stringifyDispatchConfig,
 } from "../lib/dispatch-config.mjs";
@@ -61,6 +66,20 @@ test("dispatchConfigSchema: accepts a mixed pool of every provider type", () => 
 test("dispatchConfigSchema: llama-cpp needs no auth_env or model", () => {
   const result = dispatchConfigSchema.safeParse({ pools: { cheap: [{ id: "local", provider: "llama-cpp", weight: 1 }] } });
   assert.equal(result.success, true);
+});
+
+test("dispatchConfigSchema: thinking accepts a boolean (the original shape) or a specific level string", () => {
+  const entry = (thinking) => ({ pools: { capable: [{ id: "x", provider: "xai", model: "grok-4.7", weight: 1, auth_env: "X", thinking }] } });
+  assert.equal(dispatchConfigSchema.safeParse(entry(true)).success, true);
+  assert.equal(dispatchConfigSchema.safeParse(entry(false)).success, true);
+  assert.equal(dispatchConfigSchema.safeParse(entry("high")).success, true);
+  assert.equal(dispatchConfigSchema.safeParse(entry("medium")).success, true);
+  assert.equal(dispatchConfigSchema.safeParse(entry("low")).success, true);
+});
+
+test("dispatchConfigSchema: thinking rejects a level string outside low/medium/high", () => {
+  const result = dispatchConfigSchema.safeParse({ pools: { capable: [{ id: "x", provider: "xai", model: "grok-4.7", weight: 1, auth_env: "X", thinking: "extreme" }] } });
+  assert.equal(result.success, false);
 });
 
 test("dispatchConfigSchema: a hosted provider without auth_env is rejected", () => {
@@ -298,4 +317,97 @@ test("stringifyDispatchConfig round-trips through loadDispatchConfig", () => {
   const result = loadDispatchConfig(root);
   assert.equal(result.found, true);
   assert.equal(result.config.pools.cheap[0].id, "local");
+});
+
+// --------------------------------------------------------------------------
+// model-dependent context budgeting (resolveEntryContext / entryContextPerNom / poolContextPerNom)
+// --------------------------------------------------------------------------
+
+test("resolveEntryContext: a llama-cpp entry returns null -- caller must use the local, live-probed number instead", () => {
+  assert.equal(resolveEntryContext({ id: "local", provider: "llama-cpp" }), null);
+});
+
+test("resolveEntryContext: an explicit context_window override always wins, even with a catalog present", () => {
+  const catalog = new Map([["xai/grok-4.7", 999999]]);
+  const result = resolveEntryContext({ id: "grok", provider: "xai", model: "grok-4.7", context_window: 500000 }, { catalog });
+  assert.equal(result.raw, 500000);
+  assert.match(result.source, /override/);
+});
+
+test("resolveEntryContext: falls back to the openclaw catalog lookup when no override is set", () => {
+  const catalog = new Map([["xai/grok-4.6", 500000]]);
+  const result = resolveEntryContext({ id: "grok", provider: "xai", model: "grok-4.6" }, { catalog });
+  assert.equal(result.raw, 500000);
+  assert.match(result.source, /openclaw model catalog/);
+});
+
+test("resolveEntryContext: a model in neither the override nor the catalog gets the conservative fallback, not a crash or an optimistic guess", () => {
+  // The exact real situation this shipped for: grok-4.7 released the same
+  // day, not yet in OpenClaw's cached catalog.
+  const result = resolveEntryContext({ id: "grok", provider: "xai", model: "grok-4.7" }, { catalog: new Map() });
+  assert.equal(result.raw, UNKNOWN_MODEL_CONTEXT_FALLBACK);
+  assert.match(result.source, /unknown model "xai\/grok-4\.7"/);
+});
+
+test("resolveEntryContext: a null catalog (openclaw unreachable) is treated the same as an empty one, not a throw", () => {
+  const result = resolveEntryContext({ id: "grok", provider: "xai", model: "grok-4.6" }, { catalog: null });
+  assert.equal(result.raw, UNKNOWN_MODEL_CONTEXT_FALLBACK);
+});
+
+test("entryContextPerNom: a hosted entry's window is buffered down by CONTEXT_WINDOW_BUFFER, not used raw", () => {
+  const result = entryContextPerNom({ id: "grok", provider: "xai", model: "grok-4.6", context_window: 500000 }, {});
+  assert.equal(result.contextPerNom, Math.floor(500000 * CONTEXT_WINDOW_BUFFER));
+  assert.match(result.source, /buffered to 75%/);
+});
+
+test("entryContextPerNom: a llama-cpp entry uses localContextPerNom UNBUFFERED -- it's a live probe, not a rated ceiling", () => {
+  const result = entryContextPerNom({ id: "local", provider: "llama-cpp" }, { localContextPerNom: 65536 });
+  assert.equal(result.contextPerNom, 65536);
+  assert.equal(result.source, "local llama-server");
+});
+
+test("entryContextPerNom: a llama-cpp entry with no localContextPerNom known returns null", () => {
+  assert.equal(entryContextPerNom({ id: "local", provider: "llama-cpp" }, {}), null);
+});
+
+test("poolContextPerNom: takes the MINIMUM buffered window across every available entry, not the first or the max", () => {
+  const pool = [
+    { id: "big", provider: "xai", model: "grok-4.6", context_window: 1000000, auth_env: "NOMARMY_XAI_API_KEY" },
+    { id: "small", provider: "deepinfra", model: "small-model", context_window: 40000, auth_env: "NOMARMY_DEEPINFRA_API_KEY" },
+  ];
+  const env = { NOMARMY_XAI_API_KEY: "set", NOMARMY_DEEPINFRA_API_KEY: "set" };
+  const result = poolContextPerNom(pool, env, {});
+  assert.equal(result.contextPerNom, Math.floor(40000 * CONTEXT_WINDOW_BUFFER));
+  assert.match(result.source, /pool minimum across 2 available entries/);
+});
+
+test("poolContextPerNom: an entry whose auth_env isn't set is excluded from the minimum, same as pickProvider/availableEntries", () => {
+  const pool = [
+    { id: "unauthed-small", provider: "deepinfra", model: "x", context_window: 1000, auth_env: "NOMARMY_UNSET_KEY" },
+    { id: "authed-big", provider: "xai", model: "grok-4.6", context_window: 500000, auth_env: "NOMARMY_XAI_API_KEY" },
+  ];
+  const env = { NOMARMY_XAI_API_KEY: "set" };
+  const result = poolContextPerNom(pool, env, {});
+  assert.equal(result.contextPerNom, Math.floor(500000 * CONTEXT_WINDOW_BUFFER));
+});
+
+test("poolContextPerNom: a pool with zero available entries returns null (dispatch's own pickProvider raises the real error)", () => {
+  const pool = [{ id: "x", provider: "xai", model: "grok-4.6", auth_env: "NOMARMY_UNSET_KEY" }];
+  assert.equal(poolContextPerNom(pool, {}, {}), null);
+});
+
+test("poolContextPerNom: an all-llama-cpp pool with no localContextPerNom given returns null, letting the caller fall back to the global local budget", () => {
+  const pool = [{ id: "local", provider: "llama-cpp" }];
+  assert.equal(poolContextPerNom(pool, {}, {}), null);
+});
+
+test("poolContextPerNom: a mixed pool correctly weighs a llama-cpp entry's UNBUFFERED local number against a hosted entry's buffered one", () => {
+  const pool = [
+    { id: "local", provider: "llama-cpp" },
+    { id: "grok", provider: "xai", model: "grok-4.6", context_window: 80000, auth_env: "NOMARMY_XAI_API_KEY" },
+  ];
+  const env = { NOMARMY_XAI_API_KEY: "set" };
+  // local: 65536 unbuffered. grok: 80000 * 0.75 = 60000 buffered. grok wins (smaller).
+  const result = poolContextPerNom(pool, env, { localContextPerNom: 65536 });
+  assert.equal(result.contextPerNom, 60000);
 });

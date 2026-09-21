@@ -1,4 +1,4 @@
-# nomArmy multi-provider dispatch pools (v1.3) -- OPTIONAL.
+# nomArmy multi-provider dispatch pools -- OPTIONAL.
 #
 # Copy this file to config/providers.yml (or run `nomarmy providers add`,
 # which writes the same shape) to opt in. Absent entirely, nothing changes:
@@ -25,8 +25,19 @@
 # credential in this file -- only the name of the variable to read it from,
 # same convention as NOMARMY_BEDROCK_API_KEY today. Optional on every entry:
 # max_concurrent (default 2, a static ceiling since nomArmy does not yet do
-# real rate-limit-aware admission per provider) and thinking (default true;
-# set false for a model with no reasoning mode).
+# real rate-limit-aware admission per provider), thinking (default true;
+# set false for a model with no reasoning mode), and context_window (see
+# below).
+#
+# context_window: how big a brief/report nomArmy will write/expect for jobs
+# on this entry is sized from the model's real context window, looked up
+# automatically from OpenClaw's own model catalog at dispatch time (a 25%
+# safety margin is always reserved off whatever number is used, hosted or
+# looked-up). Leave context_window unset for that automatic lookup -- set it
+# explicitly only when the model is newer than OpenClaw's cached catalog
+# (run `openclaw models list --refresh` first to check) or you want to be
+# more conservative than the model's rated maximum. An unknown, unset model
+# gets a conservative 32000-token fallback rather than an optimistic guess.
 #
 # Provider types nomArmy knows how to register with OpenClaw
 # (see `nomarmy providers add` and scripts/configure-openclaw.sh):

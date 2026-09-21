@@ -393,6 +393,171 @@ test("providers remove --json on a nonexistent config/providers.yml refuses clea
   }
 });
 
+test("providers add --json --context-window sets an explicit override; providers update --json changes it later", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const added = runProvidersCLI(root, [
+      "add", "--json", "--pool", "capable", "--provider", "xai", "--id", "grok",
+      "--model", "grok-4.7", "--auth-env", "NOMARMY_XAI_API_KEY", "--context-window", "500000",
+    ]);
+    assert.equal(added.exitCode, 0, added.stdout);
+    assert.equal(JSON.parse(added.stdout).entry.context_window, 500000);
+
+    const updated = runProvidersCLI(root, ["update", "capable", "grok", "--json", "--context-window", "400000"]);
+    assert.equal(updated.exitCode, 0, updated.stdout);
+    assert.equal(JSON.parse(updated.stdout).entry.context_window, 400000);
+
+    const { stdout } = runProvidersCLI(root, ["list", "--json"]);
+    assert.equal(JSON.parse(stdout).pools.capable[0].context_window, 400000);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("providers add --json with no --context-window leaves the field unset -- dispatch falls back to the openclaw catalog lookup, not a hardcoded default", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { exitCode, stdout } = runProvidersCLI(root, [
+      "add", "--json", "--pool", "capable", "--provider", "xai", "--id", "grok",
+      "--model", "grok-4.6", "--auth-env", "NOMARMY_XAI_API_KEY",
+    ]);
+    assert.equal(exitCode, 0, stdout);
+    assert.equal("context_window" in JSON.parse(stdout).entry, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("providers list (plain text) never prints 'thinking=undefined' for a llama-cpp entry, which has no thinking field at all", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    runProvidersCLI(root, ["add", "--json", "--pool", "cheap", "--provider", "llama-cpp", "--id", "local", "--weight", "10"]);
+    const { exitCode, stdout } = runProvidersCLI(root, ["list"]);
+    assert.equal(exitCode, 0, stdout);
+    assert.doesNotMatch(stdout, /thinking=undefined/);
+    assert.doesNotMatch(stdout, /thinking=/, "a llama-cpp entry has no per-entry thinking note at all -- it's governed by the separate global flag");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("providers list (plain text) shows a fixed thinking level distinctly from the boolean pass-through case", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    runProvidersCLI(root, ["add", "--json", "--pool", "capable", "--provider", "xai", "--id", "grok", "--model", "grok-4.7", "--auth-env", "NOMARMY_XAI_API_KEY", "--thinking", "high"]);
+    const { stdout } = runProvidersCLI(root, ["list"]);
+    assert.match(stdout, /thinking=high \(fixed\)/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("providers add --json --thinking <level> sets a fixed reasoning floor for the entry; a bare --thinking keeps the boolean pass-through meaning", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const fixed = runProvidersCLI(root, ["add", "--json", "--pool", "capable", "--provider", "xai", "--id", "grok", "--model", "grok-4.7", "--auth-env", "NOMARMY_XAI_API_KEY", "--thinking", "high"]);
+    assert.equal(fixed.exitCode, 0, fixed.stdout);
+    assert.equal(JSON.parse(fixed.stdout).entry.thinking, "high");
+
+    const boolTrue = runProvidersCLI(root, ["add", "--json", "--pool", "capable", "--provider", "openai", "--id", "gpt", "--model", "gpt-5.6", "--auth-env", "NOMARMY_OPENAI_API_KEY", "--thinking"]);
+    assert.equal(boolTrue.exitCode, 0, boolTrue.stdout);
+    assert.equal(JSON.parse(boolTrue.stdout).entry.thinking, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("providers update --json --thinking <level> changes an entry's thinking from boolean to a fixed level and back", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    runProvidersCLI(root, ["add", "--json", "--pool", "capable", "--provider", "xai", "--id", "grok", "--model", "grok-4.7", "--auth-env", "NOMARMY_XAI_API_KEY"]);
+    const toHigh = runProvidersCLI(root, ["update", "capable", "grok", "--json", "--thinking", "high"]);
+    assert.equal(toHigh.exitCode, 0, toHigh.stdout);
+    assert.equal(JSON.parse(toHigh.stdout).entry.thinking, "high");
+
+    const toOff = runProvidersCLI(root, ["update", "capable", "grok", "--json", "--no-thinking"]);
+    assert.equal(toOff.exitCode, 0, toOff.stdout);
+    assert.equal(JSON.parse(toOff.stdout).entry.thinking, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("providers update --json swaps a native provider's model with no OpenClaw call at all -- registration is per-provider, not per-model", () => {
+  const root = scratchNomarmyRoot();
+  const fake = withFakeOpenclaw(root);
+  try {
+    runProvidersCLI(root, [
+      "add", "--json", "--pool", "capable", "--provider", "xai", "--id", "grok",
+      "--model", "grok-build-0.1", "--auth-env", "NOMARMY_XAI_API_KEY", "--weight", "2",
+    ]);
+    const { exitCode, stdout } = runProvidersCLI(root, ["update", "capable", "grok", "--json", "--model", "grok-4.7"], fake.env);
+    assert.equal(exitCode, 0, stdout);
+    const output = JSON.parse(stdout);
+    assert.equal(output.entry.model, "grok-4.7");
+    assert.equal(output.entry.auth_env, "NOMARMY_XAI_API_KEY", "unrelated fields must survive an update untouched");
+    assert.equal(output.entry.weight, 2, "unrelated fields must survive an update untouched");
+    assert.deepEqual(output.changed, ["model"]);
+    assert.equal(fake.calls().length, 0, "a model-only swap on a native provider must never shell out to openclaw");
+    const after = fs.readFileSync(path.join(root, "config", "providers.yml"), "utf8");
+    assert.match(after, /grok-4\.7/);
+    assert.doesNotMatch(after, /grok-build-0\.1/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("providers update --json changes weight/max_concurrent independently of model", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    runProvidersCLI(root, ["add", "--json", "--pool", "cheap", "--provider", "llama-cpp", "--id", "local", "--weight", "1"]);
+    const { exitCode, stdout } = runProvidersCLI(root, ["update", "cheap", "local", "--json", "--weight", "10", "--max-concurrent", "3"]);
+    assert.equal(exitCode, 0, stdout);
+    const output = JSON.parse(stdout);
+    assert.equal(output.entry.weight, 10);
+    assert.equal(output.entry.max_concurrent, 3);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("providers update --json with no fields given refuses cleanly instead of writing a no-op", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    runProvidersCLI(root, ["add", "--json", "--pool", "cheap", "--provider", "llama-cpp", "--id", "local", "--weight", "1"]);
+    const { exitCode, stdout } = runProvidersCLI(root, ["update", "cheap", "local", "--json"]);
+    assert.notEqual(exitCode, 0);
+    assert.match(JSON.parse(stdout).error, /Nothing to update/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("providers update --json on an unknown pool/id refuses cleanly, same shape as remove", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    runProvidersCLI(root, ["add", "--json", "--pool", "cheap", "--provider", "llama-cpp", "--id", "local", "--weight", "1"]);
+    const { exitCode, stdout } = runProvidersCLI(root, ["update", "cheap", "nonexistent", "--json", "--weight", "5"]);
+    assert.notEqual(exitCode, 0);
+    assert.match(JSON.parse(stdout).error, /No entry with id "nonexistent"/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("providers update --json rejects an invalid resulting entry (e.g. negative weight) without corrupting the file", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    runProvidersCLI(root, ["add", "--json", "--pool", "cheap", "--provider", "llama-cpp", "--id", "local", "--weight", "1"]);
+    const { exitCode, stdout } = runProvidersCLI(root, ["update", "cheap", "local", "--json", "--weight", "-5"]);
+    assert.notEqual(exitCode, 0);
+    const after = fs.readFileSync(path.join(root, "config", "providers.yml"), "utf8");
+    assert.match(after, /weight: 1/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("scan --json against empty temp directory returns evidence with zero counts", () => {
   const tmpDir = mkdtempSync(path.join(tmpdir(), "nomarmy-scan-empty-test-"));
   try {
