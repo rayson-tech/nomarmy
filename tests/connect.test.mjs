@@ -78,6 +78,37 @@ test("installMcpCopy: no docker/ in nomarmyRoot is fine, not an error (older che
   }
 });
 
+test("installMcpCopy: also copies config/ so mcp/server.mjs can find config/providers.yml in the installed copy", () => {
+  const nomarmyRoot = fakeRoot();
+  fs.mkdirSync(path.join(nomarmyRoot, "config"), { recursive: true });
+  fs.writeFileSync(path.join(nomarmyRoot, "config", "providers.yml"), "pools: {}\n");
+  const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
+  try {
+    installMcpCopy({ nomarmyRoot, installDir, run: () => {} });
+    assert.equal(fs.readFileSync(path.join(installDir, "config", "providers.yml"), "utf8"), "pools: {}\n");
+  } finally {
+    fs.rmSync(nomarmyRoot, { recursive: true, force: true });
+    fs.rmSync(installDir, { recursive: true, force: true });
+  }
+});
+
+test("installMcpCopy: a stale config/ directory in installDir is fully replaced, not merged (a removed pool must not survive)", () => {
+  const nomarmyRoot = fakeRoot();
+  fs.mkdirSync(path.join(nomarmyRoot, "config"), { recursive: true });
+  fs.writeFileSync(path.join(nomarmyRoot, "config", "providers.yml"), "pools: {}\n");
+  const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
+  fs.mkdirSync(path.join(installDir, "config"), { recursive: true });
+  fs.writeFileSync(path.join(installDir, "config", "stale-removed-file.env"), "STALE=1\n");
+  try {
+    installMcpCopy({ nomarmyRoot, installDir, run: () => {} });
+    assert.equal(fs.existsSync(path.join(installDir, "config", "stale-removed-file.env")), false);
+    assert.equal(fs.existsSync(path.join(installDir, "config", "providers.yml")), true);
+  } finally {
+    fs.rmSync(nomarmyRoot, { recursive: true, force: true });
+    fs.rmSync(installDir, { recursive: true, force: true });
+  }
+});
+
 test("installMcpCopy: a stale lib/ directory in installDir is fully replaced, not merged", () => {
   const nomarmyRoot = fakeRoot();
   const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));

@@ -15,6 +15,7 @@ import { runQuery, formatCitations, OPS as EVIDENCE_OPS } from "../lib/repo-quer
 import { loadConfig, ConfigError } from "../lib/config.mjs";
 import { resolveSandboxImage, detectPrimaryLanguage, EXEC_PATH_PREPEND } from "../lib/sandbox-images.mjs";
 import { DEFAULT_AGENT_IMAGE } from "../lib/verify.mjs";
+import { loadDispatchConfig, resolvePool, pickProvider } from "../lib/dispatch-config.mjs";
 
 const VERSION = "1.3.0";
 const server = new McpServer({ name: "nomarmy-local-worker", version: VERSION });
@@ -340,6 +341,62 @@ function profileConfig(profile, reasoning) {
   return profiles[profile];
 }
 
+// mcp/ and config/ are siblings whether running from the dev checkout or the
+// installed copy under ~/.local/share/nomarmy-local-agents (installMcpCopy
+// copies both -- see lib/connect.mjs) -- same resolution lib/sandbox-images.mjs
+// uses for docker/. config/providers.yml is loaded once per process, not
+// re-read per job: same "changes need a restart" contract as every other
+// config/*.env value this server already reads once at module load.
+const nomarmyRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+let cachedDispatchConfig;
+function dispatchConfig() {
+  if (cachedDispatchConfig === undefined) cachedDispatchConfig = loadDispatchConfig(nomarmyRoot);
+  return cachedDispatchConfig;
+}
+
+// One in-flight-count per pool entry id, incremented/decremented around the
+// single `openclaw agent exec` call that entry backs (see runOpenClaw's use
+// below). This is deliberately NOT derived from `activeJobs` -- an implement
+// job can call runOpenClaw twice in sequence (the work call, then the
+// report-reserve call), each picking its own entry independently, and this
+// only ever needs to answer "how many calls are using entry X right now",
+// not "how many jobs". Enforces each entry's own `max_concurrent` as a
+// static, operator-declared ceiling -- see config/providers.yml.example for
+// why real rate-limit-aware admission is out of scope for now.
+const poolEntryRunningCounts = new Map();
+function withPoolEntrySlot(entryId, fn) {
+  if (!entryId) return fn();
+  poolEntryRunningCounts.set(entryId, (poolEntryRunningCounts.get(entryId) || 0) + 1);
+  return Promise.resolve().then(fn).finally(() => {
+    const next = (poolEntryRunningCounts.get(entryId) || 1) - 1;
+    if (next <= 0) poolEntryRunningCounts.delete(entryId);
+    else poolEntryRunningCounts.set(entryId, next);
+  });
+}
+
+// Picks one entry from a named pool in config/providers.yml and shapes it
+// exactly like profileConfig's return value ({model, thinking}), so it drops
+// into runOpenClaw's existing `--model`/`--thinking` seam with a one-line
+// branch. Never falls back to `profile` silently on a bad pool name or an
+// exhausted pool -- both throw a specific, actionable error instead (unknown
+// pool name / pool exists but nothing in it is currently authenticated or
+// under its max_concurrent), since silently substituting a different worker
+// identity than the one requested would be a much worse failure mode than a
+// clear refusal.
+export function resolvePoolSelection(poolName, reasoning, {
+  getDispatchConfig = dispatchConfig,
+  pickProviderFn = pickProvider,
+  runningById = Object.fromEntries(poolEntryRunningCounts),
+} = {}) {
+  const pool = resolvePool(getDispatchConfig(), poolName);
+  const entry = pickProviderFn(pool, { runningById });
+  const model = entry.provider === "llama-cpp"
+    ? `${workerProvider}/${entry.model || workerModel}`
+    : `${entry.provider}/${entry.model}`;
+  const thinkingCapable = entry.provider === "llama-cpp" ? workerModelThinkingSupported : entry.thinking;
+  return { model, thinking: thinkingCapable ? reasoning : "off", entry };
+}
+
 let cachedAmbientOpenClawConfigPath;
 function ambientOpenClawConfigPath() {
   if (cachedAmbientOpenClawConfigPath === undefined) {
@@ -430,8 +487,12 @@ export function resolveWorkerSandboxOverride(cwd, runtimeDir, {
   return configPath;
 }
 
-async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef, baseSha, timeoutSeconds, runtimeDir, profile, reasoning, jobDir, workerId, evidence = null, evidenceTool = null, overridePrompt = null, logSuffix = "", idleDiff = null }) {
-  const selected = profileConfig(profile, reasoning);
+async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef, baseSha, timeoutSeconds, runtimeDir, profile, reasoning, pool = null, jobDir, workerId, evidence = null, evidenceTool = null, overridePrompt = null, logSuffix = "", idleDiff = null }) {
+  // `pool` (config/providers.yml) and `profile` (the single global
+  // NOMARMY_WORKER_PROVIDER/MODEL pair) are mutually exclusive selectors for
+  // the same {model, thinking} shape -- omitting `pool` is the exact
+  // pre-existing behavior, unchanged.
+  const selected = pool ? resolvePoolSelection(pool, reasoning) : profileConfig(profile, reasoning);
   const agentHome = path.join(runtimeDir, "home");
   const npmCache = path.join(runtimeDir, "npm-cache");
   fs.mkdirSync(agentHome, { recursive: true }); fs.mkdirSync(npmCache, { recursive: true });
@@ -458,25 +519,30 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
     "--timeout", String(timeoutSeconds), "--state-dir", stateDir, "--json",
     ...(sandboxOverridePath ? ["--config", sandboxOverridePath] : [])];
   const onTick = idleDiff ? makeIdleDiffTick(cwd, idleDiff) : null;
-  try {
-    const { stdout, stderr } = await withSandboxProvisioningRetry(
-      () => run("openclaw", args, { cwd, env, timeoutMs: (timeoutSeconds + 30) * 1000, onTick, tickMs: (idleDiff?.pollSeconds ?? 15) * 1000 }),
-      { onRetry: (attempt, error) => fs.appendFileSync(path.join(jobDir, "coordinator.log"),
-          `${new Date().toISOString()} transient sandbox provisioning error${logSuffix}, retry ${attempt}/${MAX_SANDBOX_PROVISIONING_RETRIES}\n${error.message}\n`) },
-    );
-    fs.writeFileSync(path.join(jobDir, `openclaw${logSuffix}.stdout.log`), stdout + "\n");
-    fs.writeFileSync(path.join(jobDir, `openclaw${logSuffix}.stderr.log`), stderr + "\n");
-    try { return JSON.parse(stdout); } catch { throw new Error(`OpenClaw returned invalid JSON:\n${stdout}`); }
-  } catch (error) {
-    fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} OpenClaw failure${logSuffix}\n${error.stack || error.message}\n`);
-    throw error;
-  } finally {
-    // A cloned copy of the ambient OpenClaw config (which may carry a real
-    // cloud credential -- see resolveWorkerSandboxOverride) has no reason to
-    // outlive this one run.
-    if (sandboxOverridePath) fs.rmSync(sandboxOverridePath, { force: true });
-    await reapSandboxContainers(stateDir, jobDir);
-  }
+  // Held for this whole call (including retries) so max_concurrent counts a
+  // real in-flight `agent exec`, not just the time between admission and
+  // launch. A `profile`-routed call has no entry id and this is a no-op.
+  return withPoolEntrySlot(selected.entry?.id, async () => {
+    try {
+      const { stdout, stderr } = await withSandboxProvisioningRetry(
+        () => run("openclaw", args, { cwd, env, timeoutMs: (timeoutSeconds + 30) * 1000, onTick, tickMs: (idleDiff?.pollSeconds ?? 15) * 1000 }),
+        { onRetry: (attempt, error) => fs.appendFileSync(path.join(jobDir, "coordinator.log"),
+            `${new Date().toISOString()} transient sandbox provisioning error${logSuffix}, retry ${attempt}/${MAX_SANDBOX_PROVISIONING_RETRIES}\n${error.message}\n`) },
+      );
+      fs.writeFileSync(path.join(jobDir, `openclaw${logSuffix}.stdout.log`), stdout + "\n");
+      fs.writeFileSync(path.join(jobDir, `openclaw${logSuffix}.stderr.log`), stderr + "\n");
+      try { return JSON.parse(stdout); } catch { throw new Error(`OpenClaw returned invalid JSON:\n${stdout}`); }
+    } catch (error) {
+      fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} OpenClaw failure${logSuffix}\n${error.stack || error.message}\n`);
+      throw error;
+    } finally {
+      // A cloned copy of the ambient OpenClaw config (which may carry a real
+      // cloud credential -- see resolveWorkerSandboxOverride) has no reason to
+      // outlive this one run.
+      if (sandboxOverridePath) fs.rmSync(sandboxOverridePath, { force: true });
+      await reapSandboxContainers(stateDir, jobDir);
+    }
+  });
 }
 
 // OpenClaw names each job's sandbox container after the hash of its skills
@@ -1237,6 +1303,15 @@ export function buildMetrics({ result, record, reportValidation, outcome, worker
     worker_tool_calls: intOrNull(tools?.calls ?? tools?.total ?? tools?.count),
     worker_tool_failures: intOrNull(tools?.failures),
     worker_model: result?.model ?? execution.workerModel ?? null,
+    // Was already read into workerMetadata() above but discarded before
+    // reaching here -- every pool-routed job's actual provider is now
+    // visible in job metrics, not just its model name.
+    worker_provider: result?.provider ?? execution.workerProvider ?? null,
+    // Best-effort: present in `agent exec --json`'s envelope for at least
+    // some providers (observed directly during this feature's own live
+    // testing), but not confirmed reliable/nonzero across every provider
+    // type here -- treat as a hint, not an authoritative bill.
+    worker_cost_usd: intOrNull(result?.costUsd),
     worker_tokens_per_second: workerTokensPerSecond,
     context_limit: contextLimit
   };
@@ -1290,7 +1365,7 @@ function writeStatus(jobDir, patch) {
 }
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-export async function executeJob({ task, acceptance, verification, mode = "implement", baseRef, timeoutSeconds = 600, profile = "coder", reasoning = "high", workerId, evidence = null, verifyRegression = false, jobId: presetJobId = null }) {
+export async function executeJob({ task, acceptance, verification, mode = "implement", baseRef, timeoutSeconds = 600, profile = "coder", reasoning = "high", pool = null, workerId, evidence = null, verifyRegression = false, jobId: presetJobId = null }) {
   await assertRepo();
   ensureJobsRoot();
   // Fire-and-forget: sweeps whatever this or any other nomArmy install left
@@ -1304,13 +1379,13 @@ export async function executeJob({ task, acceptance, verification, mode = "imple
     serverPid: process.pid, baseSha: base.sha, timeoutSeconds, ...extra
   });
   progress("starting", { startedAt: new Date().toISOString() });
-  const common = { task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, workerId, progress, jobStartedMs };
+  const common = { task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool, workerId, progress, jobStartedMs };
   if (mode === "scout") return executeScout(common);
   if (mode === "decompose") return executeDecompose(common);
   return executeImplement({ ...common, verification, evidence, verifyRegression });
 }
 
-async function executeImplement({ task, acceptance, verification, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, workerId, evidence, verifyRegression = false, progress, jobStartedMs }) {
+async function executeImplement({ task, acceptance, verification, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool = null, workerId, evidence, verifyRegression = false, progress, jobStartedMs }) {
   const mode = "implement";
   let branch = `agent/${jobId}`, worktree = path.join(jobDir, "worktree");
   try {
@@ -1333,7 +1408,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
     try {
       result = await runOpenClaw({
         task, acceptance, verification, mode, cwd, baseRef: base.ref, baseSha: base.sha,
-        timeoutSeconds: timeBudget.workTimeoutSeconds, runtimeDir, profile, reasoning, jobDir, workerId: workerId || jobId, evidence,
+        timeoutSeconds: timeBudget.workTimeoutSeconds, runtimeDir, profile, reasoning, pool, jobDir, workerId: workerId || jobId, evidence,
         idleDiff: { idleMs: timeBudget.idleBreakSeconds * 1000, minElapsedMs: timeBudget.idleMinElapsedSeconds * 1000, pollSeconds: timeBudget.idlePollSeconds },
       });
     } catch (error) {
@@ -1387,7 +1462,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
       try {
         const recoveryResult = await runOpenClaw({
           task, acceptance, verification, mode, cwd, baseRef: base.ref, baseSha: base.sha,
-          timeoutSeconds: timeBudget.reportReserveSeconds, runtimeDir, profile, reasoning, jobDir, workerId: workerId || jobId,
+          timeoutSeconds: timeBudget.reportReserveSeconds, runtimeDir, profile, reasoning, pool, jobDir, workerId: workerId || jobId,
           overridePrompt: reportRecoveryPrompt({ report: budgets.report.implement, changes }), logSuffix: "-recovery",
         });
         const recoveryText = finalText(recoveryResult);
@@ -1532,7 +1607,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
 // the worktree, so a scout that wrote to its snapshot cannot forge evidence.
 // A clean scout worktree holds no work and is removed; a dirty one is retained
 // because a scout that wrote is a scout that misbehaved, and that is worth a look.
-async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, workerId, progress, jobStartedMs }) {
+async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool = null, workerId, progress, jobStartedMs }) {
   const mode = "scout", worktree = path.join(jobDir, "worktree");
   let worktreeRetained = false;
   try {
@@ -1555,7 +1630,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
     const workerStartedMs = Date.now();
     progress("worker");
     try {
-      result = await runOpenClaw({ task, acceptance, verification: null, mode, cwd: worktree, baseRef: base.ref, baseSha: base.sha, timeoutSeconds, runtimeDir, profile, reasoning, jobDir, workerId: workerId || jobId, evidenceTool: evidencePlaced ? evidenceTool : null });
+      result = await runOpenClaw({ task, acceptance, verification: null, mode, cwd: worktree, baseRef: base.ref, baseSha: base.sha, timeoutSeconds, runtimeDir, profile, reasoning, pool, jobDir, workerId: workerId || jobId, evidenceTool: evidencePlaced ? evidenceTool : null });
     } catch (error) {
       workerFailed = true;
       // error.timedOut is set only by our own spawn timer (run(), above) --
@@ -1667,7 +1742,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
 // commitAllowed/selectUnionCandidates are both hard-gated on mode ===
 // "implement" elsewhere, so a decompose result can never be auto-dispatched
 // or unioned even by accident.
-async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, workerId, progress, jobStartedMs }) {
+async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool = null, workerId, progress, jobStartedMs }) {
   const mode = "decompose", worktree = path.join(jobDir, "worktree");
   let worktreeRetained = false;
   try {
@@ -1686,7 +1761,7 @@ async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtime
     const workerStartedMs = Date.now();
     progress("worker");
     try {
-      result = await runOpenClaw({ task, acceptance, verification: null, mode, cwd: worktree, baseRef: base.ref, baseSha: base.sha, timeoutSeconds, runtimeDir, profile, reasoning, jobDir, workerId: workerId || jobId, evidenceTool: evidencePlaced ? evidenceTool : null });
+      result = await runOpenClaw({ task, acceptance, verification: null, mode, cwd: worktree, baseRef: base.ref, baseSha: base.sha, timeoutSeconds, runtimeDir, profile, reasoning, pool, jobDir, workerId: workerId || jobId, evidenceTool: evidencePlaced ? evidenceTool : null });
     } catch (error) {
       workerFailed = true;
       workerTimedOut = Boolean(error.timedOut);
@@ -1934,7 +2009,24 @@ export async function mapLimit(items, limit, fn, { staggerMs = 0 } = {}) {
 // memory pressure rather than shrinking the brief and hoping.
 // ---------------------------------------------------------------------------
 const activeJobs = new Map();
-function runningCount() { return [...activeJobs.values()].filter(j => !j.settled).length; }
+// `lane` is "local" (the single global worker provider, exactly as before
+// pools existed) or "pool" (job.pool set -- see resolvePoolSelection). The
+// local-slot admission check below must only ever count the local lane: a
+// pool-routed job's actual inference runs on someone else's hardware and
+// was never competing for llama-server's own slots in the first place.
+function runningCount(lane = null) {
+  const entries = [...activeJobs.values()].filter(j => !j.settled);
+  return lane ? entries.filter(j => j.lane === lane).length : entries.length;
+}
+// A static, operator-declared ceiling on how many pool-routed jobs may run
+// at once, independent of and additive to currentMaxWorkers()'s local
+// ceiling -- exactly the "more real concurrency, not just diversity"
+// benefit of spreading load across providers with their own separate rate
+// limits. Not rate-limit-aware (see config/providers.yml.example); read
+// fresh each call, matching currentMaxWorkers()'s own env-read pattern.
+export function currentMaxPoolWorkers() {
+  return clampInt(process.env.NOMARMY_MAX_POOL_WORKERS, 1, 32, 4);
+}
 function track(jobId, meta, promise) {
   const entry = { ...meta, jobId, startedAt: new Date().toISOString(), settled: false, result: null, error: null, promise: null };
   entry.promise = promise.then(r => { entry.settled = true; entry.result = r; return r; }, e => { entry.settled = true; entry.error = e; throw e; });
@@ -1944,14 +2036,15 @@ function track(jobId, meta, promise) {
 }
 function toolText(text, isError = false) { return { content: [{ type: "text", text }], isError }; }
 function capacitySnapshot() {
-  const admission = assessAdmission({ hardware: hardwareSnapshot, runningJobs: runningCount(), slots: contextInfo.slots, maxWorkers: currentMaxWorkers() });
+  const admission = assessAdmission({ hardware: hardwareSnapshot, runningJobs: runningCount("local"), slots: contextInfo.slots, maxWorkers: currentMaxWorkers() });
   return {
     budgets: { ...budgets, describe: describeBudgets(budgets) },
     context: contextInfo,
     admission,
     memory: hardwareSnapshot?.memory ?? null,
-    running: [...activeJobs.values()].filter(j => !j.settled).map(j => ({ jobId: j.jobId, workerId: j.workerId, mode: j.mode, startedAt: j.startedAt, phase: readJson(path.join(jobsRoot, j.jobId, "status.json"))?.phase ?? "starting" })),
-    maxWorkers: currentMaxWorkers()
+    running: [...activeJobs.values()].filter(j => !j.settled).map(j => ({ jobId: j.jobId, workerId: j.workerId, mode: j.mode, lane: j.lane, startedAt: j.startedAt, phase: readJson(path.join(jobsRoot, j.jobId, "status.json"))?.phase ?? "starting" })),
+    maxWorkers: currentMaxWorkers(),
+    pool: { running: runningCount("pool"), maxWorkers: currentMaxPoolWorkers() }
   };
 }
 async function admit(jobs) {
@@ -1966,8 +2059,18 @@ async function admit(jobs) {
       problems.push(`${jobs.length > 1 ? `job ${i + 1}: ` : ""}verify_regression requires a verification profile; there is nothing to run twice without one`);
     }
   });
-  const admission = assessAdmission({ hardware: hardwareSnapshot, runningJobs: runningCount(), slots: contextInfo.slots, maxWorkers: currentMaxWorkers() });
+  // Local-slot capacity only ever concerns the local lane -- a pool-routed
+  // job's own inference runs elsewhere and was never counted against
+  // llama-server's slots. Mirrors that same check's shape for the pool
+  // lane, against a separate, additive ceiling (see currentMaxPoolWorkers).
+  const admission = assessAdmission({ hardware: hardwareSnapshot, runningJobs: runningCount("local"), slots: contextInfo.slots, maxWorkers: currentMaxWorkers() });
   if (!admission.admit) problems.push(...admission.reasons.map(r => `not admitted (${admission.level}): ${r}`));
+  if (jobs.some(j => j.pool)) {
+    const poolCeiling = currentMaxPoolWorkers(), runningPool = runningCount("pool");
+    if (runningPool >= poolCeiling) {
+      problems.push(`not admitted (capacity): ${runningPool} pool job(s) already running, at NOMARMY_MAX_POOL_WORKERS=${poolCeiling}`);
+    }
+  }
   return { problems, admission };
 }
 function refusal(problems) {
@@ -1976,7 +2079,8 @@ function refusal(problems) {
 function launch(args) {
   const workerId = args.worker_id || null;
   const jobId = slug(workerId || (args.mode === "scout" ? "scout" : "worker"));
-  return track(jobId, { mode: args.mode, workerId: workerId || jobId }, executeJob({ ...jobArgs(args, workerId), jobId }));
+  const lane = args.pool ? "pool" : "local";
+  return track(jobId, { mode: args.mode, workerId: workerId || jobId, lane }, executeJob({ ...jobArgs(args, workerId), jobId }));
 }
 // Best-effort progress signal for a job still mid-run: a plain "phase: worker,
 // elapsed: Ns" told a caller nothing about whether the worker was still
@@ -2040,7 +2144,8 @@ export const jobSchema = z.object({
   base_ref: z.string().optional(),
   timeout_seconds: z.number().int().min(30).max(1800).default(600),
   profile: z.enum(["coder", "gpt"]).default("coder").describe("coder: Qwen3-Coder-Next by default, runs with thinking off regardless of `reasoning` (that model has no thinking mode at all, not a policy choice); if NOMARMY_WORKER_MODEL_THINKING=true (set when a different, reasoning-capable model is configured into this slot), `reasoning` takes effect exactly like on profile gpt. gpt: the gpt-oss-20b fallback, where `reasoning` always sets its thinking level."),
-  reasoning: z.enum(["low", "medium", "high"]).default("medium").describe("Thinking level passed to the worker model. Only takes effect on profile: gpt; silently ignored on the default profile: coder. Default is medium, not high, on real measured evidence: on an identical ticket, gpt-oss-20b at high took 318s with 21 tool calls and 4 failures, and at medium took 62s with 9 calls and 0 failures -- high did not produce a better answer, it thrashed. A separate open-ended task made Qwen3.6-27B time out completely at high (630s, zero output) and succeed at medium. Do not raise this to high by default reasoning that more thinking should help -- it has only ever hurt or timed out in testing so far. Reach for high only after a task has already failed once at medium and the failure looks like an under-thinking problem specifically (wrong root cause, not a formatting or scope issue)."),
+  reasoning: z.enum(["low", "medium", "high"]).default("medium").describe("Thinking level passed to the worker model. Only takes effect on profile: gpt; silently ignored on the default profile: coder. Also applies on a pool-routed job, per that entry's own `thinking` flag. Default is medium, not high, on real measured evidence: on an identical ticket, gpt-oss-20b at high took 318s with 21 tool calls and 4 failures, and at medium took 62s with 9 calls and 0 failures -- high did not produce a better answer, it thrashed. A separate open-ended task made Qwen3.6-27B time out completely at high (630s, zero output) and succeed at medium. Do not raise this to high by default reasoning that more thinking should help -- it has only ever hurt or timed out in testing so far. Reach for high only after a task has already failed once at medium and the failure looks like an under-thinking problem specifically (wrong root cause, not a formatting or scope issue)."),
+  pool: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().describe("Name of a weighted multi-provider pool from config/providers.yml (e.g. \"cheap\", \"capable\" -- names are whatever that file declares). When set, OVERRIDES `profile`: nomArmy weighted-randomly picks one authenticated, under-capacity provider entry from the named pool for this job instead of using the single global worker provider/model. Omit entirely to keep today's `profile`-only behavior unchanged -- this is fully opt-in and does nothing if config/providers.yml does not exist. Refuses with a clear error (not a silent fallback to local) if the pool name is unknown, or if every entry in it is either missing its credential or already at its max_concurrent."),
   evidence: z.string().max(maxEvidenceChars,
     `Evidence exceeds the ${maxEvidenceChars}-character budget. This is for facts already resolved (e.g. with repo_evidence), not more description of the task -- if it needs more than this, resolve less per job or put the pointer (a path and line range) here instead of the material itself.`
   ).optional().describe("implement only: facts YOU already resolved (e.g. via repo_evidence) that the worker should trust and not re-derive -- exact signatures, call sites, line ranges, existing behavior. Cuts exploration that would otherwise burn the worker's own context budget on something you already know. Not a substitute for a clear objective and acceptance criteria."),
@@ -2048,7 +2153,7 @@ export const jobSchema = z.object({
 });
 function jobArgs(args, workerId) {
   return { task: args.task, acceptance: args.acceptance, verification: args.verification, mode: args.mode, baseRef: args.base_ref,
-    timeoutSeconds: args.timeout_seconds, profile: args.profile, reasoning: args.reasoning, evidence: args.evidence,
+    timeoutSeconds: args.timeout_seconds, profile: args.profile, reasoning: args.reasoning, pool: args.pool, evidence: args.evidence,
     verifyRegression: args.verify_regression, workerId };
 }
 server.tool("local_worker", "Run one isolated local worker and wait for it. mode=implement edits in its own worktree and the coordinator commits only on a valid done report (or a recovered job that passed independent verification); failed or incomplete worktrees are retained. mode=scout answers a question from a read-only snapshot with mandatory [path:line] citations that nomArmy verifies and expands. mode=decompose (also read-only) proposes 2+ independent subtasks for a broad objective instead of one worker turn trying to do too much; the proposal is never auto-dispatched, review it and make a separate call with the subtasks you choose. Refuses under memory pressure or over capacity; use local_worker_start + local_worker_status to avoid blocking.", jobSchema.shape,

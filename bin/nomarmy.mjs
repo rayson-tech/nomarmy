@@ -18,6 +18,8 @@ import { detectHardware } from "../lib/hardware.mjs";
 import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf.mjs";
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
 import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected } from "../lib/connect.mjs";
+import { loadDispatchConfig, dispatchConfigPath, stringifyDispatchConfig } from "../lib/dispatch-config.mjs";
+import { dispatchConfigSchema, formatDispatchIssues, PROVIDER_TYPES, NATIVE_PROVIDER_TYPES } from "../lib/dispatch-schema.mjs";
 
 // Add a new coordinator: add its name here, teach commandExists/connectTarget
 // about it below (a JSON-file target like Cursor has no PATH binary to check
@@ -77,6 +79,22 @@ Usage: nomarmy <command> [options]
                                 registration (never done silently)
   update          Pull the latest nomArmy code and re-sync the installed
                   MCP copy (fast-forward only; refuses on local changes).
+  providers <list|add|remove|validate>
+                  Manage config/providers.yml -- optional, weighted pools of
+                  worker providers (local, Bedrock, DeepInfra, Anthropic,
+                  OpenAI, xAI, Azure OpenAI, or a custom OpenAI-compatible
+                  endpoint) a job can be dispatched against with
+                  local_worker's \`pool\` field instead of the single global
+                  worker model. Absent entirely, nothing changes.
+                  list      show configured pools and which entries have
+                            their credential set right now
+                  add       interactive wizard to add one entry to a pool
+                            (or --json --pool --provider --id [--model]
+                            [--auth-env] [--base-url] [--weight]
+                            [--max-concurrent] [--no-thinking])
+                  remove <pool> <id>
+                            remove one entry (or the whole pool if now empty)
+                  validate  check config/providers.yml against the schema
   connect [claude] [codex] [cursor]
                   (Re-)register the MCP server with one or more coordinators.
                   With no target and not --json, prompts an interactive
@@ -542,6 +560,260 @@ async function cmdModel() {
   }
 }
 
+// One label/default per provider type `nomarmy providers add` menu shows.
+// `native: true` types register through OpenClaw's own dedicated onboarding
+// flag (--anthropic-api-key etc, verified via `openclaw onboard --help`);
+// the rest register as a custom endpoint (the same mechanism
+// scripts/configure-openclaw.sh already uses for Bedrock) and need base_url.
+const KNOWN_PROVIDERS = {
+  anthropic: { label: "Anthropic (Claude)", defaultModel: "claude-sonnet-4-6", authEnvSuggestion: "NOMARMY_ANTHROPIC_API_KEY", native: true },
+  openai: { label: "OpenAI", defaultModel: "gpt-5.6-terra", authEnvSuggestion: "NOMARMY_OPENAI_API_KEY", native: true },
+  xai: { label: "xAI (Grok)", defaultModel: "grok-build-0.1", authEnvSuggestion: "NOMARMY_XAI_API_KEY", native: true },
+  deepinfra: { label: "DeepInfra", defaultModel: "meta-llama/Llama-3.3-70B-Instruct-Turbo", authEnvSuggestion: "NOMARMY_DEEPINFRA_API_KEY", native: true },
+  bedrock: { label: "AWS Bedrock (custom OpenAI-compatible endpoint)", defaultModel: "amazon.nova-micro-v1:0", authEnvSuggestion: "NOMARMY_BEDROCK_API_KEY", native: false, baseUrlHint: "https://bedrock-runtime.<region>.amazonaws.com/openai/v1" },
+  "azure-openai": { label: "Azure OpenAI", defaultModel: "gpt-4o-mini", authEnvSuggestion: "NOMARMY_AZURE_OPENAI_API_KEY", native: false, baseUrlHint: "https://YOUR-RESOURCE.openai.azure.com" },
+  "openai-compatible": { label: "Custom OpenAI-compatible endpoint", defaultModel: "", authEnvSuggestion: "NOMARMY_CUSTOM_API_KEY", native: false, baseUrlHint: "https://example.com/v1" },
+  "llama-cpp": { label: "Local llama.cpp server (already configured -- adds it to a pool alongside remote providers)", native: false },
+};
+
+/** `openclaw onboard` command that registers one provider entry -- native
+ * types use their own dedicated flag; everything else registers as a custom
+ * endpoint, the same mechanism already used for Bedrock in
+ * scripts/configure-openclaw.sh. Never logs or echoes the API key itself. */
+function registerProviderWithOpenClaw({ id, provider, model, authEnv, baseUrl }) {
+  const apiKey = authEnv ? process.env[authEnv] : null;
+  if (authEnv && !apiKey) {
+    console.log(c.red(`✗ ${authEnv} is not set in this shell -- export it, then run this registration again.`));
+    return false;
+  }
+  const skipFlags = ["--skip-daemon", "--skip-channels", "--skip-skills", "--skip-search", "--skip-hooks", "--skip-ui"];
+  try {
+    if (NATIVE_PROVIDER_TYPES.includes(provider)) {
+      execFileSync("openclaw", ["onboard", "--non-interactive", "--accept-risk", `--${provider}-api-key`, apiKey, ...skipFlags], { stdio: "ignore" });
+    } else {
+      execFileSync("openclaw", ["onboard", "--non-interactive", "--accept-risk",
+        "--custom-base-url", baseUrl, "--custom-model-id", model, "--custom-provider-id", id, "--custom-compatibility", "openai", ...skipFlags], { stdio: "ignore" });
+      execFileSync("openclaw", ["models", "auth", "paste-api-key", "--provider", id, "--profile-id", `${id}:nomarmy`], { input: `${apiKey}\n`, stdio: ["pipe", "ignore", "ignore"] });
+    }
+    console.log(c.green(`✓ Registered "${id}" with OpenClaw.`));
+    console.log(c.yellow(`This project has not run a real job against this specific provider type yet -- run \`openclaw models list --provider ${NATIVE_PROVIDER_TYPES.includes(provider) ? provider : id}\` to confirm it registered as expected, then dispatch one real job against this pool before trusting it in production.`));
+    return true;
+  } catch (error) {
+    console.log(c.red(`✗ Registration failed: ${error.message}`));
+    return false;
+  }
+}
+
+async function cmdProvidersList() {
+  const configPath = dispatchConfigPath(nomarmyRoot);
+  let loaded;
+  try {
+    loaded = loadDispatchConfig(nomarmyRoot);
+  } catch (error) {
+    if (json) { out({ error: error.message, errors: error.errors, path: error.path }); process.exit(1); }
+    console.error(c.red(`${error.path ?? "config/providers.yml"} is invalid:`));
+    for (const line of error.errors) console.error(`  - ${line}`);
+    process.exit(1);
+  }
+  if (!loaded.found) {
+    if (json) return out({ found: false, path: configPath, pools: {} });
+    console.log(c.dim(`No config/providers.yml yet (would live at ${configPath}).`));
+    console.log(`Run ${c.bold("nomarmy providers add")} to create one, or copy config/providers.yml.example.`);
+    return;
+  }
+  if (json) {
+    const pools = {};
+    for (const [name, entries] of Object.entries(loaded.config.pools)) {
+      pools[name] = entries.map((e) => ({ ...e, auth_set: e.auth_env ? Boolean(process.env[e.auth_env]) : true }));
+    }
+    return out({ found: true, path: loaded.path, pools });
+  }
+  console.log(c.bold(`🍪 nomArmy providers`) + c.dim(`  (${loaded.path})`));
+  for (const [name, entries] of Object.entries(loaded.config.pools)) {
+    console.log(`\n${c.bold(name)}:`);
+    for (const entry of entries) {
+      const authOk = !entry.auth_env || Boolean(process.env[entry.auth_env]);
+      const authNote = entry.auth_env ? `  auth_env=${entry.auth_env} ${authOk ? c.green("✓") : c.red("✗ unset")}` : "";
+      console.log(`  - ${c.cyan(entry.id)}  (${entry.provider}${entry.model ? `/${entry.model}` : ""})  weight=${entry.weight}  max_concurrent=${entry.max_concurrent}${authNote}`);
+    }
+  }
+  console.log(c.dim(`\nDispatch a job against one of these with local_worker's \`pool\` field, e.g. pool: "${Object.keys(loaded.config.pools)[0] ?? "cheap"}".`));
+}
+
+async function cmdProvidersValidate() {
+  try {
+    const loaded = loadDispatchConfig(nomarmyRoot);
+    if (json) return out({ valid: true, found: loaded.found, path: loaded.path });
+    console.log(loaded.found ? c.green(`✓ ${loaded.path} is valid.`) : c.dim("No config/providers.yml yet -- nothing to validate."));
+  } catch (error) {
+    if (json) { out({ valid: false, errors: error.errors, path: error.path }); process.exit(1); }
+    console.error(c.red(`✗ ${error.path ?? "config/providers.yml"} is invalid:`));
+    for (const line of error.errors) console.error(`  - ${line}`);
+    process.exit(1);
+  }
+}
+
+async function cmdProvidersRemove() {
+  const poolName = argv[2], id = argv[3];
+  if (!poolName || !id) throw new Error("Usage: nomarmy providers remove <pool> <id>");
+  const loaded = loadDispatchConfig(nomarmyRoot);
+  if (!loaded.found) throw new Error("No config/providers.yml exists yet -- nothing to remove.");
+  const pool = loaded.config.pools[poolName];
+  if (!pool) throw new Error(`Unknown pool "${poolName}". Configured pools: ${Object.keys(loaded.config.pools).join(", ") || "(none)"}`);
+  const remaining = pool.filter((e) => e.id !== id);
+  if (remaining.length === pool.length) throw new Error(`No entry with id "${id}" in pool "${poolName}".`);
+
+  if (!json) {
+    const rl = createInterface({ input, output });
+    let answer;
+    try {
+      answer = (await rl.question(c.bold(`Remove "${id}" from pool "${poolName}"${remaining.length ? "" : " (this empties and removes the pool)"}? [y/N] `))).trim().toLowerCase();
+    } finally {
+      rl.close();
+    }
+    if (answer !== "y" && answer !== "yes") { console.log(c.dim("Cancelled; nothing changed.")); return; }
+  }
+
+  const nextPools = { ...loaded.config.pools };
+  if (remaining.length) nextPools[poolName] = remaining; else delete nextPools[poolName];
+  fs.writeFileSync(dispatchConfigPath(nomarmyRoot), stringifyDispatchConfig({ pools: nextPools }));
+  if (json) return out({ removed: true, pool: poolName, id });
+  console.log(c.green(`✓ Removed "${id}" from pool "${poolName}".`));
+}
+
+async function cmdProvidersAdd() {
+  const configPath = dispatchConfigPath(nomarmyRoot);
+  let existingPools = {};
+  try {
+    const loaded = loadDispatchConfig(nomarmyRoot);
+    if (loaded.found) existingPools = loaded.config.pools;
+  } catch (error) {
+    throw new Error(`config/providers.yml already exists but is invalid -- fix it by hand or delete it before adding: ${error.message}`);
+  }
+
+  let poolName, providerType, id, model, weight, authEnv, baseUrl, maxConcurrent, thinking;
+
+  if (json) {
+    poolName = value("pool");
+    providerType = value("provider");
+    id = value("id");
+    model = value("model");
+    weight = Number(value("weight", "1"));
+    authEnv = value("auth-env");
+    baseUrl = value("base-url");
+    maxConcurrent = value("max-concurrent") ? Number(value("max-concurrent")) : undefined;
+    thinking = flag("no-thinking") ? false : undefined;
+    if (!poolName || !providerType || !id) {
+      throw new Error(`--json requires --pool <name> --provider <${PROVIDER_TYPES.join("|")}> --id <id>, plus --model/--auth-env/--base-url as that provider type needs.`);
+    }
+  } else {
+    if (!process.stdin.isTTY) throw new Error("nomarmy providers add needs an interactive terminal, or --json with explicit flags (see `nomarmy help`).");
+    const rl = createInterface({ input, output });
+    try {
+      console.log(c.bold("🍪 nomArmy providers add"));
+      const existingNames = Object.keys(existingPools);
+      const poolPrompt = existingNames.length
+        ? `Pool name [existing: ${existingNames.join(", ")}, or type a new one]: `
+        : `Pool name (new -- e.g. "cheap" or "capable"): `;
+      poolName = (await rl.question(c.bold(poolPrompt))).trim();
+      if (!poolName) throw new Error("A pool name is required.");
+
+      console.log("\n" + c.bold("Which provider?"));
+      PROVIDER_TYPES.forEach((t, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${KNOWN_PROVIDERS[t]?.label ?? t}`));
+      const typeChoice = (await rl.question(c.bold("Choice: "))).trim();
+      providerType = PROVIDER_TYPES[Number(typeChoice) - 1];
+      if (!providerType) throw new Error(`Not a valid choice: "${typeChoice}".`);
+      const info = KNOWN_PROVIDERS[providerType] ?? {};
+
+      id = (await rl.question(c.bold(`Entry id [${providerType}]: `))).trim() || providerType;
+
+      if (providerType !== "llama-cpp") {
+        model = (await rl.question(c.bold(`Model${info.defaultModel ? ` [${info.defaultModel}]` : ""}: `))).trim() || info.defaultModel;
+        if (!model) throw new Error("A model id is required for this provider type.");
+        authEnv = (await rl.question(c.bold(`Environment variable holding the API key [${info.authEnvSuggestion}]: `))).trim() || info.authEnvSuggestion;
+      } else {
+        const modelAnswer = (await rl.question(c.bold("Model override (blank -> use NOMARMY_WORKER_MODEL, today's default): "))).trim();
+        if (modelAnswer) model = modelAnswer;
+      }
+
+      if (["bedrock", "azure-openai", "openai-compatible"].includes(providerType)) {
+        baseUrl = (await rl.question(c.bold(`Base URL${info.baseUrlHint ? ` (e.g. ${info.baseUrlHint})` : ""}: `))).trim();
+        if (!baseUrl) throw new Error("A base_url is required for this provider type.");
+      }
+
+      const weightAnswer = (await rl.question(c.bold("Weight [1]: "))).trim();
+      weight = weightAnswer ? Number(weightAnswer) : 1;
+
+      const maxConcurrentAnswer = (await rl.question(c.bold("max_concurrent [2]: "))).trim();
+      if (maxConcurrentAnswer) maxConcurrent = Number(maxConcurrentAnswer);
+
+      if (providerType !== "llama-cpp") {
+        const thinkingAnswer = (await rl.question(c.bold("Does this model have a thinking/reasoning mode? [Y/n] "))).trim().toLowerCase();
+        thinking = !(thinkingAnswer === "n" || thinkingAnswer === "no");
+      }
+
+      if (authEnv && !process.env[authEnv]) {
+        console.log(c.yellow(`\nNote: ${authEnv} is not set in this shell right now.`));
+        console.log(c.dim(`  export ${authEnv}=...`));
+        console.log(c.dim("The entry is written either way -- it's simply skipped at dispatch time until that's set."));
+      }
+    } finally {
+      rl.close();
+    }
+  }
+
+  const entry = { id, provider: providerType, weight };
+  if (model) entry.model = model;
+  if (authEnv) entry.auth_env = authEnv;
+  if (baseUrl) entry.base_url = baseUrl;
+  if (maxConcurrent !== undefined) entry.max_concurrent = maxConcurrent;
+  if (thinking !== undefined) entry.thinking = thinking;
+
+  const nextPools = { ...existingPools, [poolName]: [...(existingPools[poolName] ?? []), entry] };
+  const parsed = dispatchConfigSchema.safeParse({ pools: nextPools });
+  if (!parsed.success) {
+    const errors = formatDispatchIssues(parsed.error);
+    if (json) { out({ error: "invalid provider entry", errors }); process.exit(1); }
+    console.error(c.red("This entry is not valid:"));
+    for (const line of errors) console.error(`  - ${line}`);
+    process.exit(1);
+  }
+
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, stringifyDispatchConfig(parsed.data));
+  const written = parsed.data.pools[poolName].at(-1);
+
+  if (json) {
+    const registered = flag("register") ? registerProviderWithOpenClaw(written) : null;
+    return out({ written: configPath, pool: poolName, entry: written, registered });
+  }
+
+  console.log(c.green(`\n✓ Wrote ${path.relative(nomarmyRoot, configPath)} -- pool "${poolName}" now has ${nextPools[poolName].length} entr${nextPools[poolName].length === 1 ? "y" : "ies"}.`));
+
+  if (providerType !== "llama-cpp") {
+    const rl2 = createInterface({ input, output });
+    try {
+      const answer = (await rl2.question(c.bold(`\nRegister "${id}" with OpenClaw now? [y/N] `))).trim().toLowerCase();
+      if (answer === "y" || answer === "yes") registerProviderWithOpenClaw(written);
+      else console.log(c.dim(`Skipped -- this entry can't actually dispatch until it's registered. Rerun \`nomarmy providers add\` isn't needed for that; ask a maintainer for the equivalent \`openclaw onboard\`/\`openclaw models auth paste-api-key\` commands, or answer yes next time.`));
+    } finally {
+      rl2.close();
+    }
+  }
+
+  console.log(c.dim("\nRun `nomarmy providers list` to see the full picture."));
+  console.log(c.yellow("Restart your Claude Code / Codex session to pick this up -- config/providers.yml is read once per MCP server process."));
+}
+
+async function cmdProviders() {
+  const sub = argv[1];
+  if (sub === "list") return cmdProvidersList();
+  if (sub === "add") return cmdProvidersAdd();
+  if (sub === "remove") return cmdProvidersRemove();
+  if (sub === "validate") return cmdProvidersValidate();
+  throw new Error(`Unknown providers subcommand "${sub ?? ""}". Use: nomarmy providers <list|add|remove|validate>`);
+}
+
 function git(args) {
   try { return execFileSync("git", args, { cwd: nomarmyRoot, encoding: "utf8" }).trim(); }
   catch (error) { throw new Error(`git ${args.join(" ")} failed: ${error.stderr ? String(error.stderr).trim() : error.message}`); }
@@ -955,7 +1227,7 @@ function sizingCheck(hardware, gguf) {
   process.exit((res.warnings ?? []).some((w) => w.severity === "error") ? 1 : 0);
 }
 
-const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, update: cmdUpdate, connect: cmdConnect, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
+const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, providers: cmdProviders, update: cmdUpdate, connect: cmdConnect, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
   // Import lazily to avoid circular dependencies

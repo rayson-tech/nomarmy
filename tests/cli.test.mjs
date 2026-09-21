@@ -159,6 +159,130 @@ test("sizing --noms an unreasonable count reports fits:false, not a crash or a s
   assert.equal(recommendation.fits, false);
 });
 
+// `nomarmy providers` resolves config/providers.yml against nomarmyRoot (the
+// CLI script's OWN location), not --repo/cwd -- the same way `setup`/`model`
+// already resolve config/common.env. read-only subcommands (list/validate)
+// are safe to exercise against the real checkout directly, since this repo
+// ships no real config/providers.yml (only the .example template). The
+// WRITE subcommands (add/remove) get their own tiny scratch copy of
+// bin/+lib/+package.json (node_modules symlinked, not copied, to stay fast)
+// so a test run never touches this actual repository's own files.
+
+test("providers list --json against this real repo (no config/providers.yml shipped) reports found:false", () => {
+  const result = execFileSync(process.execPath, [CLI_PATH, "providers", "list", "--json"], { encoding: "utf8" });
+  const output = JSON.parse(result);
+  assert.equal(output.found, false);
+  assert.deepEqual(output.pools, {});
+});
+
+test("providers validate --json against this real repo reports valid:true, found:false", () => {
+  const result = execFileSync(process.execPath, [CLI_PATH, "providers", "validate", "--json"], { encoding: "utf8" });
+  const output = JSON.parse(result);
+  assert.equal(output.valid, true);
+  assert.equal(output.found, false);
+});
+
+function scratchNomarmyRoot() {
+  const dir = mkdtempSync(path.join(tmpdir(), "nomarmy-providers-cli-"));
+  const repoRoot = path.join(here, "..");
+  fs.symlinkSync(path.join(repoRoot, "node_modules"), path.join(dir, "node_modules"));
+  fs.cpSync(path.join(repoRoot, "bin"), path.join(dir, "bin"), { recursive: true });
+  fs.cpSync(path.join(repoRoot, "lib"), path.join(dir, "lib"), { recursive: true });
+  fs.copyFileSync(path.join(repoRoot, "package.json"), path.join(dir, "package.json"));
+  return dir;
+}
+
+function runProvidersCLI(root, args) {
+  try {
+    const result = execFileSync(process.execPath, [path.join(root, "bin", "nomarmy.mjs"), "providers", ...args], {
+      cwd: root, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
+    });
+    return { exitCode: 0, stdout: result, stderr: "" };
+  } catch (error) {
+    return { exitCode: error.status ?? 1, stdout: error.stdout ?? "", stderr: error.stderr ?? "" };
+  }
+}
+
+test("providers add --json (llama-cpp) writes a valid config/providers.yml under a scratch nomarmyRoot", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { exitCode, stdout } = runProvidersCLI(root, ["add", "--json", "--pool", "cheap", "--provider", "llama-cpp", "--id", "local", "--weight", "10"]);
+    assert.equal(exitCode, 0, stdout);
+    const written = JSON.parse(stdout);
+    assert.equal(written.entry.id, "local");
+    assert.ok(fs.existsSync(path.join(root, "config", "providers.yml")));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("providers add --json (hosted provider) requires --auth-env, refuses cleanly without it", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { exitCode, stdout } = runProvidersCLI(root, ["add", "--json", "--pool", "capable", "--provider", "anthropic", "--id", "sonnet", "--model", "claude-sonnet-4-6"]);
+    assert.notEqual(exitCode, 0);
+    assert.match(JSON.parse(stdout).errors.join("\n"), /auth_env: is required/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("providers add --json twice accumulates entries in the same pool, then list --json shows both", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    runProvidersCLI(root, ["add", "--json", "--pool", "cheap", "--provider", "llama-cpp", "--id", "local", "--weight", "10"]);
+    runProvidersCLI(root, ["add", "--json", "--pool", "cheap", "--provider", "deepinfra", "--id", "deepinfra-llama", "--model", "meta-llama/Llama-3.3-70B-Instruct-Turbo", "--auth-env", "NOMARMY_DEEPINFRA_API_KEY", "--weight", "3"]);
+    const { exitCode, stdout } = runProvidersCLI(root, ["list", "--json"]);
+    assert.equal(exitCode, 0, stdout);
+    const output = JSON.parse(stdout);
+    assert.equal(output.pools.cheap.length, 2);
+    assert.equal(output.pools.cheap[1].auth_set, false, "NOMARMY_DEEPINFRA_API_KEY is not set in the test env");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("providers add --json refuses a duplicate id across pools, and does not corrupt the existing file", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    runProvidersCLI(root, ["add", "--json", "--pool", "cheap", "--provider", "llama-cpp", "--id", "local", "--weight", "10"]);
+    const { exitCode, stdout } = runProvidersCLI(root, ["add", "--json", "--pool", "capable", "--provider", "anthropic", "--id", "local", "--model", "x", "--auth-env", "NOMARMY_X"]);
+    assert.notEqual(exitCode, 0);
+    assert.match(JSON.parse(stdout).errors.join("\n"), /already used by pool "cheap"/);
+    const after = fs.readFileSync(path.join(root, "config", "providers.yml"), "utf8");
+    assert.match(after, /cheap:/);
+    assert.doesNotMatch(after, /capable:/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("providers remove --json removes one entry; removing the last entry removes the whole pool", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    runProvidersCLI(root, ["add", "--json", "--pool", "cheap", "--provider", "llama-cpp", "--id", "local", "--weight", "10"]);
+    const { exitCode, stdout } = runProvidersCLI(root, ["remove", "cheap", "local", "--json"]);
+    assert.equal(exitCode, 0, stdout);
+    const output = JSON.parse(stdout);
+    assert.equal(output.removed, true);
+    const after = fs.readFileSync(path.join(root, "config", "providers.yml"), "utf8");
+    assert.doesNotMatch(after, /cheap:/, "an emptied pool must be removed entirely, not left as an empty list");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("providers remove --json on a nonexistent config/providers.yml refuses cleanly", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { exitCode, stdout } = runProvidersCLI(root, ["remove", "cheap", "local", "--json"]);
+    assert.notEqual(exitCode, 0);
+    assert.match(JSON.parse(stdout).error, /No config\/providers\.yml exists yet/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("scan --json against empty temp directory returns evidence with zero counts", () => {
   const tmpDir = mkdtempSync(path.join(tmpdir(), "nomarmy-scan-empty-test-"));
   try {

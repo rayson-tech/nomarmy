@@ -1,0 +1,86 @@
+# nomArmy multi-provider dispatch pools (v1.3) -- OPTIONAL.
+#
+# Copy this file to config/providers.yml (or run `nomarmy providers add`,
+# which writes the same shape) to opt in. Absent entirely, nothing changes:
+# every job keeps using the single NOMARMY_WORKER_PROVIDER/NOMARMY_WORKER_MODEL
+# pair from common.env, exactly as before this existed.
+#
+# A pool is a named, weighted list of providers a job can be dispatched
+# against with `pool: "<name>"` (the local_worker/local_worker_start/
+# local_workers MCP tools' `pool` field). Selection is weighted-random: an
+# entry with weight 3 is picked 3x as often as one with weight 1, among
+# whichever entries in the pool currently have their credential set --
+# every other entry is simply skipped, never a per-job failure.
+#
+# Pool names are yours to choose. This file shows one common split (routine
+# work stays cheap/disposable; harder work opts into stronger models) but
+# nomArmy does not require that vocabulary -- name pools however you think
+# about the work.
+#
+# Every entry needs: id (unique across every pool -- used as the OpenClaw
+# provider id and in job metrics), provider (see the list below), weight
+# (a positive number, relative to other entries in the same pool), and for
+# every provider except llama-cpp: auth_env, the NAME of an environment
+# variable holding that provider's API key. nomArmy never stores a raw
+# credential in this file -- only the name of the variable to read it from,
+# same convention as NOMARMY_BEDROCK_API_KEY today. Optional on every entry:
+# max_concurrent (default 2, a static ceiling since nomArmy does not yet do
+# real rate-limit-aware admission per provider) and thinking (default true;
+# set false for a model with no reasoning mode).
+#
+# Provider types nomArmy knows how to register with OpenClaw
+# (see `nomarmy providers add` and scripts/configure-openclaw.sh):
+#   llama-cpp         the already-configured local server. model/thinking
+#                      omitted -> falls back to NOMARMY_WORKER_MODEL /
+#                      NOMARMY_MODEL_THINKING, i.e. today's defaults.
+#   anthropic          native OpenClaw onboarding (--anthropic-api-key).
+#   openai             native OpenClaw onboarding (--openai-api-key).
+#   xai                native OpenClaw onboarding (--xai-api-key). Grok.
+#   deepinfra          native OpenClaw onboarding (--deepinfra-api-key).
+#   bedrock            custom endpoint, needs base_url (nomArmy derives a
+#                      default from NOMARMY_BEDROCK_REGION at setup time).
+#   azure-openai       custom endpoint, needs base_url -- every Azure OpenAI
+#                      deployment has its own resource URL, no default exists.
+#   openai-compatible  escape hatch for anything else with an OpenAI-shaped
+#                      endpoint. Always needs base_url.
+
+pools:
+  cheap:
+    - id: local
+      provider: llama-cpp
+      weight: 10
+    - id: bedrock-nova
+      provider: bedrock
+      model: amazon.nova-micro-v1:0
+      base_url: https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1
+      weight: 3
+      auth_env: NOMARMY_BEDROCK_API_KEY
+    - id: deepinfra-llama70b
+      provider: deepinfra
+      model: meta-llama/Llama-3.3-70B-Instruct-Turbo
+      weight: 3
+      auth_env: NOMARMY_DEEPINFRA_API_KEY
+
+  capable:
+    - id: anthropic-sonnet
+      provider: anthropic
+      model: claude-sonnet-4-6
+      weight: 2
+      auth_env: NOMARMY_ANTHROPIC_API_KEY
+      max_concurrent: 2
+    - id: openai-terra
+      provider: openai
+      model: gpt-5.6-terra
+      weight: 1
+      auth_env: NOMARMY_OPENAI_API_KEY
+    - id: grok-coding
+      provider: xai
+      model: grok-build-0.1
+      weight: 1
+      auth_env: NOMARMY_XAI_API_KEY
+    - id: azure-gpt4o-mini
+      provider: azure-openai
+      model: gpt-4o-mini
+      base_url: https://YOUR-RESOURCE.openai.azure.com
+      weight: 1
+      auth_env: NOMARMY_AZURE_OPENAI_API_KEY

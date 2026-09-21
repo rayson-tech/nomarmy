@@ -221,6 +221,52 @@ nomarmy start <profile>
 
 The model itself downloads and caches on first start. Two things worth knowing: the target repo must actually contain GGUF files (a base-model repo with only PyTorch/safetensors weights won't run here), and a gated repo needs you to accept its license on huggingface.co and authenticate locally before the download will succeed.
 
+### Multi-provider dispatch pools
+
+Everything above is one global worker identity: `NOMARMY_WORKER_PROVIDER`/`NOMARMY_WORKER_MODEL`, shared by every job. `config/providers.yml` (entirely optional — absent, nothing changes) adds named, weighted pools of *several* providers a job can be dispatched against instead, so routine work can stay on the free local model while a harder job opts into a paid frontier one, or several paid providers can be spread across to get real concurrency beyond any single one's rate limit.
+
+```bash
+nomarmy providers add     # interactive wizard -- pick a pool, a provider, a model, a weight
+nomarmy providers list    # see every configured pool and which entries have their credential set
+```
+
+| Provider | Auth mechanism | Needs `base_url`? |
+|---|---|---|
+| `llama-cpp` | none — the already-configured local server | no |
+| `anthropic` | native OpenClaw onboarding (`--anthropic-api-key`) | no |
+| `openai` | native OpenClaw onboarding (`--openai-api-key`) | no |
+| `xai` (Grok) | native OpenClaw onboarding (`--xai-api-key`) | no |
+| `deepinfra` | native OpenClaw onboarding (`--deepinfra-api-key`) | no |
+| `bedrock` | custom endpoint (same mechanism as the [Cloud (Bedrock)](#cloud-bedrock) profile above) | yes (region-derived) |
+| `azure-openai` | custom endpoint | yes (per-deployment, no default exists) |
+| `openai-compatible` | custom endpoint | yes |
+
+A pool entry never carries a raw credential — only `auth_env`, the *name* of an environment variable nomArmy reads at dispatch time (the same convention `NOMARMY_BEDROCK_API_KEY` already established). An entry whose `auth_env` isn't set is simply invisible to dispatch, never a per-job failure. Selection is weighted-random over whichever entries in the named pool are currently authenticated: an entry with weight 3 is picked three times as often as one with weight 1. Each entry also gets its own `max_concurrent` (default 2) — a static, operator-declared ceiling, since nomArmy does not yet do real rate-limit-aware admission per provider — and pool-routed jobs get their own separate concurrency ceiling from local jobs (`NOMARMY_MAX_POOL_WORKERS`, default 4), additive to `NOMARMY_MAX_WORKERS`: a pool-routed job's inference runs on someone else's hardware and was never competing for the local llama-server's own slots.
+
+```yaml
+# config/providers.yml
+pools:
+  cheap:
+    - id: local
+      provider: llama-cpp
+      weight: 10
+    - id: deepinfra-llama70b
+      provider: deepinfra
+      model: meta-llama/Llama-3.3-70B-Instruct-Turbo
+      weight: 3
+      auth_env: NOMARMY_DEEPINFRA_API_KEY
+  capable:
+    - id: anthropic-sonnet
+      provider: anthropic
+      model: claude-sonnet-4-6
+      weight: 2
+      auth_env: NOMARMY_ANTHROPIC_API_KEY
+```
+
+Dispatch against a named pool with `local_worker`'s `pool` field (`pool: "cheap"`) instead of (or alongside) `profile` — omitting `pool` entirely preserves today's `profile`-only behavior byte for byte. Independent verification stays exactly as strict regardless of which provider produced a job's diff; nomArmy's whole trust boundary is "never trust the worker's self-report," which was already provider-agnostic before this existed.
+
+**Two honest gaps, not papered over.** First, `worker_cost_usd` in job metrics is best-effort: present in `agent exec`'s JSON envelope for at least some providers, but not confirmed reliable or nonzero across every provider type here — treat it as a hint, not an authoritative bill. Second, the exact registered provider id and model-catalog behavior for `anthropic`/`openai`/`xai`/`deepinfra`'s native onboarding flags is built on OpenClaw's documented `--help` output but has not been exercised against a real credential for every one of the four during this feature's own development — `nomarmy providers add`'s registration step says so directly and points you at `openclaw models list` to confirm before trusting a new provider type in production. (This is also why riding a Claude Pro/Max or ChatGPT Plus/Pro *subscription* isn't an option here: Anthropic now meters any automated/headless use as a separate, capped credit at API rates rather than free bonus capacity, and OpenAI's consumer subscription grants no API access at all — every provider above is a plain, metered API key.)
+
 ## The `nomarmy` CLI
 
 **Is there an `npm install nomarmy`?** No. The package is marked `"private": true` and is not published to the npm registry — there's nothing to `npm install -g nomarmy` from anywhere. What you get instead: clone the repo, then `npm install && npm link` inside it (the installer already does this for you as part of `install.sh`).
@@ -244,6 +290,7 @@ Every command below proposes before it writes anything, showing exactly what wou
 | `nomarmy setup` | Detects this machine, recommends a profile the same way `sizing` does, offers a model choice, and writes `config/profiles/<name>.env` (+ `config/common.env`). Prints the `install.sh` command; never runs it. |
 | `nomarmy init` | Proposes a `.nomarmy.yml` from this repository's scan evidence and writes it after confirmation. Never overwrites an existing one without `--force`. |
 | `nomarmy model` | Change the configured model later, without the rest of `setup`'s questions. Also updates the MCP registration's worker-routing env vars and offers to resync it right then. See [Swapping models](#swapping-models) above. |
+| `nomarmy providers list/add/remove/validate` | Manage `config/providers.yml`'s optional weighted multi-provider dispatch pools. See [Multi-provider dispatch pools](#multi-provider-dispatch-pools) above. |
 | `nomarmy update` | Pulls the latest nomArmy code (fast-forward only; refuses on local changes) and re-syncs the installed MCP copy for whichever coordinator(s) are already connected. |
 | `nomarmy connect [claude] [cursor] [codex]` | (Re-)registers the MCP server with one or more coordinators on its own — e.g. after installing one later. No target and not `--json` prompts an interactive multi-select. |
 | `nomarmy start` / `stop <profile>` | Starts/stops local inference (wraps `scripts/start-inference.sh` / `stop-inference.sh`). |

@@ -51,7 +51,9 @@ import {
   gitModeAtBase,
   resolveCleanupTarget,
   stripRuntimeJunk,
-  resolveWorkerSandboxOverride
+  resolveWorkerSandboxOverride,
+  resolvePoolSelection,
+  currentMaxPoolWorkers
 } from "../mcp/server.mjs";
 
 const report = ({ status = "done", tests = "pass", notDone = "none", note = "n/a" } = {}) =>
@@ -959,6 +961,25 @@ test("metrics: worker token usage and tool calls are read when OpenClaw supplies
   assert.equal(m.worker_tool_failures, 1);
   assert.equal(m.worker_model, "qwen3-coder-next");
   assert.equal(m.files_changed, null);
+});
+
+test("metrics: worker_provider surfaces OpenClaw's own reported provider, not just the model name", () => {
+  const m = buildMetrics({
+    result: { model: "claude-sonnet-4-6", provider: "anthropic", usage: { inputTokens: 10, outputTokens: 5 } },
+    record: null, reportValidation: null, outcome: null, workerElapsedMs: 10, totalElapsedMs: 20
+  });
+  assert.equal(m.worker_provider, "anthropic");
+});
+
+test("metrics: worker_cost_usd is read when OpenClaw supplies it, null otherwise", () => {
+  const withCost = buildMetrics({
+    result: { costUsd: 0.0042 }, record: null, reportValidation: null, outcome: null, workerElapsedMs: 1, totalElapsedMs: 2
+  });
+  assert.equal(withCost.worker_cost_usd, 0.0042);
+  const withoutCost = buildMetrics({
+    result: { model: "qwen3-coder-next" }, record: null, reportValidation: null, outcome: null, workerElapsedMs: 1, totalElapsedMs: 2
+  });
+  assert.equal(withoutCost.worker_cost_usd, null, "a provider that never reports cost must stay null, not fabricate 0");
 });
 
 test("metrics: a recovered, truncated job is visibly marked as such", () => {
@@ -2031,4 +2052,78 @@ test("resolveWorkerSandboxOverride: the written config file is not world/group r
   });
   const mode = fs.statSync(result).mode & 0o777;
   assert.equal(mode, 0o600, "a clone that may carry a real cloud credential must not be group/world readable");
+});
+
+// resolvePoolSelection / currentMaxPoolWorkers: `pool` (config/providers.yml)
+// is a second selector alongside `profile`, dropped into runOpenClaw's same
+// {model, thinking} seam. All three collaborators (dispatch config lookup,
+// the weighted picker, and the running-count map) are injected here -- this
+// never touches a real config/providers.yml or Math.random.
+
+function fakeDispatchConfig(pools) {
+  return { found: true, config: { pools } };
+}
+
+test("resolvePoolSelection: an llama-cpp entry with no model falls back to the global worker model/thinking, unchanged", () => {
+  const selection = resolvePoolSelection("cheap", "medium", {
+    getDispatchConfig: () => fakeDispatchConfig({ cheap: [{ id: "local", provider: "llama-cpp", weight: 1 }] }),
+    pickProviderFn: (pool) => pool[0],
+  });
+  // workerProvider/workerModel default to llama-cpp/qwen3-coder-next, and
+  // workerModelThinkingSupported defaults to false, in this test process's
+  // env -- matching profileConfig("coder", ...)'s own default behavior.
+  assert.equal(selection.model, "llama-cpp/qwen3-coder-next");
+  assert.equal(selection.thinking, "off");
+  assert.equal(selection.entry.id, "local");
+});
+
+test("resolvePoolSelection: a hosted entry composes <provider>/<model> and applies its own thinking flag", () => {
+  const selection = resolvePoolSelection("capable", "high", {
+    getDispatchConfig: () => fakeDispatchConfig({
+      capable: [{ id: "sonnet", provider: "anthropic", model: "claude-sonnet-4-6", weight: 1, auth_env: "X", thinking: true }],
+    }),
+    pickProviderFn: (pool) => pool[0],
+  });
+  assert.equal(selection.model, "anthropic/claude-sonnet-4-6");
+  assert.equal(selection.thinking, "high");
+});
+
+test("resolvePoolSelection: thinking:false on a hosted entry forces thinking off regardless of the requested reasoning", () => {
+  const selection = resolvePoolSelection("capable", "high", {
+    getDispatchConfig: () => fakeDispatchConfig({
+      capable: [{ id: "no-think", provider: "openai", model: "gpt-5.6-luna", weight: 1, auth_env: "X", thinking: false }],
+    }),
+    pickProviderFn: (pool) => pool[0],
+  });
+  assert.equal(selection.thinking, "off");
+});
+
+test("resolvePoolSelection: an unknown pool name throws, never silently falling back to profile/local", () => {
+  assert.throws(
+    () => resolvePoolSelection("typo", "medium", { getDispatchConfig: () => fakeDispatchConfig({ cheap: [] }) }),
+    /unknown pool "typo"/,
+  );
+});
+
+test("resolvePoolSelection: passes the live poolEntryRunningCounts snapshot through by default", () => {
+  // Not injecting runningById exercises the real default -- with nothing
+  // in flight, an empty object must not exclude anything.
+  const selection = resolvePoolSelection("cheap", "medium", {
+    getDispatchConfig: () => fakeDispatchConfig({ cheap: [{ id: "local", provider: "llama-cpp", weight: 1 }] }),
+    pickProviderFn: (pool, opts) => { assert.deepEqual(opts.runningById, {}); return pool[0]; },
+  });
+  assert.equal(selection.entry.id, "local");
+});
+
+test("currentMaxPoolWorkers: defaults to 4 with no override, matching the cloud-execution default elsewhere", () => {
+  delete process.env.NOMARMY_MAX_POOL_WORKERS;
+  assert.equal(currentMaxPoolWorkers(), 4);
+});
+
+test("currentMaxPoolWorkers: an explicit override is respected and clamped to [1,32]", () => {
+  process.env.NOMARMY_MAX_POOL_WORKERS = "12";
+  assert.equal(currentMaxPoolWorkers(), 12);
+  process.env.NOMARMY_MAX_POOL_WORKERS = "999";
+  assert.equal(currentMaxPoolWorkers(), 32);
+  delete process.env.NOMARMY_MAX_POOL_WORKERS;
 });
