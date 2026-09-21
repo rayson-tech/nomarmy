@@ -1287,7 +1287,7 @@ function usageMetrics(result) {
 // Only fields nomArmy can actually observe are populated. Anything it cannot
 // see stays null: a fabricated metric is worse than a missing one.
 // Elapsed times are milliseconds.
-export function buildMetrics({ result, record, reportValidation, outcome, workerElapsedMs, totalElapsedMs, regressionCheckElapsedMs }) {
+export function buildMetrics({ result, record, reportValidation, outcome, workerElapsedMs, totalElapsedMs, regressionCheckElapsedMs, transientAbortRetried = false }) {
   const tools = result?.toolSummary ?? null;
   const tests = record?.testChanges ?? null;
   const metrics = usageMetrics(result);
@@ -1309,6 +1309,11 @@ export function buildMetrics({ result, record, reportValidation, outcome, worker
     report_strict: reportValidation ? reportValidation.strict : null,
     report_recovered: outcome ? Boolean(outcome.recovered) : null,
     worker_timeout: outcome ? outcome.outcome === OUTCOMES.WORKER_TIMEOUT : null,
+    // Real money was spent twice for one useful attempt when this fires --
+    // see TRANSIENT_INFERENCE_ABORT_PATTERN's comment for why. Never
+    // inferred after the fact; only ever true when executeImplement itself
+    // actually triggered the retry.
+    worker_transient_abort_retried: transientAbortRetried,
     ...metrics,
     worker_tool_calls: intOrNull(tools?.calls ?? tools?.total ?? tools?.count),
     worker_tool_failures: intOrNull(tools?.failures),
@@ -1440,12 +1445,50 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
       workerStopReason = error.stopReason ?? null;
       workerError = error.stack || error.message;
     }
-    const workerElapsedMs = Date.now() - workerStartedMs;
+    let workerElapsedMs = Date.now() - workerStartedMs;
     if (result && (result.timedOut === true || result.status === "timeout" || result.status === "timed_out")) workerTimedOut = true;
 
-    const finishedAt = new Date().toISOString();
     let report = workerFailed ? "" : finalText(result);
     let reportValidation = parseWorkerReport(report);
+
+    // A syntactically VALID report saying STATUS: blocked, paired with this
+    // exact job's own stderr showing the transient dropped-connection
+    // signature (see TRANSIENT_INFERENCE_ABORT_PATTERN's comment), gets one
+    // fresh retry at the full task -- not the report-recovery path just
+    // below, which only resumes an existing session to finish ITS report;
+    // an interrupted turn has no useful state left to resume, so this is a
+    // genuinely new attempt. Bounded by whatever time actually remains in
+    // this job's own overall timeout, so a retry can never make a job run
+    // longer than the caller originally asked for.
+    let transientAbortRetried = false;
+    let stderrText = "";
+    try { stderrText = fs.readFileSync(path.join(jobDir, "openclaw.stderr.log"), "utf8"); } catch { /* best effort */ }
+    const remainingSeconds = timeBudget.workTimeoutSeconds - Math.round(workerElapsedMs / 1000);
+    if (shouldRetryTransientAbort({ workerFailed, reportValidation, stderrText, remainingSeconds })) {
+      transientAbortRetried = true;
+      fs.appendFileSync(path.join(jobDir, "coordinator.log"),
+        `${new Date().toISOString()} transient inference abort detected (dropped connection mid-stream, not a genuine block) -- retrying the work call once, ${remainingSeconds}s remaining\n`);
+      try {
+        const retryResult = await runOpenClaw({
+          task, acceptance, verification, mode, cwd, baseRef: base.ref, baseSha: base.sha,
+          timeoutSeconds: remainingSeconds, runtimeDir, profile, reasoning, pool, jobDir, workerId: workerId || jobId, evidence,
+          idleDiff: { idleMs: timeBudget.idleBreakSeconds * 1000, minElapsedMs: timeBudget.idleMinElapsedSeconds * 1000, pollSeconds: timeBudget.idlePollSeconds },
+          logSuffix: "-transient-retry",
+        });
+        result = retryResult;
+        report = finalText(result);
+        reportValidation = parseWorkerReport(report);
+      } catch (error) {
+        // The retry attempt itself failing is a real result -- fall
+        // through with the ORIGINAL blocked report, not this error,
+        // since that report is still the best evidence of what
+        // actually happened; the coordinator log already has both.
+        fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} transient-abort retry itself failed: ${error.stack || error.message}\n`);
+      }
+      workerElapsedMs = Date.now() - workerStartedMs;
+    }
+
+    const finishedAt = new Date().toISOString();
 
     // The run left nothing parseable: either it finished (no crash, no
     // timeout) but OpenClaw's own opaque per-turn output budget cut the reply
@@ -1578,7 +1621,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
         : `report-recovery follow-up call did not produce a usable report either (${cause})`);
     }
 
-    const metrics = buildMetrics({ result, record, reportValidation, outcome: finalOutcome, workerElapsedMs, totalElapsedMs: Date.now() - jobStartedMs, regressionCheckElapsedMs });
+    const metrics = buildMetrics({ result, record, reportValidation, outcome: finalOutcome, workerElapsedMs, totalElapsedMs: Date.now() - jobStartedMs, regressionCheckElapsedMs, transientAbortRetried });
     const manifest = { version: VERSION, jobId, workerId: workerId || jobId, mode, projectDir, worktree, branch, startedAt, finishedAt,
       objective: task, acceptance: acceptance ?? [], verificationProfile: verification ?? null,
       outcome: finalOutcome.outcome, recovered: finalOutcome.recovered, recoveryAttempted: finalOutcome.recoveryAttempted,
@@ -1977,6 +2020,66 @@ const WORKER_START_STAGGER_MS = Number.parseInt(process.env.NOMARMY_WORKER_START
 const SANDBOX_PROVISIONING_RETRY_PATTERN = /SandboxProvisioningError|crun:\s*mount\s*`?devpts`?/i;
 const MAX_SANDBOX_PROVISIONING_RETRIES = 2;
 const SANDBOX_PROVISIONING_RETRY_DELAY_MS = 2000;
+
+// A DIFFERENT failure shape from the sandbox-provisioning race above:
+// verified live against a real xai/grok-4.6 job (worker-20260921-122021-
+// eb7f67), OpenClaw can absorb a dropped connection mid-stream internally
+// -- no thrown error the try/catch around runOpenClaw's call would ever
+// see, no nonzero exit -- and still produce a perfectly VALID STATUS:
+// blocked report, because the interrupted turn had no tool result left to
+// finish the task from. That job's own stderr showed the model's prior 14
+// calls all completing normally (200, sub-second each), then one call
+// erroring with no HTTP status or error code at all
+// (`message=Request was aborted`) -- the signature of a dropped/reset
+// connection mid-stream, not a documented provider error, not a genuine
+// content/logic failure. Real money was billed for the aborted call's own
+// tokens ($0.27, zero files touched). withSandboxProvisioningRetry can't
+// catch this at all, since nothing threw -- this pattern is checked
+// separately, against the job's own stderr log, after a report comes back
+// syntactically valid but says STATUS: blocked (see executeImplement).
+// Narrowly scoped to the one pattern actually observed, the same
+// "diagnosed-transient case only" discipline SANDBOX_PROVISIONING_RETRY_PATTERN
+// already uses -- broadens only as more real failure modes are actually seen.
+const TRANSIENT_INFERENCE_ABORT_PATTERN = /\[responses\]\s*error[^\n]*\bmessage=Request was aborted\b/i;
+// Retrying a full work call is far more expensive than retrying a quick
+// sandbox-provisioning check (a whole task attempt, not a container start)
+// -- capped at exactly one retry by construction (executeImplement's own
+// single `if`, not a loop), not MAX_SANDBOX_PROVISIONING_RETRIES's two.
+//
+// Below this much remaining budget, a retry attempt would likely just be
+// cut off again by the job's own timeout -- skip it and accept the
+// original blocked outcome rather than spend more without a real chance to
+// finish.
+const MIN_TRANSIENT_INFERENCE_RETRY_SECONDS = 60;
+
+/** True if `stderrText` shows the specific dropped-connection signature
+ * TRANSIENT_INFERENCE_ABORT_PATTERN documents. Exported for direct,
+ * dependency-free testing. */
+export function looksLikeTransientInferenceAbort(stderrText) {
+  return TRANSIENT_INFERENCE_ABORT_PATTERN.test(stderrText || "");
+}
+
+/**
+ * The full retry decision, as pure logic separate from executeImplement's
+ * actual side effects (the retried runOpenClaw call, the log write) --
+ * exported so this decision is directly testable without needing to mock
+ * the whole worker-dispatch flow. True only when ALL of: the worker
+ * process itself didn't fail (a genuine crash/timeout is a different,
+ * already-handled case), the report it produced is syntactically valid
+ * (an invalid/missing report is the existing report-RECOVERY path's job,
+ * not this one's), STATUS is specifically "blocked" (not partial or done
+ * -- this never second-guesses a report that already claims success or
+ * partial progress), this exact call's own stderr shows the transient
+ * dropped-connection signature, and there's still enough of the job's own
+ * timeout left for a retry to have a real chance to finish.
+ */
+export function shouldRetryTransientAbort({ workerFailed, reportValidation, stderrText, remainingSeconds }) {
+  return !workerFailed
+    && Boolean(reportValidation?.valid)
+    && reportValidation?.fields?.STATUS === "blocked"
+    && looksLikeTransientInferenceAbort(stderrText)
+    && remainingSeconds >= MIN_TRANSIENT_INFERENCE_RETRY_SECONDS;
+}
 
 /**
  * Runs `fn`, retrying only on the diagnosed-transient crun/devpts sandbox

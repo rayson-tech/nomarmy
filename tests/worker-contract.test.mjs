@@ -56,7 +56,9 @@ import {
   currentMaxPoolWorkers,
   splitJobsByLane,
   runningCount,
-  track
+  track,
+  looksLikeTransientInferenceAbort,
+  shouldRetryTransientAbort
 } from "../mcp/server.mjs";
 
 const report = ({ status = "done", tests = "pass", notDone = "none", note = "n/a" } = {}) =>
@@ -2197,4 +2199,103 @@ test("runningCount(lane): correctly isolates 'local' and 'pool' entries tracked 
   assert.ok(before.all >= 2, "no-arg counts every lane together");
   assert.equal(runningCount("local"), 0, "settled entries must not still count as running");
   assert.equal(runningCount("pool"), 0);
+});
+
+// looksLikeTransientInferenceAbort / shouldRetryTransientAbort: closes a
+// real, live-observed gap where OpenClaw absorbed a dropped connection
+// mid-stream internally (no thrown error withSandboxProvisioningRetry could
+// ever see, no nonzero exit) and still produced a perfectly valid STATUS:
+// blocked report -- real money billed ($0.27, worker-20260921-122021-eb7f67,
+// xai/grok-4.6) for zero useful output, with nothing retrying it.
+
+// The exact real line captured from that job's own openclaw.stderr.log,
+// ANSI color codes included -- proof this matches the actual observed
+// failure, not just a clean synthetic string.
+const REAL_TRANSIENT_ABORT_LINE = '\u001b[36m[openai-transport]\u001b[39m \u001b[33m[responses] error provider=xai api=openai-responses model=grok-4.6 name=Error status=undefined code=undefined type=undefined causeName=undefined causeCode=undefined message=Request was aborted\u001b[39m';
+
+test("looksLikeTransientInferenceAbort: matches the exact real line captured from the live incident that motivated this", () => {
+  assert.equal(looksLikeTransientInferenceAbort(REAL_TRANSIENT_ABORT_LINE), true);
+  assert.equal(looksLikeTransientInferenceAbort(`some earlier log output\n${REAL_TRANSIENT_ABORT_LINE}\nsome later log output`), true, "must match anywhere in a multi-line log, not just a bare string");
+});
+
+test("looksLikeTransientInferenceAbort: does not match a normal successful call's log line", () => {
+  const successLine = "[provider-transport-fetch] [model-fetch] response provider=xai api=openai-responses model=grok-4.6 status=200 elapsedMs=463 dispatcher=reused contentType=text/event-stream";
+  assert.equal(looksLikeTransientInferenceAbort(successLine), false);
+});
+
+test("looksLikeTransientInferenceAbort: does not match an unrelated real error (must not over-match and retry things it shouldn't)", () => {
+  assert.equal(looksLikeTransientInferenceAbort("[responses] error provider=xai status=429 code=rate_limit_exceeded message=Too many requests"), false);
+  assert.equal(looksLikeTransientInferenceAbort(""), false);
+  assert.equal(looksLikeTransientInferenceAbort(undefined), false);
+  assert.equal(looksLikeTransientInferenceAbort(null), false);
+});
+
+test("shouldRetryTransientAbort: true only when every condition holds at once (the real incident's exact shape)", () => {
+  assert.equal(shouldRetryTransientAbort({
+    workerFailed: false,
+    reportValidation: { valid: true, fields: { STATUS: "blocked" } },
+    stderrText: REAL_TRANSIENT_ABORT_LINE,
+    remainingSeconds: 755,
+  }), true);
+});
+
+test("shouldRetryTransientAbort: false if the worker process itself failed/crashed -- that's a different, already-handled case", () => {
+  assert.equal(shouldRetryTransientAbort({
+    workerFailed: true,
+    reportValidation: { valid: true, fields: { STATUS: "blocked" } },
+    stderrText: REAL_TRANSIENT_ABORT_LINE,
+    remainingSeconds: 755,
+  }), false);
+});
+
+test("shouldRetryTransientAbort: false if the report is invalid -- that's the existing report-recovery path's job, not this one's", () => {
+  assert.equal(shouldRetryTransientAbort({
+    workerFailed: false,
+    reportValidation: { valid: false, fields: {} },
+    stderrText: REAL_TRANSIENT_ABORT_LINE,
+    remainingSeconds: 755,
+  }), false);
+});
+
+test("shouldRetryTransientAbort: false if STATUS is done or partial -- never second-guesses a report that already claims progress", () => {
+  for (const status of ["done", "partial"]) {
+    assert.equal(shouldRetryTransientAbort({
+      workerFailed: false,
+      reportValidation: { valid: true, fields: { STATUS: status } },
+      stderrText: REAL_TRANSIENT_ABORT_LINE,
+      remainingSeconds: 755,
+    }), false, `STATUS: ${status} must never trigger a retry`);
+  }
+});
+
+test("shouldRetryTransientAbort: false if the abort signature isn't actually present -- a genuinely blocked job must not get retried just because it's blocked", () => {
+  assert.equal(shouldRetryTransientAbort({
+    workerFailed: false,
+    reportValidation: { valid: true, fields: { STATUS: "blocked" } },
+    stderrText: "no unusual log content here",
+    remainingSeconds: 755,
+  }), false);
+});
+
+test("shouldRetryTransientAbort: false when too little of the job's own timeout remains for a retry to have a real chance", () => {
+  assert.equal(shouldRetryTransientAbort({
+    workerFailed: false,
+    reportValidation: { valid: true, fields: { STATUS: "blocked" } },
+    stderrText: REAL_TRANSIENT_ABORT_LINE,
+    remainingSeconds: 30,
+  }), false);
+  // exactly at the floor is still allowed
+  assert.equal(shouldRetryTransientAbort({
+    workerFailed: false,
+    reportValidation: { valid: true, fields: { STATUS: "blocked" } },
+    stderrText: REAL_TRANSIENT_ABORT_LINE,
+    remainingSeconds: 60,
+  }), true);
+});
+
+test("metrics: worker_transient_abort_retried defaults to false and is only ever true when explicitly passed", () => {
+  const withoutRetry = buildMetrics({ result: null, record: null, reportValidation: null, outcome: null, workerElapsedMs: 1, totalElapsedMs: 2 });
+  assert.equal(withoutRetry.worker_transient_abort_retried, false);
+  const withRetry = buildMetrics({ result: null, record: null, reportValidation: null, outcome: null, workerElapsedMs: 1, totalElapsedMs: 2, transientAbortRetried: true });
+  assert.equal(withRetry.worker_transient_abort_retried, true);
 });
