@@ -282,6 +282,70 @@ test("connectClaude: config/common.env's model keys are added even with no prior
   }
 });
 
+// extraEnv: the mechanism `nomarmy providers add --update-mcp` uses to bake
+// a pool entry's auth_env NAME into the registration as a placeholder --
+// the one path guaranteed to reach the MCP server's own process.env
+// regardless of shell/launch-method timing (see lib/connect.mjs's own
+// comment on this parameter for why "just export it in your shell" isn't
+// reliable).
+test("connectClaude: extraEnv bakes a new key into the registration alongside everything else", () => {
+  const nomarmyRoot = fakeRoot();
+  const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
+  const calls = [];
+  try {
+    connectClaude({ nomarmyRoot, installDir, extraEnv: { NOMARMY_XAI_API_KEY: "registered" }, run: (cmd, args) => { calls.push([cmd, ...args].join(" ")); return ""; } });
+    const addCall = calls.find((c) => c.includes("mcp add"));
+    assert.match(addCall, /-e NOMARMY_XAI_API_KEY=registered/);
+  } finally {
+    fs.rmSync(nomarmyRoot, { recursive: true, force: true });
+    fs.rmSync(installDir, { recursive: true, force: true });
+  }
+});
+
+test("connectClaude: a key baked in by a PRIOR extraEnv connect survives a later reinstall with no extraEnv at all", () => {
+  // Mirrors the existing "preserves an existing registration's environment
+  // variables" test's own pattern: a fixed `claude mcp get` response stands
+  // in for whatever a prior connect (here, one that used extraEnv) already
+  // registered -- extraEnv is a one-time bake-in, not something that must
+  // be re-passed on every subsequent connect for it to stick.
+  const nomarmyRoot = fakeRoot();
+  const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
+  const calls = [];
+  const existingEnvOutput = ["nomarmy-local-worker:", "  Environment:", "    NOMARMY_XAI_API_KEY=registered", ""].join("\n");
+  try {
+    connectClaude({
+      nomarmyRoot, installDir,
+      run: (cmd, args) => {
+        calls.push([cmd, ...args].join(" "));
+        if (cmd === "claude" && args[0] === "mcp" && args[1] === "get") return existingEnvOutput;
+        return "";
+      },
+    });
+    const addCall = calls.find((c) => c.includes("mcp add"));
+    assert.match(addCall, /-e NOMARMY_XAI_API_KEY=registered/);
+  } finally {
+    fs.rmSync(nomarmyRoot, { recursive: true, force: true });
+    fs.rmSync(installDir, { recursive: true, force: true });
+  }
+});
+
+test("connectClaude: config/common.env's derived keys still win over extraEnv on a real collision", () => {
+  const nomarmyRoot = fakeRoot();
+  fs.mkdirSync(path.join(nomarmyRoot, "config"), { recursive: true });
+  fs.writeFileSync(path.join(nomarmyRoot, "config", "common.env"), "NOMARMY_WORKER_MODEL=qwen3-coder-next\n");
+  const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
+  const calls = [];
+  try {
+    connectClaude({ nomarmyRoot, installDir, extraEnv: { NOMARMY_WORKER_MODEL: "should-not-win" }, run: (cmd, args) => { calls.push([cmd, ...args].join(" ")); return ""; } });
+    const addCall = calls.find((c) => c.includes("mcp add"));
+    assert.match(addCall, /-e NOMARMY_WORKER_MODEL=qwen3-coder-next/);
+    assert.doesNotMatch(addCall, /should-not-win/);
+  } finally {
+    fs.rmSync(nomarmyRoot, { recursive: true, force: true });
+    fs.rmSync(installDir, { recursive: true, force: true });
+  }
+});
+
 test("connectCodex: installs the copy, best-effort removes old registrations, adds and lists", () => {
   const nomarmyRoot = fakeRoot();
   const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));

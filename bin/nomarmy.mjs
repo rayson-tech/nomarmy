@@ -91,7 +91,18 @@ Usage: nomarmy <command> [options]
                   add       interactive wizard to add one entry to a pool
                             (or --json --pool --provider --id [--model]
                             [--auth-env] [--base-url] [--weight]
-                            [--max-concurrent] [--no-thinking])
+                            [--max-concurrent] [--no-thinking] [--register]
+                            [--update-mcp])
+                            --register    also register the credential with
+                                          OpenClaw right away (needs
+                                          auth_env set in this shell)
+                            --update-mcp  bake auth_env's NAME into the
+                                          Claude Code MCP registration as a
+                                          placeholder, so dispatch sees it's
+                                          configured regardless of shell/
+                                          launch-method timing (never the
+                                          real credential -- that only ever
+                                          lives in OpenClaw's own store)
                   remove <pool> <id>
                             remove one entry (or the whole pool if now empty)
                   validate  check config/providers.yml against the schema
@@ -905,7 +916,21 @@ async function cmdProvidersAdd() {
 
   if (json) {
     const registered = flag("register") ? registerProviderWithOpenClaw(written) : null;
-    return out({ written: configPath, pool: poolName, entry: written, registered });
+    // A pool entry's auth_env is only ever checked for TRUTHINESS by the MCP
+    // server (see lib/dispatch-config.mjs's availableEntries) -- the real
+    // credential already lives in OpenClaw's own store from registration
+    // above. But that check runs inside the server's OWN process.env, which
+    // is whatever was baked into its registration, not whatever an operator
+    // happens to have exported in some shell. --update-mcp bakes a
+    // placeholder value in directly (same destructive-under-json-needs-
+    // explicit-flag rule as `model --update-mcp`), the one path guaranteed
+    // to reach the server regardless of shell/launch-method timing.
+    let mcpUpdated = false;
+    if (flag("update-mcp") && written.auth_env) {
+      connectClaude({ nomarmyRoot, run: (cmd, args2, opts = {}) => execFileSync(cmd, args2, { stdio: "ignore", ...opts }), extraEnv: { [written.auth_env]: "registered" } });
+      mcpUpdated = true;
+    }
+    return out({ written: configPath, pool: poolName, entry: written, registered, mcpUpdated });
   }
 
   console.log(c.green(`\n✓ Wrote ${path.relative(nomarmyRoot, configPath)} -- pool "${poolName}" now has ${nextPools[poolName].length} entr${nextPools[poolName].length === 1 ? "y" : "ies"}.`));
@@ -916,13 +941,31 @@ async function cmdProvidersAdd() {
       const answer = (await rl2.question(c.bold(`\nRegister "${id}" with OpenClaw now? [y/N] `))).trim().toLowerCase();
       if (answer === "y" || answer === "yes") registerProviderWithOpenClaw({ ...written, apiKeyOverride: providedApiKey });
       else console.log(c.dim(`Skipped -- this entry can't actually dispatch until it's registered. Rerun \`nomarmy providers add\` isn't needed for that; ask a maintainer for the equivalent \`openclaw onboard\`/\`openclaw models auth paste-api-key\` commands, or answer yes next time.`));
+
+      // A SEPARATE question from OpenClaw registration above: even fully
+      // registered, this entry stays invisible to dispatch until the MCP
+      // server's OWN process.env has auth_env set to something truthy --
+      // exporting it in a terminal has no reliable path to that server
+      // process (a GUI-launched Claude Code never inherited it in the
+      // first place; a terminal-launched one only did if it happened to be
+      // exported before that specific launch). Baking it into the
+      // registration itself is the one mechanism guaranteed to reach it.
+      if (written.auth_env && commandExists("claude")) {
+        const mcpAnswer = (await rl2.question(c.bold(`\nAlso add ${written.auth_env} to the Claude Code MCP registration now, so dispatch actually sees it's configured? [y/N] `))).trim().toLowerCase();
+        if (mcpAnswer === "y" || mcpAnswer === "yes") {
+          connectClaude({ nomarmyRoot, run: (cmd, args2, opts = {}) => execFileSync(cmd, args2, { stdio: "inherit", ...opts }), extraEnv: { [written.auth_env]: "registered" } });
+          console.log(c.green(`✓ MCP registration updated with a placeholder for ${written.auth_env}.`) + " The real credential is never stored here -- only OpenClaw's own credential store holds it.");
+        } else {
+          console.log(c.dim(`Skipped -- until ${written.auth_env} is set in the MCP server's own environment, this entry is invisible to dispatch (auth-missing, same as before it was registered).`));
+        }
+      }
     } finally {
       rl2.close();
     }
   }
 
   console.log(c.dim("\nRun `nomarmy providers list` to see the full picture."));
-  console.log(c.yellow("Restart your Claude Code / Codex session to pick this up -- config/providers.yml is read once per MCP server process."));
+  console.log(c.yellow("Restart your Claude Code / Codex session to pick this up -- both config/providers.yml and the MCP registration are read once per MCP server process."));
 }
 
 async function cmdProviders() {

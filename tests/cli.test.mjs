@@ -168,18 +168,36 @@ test("sizing --noms an unreasonable count reports fits:false, not a crash or a s
 // bin/+lib/+package.json (node_modules symlinked, not copied, to stay fast)
 // so a test run never touches this actual repository's own files.
 
-test("providers list --json against this real repo (no config/providers.yml shipped) reports found:false", () => {
-  const result = execFileSync(process.execPath, [CLI_PATH, "providers", "list", "--json"], { encoding: "utf8" });
-  const output = JSON.parse(result);
-  assert.equal(output.found, false);
-  assert.deepEqual(output.pools, {});
+// A scratch root, not CLI_PATH/the real checkout directly: config/
+// providers.yml is real, local, operator-written config (gitignored, not
+// shipped) -- running these against the actual repo would pass or fail
+// depending on whatever this developer happens to have configured on their
+// own machine, which is exactly the kind of test flakiness a scratch root
+// avoids.
+test("providers list --json with no config/providers.yml reports found:false", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { exitCode, stdout } = runProvidersCLI(root, ["list", "--json"]);
+    assert.equal(exitCode, 0, stdout);
+    const output = JSON.parse(stdout);
+    assert.equal(output.found, false);
+    assert.deepEqual(output.pools, {});
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
-test("providers validate --json against this real repo reports valid:true, found:false", () => {
-  const result = execFileSync(process.execPath, [CLI_PATH, "providers", "validate", "--json"], { encoding: "utf8" });
-  const output = JSON.parse(result);
-  assert.equal(output.valid, true);
-  assert.equal(output.found, false);
+test("providers validate --json with no config/providers.yml reports valid:true, found:false", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { exitCode, stdout } = runProvidersCLI(root, ["validate", "--json"]);
+    assert.equal(exitCode, 0, stdout);
+    const output = JSON.parse(stdout);
+    assert.equal(output.valid, true);
+    assert.equal(output.found, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 function scratchNomarmyRoot() {
