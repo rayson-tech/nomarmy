@@ -16,7 +16,7 @@ import {
   resolvePool,
   stringifyDispatchConfig,
 } from "../lib/dispatch-config.mjs";
-import { dispatchConfigSchema, formatDispatchIssues } from "../lib/dispatch-schema.mjs";
+import { dispatchConfigSchema, formatDispatchIssues, findReservedPoolName } from "../lib/dispatch-schema.mjs";
 
 const tempDirs = [];
 
@@ -153,6 +153,33 @@ test("loadDispatchConfig: an empty file is treated as an empty document, not a c
   assert.throws(() => loadDispatchConfig(root), /pools/);
 });
 
+// Regression: z.record() silently drops a key literally named "__proto__"
+// (no prototype pollution results, but the pool and every entry in it
+// vanish with zero validation error -- the opposite of this schema's own
+// "unrecognized field is a hard error" rule). Caught explicitly, before
+// schema validation, on the raw parsed object's own keys.
+test("findReservedPoolName: detects __proto__/constructor/prototype as pool names", () => {
+  // A `{ __proto__: [] }` OBJECT LITERAL sets the prototype instead of
+  // creating an own property (JS's own special-cased literal syntax) --
+  // JSON.parse (like YAML.parse) does not have that special case, and
+  // produces a genuine own property, which is the actual shape this guards
+  // against.
+  const withProto = JSON.parse('{"pools": {"__proto__": []}}');
+  assert.equal(findReservedPoolName(withProto), "__proto__");
+  assert.equal(findReservedPoolName({ pools: { cheap: [] } }), null);
+  assert.equal(findReservedPoolName({}), null);
+  assert.equal(findReservedPoolName(null), null);
+});
+
+test("loadDispatchConfig: a pool literally named __proto__ is a clear DispatchConfigError, not a silent empty pools object", () => {
+  const root = tempNomarmyRoot("pools:\n  __proto__:\n    - id: x\n      provider: llama-cpp\n      weight: 1\n");
+  assert.throws(() => loadDispatchConfig(root), (error) => {
+    assert.ok(error instanceof DispatchConfigError);
+    assert.ok(error.errors.some((line) => line.includes("reserved")));
+    return true;
+  });
+});
+
 // --------------------------------------------------------------------------
 // availableEntries / pickProvider / resolvePool
 // --------------------------------------------------------------------------
@@ -203,6 +230,41 @@ test("pickProvider: throws a clear, actionable error when nothing in the pool is
   assert.throws(() => pickProvider(pool, { rng: () => 0 }), /no provider in this pool has its auth_env set/);
 });
 
+// Regression: pickProvider used to accept `runningById` but never actually
+// look at it, so an entry's own max_concurrent was pure documentation with
+// zero real enforcement. Verified here against a direct repro of that gap.
+test("pickProvider: an entry at its max_concurrent is excluded, even though it's authenticated", () => {
+  const pool = [
+    { id: "a", provider: "llama-cpp", weight: 1, max_concurrent: 1 },
+    { id: "b", provider: "llama-cpp", weight: 1, max_concurrent: 1 },
+  ];
+  // 'a' is already at its cap of 1; only 'b' may be picked, regardless of rng.
+  const picked = pickProvider(pool, { rng: () => 0, runningById: { a: 5, b: 0 } });
+  assert.equal(picked.id, "b");
+});
+
+test("pickProvider: every authenticated entry at its cap throws a distinct, capacity-specific error", () => {
+  const pool = [
+    { id: "a", provider: "llama-cpp", weight: 1, max_concurrent: 1 },
+    { id: "b", provider: "llama-cpp", weight: 1, max_concurrent: 2 },
+  ];
+  assert.throws(
+    () => pickProvider(pool, { rng: () => 0, runningById: { a: 1, b: 2 } }),
+    /already at its max_concurrent limit/,
+  );
+});
+
+test("pickProvider: an entry with no max_concurrent set is never excluded on capacity grounds", () => {
+  const pool = [{ id: "unbounded", provider: "llama-cpp", weight: 1 }];
+  const picked = pickProvider(pool, { rng: () => 0, runningById: { unbounded: 999 } });
+  assert.equal(picked.id, "unbounded");
+});
+
+test("pickProvider: with no runningById supplied at all, capacity never excludes anything (default stays permissive)", () => {
+  const pool = [{ id: "a", provider: "llama-cpp", weight: 1, max_concurrent: 1 }];
+  assert.equal(pickProvider(pool, { rng: () => 0 }).id, "a");
+});
+
 test("resolvePool: an unknown pool name lists the pools that DO exist", () => {
   const dispatchConfig = { found: true, config: { pools: { cheap: [{ id: "local", provider: "llama-cpp", weight: 1 }] } } };
   assert.throws(() => resolvePool(dispatchConfig, "typo"), /unknown pool "typo" -- configured pools are: cheap/);
@@ -216,6 +278,18 @@ test("resolvePool: no pools configured at all points at `nomarmy providers add`"
 test("resolvePool: a real hit returns the pool's entries", () => {
   const dispatchConfig = { found: true, config: { pools: { cheap: [{ id: "local", provider: "llama-cpp", weight: 1 }] } } };
   assert.deepEqual(resolvePool(dispatchConfig, "cheap"), [{ id: "local", provider: "llama-cpp", weight: 1 }]);
+});
+
+// Regression: `pools?.["__proto__"]` on a plain object returns
+// Object.prototype itself -- truthy, even though no such pool was ever
+// configured (a real config/providers.yml can never legitimately declare
+// one; loadDispatchConfig rejects it at load time). A job's `pool` field
+// passes jobSchema's own regex fine for this exact string, so this must
+// throw the normal "unknown pool" error, not crash downstream in
+// pickProvider with "pool.filter is not a function".
+test("resolvePool: a job requesting pool \"__proto__\" gets the normal unknown-pool error, not a crash", () => {
+  const dispatchConfig = { found: true, config: { pools: { cheap: [{ id: "local", provider: "llama-cpp", weight: 1 }] } } };
+  assert.throws(() => resolvePool(dispatchConfig, "__proto__"), /unknown pool "__proto__" -- configured pools are: cheap/);
 });
 
 test("stringifyDispatchConfig round-trips through loadDispatchConfig", () => {

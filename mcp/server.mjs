@@ -531,7 +531,17 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
       );
       fs.writeFileSync(path.join(jobDir, `openclaw${logSuffix}.stdout.log`), stdout + "\n");
       fs.writeFileSync(path.join(jobDir, `openclaw${logSuffix}.stderr.log`), stderr + "\n");
-      try { return JSON.parse(stdout); } catch { throw new Error(`OpenClaw returned invalid JSON:\n${stdout}`); }
+      let parsed;
+      try { parsed = JSON.parse(stdout); } catch { throw new Error(`OpenClaw returned invalid JSON:\n${stdout}`); }
+      // OpenClaw's own envelope does not reliably include `provider` for
+      // every backend (observed directly during this feature's own testing).
+      // Backfilling it HERE, from what nomArmy itself just selected, is the
+      // only place that actually knows the right answer -- buildMetrics
+      // falling back to the single global workerProvider would silently
+      // misattribute a pool-routed job (e.g. one that really ran on
+      // "anthropic") to whatever the ambient default happens to be.
+      if (!parsed.provider) parsed.provider = selected.entry?.provider ?? workerProvider;
+      return parsed;
     } catch (error) {
       fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} OpenClaw failure${logSuffix}\n${error.stack || error.message}\n`);
       throw error;
@@ -1305,8 +1315,12 @@ export function buildMetrics({ result, record, reportValidation, outcome, worker
     worker_model: result?.model ?? execution.workerModel ?? null,
     // Was already read into workerMetadata() above but discarded before
     // reaching here -- every pool-routed job's actual provider is now
-    // visible in job metrics, not just its model name.
-    worker_provider: result?.provider ?? execution.workerProvider ?? null,
+    // visible in job metrics, not just its model name. runOpenClaw already
+    // backfills this from the entry it actually selected whenever
+    // OpenClaw's own envelope omits it, so this must NOT also fall back to
+    // the single global execution.workerProvider here -- that would
+    // silently misattribute a pool-routed job to the wrong provider.
+    worker_provider: result?.provider ?? null,
     // Best-effort: present in `agent exec --json`'s envelope for at least
     // some providers (observed directly during this feature's own live
     // testing), but not confirmed reliable/nonzero across every provider
@@ -2014,7 +2028,7 @@ const activeJobs = new Map();
 // local-slot admission check below must only ever count the local lane: a
 // pool-routed job's actual inference runs on someone else's hardware and
 // was never competing for llama-server's own slots in the first place.
-function runningCount(lane = null) {
+export function runningCount(lane = null) {
   const entries = [...activeJobs.values()].filter(j => !j.settled);
   return lane ? entries.filter(j => j.lane === lane).length : entries.length;
 }
@@ -2027,7 +2041,19 @@ function runningCount(lane = null) {
 export function currentMaxPoolWorkers() {
   return clampInt(process.env.NOMARMY_MAX_POOL_WORKERS, 1, 32, 4);
 }
-function track(jobId, meta, promise) {
+// Pure partition of a batch's ORIGINAL indices by lane -- pulled out of
+// local_workers' handler so this specific invariant (every job lands in
+// exactly one lane, indices preserved) is directly testable without also
+// exercising the full async dispatch/mapLimit machinery around it. This is
+// the exact split that used to not exist at all: every job in a batch
+// shared one `parallel` slot count derived only from the local ceiling,
+// which let an all-pool batch ignore NOMARMY_MAX_POOL_WORKERS entirely.
+export function splitJobsByLane(jobs) {
+  const localIndices = [], poolIndices = [];
+  jobs.forEach((j, i) => (j.pool ? poolIndices : localIndices).push(i));
+  return { localIndices, poolIndices };
+}
+export function track(jobId, meta, promise) {
   const entry = { ...meta, jobId, startedAt: new Date().toISOString(), settled: false, result: null, error: null, promise: null };
   entry.promise = promise.then(r => { entry.settled = true; entry.result = r; return r; }, e => { entry.settled = true; entry.error = e; throw e; });
   entry.promise.catch(() => {});
@@ -2254,12 +2280,30 @@ server.tool("local_workers", "Run independent jobs (implement or scout) with bou
   }
   if (problems.length) return refusal(problems);
   const batchId = slug("batch"), startedAt = new Date().toISOString();
-  const parallel = Math.max(1, Math.min(max_parallel, currentMaxWorkers() - runningCount()));
-  const results = await mapLimit(jobs, parallel, (j, i) => {
-    const workerId = j.worker_id || `${batchId}-w${i + 1}`, jobId = slug(workerId);
-    const effectiveJob = auto_union ? { ...j, base_ref: forcedBase.sha } : j;
-    return track(jobId, { mode: j.mode, workerId }, executeJob({ ...jobArgs(effectiveJob, workerId), jobId })).promise;
-  }, { staggerMs: WORKER_START_STAGGER_MS });
+  // Local and pool jobs draw from two independent ceilings (currentMaxWorkers
+  // vs currentMaxPoolWorkers) for the same reason admit() checks them
+  // separately -- a single shared `parallel` slot count derived only from
+  // the local ceiling let an all-pool batch ignore NOMARMY_MAX_POOL_WORKERS
+  // entirely. Each lane gets its own mapLimit call so its own ceiling is the
+  // one actually enforced; results are scattered back into one array in the
+  // caller's original order (mapLimit is itself index-preserving, so this is
+  // just choosing which lane's mapLimit each original index belongs to).
+  const results = new Array(jobs.length);
+  const dispatchLane = async (indices, limit) => {
+    if (!indices.length) return;
+    const laneJobs = indices.map((i) => jobs[i]);
+    const laneResults = await mapLimit(laneJobs, limit, (j, laneI) => {
+      const i = indices[laneI];
+      const workerId = j.worker_id || `${batchId}-w${i + 1}`, jobId = slug(workerId);
+      const effectiveJob = auto_union ? { ...j, base_ref: forcedBase.sha } : j;
+      return track(jobId, { mode: j.mode, workerId }, executeJob({ ...jobArgs(effectiveJob, workerId), jobId })).promise;
+    }, { staggerMs: WORKER_START_STAGGER_MS });
+    indices.forEach((i, laneI) => { results[i] = laneResults[laneI]; });
+  };
+  const { localIndices, poolIndices } = splitJobsByLane(jobs);
+  const localParallel = Math.max(1, Math.min(max_parallel, currentMaxWorkers() - runningCount("local")));
+  const poolParallel = Math.max(1, Math.min(max_parallel, currentMaxPoolWorkers() - runningCount("pool")));
+  await Promise.all([dispatchLane(localIndices, localParallel), dispatchLane(poolIndices, poolParallel)]);
 
   // Auto_union is entirely additive and must never suppress or corrupt the
   // real, already-completed per-job results below -- a broken union reports

@@ -257,6 +257,18 @@ test("providers add --json refuses a duplicate id across pools, and does not cor
   }
 });
 
+test("providers add --json refuses \"__proto__\" as a pool name with a clear error, not a silently empty pools file", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { exitCode, stdout } = runProvidersCLI(root, ["add", "--json", "--pool", "__proto__", "--provider", "llama-cpp", "--id", "local", "--weight", "1"]);
+    assert.notEqual(exitCode, 0);
+    assert.match(JSON.parse(stdout).error, /reserved/);
+    assert.equal(fs.existsSync(path.join(root, "config", "providers.yml")), false, "a refused write must not create a partial file");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("providers remove --json removes one entry; removing the last entry removes the whole pool", () => {
   const root = scratchNomarmyRoot();
   try {

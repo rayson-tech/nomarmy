@@ -19,7 +19,7 @@ import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
 import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected } from "../lib/connect.mjs";
 import { loadDispatchConfig, dispatchConfigPath, stringifyDispatchConfig } from "../lib/dispatch-config.mjs";
-import { dispatchConfigSchema, formatDispatchIssues, PROVIDER_TYPES, NATIVE_PROVIDER_TYPES } from "../lib/dispatch-schema.mjs";
+import { dispatchConfigSchema, formatDispatchIssues, findReservedPoolName, RESERVED_POOL_NAMES, PROVIDER_TYPES, NATIVE_PROVIDER_TYPES } from "../lib/dispatch-schema.mjs";
 
 // Add a new coordinator: add its name here, teach commandExists/connectTarget
 // about it below (a JSON-file target like Cursor has no PATH binary to check
@@ -576,30 +576,47 @@ const KNOWN_PROVIDERS = {
   "llama-cpp": { label: "Local llama.cpp server (already configured -- adds it to a pool alongside remote providers)", native: false },
 };
 
-/** `openclaw onboard` command that registers one provider entry -- native
- * types use their own dedicated flag; everything else registers as a custom
- * endpoint, the same mechanism already used for Bedrock in
- * scripts/configure-openclaw.sh. Never logs or echoes the API key itself. */
+/**
+ * Registers one provider entry with OpenClaw. The credential is ALWAYS
+ * piped via stdin, never passed as a CLI argument -- a bare argv value is
+ * visible to any other process on this machine for the child's lifetime
+ * (`ps aux`/`/proc/<pid>/cmdline`), which an earlier version of this
+ * function got wrong for native providers specifically (--anthropic-api-key
+ * <key> as a literal argument), a real regression against the discipline
+ * scripts/configure-openclaw.sh already established for Bedrock/local.
+ * `openclaw models auth paste-api-key --provider <id>` is that same
+ * stdin-piped primitive, used uniformly here for every provider type.
+ * Custom endpoints (bedrock/azure-openai/openai-compatible) additionally
+ * need `openclaw onboard --custom-*` first to define the provider's shape
+ * (base URL, model id) before a credential can attach to it; native
+ * providers (anthropic/openai/xai/deepinfra) are already known to OpenClaw
+ * and skip straight to the credential step. On failure, the raw exec error
+ * is deliberately never printed -- Node's own error message embeds the
+ * full child command line, which for a failed `paste-api-key` call would
+ * otherwise still be safe (the key was on stdin, not argv) but is not worth
+ * trusting blindly across every future code path this function might grow.
+ */
 function registerProviderWithOpenClaw({ id, provider, model, authEnv, baseUrl }) {
   const apiKey = authEnv ? process.env[authEnv] : null;
   if (authEnv && !apiKey) {
     console.log(c.red(`✗ ${authEnv} is not set in this shell -- export it, then run this registration again.`));
     return false;
   }
+  const isNative = NATIVE_PROVIDER_TYPES.includes(provider);
+  const authProviderId = isNative ? provider : id;
   const skipFlags = ["--skip-daemon", "--skip-channels", "--skip-skills", "--skip-search", "--skip-hooks", "--skip-ui"];
   try {
-    if (NATIVE_PROVIDER_TYPES.includes(provider)) {
-      execFileSync("openclaw", ["onboard", "--non-interactive", "--accept-risk", `--${provider}-api-key`, apiKey, ...skipFlags], { stdio: "ignore" });
-    } else {
+    if (!isNative) {
       execFileSync("openclaw", ["onboard", "--non-interactive", "--accept-risk",
         "--custom-base-url", baseUrl, "--custom-model-id", model, "--custom-provider-id", id, "--custom-compatibility", "openai", ...skipFlags], { stdio: "ignore" });
-      execFileSync("openclaw", ["models", "auth", "paste-api-key", "--provider", id, "--profile-id", `${id}:nomarmy`], { input: `${apiKey}\n`, stdio: ["pipe", "ignore", "ignore"] });
     }
+    execFileSync("openclaw", ["models", "auth", "paste-api-key", "--provider", authProviderId, "--profile-id", `${authProviderId}:nomarmy`],
+      { input: `${apiKey}\n`, stdio: ["pipe", "ignore", "ignore"] });
     console.log(c.green(`✓ Registered "${id}" with OpenClaw.`));
-    console.log(c.yellow(`This project has not run a real job against this specific provider type yet -- run \`openclaw models list --provider ${NATIVE_PROVIDER_TYPES.includes(provider) ? provider : id}\` to confirm it registered as expected, then dispatch one real job against this pool before trusting it in production.`));
+    console.log(c.yellow(`This project has not run a real job against this specific provider type yet -- run \`openclaw models list --provider ${authProviderId}\` to confirm it registered as expected, then dispatch one real job against this pool before trusting it in production.`));
     return true;
   } catch (error) {
-    console.log(c.red(`✗ Registration failed: ${error.message}`));
+    console.log(c.red(`✗ Registration failed (exit ${error.status ?? "?"}). Run the equivalent \`openclaw onboard\` / \`openclaw models auth paste-api-key --provider ${authProviderId}\` commands by hand to see the real error -- it is not repeated here, since a raw exec error can embed a full child command line and this one is not worth trusting blindly not to.`));
     return false;
   }
 }
@@ -656,9 +673,16 @@ async function cmdProvidersValidate() {
 async function cmdProvidersRemove() {
   const poolName = argv[2], id = argv[3];
   if (!poolName || !id) throw new Error("Usage: nomarmy providers remove <pool> <id>");
+  if (RESERVED_POOL_NAMES.includes(poolName)) throw new Error(`Unknown pool "${poolName}" (that name is reserved and can never be a real pool).`);
   const loaded = loadDispatchConfig(nomarmyRoot);
   if (!loaded.found) throw new Error("No config/providers.yml exists yet -- nothing to remove.");
-  const pool = loaded.config.pools[poolName];
+  // hasOwnProperty, not a truthy check: `loaded.config.pools["__proto__"]`
+  // (a plain object's own real prototype) is truthy even when no such pool
+  // was ever configured, and would otherwise reach `pool.filter(...)` below
+  // and crash with "pool.filter is not a function" instead of this clear
+  // error -- moot now that RESERVED_POOL_NAMES is checked above first, but
+  // this guard also covers any OTHER inherited-but-not-own key.
+  const pool = Object.prototype.hasOwnProperty.call(loaded.config.pools, poolName) ? loaded.config.pools[poolName] : undefined;
   if (!pool) throw new Error(`Unknown pool "${poolName}". Configured pools: ${Object.keys(loaded.config.pools).join(", ") || "(none)"}`);
   const remaining = pool.filter((e) => e.id !== id);
   if (remaining.length === pool.length) throw new Error(`No entry with id "${id}" in pool "${poolName}".`);
@@ -762,6 +786,18 @@ async function cmdProvidersAdd() {
     }
   }
 
+  // Checked as early as possible, on `poolName` alone -- `existingPools[poolName]`
+  // a few lines below is itself unsafe for this exact value: `{}["__proto__"]`
+  // returns Object.prototype (a real, truthy object, so `?? []` never
+  // catches it), and spreading that into an array throws "is not iterable"
+  // instead of ever reaching the schema-level reserved-name error below.
+  if (RESERVED_POOL_NAMES.includes(poolName)) {
+    const msg = `"${poolName}" is a reserved name and cannot be used as a pool name.`;
+    if (json) { out({ error: msg }); process.exit(1); }
+    console.error(c.red(msg));
+    process.exit(1);
+  }
+
   const entry = { id, provider: providerType, weight };
   if (model) entry.model = model;
   if (authEnv) entry.auth_env = authEnv;
@@ -770,6 +806,13 @@ async function cmdProvidersAdd() {
   if (thinking !== undefined) entry.thinking = thinking;
 
   const nextPools = { ...existingPools, [poolName]: [...(existingPools[poolName] ?? []), entry] };
+  const reservedName = findReservedPoolName({ pools: nextPools });
+  if (reservedName) {
+    const msg = `"${reservedName}" is a reserved name and cannot be used as a pool name.`;
+    if (json) { out({ error: msg }); process.exit(1); }
+    console.error(c.red(msg));
+    process.exit(1);
+  }
   const parsed = dispatchConfigSchema.safeParse({ pools: nextPools });
   if (!parsed.success) {
     const errors = formatDispatchIssues(parsed.error);
