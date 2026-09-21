@@ -15,9 +15,17 @@ import { runQuery, formatCitations, OPS as EVIDENCE_OPS } from "../lib/repo-quer
 import { loadConfig, ConfigError } from "../lib/config.mjs";
 import { resolveSandboxImage, detectPrimaryLanguage, EXEC_PATH_PREPEND } from "../lib/sandbox-images.mjs";
 import { DEFAULT_AGENT_IMAGE } from "../lib/verify.mjs";
-import { loadDispatchConfig, resolvePool, pickProvider } from "../lib/dispatch-config.mjs";
+import { loadDispatchConfig, resolvePool, pickProvider, poolContextPerNom, entryContextPerNom } from "../lib/dispatch-config.mjs";
+import { queryModelCatalog } from "../lib/model-catalog.mjs";
 
-const VERSION = "1.3.0";
+// Read from package.json rather than a second hardcoded literal -- the two
+// drifted apart for real (this constant still said "1.3.0", an internal
+// milestone label, after the public package version was reset to 0.x for
+// the open-source launch). installMcpCopy (lib/connect.mjs) copies
+// package.json to the same relative location next to the installed
+// mcp/server.mjs, so this resolves identically in a dev checkout or an
+// installed copy.
+const VERSION = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8")).version;
 const server = new McpServer({ name: "nomarmy-local-worker", version: VERSION });
 const projectDir = path.resolve(process.env.CLAUDE_PROJECT_DIR || process.cwd());
 const stateRoot = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
@@ -326,9 +334,18 @@ async function refreshBudgets() {
   } catch { hardwareSnapshot = null; }
   return budgets;
 }
+// A confirmed real confusion, not just an imprecise name: this is a single
+// module-level snapshot, computed once, identical in EVERY manifest
+// regardless of job -- it is the server's own global default, never what a
+// SPECIFIC job actually used. A pool-routed job's real provider/model is
+// worker.model/worker.provider and metrics.worker_model (both resolved from
+// OpenClaw's own per-job response) -- prefixed "default" here so a reader
+// can no longer mistake this for a per-job result the way `workerModel`
+// sitting inside a per-job manifest record read.
 const execution = {
   layer: process.env.NOMARMY_EXECUTION || "local",
-  workerProvider, workerModel, workerModelFallback, orchestratorTrust,
+  defaultWorkerProvider: workerProvider, defaultWorkerModel: workerModel, defaultWorkerModelFallback: workerModelFallback,
+  orchestratorTrust,
   orchestratorModel: process.env.NOMARMY_ORCHESTRATOR_MODEL || null
 };
 
@@ -339,6 +356,21 @@ function profileConfig(profile, reasoning) {
   };
   if (!profiles[profile]) throw new Error(`Unknown worker profile: ${profile}`);
   return profiles[profile];
+}
+
+// The manifest's own record of what thinking level a job's worker actually
+// ran with. A real, confirmed bug this replaces: the old formula computed
+// this from `profile`/`workerModelThinkingSupported` alone, which has no
+// way to see a pool-routed job's real value at all -- every pool-routed
+// job's manifest reported this field as if it had used the single global
+// profile, regardless of what provider/entry actually ran. `result` is
+// runOpenClaw's own parsed envelope, which now backfills `thinkingApplied`
+// unconditionally (both profile- and pool-routed jobs) -- preferred here
+// whenever it's present; the old formula survives only for a `result` that
+// predates this fix or never reached runOpenClaw at all (e.g. worker_failed).
+export function resolveReasoningApplied({ result, profile, reasoning, workerModelThinkingSupported }) {
+  if (typeof result?.thinkingApplied === "string") return result.thinkingApplied;
+  return profile === "gpt" || workerModelThinkingSupported ? reasoning : "off";
 }
 
 // mcp/ and config/ are siblings whether running from the dev checkout or the
@@ -352,6 +384,41 @@ let cachedDispatchConfig;
 function dispatchConfig() {
   if (cachedDispatchConfig === undefined) cachedDispatchConfig = loadDispatchConfig(nomarmyRoot);
   return cachedDispatchConfig;
+}
+
+// OpenClaw's own model catalog (queryModelCatalog), cached once per process
+// like everything else read-once-at-connect-time here -- a subprocess call
+// per job would be needless latency for a number that doesn't change
+// mid-session. null (openclaw unreachable) is cached too, on purpose: if it
+// wasn't on PATH at server startup it won't become reachable mid-process,
+// and every hosted entry still works via its context_window override or the
+// conservative unknown-model fallback either way (see lib/dispatch-config.mjs).
+let cachedModelCatalog;
+function modelCatalog() {
+  if (cachedModelCatalog === undefined) cachedModelCatalog = queryModelCatalog();
+  return cachedModelCatalog;
+}
+
+/**
+ * The budgets a pool-routed job should be checked/prompted against, instead
+ * of the single local-derived global `budgets` every job used before this
+ * existed -- a hosted model's real context window is usually nothing like a
+ * local llama-server's, and budgeting a Grok/Anthropic/OpenAI job against
+ * the local machine's ~64K was an accidental, needless cap, not a deliberate
+ * one. Falls back to the outer `budgets`/`contextInfo` when the pool can't
+ * be resolved (unknown pool, no available entries, or an all-llama-cpp pool
+ * with no local context known yet) -- pickProvider itself raises the real,
+ * specific dispatch-time error in those cases; this is not the place to
+ * duplicate it, only to avoid ever computing budgets from `null`.
+ */
+function budgetsForPool(poolName) {
+  const loaded = dispatchConfig();
+  if (!loaded?.found) return budgets;
+  const pool = loaded.config.pools[poolName];
+  if (!pool) return budgets;
+  const resolved = poolContextPerNom(pool, process.env, { catalog: modelCatalog(), localContextPerNom: contextInfo.contextPerNom });
+  if (!resolved) return budgets;
+  return deriveBudgets({ contextPerNom: resolved.contextPerNom, source: resolved.source, env: process.env });
 }
 
 // One in-flight-count per pool entry id, incremented/decremented around the
@@ -393,8 +460,17 @@ export function resolvePoolSelection(poolName, reasoning, {
   const model = entry.provider === "llama-cpp"
     ? `${workerProvider}/${entry.model || workerModel}`
     : `${entry.provider}/${entry.model}`;
-  const thinkingCapable = entry.provider === "llama-cpp" ? workerModelThinkingSupported : entry.thinking;
-  return { model, thinking: thinkingCapable ? reasoning : "off", entry };
+  // llama-cpp defers to the single global NOMARMY_MODEL_THINKING flag, same
+  // as a profile-routed job. A hosted entry's own `thinking` decides: false
+  // -> off; true -> pass through the job's requested `reasoning`; a specific
+  // level -> always that level, this entry's own floor, regardless of what
+  // the job asked for (see thinkingSchema's doc comment for why).
+  const thinking = entry.provider === "llama-cpp"
+    ? (workerModelThinkingSupported ? reasoning : "off")
+    : entry.thinking === false ? "off"
+    : entry.thinking === true ? reasoning
+    : entry.thinking;
+  return { model, thinking, entry };
 }
 
 let cachedAmbientOpenClawConfigPath;
@@ -487,22 +563,57 @@ export function resolveWorkerSandboxOverride(cwd, runtimeDir, {
   return configPath;
 }
 
+// A real, confirmed incident: config/providers.yml's grok entry carried
+// `thinking: true` (correct for grok-4.6) unchanged across a `providers
+// update --model grok-4.7`, and OpenClaw rejects grok-4.7 outright for any
+// thinking level except "off" -- exit 1, zero model calls, before the
+// scout/implement distinction even matters (both modes hit this identically;
+// it only LOOKED scout-specific because the implement job that had
+// succeeded predated the model swap to 4.7). OpenClaw's own model catalog
+// carries no per-model thinking-support field to check this against in
+// advance (verified live: grok-4.7 isn't in the catalog at all yet), so
+// this is necessarily reactive -- parse OpenClaw's own error, which already
+// names the one level it does accept, and retry once with that instead of
+// failing a job an operator has no way to have predicted.
+// The model group is non-greedy up to the literal ". Use one of:", not a
+// [^.]-excluding class -- a real model id (xai/grok-4.7) contains its own
+// period, which a naive [^.\n]+ can never match past, so the whole pattern
+// silently never matched a real model name at all (caught by a test using
+// the exact real captured error, not a synthesized one).
+const UNSUPPORTED_THINKING_RE = /Thinking level "([^"]*)" is not supported for (.+?)\.\s*Use one of:\s*([^.\n]+)\./i;
+export function parseUnsupportedThinkingError(errorMessage) {
+  const match = UNSUPPORTED_THINKING_RE.exec(String(errorMessage ?? ""));
+  if (!match) return null;
+  const supported = match[3].split(",").map((s) => s.trim()).filter(Boolean);
+  if (supported.length === 0) return null;
+  return { requested: match[1], model: match[2].trim(), supported };
+}
+
 async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef, baseSha, timeoutSeconds, runtimeDir, profile, reasoning, pool = null, jobDir, workerId, evidence = null, evidenceTool = null, overridePrompt = null, logSuffix = "", idleDiff = null }) {
   // `pool` (config/providers.yml) and `profile` (the single global
   // NOMARMY_WORKER_PROVIDER/MODEL pair) are mutually exclusive selectors for
   // the same {model, thinking} shape -- omitting `pool` is the exact
   // pre-existing behavior, unchanged.
   const selected = pool ? resolvePoolSelection(pool, reasoning) : profileConfig(profile, reasoning);
+  // The specific entry is now known (weighted-random selection already
+  // happened), so this job gets a PRECISE budget for that one entry's real
+  // context window instead of the pool-wide conservative minimum admission
+  // used -- generally more generous, since it's no longer worst-casing
+  // across every entry in the pool. Falls back to the outer, local-derived
+  // `budgets` for a `profile`-routed job (selected.entry is undefined) or a
+  // llama-cpp pool entry with no local context resolved.
+  const entryContext = selected.entry ? entryContextPerNom(selected.entry, { catalog: modelCatalog(), localContextPerNom: contextInfo.contextPerNom }) : null;
+  const jobBudgets = entryContext ? deriveBudgets({ ...entryContext, env: process.env }) : budgets;
   const agentHome = path.join(runtimeDir, "home");
   const npmCache = path.join(runtimeDir, "npm-cache");
   fs.mkdirSync(agentHome, { recursive: true }); fs.mkdirSync(npmCache, { recursive: true });
   const env = { ...process.env, OPENCLAW_LOCAL_WORKER_RUNTIME: runtimeDir, NOMARMY_AGENT_HOME: agentHome,
     NPM_CONFIG_CACHE: npmCache, npm_config_cache: npmCache, NPM_CONFIG_UPDATE_NOTIFIER: "false", npm_config_update_notifier: "false" };
   const prompt = overridePrompt ?? (mode === "scout"
-    ? scoutPrompt({ question: task, mustCover: acceptance, baseRef, baseSha, workerId, limits: budgets.scout, report: budgets.report.scout, evidenceTool })
+    ? scoutPrompt({ question: task, mustCover: acceptance, baseRef, baseSha, workerId, limits: jobBudgets.scout, report: jobBudgets.report.scout, evidenceTool })
     : mode === "decompose"
-    ? decomposePrompt({ objective: task, constraints: acceptance, baseRef, baseSha, workerId, limits: budgets.decompose, report: budgets.report.decompose, evidenceTool })
-    : workerPrompt({ task, acceptance, verification, mode, baseRef, baseSha, workerId, evidence, report: budgets.report.implement }));
+    ? decomposePrompt({ objective: task, constraints: acceptance, baseRef, baseSha, workerId, limits: jobBudgets.decompose, report: jobBudgets.report.decompose, evidenceTool })
+    : workerPrompt({ task, acceptance, verification, mode, baseRef, baseSha, workerId, evidence, report: jobBudgets.report.implement }));
   fs.writeFileSync(path.join(jobDir, `brief${logSuffix}.txt`), prompt + "\n");
   // --state-dir keeps OpenClaw's session state (its transcript database among
   // it) inside the job directory instead of a temp dir it deletes on exit.
@@ -514,21 +625,39 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
   const stateDir = path.join(runtimeDir, "state");
   fs.mkdirSync(stateDir, { recursive: true });
   const sandboxOverridePath = resolveWorkerSandboxOverride(cwd, runtimeDir);
-  const args = ["agent", "exec", prompt, "--model", selected.model,
-    "--cwd", cwd, "--code-mode", "direct", "--local-model-lean", "--thinking", selected.thinking,
+  const buildArgs = (thinking) => ["agent", "exec", prompt, "--model", selected.model,
+    "--cwd", cwd, "--code-mode", "direct", "--local-model-lean", "--thinking", thinking,
     "--timeout", String(timeoutSeconds), "--state-dir", stateDir, "--json",
     ...(sandboxOverridePath ? ["--config", sandboxOverridePath] : [])];
   const onTick = idleDiff ? makeIdleDiffTick(cwd, idleDiff) : null;
+  const execOnce = (thinking) => withSandboxProvisioningRetry(
+    () => run("openclaw", buildArgs(thinking), { cwd, env, timeoutMs: (timeoutSeconds + 30) * 1000, onTick, tickMs: (idleDiff?.pollSeconds ?? 15) * 1000 }),
+    { onRetry: (attempt, error) => fs.appendFileSync(path.join(jobDir, "coordinator.log"),
+        `${new Date().toISOString()} transient sandbox provisioning error${logSuffix}, retry ${attempt}/${MAX_SANDBOX_PROVISIONING_RETRIES}\n${error.message}\n`) },
+  );
   // Held for this whole call (including retries) so max_concurrent counts a
   // real in-flight `agent exec`, not just the time between admission and
   // launch. A `profile`-routed call has no entry id and this is a no-op.
   return withPoolEntrySlot(selected.entry?.id, async () => {
     try {
-      const { stdout, stderr } = await withSandboxProvisioningRetry(
-        () => run("openclaw", args, { cwd, env, timeoutMs: (timeoutSeconds + 30) * 1000, onTick, tickMs: (idleDiff?.pollSeconds ?? 15) * 1000 }),
-        { onRetry: (attempt, error) => fs.appendFileSync(path.join(jobDir, "coordinator.log"),
-            `${new Date().toISOString()} transient sandbox provisioning error${logSuffix}, retry ${attempt}/${MAX_SANDBOX_PROVISIONING_RETRIES}\n${error.message}\n`) },
-      );
+      let stdout, stderr;
+      try {
+        ({ stdout, stderr } = await execOnce(selected.thinking));
+      } catch (error) {
+        const unsupported = parseUnsupportedThinkingError(error.message);
+        // Only retry when OpenClaw itself named a DIFFERENT level as the fix
+        // -- never loop on the same level, and never mask a real, unrelated
+        // failure as a thinking-level problem it isn't.
+        if (unsupported && !unsupported.supported.includes(selected.thinking)) {
+          const fallback = unsupported.supported[0];
+          fs.appendFileSync(path.join(jobDir, "coordinator.log"),
+            `${new Date().toISOString()} "${selected.model}" rejected thinking level "${selected.thinking}" (OpenClaw supports: ${unsupported.supported.join(", ")}) -- retrying once with "${fallback}"\n`);
+          selected.thinking = fallback; // the manifest's requestedReasoning field should reflect what was ACTUALLY used, not the level that failed
+          ({ stdout, stderr } = await execOnce(fallback));
+        } else {
+          throw error;
+        }
+      }
       fs.writeFileSync(path.join(jobDir, `openclaw${logSuffix}.stdout.log`), stdout + "\n");
       fs.writeFileSync(path.join(jobDir, `openclaw${logSuffix}.stderr.log`), stderr + "\n");
       let parsed;
@@ -541,6 +670,12 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
       // misattribute a pool-routed job (e.g. one that really ran on
       // "anthropic") to whatever the ambient default happens to be.
       if (!parsed.provider) parsed.provider = selected.entry?.provider ?? workerProvider;
+      // The ACTUALLY-used thinking level (after any unsupported-level retry
+      // above) -- `reasoningApplied` in the manifest (see
+      // resolveReasoningApplied) prefers this over its own profile-only
+      // formula, which had no way to reflect a pool-routed job's real value
+      // at all (a real, separate bug this closes alongside the retry).
+      parsed.thinkingApplied = selected.thinking;
       return parsed;
     } catch (error) {
       fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} OpenClaw failure${logSuffix}\n${error.stack || error.message}\n`);
@@ -712,6 +847,47 @@ export function classifyTestChanges(entries) {
   if (buckets.existing_tests_modified.length) reviewFlags.push(`existing tests modified: ${buckets.existing_tests_modified.join(", ")}`);
   if (buckets.existing_tests_deleted.length) reviewFlags.push(`existing tests deleted: ${buckets.existing_tests_deleted.join(", ")}`);
   return { ...buckets, reviewRequired: reviewFlags.length > 0, reviewFlags, heuristic: TEST_PATH_PATTERNS.map(p => p.name) };
+}
+
+// ---------------------------------------------------------------------------
+// Scoped test-selection risk: a real incident this closes. `classifyResults`
+// (lib/verify.mjs) only ever checks exit codes -- a verification command
+// whose test-selection flag (-k, -m, --testNamePattern, --grep, -run...)
+// happens to exclude the exact test(s) covering THIS diff still reports an
+// honest, green pass, because plenty of OTHER tests genuinely ran and
+// passed. That is not a bug in classifyResults; exit-code checking cannot
+// see the difference on its own. verify_regression (now on by default
+// whenever a verification profile is set) catches this too, eventually --
+// this check is the cheap, fast, always-on companion: no sandbox run, no
+// wall-clock cost, just cross-referencing the CONFIGURED command strings
+// against the diff's own test-file changes. Deliberately narrow, not a
+// general "your -k looks suspicious" linter: a selection flag alone is
+// completely normal (most `.nomarmy.yml` profiles that use one use it on
+// purpose, every run) -- it is only worth a human's attention when paired
+// with a test file THIS diff itself touched, the one case that flag could
+// plausibly be excluding by accident.
+const TEST_SELECTION_FLAG_PATTERNS = Object.freeze([
+  { name: "pytest -k", re: /(^|\s)-k(\s|=)/ },
+  { name: "pytest -m", re: /(^|\s)-m(\s|=)/ },
+  { name: "jest/vitest -t / --testNamePattern", re: /(^|\s)(-t|--testNamePattern)(\s|=)/ },
+  { name: "go test -run", re: /(^|\s)-run(\s|=)/ },
+  { name: "--grep", re: /(^|\s)--grep(\s|=)/ },
+  { name: "--filter", re: /(^|\s)--filter(\s|=)/ },
+]);
+export function detectScopedTestSelectionRisk({ commands = [], testChanges = null } = {}) {
+  const touchedTestFiles = [...(testChanges?.new_tests_added ?? []), ...(testChanges?.existing_tests_modified ?? [])];
+  if (touchedTestFiles.length === 0) return null;
+  const flagged = [];
+  for (const command of commands) {
+    const match = TEST_SELECTION_FLAG_PATTERNS.find((p) => p.re.test(String(command ?? "")));
+    if (match) flagged.push({ command, flag: match.name });
+  }
+  if (flagged.length === 0) return null;
+  const flagNames = [...new Set(flagged.map((f) => f.flag))].join(", ");
+  return {
+    flagged,
+    reason: `verification command(s) use a test-selection flag (${flagNames}) and this diff also touches test file(s) ${touchedTestFiles.join(", ")} -- a scoped filter like this can silently exclude exactly those tests while unrelated tests still run and pass. Confirm they're actually included in the selection before trusting this as coverage.`,
+  };
 }
 
 // `git diff` against the base SHA cannot see files the worker created but that
@@ -1317,13 +1493,13 @@ export function buildMetrics({ result, record, reportValidation, outcome, worker
     ...metrics,
     worker_tool_calls: intOrNull(tools?.calls ?? tools?.total ?? tools?.count),
     worker_tool_failures: intOrNull(tools?.failures),
-    worker_model: result?.model ?? execution.workerModel ?? null,
+    worker_model: result?.model ?? execution.defaultWorkerModel ?? null,
     // Was already read into workerMetadata() above but discarded before
     // reaching here -- every pool-routed job's actual provider is now
     // visible in job metrics, not just its model name. runOpenClaw already
     // backfills this from the entry it actually selected whenever
     // OpenClaw's own envelope omits it, so this must NOT also fall back to
-    // the single global execution.workerProvider here -- that would
+    // the single global execution.defaultWorkerProvider here -- that would
     // silently misattribute a pool-routed job to the wrong provider.
     worker_provider: result?.provider ?? null,
     // Best-effort: present in `agent exec --json`'s envelope for at least
@@ -1584,11 +1760,26 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
       regressionCheck: regressionCheckFatal ? { ...regressionCheck, status: "not_run" } : regressionCheck,
       workerFailed, workerTimedOut, mode,
     });
-    const finalOutcome = regressionCheckFatal
+    const afterRegression = regressionCheckFatal
       ? { ...outcome, outcome: OUTCOMES.NEEDS_REVIEW, commitAllowed: false,
           commitBlockedReason: `regression-check restore did not verifiably complete: ${regressionCheck.reason}`,
           reviewRequired: true, reasons: [...outcome.reasons, `REGRESSION CHECK RESTORE FAILED: ${regressionCheck.reason}`] }
       : outcome;
+
+    // Cheap, always-on, additive: never changes commitAllowed/commitBlockedReason
+    // on its own (unlike the regression-check override above), only flags for
+    // review -- see detectScopedTestSelectionRisk's own doc comment for why.
+    let selectionRisk = null;
+    if (mode === "implement" && verification) {
+      try {
+        const loaded = loadConfig(cwd);
+        const profileCommands = loaded.found ? (loaded.config?.verification?.[verification]?.commands ?? []) : [];
+        selectionRisk = detectScopedTestSelectionRisk({ commands: profileCommands, testChanges: preCommit.testChanges });
+      } catch { /* a config load failure here is the verification runner's own problem to report, not this check's */ }
+    }
+    const finalOutcome = selectionRisk
+      ? { ...afterRegression, reviewRequired: true, reasons: [...afterRegression.reasons, `SCOPED TEST SELECTION RISK: ${selectionRisk.reason}`] }
+      : afterRegression;
 
     progress("commit");
     const commit = await createCoordinatorCommit({ cwd, jobId, outcome: finalOutcome });
@@ -1632,6 +1823,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
       // visible here even though resolveOutcome above only ever saw a
       // not_run-substituted view) -- full transparency for the caller.
       regressionCheck,
+      testSelectionRisk: selectionRisk,
       testChanges: record.testChanges, metrics,
       worktreePointerBefore: beforePointer, worktreePointerAfterWorker: afterPointer, worktreeRetained: Boolean(worktree),
       commit, gitBeforeCoordinatorCommit: preCommit, git: record, worker, workerError, workerStopReason,
@@ -1645,7 +1837,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
       // it back on. Coercing this field itself to "off" reads as nomArmy
       // silently discarding the caller's input, which it is not --
       // reasoningApplied is what the field previously conflated it with.
-      requestedProfile: profile, requestedReasoning: reasoning, reasoningApplied: profile === "gpt" || workerModelThinkingSupported ? reasoning : "off", execution };
+      requestedProfile: profile, requestedReasoning: reasoning, reasoningApplied: resolveReasoningApplied({ result, profile, reasoning, workerModelThinkingSupported }), execution };
     fs.writeFileSync(path.join(jobDir, "metadata.json"), JSON.stringify(manifest, null, 2));
     if (result) fs.writeFileSync(path.join(jobDir, "result.json"), JSON.stringify(result, null, 2));
     progress("finished", { coordinatorStatus, outcome: finalOutcome.outcome });
@@ -1773,7 +1965,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
       // it back on. Coercing this field itself to "off" reads as nomArmy
       // silently discarding the caller's input, which it is not --
       // reasoningApplied is what the field previously conflated it with.
-      requestedProfile: profile, requestedReasoning: reasoning, reasoningApplied: profile === "gpt" || workerModelThinkingSupported ? reasoning : "off", execution };
+      requestedProfile: profile, requestedReasoning: reasoning, reasoningApplied: resolveReasoningApplied({ result, profile, reasoning, workerModelThinkingSupported }), execution };
     fs.writeFileSync(path.join(jobDir, "metadata.json"), JSON.stringify(manifest, null, 2));
     if (result) fs.writeFileSync(path.join(jobDir, "result.json"), JSON.stringify(result, null, 2));
     progress("finished", { coordinatorStatus: outcome.coordinatorStatus, outcome: outcome.outcome });
@@ -1884,7 +2076,7 @@ async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtime
       displacement,
       dirty, snapshotChanges: record.repoStatusFiles, worktreeRetained, metrics, worker, workerError,
       budgets: { contextPerNom: budgets.contextPerNom, source: budgets.source, decompose: budgets.decompose, report: budgets.report.decompose },
-      requestedProfile: profile, requestedReasoning: reasoning, reasoningApplied: profile === "gpt" || workerModelThinkingSupported ? reasoning : "off", execution };
+      requestedProfile: profile, requestedReasoning: reasoning, reasoningApplied: resolveReasoningApplied({ result, profile, reasoning, workerModelThinkingSupported }), execution };
     fs.writeFileSync(path.join(jobDir, "metadata.json"), JSON.stringify(manifest, null, 2));
     if (result) fs.writeFileSync(path.join(jobDir, "result.json"), JSON.stringify(result, null, 2));
     progress("finished", { coordinatorStatus: outcome.coordinatorStatus, outcome: outcome.outcome });
@@ -1954,6 +2146,27 @@ function compactDecomposeRecord(m) {
     modelCalls: met.decompose_model_calls ?? null, workerModel: met.worker_model ?? null,
     issues: m.issues ?? [], dirty: m.dirty ?? null, worktreeRetained: m.worktreeRetained ?? null, error: m.error ?? null };
 }
+// Same convention as compactScoutRecord/compactDecomposeRecord: small, only
+// what deciding "what to clean up / what needs recovery" actually needs.
+// A real incident this fixes: with no compaction at all, an implement
+// job's FULL manifest (objective text, budgets, timeBudget, every git
+// record, gitBeforeCoordinatorCommit, ...) meant a `limit: 12` listing
+// blew the tool-result size cap outright -- exactly the one call an
+// operator reaches for first when cleaning up a job backlog.
+function compactImplementRecord(m) {
+  const met = m.metrics ?? {};
+  return { jobId: m.jobId, workerId: m.workerId, mode: m.mode, outcome: m.outcome, coordinatorStatus: m.coordinatorStatus, reviewRequired: m.reviewRequired,
+    branch: m.branch ?? null, commit: m.commit?.sha ?? null, worktree: m.worktree ?? null, worktreeRetained: m.worktreeRetained ?? null,
+    filesChanged: met.files_changed ?? null,
+    elapsedSeconds: Number.isFinite(met.total_elapsed) ? Math.round(met.total_elapsed / 1000) : null,
+    workerModel: met.worker_model ?? null,
+    startedAt: m.startedAt ?? null, finishedAt: m.finishedAt ?? null,
+    issues: m.issues ?? [], error: m.error ?? null };
+}
+function compactJobRecord(meta) {
+  return meta.mode === "scout" ? compactScoutRecord(meta) : meta.mode === "decompose" ? compactDecomposeRecord(meta) : compactImplementRecord(meta);
+}
+
 // Evidence before claim, in the display order too: the record is what
 // nomArmy verified against Git, the worker's report is prose it wrote about
 // itself. Leading with the report buried the record below whatever the
@@ -2179,7 +2392,12 @@ function capacitySnapshot() {
 async function admit(jobs) {
   await refreshBudgets();
   const problems = [];
-  jobs.forEach((j, i) => { for (const p of checkBrief(j, budgets)) problems.push(jobs.length > 1 ? `job ${i + 1}: ${p}` : p); });
+  // A pool-routed job is checked against that pool's OWN (model-dependent)
+  // budget, not the local-derived global one -- see budgetsForPool. Which
+  // specific entry pickProvider will land on isn't known yet at admission
+  // time, so this is the conservative minimum across the pool's currently
+  // available entries, not any one entry's precise number.
+  jobs.forEach((j, i) => { for (const p of checkBrief(j, j.pool ? budgetsForPool(j.pool) : budgets)) problems.push(jobs.length > 1 ? `job ${i + 1}: ${p}` : p); });
   // verify_regression re-runs `verification`; with no profile set there is
   // nothing to re-run. Refuse before starting anything, matching every other
   // admission check here, rather than silently no-op at runtime.
@@ -2266,8 +2484,8 @@ export const jobSchema = z.object({
     `Acceptance item exceeds ${maxAcceptanceItemChars} characters. Keep each criterion to one concrete, checkable statement.`
   )).max(20).optional().describe("implement: acceptance criteria the worker must satisfy. scout: points a complete answer must cover. decompose: constraints a good split must respect."),
   verification: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().describe("Verification profile NAME (e.g. quick, standard, browser). Semantic; nomArmy owns execution. Ignored by scouts."),
-  verify_regression: z.boolean().default(false).describe(
-    "implement only: after the diff passes `verification` and touches production files, temporarily revert just those production files, re-run the SAME verification profile (expected to fail without the fix), then restore them. A re-run that still PASSES proves no test would catch this regression, and the outcome is downgraded to NEEDS_REVIEW regardless of the worker's report -- never silently committed as done. Runs the full profile a second time; opt in only when that wall-clock cost (can matter on repos with thousands of tests) is worth the guarantee. Requires `verification` to be set. Ignored by scouts."
+  verify_regression: z.boolean().optional().describe(
+    "implement only: after the diff passes `verification` and touches production files, temporarily revert just those production files, re-run the SAME verification profile (expected to fail without the fix), then restore them. A re-run that still PASSES proves no test would catch this regression, and the outcome is downgraded to NEEDS_REVIEW regardless of the worker's report -- never silently committed as done. This is the ONLY mechanism that catches a verification profile that passes for the wrong reason (a test-selection flag that accidentally excludes the changed file's own tests reports a real, honest, green run that never touched the diff -- exit-code checking alone cannot see the difference). Defaults to true whenever `verification` is set, since that gap is exactly what nomArmy's trust boundary claims to close; pass `false` explicitly to skip the doubled wall-clock cost (can matter on repos with thousands of tests) and accept the risk instead. No effect with no `verification` profile -- there is nothing to re-run. Ignored by scouts."
   ),
   mode: z.enum(["scout", "implement", "decompose"]).default("implement").describe("implement: edit in an isolated worktree, coordinator commits on a valid report. scout: read-only research; every finding must cite [path:start-end] and nomArmy attaches the cited lines after verifying them against the base commit. decompose: read-only; proposes 2+ independent, evidence-grounded subtasks for a broad objective instead of doing everything in one worker turn. Never auto-dispatched -- the proposal is reviewed like a scout's findings, and the coordinator makes its own separate dispatch call with whatever subtasks it chooses to use."),
   base_ref: z.string().optional(),
@@ -2280,10 +2498,19 @@ export const jobSchema = z.object({
   ).optional().describe("implement only: facts YOU already resolved (e.g. via repo_evidence) that the worker should trust and not re-derive -- exact signatures, call sites, line ranges, existing behavior. Cuts exploration that would otherwise burn the worker's own context budget on something you already know. Not a substitute for a clear objective and acceptance criteria."),
   worker_id: z.string().regex(/^[A-Za-z0-9._-]+$/).optional()
 });
+// An explicit true/false always wins. Omitted, this defaults to true
+// whenever there's actually a `verification` profile to regression-check
+// against (and this is an implement job -- scouts/decomposes ignore it
+// regardless) -- see resolveVerifyRegression for why "on by default" is the
+// right call, not just a cost/benefit compromise.
+export function resolveVerifyRegression(args) {
+  if (typeof args.verify_regression === "boolean") return args.verify_regression;
+  return args.mode === "implement" && Boolean(args.verification);
+}
 function jobArgs(args, workerId) {
   return { task: args.task, acceptance: args.acceptance, verification: args.verification, mode: args.mode, baseRef: args.base_ref,
     timeoutSeconds: args.timeout_seconds, profile: args.profile, reasoning: args.reasoning, pool: args.pool, evidence: args.evidence,
-    verifyRegression: args.verify_regression, workerId };
+    verifyRegression: resolveVerifyRegression(args), workerId };
 }
 server.tool("local_worker", "Run one isolated local worker and wait for it. mode=implement edits in its own worktree and the coordinator commits only on a valid done report (or a recovered job that passed independent verification); failed or incomplete worktrees are retained. mode=scout answers a question from a read-only snapshot with mandatory [path:line] citations that nomArmy verifies and expands. mode=decompose (also read-only) proposes 2+ independent subtasks for a broad objective instead of one worker turn trying to do too much; the proposal is never auto-dispatched, review it and make a separate call with the subtasks you choose. Refuses under memory pressure or over capacity; use local_worker_start + local_worker_status to avoid blocking.", jobSchema.shape,
   async args => {
@@ -2445,12 +2672,12 @@ server.tool("repo_evidence", `Deterministic repository evidence with exact [path
     return toolText(args.json ? JSON.stringify(result, null, 2) : formatCitations(result));
   } catch (error) { return toolText(`repo_evidence ${args.op}: ${error.message}`, true); }
 });
-server.tool("local_worker_jobs", "List recent job records for review/recovery, including jobs still running or orphaned by a server restart. Does not modify repositories.", { limit: z.number().int().min(1).max(50).default(10) }, async ({ limit }) => {
+server.tool("local_worker_jobs", "List recent job records for review/recovery, including jobs still running or orphaned by a server restart. Does not modify repositories. Returns a small PROJECTION per job by default (jobId, outcome, branch/commit, worktreeRetained, filesChanged, timing, issues) -- enough to decide what needs recovery or cleanup without pulling every job's full execution record (objective text, budgets, git records, ...) into context, which can exceed the tool result size past a handful of jobs. Pass full: true only for the specific job(s) you already know need deep inspection.", { limit: z.number().int().min(1).max(50).default(10), full: z.boolean().default(false).describe("Return each job's complete, uncompacted manifest instead of the small default projection. Requesting this across many jobs at once risks exceeding the tool result size cap -- prefer the default projection first, then a targeted look (e.g. local_worker_status) at just the job(s) that need it.") }, async ({ limit, full }) => {
   const dirs = fs.readdirSync(ensureJobsRoot(), { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name).sort().reverse().slice(0, limit);
   const rows = await Promise.all(dirs.map(async name => {
     const dir = path.join(jobsRoot, name);
     const meta = readJson(path.join(dir, "metadata.json")) ?? readJson(path.join(dir, "failure.json"));
-    if (meta) return meta.mode === "scout" ? compactScoutRecord(meta) : meta.mode === "decompose" ? compactDecomposeRecord(meta) : meta;
+    if (meta) return full ? meta : compactJobRecord(meta);
     const status = readJson(path.join(dir, "status.json"));
     if (status) return summarize(activeJobs.get(name) ?? null, { status, meta: null, failure: null }, dir);
     return { jobId: name, state: "unknown" };
@@ -2500,7 +2727,96 @@ export async function stripRuntimeJunk(worktree) {
     }
   } catch { /* best-effort; falls through to the normal remove attempt */ }
 }
-server.tool("local_worker_cleanup", "Remove a retained worker worktree and optionally its agent branch after Claude has reviewed/integrated or deliberately discarded it. Refuses to delete the current branch.", {
+// `git branch -d` refuses unless <branch> is an ANCESTOR of HEAD -- true for
+// a `git merge`d branch, never true for a cherry-picked one, which is
+// nomArmy's own integration model (the coordinator reviews/corrects before
+// committing; see CLAUDE.md's "Integration"). A real incident this fixes:
+// every genuinely-integrated job cleanup needed `force: true` regardless,
+// which makes force routine instead of the "I am discarding something"
+// signal it exists to be. `git cherry <upstream> <head>` compares by PATCH
+// CONTENT, not commit ancestry -- for each commit unique to <head>, "-"
+// means an equivalent patch already exists in <upstream>'s history. A
+// branch where every commit shows "-" is content-integrated even though
+// git's own ancestry check says otherwise, and is safe to hard-delete
+// without the caller having to assert `force` for something that isn't
+// actually a discard.
+export async function isBranchContentIntegrated(branch, cwd) {
+  const out = await git(["cherry", "HEAD", branch], cwd);
+  const lines = out.split("\n").filter(Boolean);
+  // No commits unique to `branch` at all (already an ancestor, or branch IS
+  // HEAD) -- trivially integrated; `git branch -d` itself would have
+  // succeeded on this case anyway.
+  if (lines.length === 0) return true;
+  return lines.every((line) => line.startsWith("-"));
+}
+// A job's worktree/branch holds NOTHING worth a human decision when its
+// branch tip is byte-identical to the base SHA it started from (zero
+// commits -- exactly "agent/worker-X tip=c6588ffe already-in-branch", a
+// real finding: 4 such worktrees, 8 hours old, ~164MB, holding only an
+// ISOLATION_PROBE.txt and a stray .venv) AND the live worktree has no
+// uncommitted changes either (a worker that edited files but was never
+// committed still deserves a human look -- retaining THAT is correct, not
+// clutter). Both facts are checked live against Git, never trusted from a
+// stored manifest that could be stale.
+export function isProvablyEmptyJob({ branchTipSha, baseSha, workingTreeDirty }) {
+  if (!branchTipSha || !baseSha) return false; // nothing to compare -- never guess "safe"
+  if (branchTipSha !== baseSha) return false; // real commits exist on this branch
+  return !workingTreeDirty;
+}
+server.tool("local_worker_sweep", "Bulk-reap job worktrees/branches that are PROVABLY EMPTY: the branch's tip is identical to the base SHA it started from (zero commits) AND the worktree has no uncommitted changes left either -- there is nothing here to inspect, recover, or lose. Never removes a worktree holding any real committed or uncommitted work, regardless of age or older_than_hours -- emptiness is what makes it safe, not age. A worktree with real work always stays a deliberate, individual local_worker_cleanup call. Use dry_run first to see what would be reaped.", {
+  older_than_hours: z.number().min(0).default(0).describe("Only consider jobs finished (or, if never finished, last touched) at least this many hours ago. 0 (default) considers every job regardless of age."),
+  delete_branches: z.boolean().default(true).describe("Also delete each reaped job's branch. Safe unconditionally here (never force) -- a branch identical to its base SHA is trivially git's own definition of already-merged."),
+  dry_run: z.boolean().default(false).describe("Report what WOULD be reaped without removing anything."),
+  limit: z.number().int().min(1).max(500).default(200).describe("Maximum number of job directories to examine in one call.")
+}, async ({ older_than_hours, delete_branches, dry_run, limit }) => {
+  await assertRepo();
+  const dirs = fs.readdirSync(ensureJobsRoot(), { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name).sort().slice(0, limit);
+  const cutoffMs = older_than_hours > 0 ? Date.now() - older_than_hours * 3600 * 1000 : null;
+  const reaped = [], skipped = [];
+  for (const jobId of dirs) {
+    const jobDir = path.join(jobsRoot, jobId);
+    const metaPath = path.join(jobDir, "metadata.json"), failPath = path.join(jobDir, "failure.json");
+    const p = fs.existsSync(metaPath) ? metaPath : (fs.existsSync(failPath) ? failPath : null);
+    const meta = p ? readJson(p) : null;
+    const target = resolveCleanupTarget({ jobDir, jobId, meta, status: meta ? null : readJson(path.join(jobDir, "status.json")) });
+    if (!target?.worktree || !fs.existsSync(target.worktree)) continue; // nothing here to reap at all
+    const { worktree, branch } = target;
+    let finishedAtMs;
+    try { finishedAtMs = meta?.finishedAt ? Date.parse(meta.finishedAt) : fs.statSync(jobDir).mtimeMs; }
+    catch { finishedAtMs = Date.now(); }
+    if (cutoffMs !== null && finishedAtMs > cutoffMs) { skipped.push({ jobId, reason: "younger than older_than_hours" }); continue; }
+    const baseSha = meta?.git?.baseSha ?? meta?.baseSha ?? null;
+    let branchTipSha = null;
+    if (branch) { try { branchTipSha = (await git(["rev-parse", branch], projectDir)).trim(); } catch { branchTipSha = null; } }
+    let workingTreeDirty = true; // never guess "clean" if the check itself failed
+    try {
+      const statusOut = await gitRaw(["status", "--porcelain=v1", "-z", "--untracked-files=all"], worktree);
+      workingTreeDirty = parseStatusPorcelainZ(statusOut).some((e) => !isRuntimeJunk(e.file));
+    } catch { workingTreeDirty = true; }
+    if (!isProvablyEmptyJob({ branchTipSha, baseSha, workingTreeDirty })) {
+      skipped.push({ jobId, reason: !baseSha ? "no recorded base SHA to compare against" : branchTipSha !== baseSha ? "branch has real commits" : "worktree has uncommitted changes" });
+      continue;
+    }
+    if (dry_run) { reaped.push({ jobId, worktree, branch, dryRun: true }); continue; }
+    try {
+      await releaseSandboxLocks(worktree);
+      await stripRuntimeJunk(worktree);
+      await run("git", ["worktree", "remove", worktree], { cwd: projectDir });
+      let branchDeleted = false;
+      if (delete_branches && branch) {
+        const current = await git(["branch", "--show-current"]);
+        // Identical SHA to its base is trivially git's own ancestor
+        // definition -- plain `-d`, no force needed, ever, here.
+        if (current !== branch) { await run("git", ["branch", "-d", branch], { cwd: projectDir }); branchDeleted = true; }
+      }
+      reaped.push({ jobId, worktree, branch, branchDeleted });
+    } catch (error) {
+      skipped.push({ jobId, reason: `removal failed: ${error.message}` });
+    }
+  }
+  return toolText(JSON.stringify({ examined: dirs.length, reapedCount: reaped.length, skippedCount: skipped.length, dryRun: dry_run, reaped, skipped }, null, 2));
+});
+server.tool("local_worker_cleanup", "Remove a retained worker worktree and optionally its agent branch after Claude has reviewed/integrated or deliberately discarded it. Refuses to delete the current branch. A branch whose commits were cherry-picked (not merged) into the current branch -- nomArmy's own integration model -- is recognized as integrated by comparing PATCH CONTENT (git cherry), not git's own ancestry-only check, so a genuinely-integrated job's cleanup does not need force: true. Reserve force for a branch you are actually discarding unintegrated work from.", {
   job_id: z.string().min(1), delete_branch: z.boolean().default(false), force: z.boolean().default(false)
 }, async ({ job_id, delete_branch, force }) => {
   await assertRepo();
@@ -2517,8 +2833,25 @@ server.tool("local_worker_cleanup", "Remove a retained worker worktree and optio
     if (!force) await stripRuntimeJunk(worktree);
     await run("git", ["worktree", "remove", ...(force ? ["--force"] : []), worktree], { cwd: projectDir });
   }
-  if (delete_branch && branch) { const current = await git(["branch", "--show-current"]); if (current === branch) throw new Error("Refusing to delete current branch"); await run("git", ["branch", force ? "-D" : "-d", branch], { cwd: projectDir }); }
-  return toolText(JSON.stringify({ jobId: job_id, removedWorktree: worktree || null, deletedBranch: delete_branch ? branch : null }, null, 2));
+  let branchDeleteMode = null;
+  if (delete_branch && branch) {
+    const current = await git(["branch", "--show-current"]);
+    if (current === branch) throw new Error("Refusing to delete current branch");
+    if (force) {
+      branchDeleteMode = "forced";
+      await run("git", ["branch", "-D", branch], { cwd: projectDir });
+    } else {
+      try {
+        await run("git", ["branch", "-d", branch], { cwd: projectDir });
+        branchDeleteMode = "merged";
+      } catch (error) {
+        if (!(await isBranchContentIntegrated(branch, projectDir))) throw error;
+        branchDeleteMode = "content-integrated";
+        await run("git", ["branch", "-D", branch], { cwd: projectDir });
+      }
+    }
+  }
+  return toolText(JSON.stringify({ jobId: job_id, removedWorktree: worktree || null, deletedBranch: delete_branch ? branch : null, branchDeleteMode }, null, 2));
 });
 
 const isMain = (() => { try { return Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } })();

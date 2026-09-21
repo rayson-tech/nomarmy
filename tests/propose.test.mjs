@@ -3,8 +3,8 @@ import test from "node:test";
 
 import { buildConfigProposal } from "../lib/propose.mjs";
 
-function evidence({ services = [], commands = [], fixturePaths = [] } = {}) {
-  return { services: { items: services }, commands: { items: commands }, fixturePaths };
+function evidence({ services = [], commands = [], tooling = [], fixturePaths = [] } = {}) {
+  return { services: { items: services }, commands: { items: commands }, tooling: { items: tooling }, fixturePaths };
 }
 
 test("buildConfigProposal: no services and no test command yields a valid, fail-loud placeholder proposal", () => {
@@ -69,6 +69,62 @@ test("buildConfigProposal: services spread across multiple distinct compose file
   assert.equal(r.valid, true);
   assert.equal(Object.keys(r.proposal.environment.services).length, 1, "only the first compose file's services are proposed");
   assert.ok(r.notes.some((n) => /different compose files/.test(n)));
+});
+
+test("buildConfigProposal: exactly one requirements.txt-shaped file is proposed automatically -- the real bug this closes (nomarmy init silently omitted environment.python.requirements even when evidence found it)", () => {
+  const r = buildConfigProposal(evidence({
+    tooling: [{ name: "pip", category: "package-manager", detail: "requirements.txt", source: "requirements.txt" }],
+  }));
+  assert.equal(r.valid, true);
+  assert.deepEqual(r.proposal.environment.python, { requirements: ["requirements.txt"] });
+});
+
+test("buildConfigProposal: requirements evidence merges into environment alongside compose, not overwriting it", () => {
+  const r = buildConfigProposal(evidence({
+    services: [{ name: "db", source: "docker-compose.yml" }],
+    tooling: [{ name: "pip", category: "package-manager", detail: "requirements.txt", source: "requirements.txt" }],
+  }));
+  assert.equal(r.valid, true);
+  assert.deepEqual(r.proposal.environment.compose, { file: "docker-compose.yml" });
+  assert.deepEqual(r.proposal.environment.python, { requirements: ["requirements.txt"] });
+});
+
+test("buildConfigProposal: several requirements files is ambiguous -- proposes nothing automatically but notes it loudly instead of staying silent", () => {
+  const r = buildConfigProposal(evidence({
+    tooling: [
+      { name: "pip", category: "package-manager", detail: "requirements.txt", source: "requirements.txt" },
+      { name: "pip", category: "package-manager", detail: "requirements-dev.txt", source: "requirements-dev.txt" },
+    ],
+  }));
+  assert.equal(r.valid, true);
+  assert.equal(r.proposal.environment, undefined, "no environment.python proposed -- the combination is a human judgment call, same as multiple compose files");
+  assert.ok(r.notes.some((n) => /2 requirements files/.test(n) && /requirements\.txt/.test(n) && /requirements-dev\.txt/.test(n)));
+});
+
+test("buildConfigProposal: a duplicate source (same requirements.txt recorded twice) still counts as exactly one file", () => {
+  const r = buildConfigProposal(evidence({
+    tooling: [
+      { name: "pip", category: "package-manager", detail: "requirements.txt", source: "requirements.txt" },
+      { name: "pip", category: "package-manager", detail: "requirements.txt", source: "requirements.txt" },
+    ],
+  }));
+  assert.deepEqual(r.proposal.environment.python, { requirements: ["requirements.txt"] });
+});
+
+test("buildConfigProposal: a fixture-flagged requirements file is excluded, never proposed as a real dependency source", () => {
+  const r = buildConfigProposal(evidence({
+    tooling: [{ name: "pip", category: "package-manager", detail: "x", source: "tests/fixtures/python-svc/requirements.txt" }],
+    fixturePaths: ["tests/fixtures/python-svc/requirements.txt"],
+  }));
+  assert.equal(r.proposal.environment, undefined);
+  assert.ok(r.excludedFixturePaths.includes("tests/fixtures/python-svc/requirements.txt"));
+});
+
+test("buildConfigProposal: pyproject.toml/poetry/uv tooling evidence alone (no requirements.txt) proposes nothing -- the sandbox builder has no install path for it yet, so proposing environment.python would claim a capability that doesn't exist", () => {
+  const r = buildConfigProposal(evidence({
+    tooling: [{ name: "poetry", category: "package-manager", detail: "pyproject.toml", source: "pyproject.toml" }],
+  }));
+  assert.equal(r.proposal.environment, undefined);
 });
 
 test("buildConfigProposal: the returned proposal is always independently valid against the real schema", () => {

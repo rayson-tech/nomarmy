@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 
 import { ConfigError } from "../lib/config.mjs";
 import { DEFAULT_AGENT_IMAGE } from "../lib/verify.mjs";
@@ -58,7 +59,13 @@ import {
   runningCount,
   track,
   looksLikeTransientInferenceAbort,
-  shouldRetryTransientAbort
+  shouldRetryTransientAbort,
+  resolveVerifyRegression,
+  detectScopedTestSelectionRisk,
+  parseUnsupportedThinkingError,
+  resolveReasoningApplied,
+  isBranchContentIntegrated,
+  isProvablyEmptyJob
 } from "../mcp/server.mjs";
 
 const report = ({ status = "done", tests = "pass", notDone = "none", note = "n/a" } = {}) =>
@@ -977,7 +984,7 @@ test("metrics: worker_provider surfaces OpenClaw's own reported provider, not ju
 });
 
 // Regression: worker_provider used to fall back to the single global
-// execution.workerProvider when OpenClaw's own envelope omitted `provider`
+// execution.defaultWorkerProvider when OpenClaw's own envelope omitted `provider`
 // -- for a pool-routed job that actually ran on a different provider, that
 // fallback silently misattributed it to whatever the ambient default
 // happens to be. It must now stay null instead (matching worker_cost_usd's
@@ -1179,12 +1186,16 @@ test("jobSchema: evidence is optional", () => {
 
 // ---------------------------------------------------------------------------
 // verify_regression: schema plumbing for the (separately wired) regression
-// check -- defaults to false, accepts an explicit boolean, rejects anything else.
+// check -- accepts an explicit boolean, rejects anything else. The SCHEMA
+// itself leaves it unset when omitted (no schema-level default) -- the
+// actual effective default (true whenever a verification profile is set)
+// is resolveVerifyRegression's job, not the schema's, since it depends on
+// another field (verification) the schema alone can't see.
 // ---------------------------------------------------------------------------
-test("jobSchema: verify_regression defaults to false when omitted", () => {
+test("jobSchema: verify_regression is left unset (undefined), not defaulted, when omitted", () => {
   const result = jobSchema.safeParse({ task: "t" });
   assert.equal(result.success, true);
-  assert.equal(result.data.verify_regression, false);
+  assert.equal(result.data.verify_regression, undefined);
 });
 
 test("jobSchema: verify_regression accepts true", () => {
@@ -2118,6 +2129,16 @@ test("resolvePoolSelection: thinking:false on a hosted entry forces thinking off
   assert.equal(selection.thinking, "off");
 });
 
+test("resolvePoolSelection: a specific thinking level on a hosted entry is always used, even when the job requested a different one -- the entry's own reasoning floor", () => {
+  const selection = resolvePoolSelection("capable", "medium", {
+    getDispatchConfig: () => fakeDispatchConfig({
+      capable: [{ id: "grok", provider: "xai", model: "grok-4.7", weight: 1, auth_env: "X", thinking: "high" }],
+    }),
+    pickProviderFn: (pool) => pool[0],
+  });
+  assert.equal(selection.thinking, "high");
+});
+
 test("resolvePoolSelection: an unknown pool name throws, never silently falling back to profile/local", () => {
   assert.throws(
     () => resolvePoolSelection("typo", "medium", { getDispatchConfig: () => fakeDispatchConfig({ cheap: [] }) }),
@@ -2298,4 +2319,213 @@ test("metrics: worker_transient_abort_retried defaults to false and is only ever
   assert.equal(withoutRetry.worker_transient_abort_retried, false);
   const withRetry = buildMetrics({ result: null, record: null, reportValidation: null, outcome: null, workerElapsedMs: 1, totalElapsedMs: 2, transientAbortRetried: true });
   assert.equal(withRetry.worker_transient_abort_retried, true);
+});
+
+// ---------------------------------------------------------------------------
+// resolveVerifyRegression: verify_regression now defaults ON whenever there
+// is a verification profile to regression-check against -- exit-code
+// checking alone cannot tell a genuine pass from a test-selection flag (-k,
+// --grep, etc.) that accidentally excluded the changed file's own tests, and
+// this revert+rerun proof is the only mechanism that can.
+// ---------------------------------------------------------------------------
+test("resolveVerifyRegression: defaults to true for an implement job with a verification profile set -- the whole point of this default flip", () => {
+  assert.equal(resolveVerifyRegression({ mode: "implement", verification: "quick" }), true);
+});
+
+test("resolveVerifyRegression: defaults to false with no verification profile -- there is nothing to regression-check", () => {
+  assert.equal(resolveVerifyRegression({ mode: "implement", verification: undefined }), false);
+});
+
+test("resolveVerifyRegression: defaults to false for scout/decompose regardless of verification -- the field only applies to implement", () => {
+  assert.equal(resolveVerifyRegression({ mode: "scout", verification: "quick" }), false);
+  assert.equal(resolveVerifyRegression({ mode: "decompose", verification: "quick" }), false);
+});
+
+test("resolveVerifyRegression: an explicit false always wins, even with a verification profile set -- the wall-clock opt-out must still work", () => {
+  assert.equal(resolveVerifyRegression({ mode: "implement", verification: "quick", verify_regression: false }), false);
+});
+
+test("resolveVerifyRegression: an explicit true always wins, even with no verification profile -- admission's own separate check is what catches that combination as invalid, not this function silently correcting it", () => {
+  assert.equal(resolveVerifyRegression({ mode: "implement", verification: undefined, verify_regression: true }), true);
+});
+
+// ---------------------------------------------------------------------------
+// detectScopedTestSelectionRisk: the real incident this closes -- `-k 'gx or
+// descriptor or fixture'` deselected all 8 tests in the exact file a worker
+// was changing, the run still reported 2319 passing, honestly. A test-
+// selection flag alone is completely normal and not itself flagged; only
+// paired with THIS diff touching a test file is it worth a human's look.
+// ---------------------------------------------------------------------------
+const noTestChanges = { new_tests_added: [], existing_tests_modified: [] };
+
+test("detectScopedTestSelectionRisk: the real incident's exact shape -- a -k filter, and this diff touches a test file", () => {
+  const result = detectScopedTestSelectionRisk({
+    commands: ["pytest -k 'gx or descriptor or fixture'"],
+    testChanges: { new_tests_added: [], existing_tests_modified: ["tests/test_fixture.py"] },
+  });
+  assert.ok(result);
+  assert.match(result.reason, /pytest -k/);
+  assert.match(result.reason, /tests\/test_fixture\.py/);
+});
+
+test("detectScopedTestSelectionRisk: a selection flag with no test-file changes in the diff is NOT flagged -- an ordinary, expected use of -k", () => {
+  assert.equal(detectScopedTestSelectionRisk({ commands: ["pytest -k 'not slow'"], testChanges: noTestChanges }), null);
+});
+
+test("detectScopedTestSelectionRisk: a test file changed but no selection flag in the command is NOT flagged -- nothing here suggests exclusion", () => {
+  assert.equal(detectScopedTestSelectionRisk({
+    commands: ["pytest"],
+    testChanges: { new_tests_added: ["tests/test_new.py"], existing_tests_modified: [] },
+  }), null);
+});
+
+test("detectScopedTestSelectionRisk: recognizes jest/vitest -t, go test -run, and --grep, not just pytest -k", () => {
+  const changes = { new_tests_added: ["src/foo.test.ts"], existing_tests_modified: [] };
+  assert.ok(detectScopedTestSelectionRisk({ commands: ["jest -t 'unrelated'"], testChanges: changes }));
+  assert.ok(detectScopedTestSelectionRisk({ commands: ["go test -run TestOther ./..."], testChanges: changes }));
+  assert.ok(detectScopedTestSelectionRisk({ commands: ["mocha --grep unrelated"], testChanges: changes }));
+});
+
+test("detectScopedTestSelectionRisk: a flag-shaped substring inside an unrelated word does not false-positive (e.g. '-keep', 'bookmark')", () => {
+  assert.equal(detectScopedTestSelectionRisk({
+    commands: ["pytest --keep-going"],
+    testChanges: { new_tests_added: ["tests/test_x.py"], existing_tests_modified: [] },
+  }), null);
+});
+
+test("detectScopedTestSelectionRisk: no commands and no test changes returns null, never throws", () => {
+  assert.equal(detectScopedTestSelectionRisk({}), null);
+  assert.equal(detectScopedTestSelectionRisk(), null);
+});
+
+// ---------------------------------------------------------------------------
+// parseUnsupportedThinkingError / resolveReasoningApplied: the real incident
+// this closes -- grok-4.7 rejects "medium" (config/providers.yml's grok
+// entry still said thinking: true, correct for grok-4.6, after a
+// `providers update --model grok-4.7` never touched it), openclaw exited 1
+// with zero model calls, and the manifest's reasoningApplied field had no
+// way to reflect a pool-routed job's real thinking level at all -- it was
+// computed purely from profile/workerModelThinkingSupported.
+// ---------------------------------------------------------------------------
+const REAL_UNSUPPORTED_THINKING_STDERR = 'Thinking level "medium" is not supported for xai/grok-4.7. Use one of: off.\n';
+
+test("parseUnsupportedThinkingError: parses the real error message captured from the live incident", () => {
+  const result = parseUnsupportedThinkingError(`openclaw exited 1\nSTDERR:\n${REAL_UNSUPPORTED_THINKING_STDERR}\nSTDOUT:\n{}`);
+  assert.deepEqual(result, { requested: "medium", model: "xai/grok-4.7", supported: ["off"] });
+});
+
+test("parseUnsupportedThinkingError: a message with several supported levels splits them all", () => {
+  const result = parseUnsupportedThinkingError('Thinking level "off" is not supported for some/model. Use one of: low, medium, high.');
+  assert.deepEqual(result.supported, ["low", "medium", "high"]);
+});
+
+test("parseUnsupportedThinkingError: an unrelated error returns null, never a false match", () => {
+  assert.equal(parseUnsupportedThinkingError("openclaw exited 1\nSTDERR:\nsome other real failure\n"), null);
+  assert.equal(parseUnsupportedThinkingError(""), null);
+  assert.equal(parseUnsupportedThinkingError(undefined), null);
+});
+
+test("resolveReasoningApplied: prefers result.thinkingApplied (the real, pool-aware value) over the profile-only formula", () => {
+  const applied = resolveReasoningApplied({
+    result: { thinkingApplied: "off" }, // e.g. a pool entry that got retried down to "off"
+    profile: "coder", reasoning: "medium", workerModelThinkingSupported: true,
+  });
+  assert.equal(applied, "off");
+});
+
+test("resolveReasoningApplied: falls back to the profile-only formula when result carries no thinkingApplied (e.g. worker_failed before runOpenClaw ever returned)", () => {
+  assert.equal(resolveReasoningApplied({ result: null, profile: "coder", reasoning: "medium", workerModelThinkingSupported: false }), "off");
+  assert.equal(resolveReasoningApplied({ result: null, profile: "gpt", reasoning: "high", workerModelThinkingSupported: false }), "high");
+});
+
+// ---------------------------------------------------------------------------
+// isBranchContentIntegrated: the real incident this closes -- nomArmy
+// integrates by cherry-pick, never merge, so `git branch -d` always refuses
+// ("not fully merged") on a genuinely-integrated job branch, making `force`
+// routine on every successful cleanup instead of a real discard signal.
+// git cherry compares by PATCH CONTENT, which recognizes a cherry-picked
+// commit as already-applied even though its SHA differs from the original.
+// ---------------------------------------------------------------------------
+test("isBranchContentIntegrated: a branch actually merged (git's own ancestry case) is trivially integrated", async () => {
+  const dir = await initTempGitRepo();
+  try {
+    execFileSync("git", ["checkout", "-qb", "agent/x"], { cwd: dir });
+    fs.writeFileSync(path.join(dir, "b.txt"), "y");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["commit", "-qm", "add b"], { cwd: dir });
+    execFileSync("git", ["checkout", "-q", "-"], { cwd: dir }); // back to the original branch (main/master)
+    execFileSync("git", ["merge", "-q", "--no-ff", "agent/x"], { cwd: dir });
+    assert.equal(await isBranchContentIntegrated("agent/x", dir), true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("isBranchContentIntegrated: a branch cherry-picked into HEAD (different SHA, same content) is recognized as integrated -- the real, confirmed bug this closes", async () => {
+  const dir = await initTempGitRepo();
+  const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+  try {
+    execFileSync("git", ["checkout", "-qb", "agent/y", base], { cwd: dir });
+    fs.writeFileSync(path.join(dir, "c.txt"), "z");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["commit", "-qm", "add c"], { cwd: dir });
+    execFileSync("git", ["checkout", "-q", "-"], { cwd: dir });
+    // A commit lands on the trunk between the job branch's creation and its
+    // integration (the realistic case) -- this alone guarantees the
+    // cherry-picked commit gets a genuinely different parent/SHA from
+    // agent/y's own commit, not just a coincidentally-identical one.
+    fs.writeFileSync(path.join(dir, "unrelated.txt"), "meanwhile, on trunk");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["commit", "-qm", "unrelated trunk work"], { cwd: dir });
+    // The coordinator's own real integration path: cherry-pick, not merge.
+    execFileSync("git", ["cherry-pick", "agent/y"], { cwd: dir });
+    const currentTip = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+    const branchTip = execFileSync("git", ["rev-parse", "agent/y"], { cwd: dir, encoding: "utf8" }).trim();
+    assert.notEqual(currentTip, branchTip, "cherry-pick onto a diverged trunk must produce a genuinely different SHA, or this test proves nothing");
+    assert.throws(() => execFileSync("git", ["branch", "-d", "agent/y"], { cwd: dir, stdio: "pipe" }),
+      /not fully merged/, "confirms git's OWN ancestry check really does refuse here, same as the real incident");
+    assert.equal(await isBranchContentIntegrated("agent/y", dir), true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("isBranchContentIntegrated: a branch with genuinely un-integrated content is NOT reported integrated -- must never falsely clear the way for a real discard", async () => {
+  const dir = await initTempGitRepo();
+  try {
+    execFileSync("git", ["checkout", "-qb", "agent/z"], { cwd: dir });
+    fs.writeFileSync(path.join(dir, "unintegrated.txt"), "real work, never taken");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["commit", "-qm", "real work"], { cwd: dir });
+    execFileSync("git", ["checkout", "-q", "-"], { cwd: dir });
+    assert.equal(await isBranchContentIntegrated("agent/z", dir), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// isProvablyEmptyJob: the real incident this closes -- 4 retained worktrees,
+// 8 hours old, ~164MB, each holding only an ISOLATION_PROBE.txt and a .venv,
+// whose branch tip was already identical to its own base SHA (the worker
+// made zero commits; the failure was environmental, not about the code).
+// Never trusts a stored manifest number -- both facts are meant to be
+// checked live against Git by the caller before this decides.
+// ---------------------------------------------------------------------------
+test("isProvablyEmptyJob: zero commits (tip === base) and a clean worktree is provably empty -- the real incident's exact shape", () => {
+  assert.equal(isProvablyEmptyJob({ branchTipSha: "abc123", baseSha: "abc123", workingTreeDirty: false }), true);
+});
+
+test("isProvablyEmptyJob: zero commits but real uncommitted changes remain -- NOT empty, a human should still look", () => {
+  assert.equal(isProvablyEmptyJob({ branchTipSha: "abc123", baseSha: "abc123", workingTreeDirty: true }), false);
+});
+
+test("isProvablyEmptyJob: the branch has real commits (tip !== base) -- NOT empty regardless of worktree state", () => {
+  assert.equal(isProvablyEmptyJob({ branchTipSha: "def456", baseSha: "abc123", workingTreeDirty: false }), false);
+});
+
+test("isProvablyEmptyJob: missing either SHA never guesses \"safe\" -- always false, not a coin flip", () => {
+  assert.equal(isProvablyEmptyJob({ branchTipSha: null, baseSha: "abc123", workingTreeDirty: false }), false);
+  assert.equal(isProvablyEmptyJob({ branchTipSha: "abc123", baseSha: null, workingTreeDirty: false }), false);
+  assert.equal(isProvablyEmptyJob({ branchTipSha: null, baseSha: null, workingTreeDirty: false }), false);
 });
