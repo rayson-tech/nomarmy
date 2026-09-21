@@ -1,0 +1,10 @@
+# Belt-and-suspenders alongside the negated entries in package.json's
+# `files` array (the part that's actually load-bearing here -- verified
+# live: an .npmignore-only version of this exclusion did NOT stop `npm pack`
+# from including this operator's real, gitignored config/providers.yml;
+# `files` needed its own explicit "!config/providers.yml" line too, since
+# `files` whitelisting a directory does not reliably defer to .gitignore or
+# .npmignore for paths inside it).
+config/providers.yml
+config/profiles/*.local.env
+.nomarmy.local.yml

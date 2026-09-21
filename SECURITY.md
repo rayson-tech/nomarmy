@@ -26,3 +26,9 @@ nomArmy's security model is described in the README's [Security posture](README.
 - Supply-chain concerns in the dependency set declared in `package.json`.
 
 Out of scope: the safety of a repository a user deliberately points a worker at (that repo's content is explicitly untrusted by design), and vulnerabilities in third-party tools nomArmy orchestrates but doesn't ship (llama.cpp, OpenClaw, Podman) — please report those upstream.
+
+## Known limitation: the diff and report are not content-scanned
+
+The sandbox blocks network egress (`--network none`), which stops a worker from exfiltrating anything itself. It does not stop the diff or the four-line report from *carrying* something out on its own — a worker's file edits and prose are the one channel that always leaves the sandbox, because the coordinator reads them to decide what to commit. Nothing today scans that diff or report text for secrets, encoded payloads, or content a compromised or adversarially-crafted repository steered the worker into writing.
+
+The mitigation that exists is process, not a technical control: the coordinator treats the worker's report as an unverified claim, independently re-runs verification against Git/test state before accepting anything, and a human reviews material diffs before they reach a real branch. That's real, but it's a different guarantee than "the output channel is inspected" — it catches a worker that's *wrong*, not necessarily a worker whose output was deliberately shaped to look right while carrying something extra. A report along these lines (automated secret-pattern scanning on the diff before it's ever presented for acceptance) is welcome.
