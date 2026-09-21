@@ -19,7 +19,7 @@ import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
 import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected } from "../lib/connect.mjs";
 import { loadDispatchConfig, dispatchConfigPath, stringifyDispatchConfig } from "../lib/dispatch-config.mjs";
-import { dispatchConfigSchema, formatDispatchIssues, findReservedPoolName, RESERVED_POOL_NAMES, PROVIDER_TYPES, NATIVE_PROVIDER_TYPES } from "../lib/dispatch-schema.mjs";
+import { dispatchConfigSchema, formatDispatchIssues, findReservedPoolName, RESERVED_POOL_NAMES, PROVIDER_TYPES, NATIVE_PROVIDER_TYPES, ID_RE, AUTH_ENV_NAME_RE } from "../lib/dispatch-schema.mjs";
 
 // Add a new coordinator: add its name here, teach commandExists/connectTarget
 // about it below (a JSON-file target like Cursor has no PATH binary to check
@@ -315,6 +315,42 @@ function writeEnvLine(filePath, key, value) {
 // medium on an identical ticket). `recommended` is this project's own
 // honest opinion given everything measured so far, not a formula -- it
 // prints as a note, never a hidden default no one chose.
+/**
+ * Ask a question and keep re-asking until the answer matches `pattern` (or
+ * is blank and `allowEmpty`, returning `fallback`) -- validated ON THE SPOT,
+ * not left to fail only at the very end via schema validation with no
+ * indication of which of several answers was the problem.
+ */
+async function askUntilValid(rl, prompt, { pattern, invalidMessage, allowEmpty = false, fallback = "" }) {
+  for (;;) {
+    const answer = (await rl.question(c.bold(prompt))).trim();
+    if (!answer && allowEmpty) return fallback;
+    if (pattern.test(answer)) return answer;
+    console.log(c.red(`  ✗ ${invalidMessage}`));
+  }
+}
+
+/**
+ * Like rl.question, for a real secret typed directly into the terminal
+ * rather than exported as an env var first. NOT masked: the classic
+ * "monkey-patch readline's private write hook" trick relies on
+ * `_writeToOutput`, which the callback-based `readline.Interface` exposes
+ * but this project's promises-based one (`node:readline/promises`,
+ * confirmed directly against this Node version) does not -- and a
+ * hand-rolled raw-mode character reader is exactly the kind of thing that's
+ * unsafe to ship without testing against a real interactive terminal, which
+ * this environment cannot do. So this echoes plainly, like every other
+ * question in this file, and says so up front rather than silently doing
+ * something fragile. The value is still never written to config/
+ * providers.yml or any other file -- it's held in memory for the one
+ * immediate registration call and discarded.
+ */
+async function askSecret(rl, prompt) {
+  console.log(c.yellow("(this will be visible as you type it -- not masked, not sent anywhere, not saved to a file)"));
+  const answer = await rl.question(c.bold(prompt));
+  return answer.trim();
+}
+
 const KNOWN_MODELS = {
   default: {
     label: "Qwen3-Coder-Next (shipped default; no thinking mode -- 0 failures across every case tested tonight)",
@@ -596,21 +632,35 @@ const KNOWN_PROVIDERS = {
  * otherwise still be safe (the key was on stdin, not argv) but is not worth
  * trusting blindly across every future code path this function might grow.
  */
-function registerProviderWithOpenClaw({ id, provider, model, authEnv, baseUrl }) {
-  const apiKey = authEnv ? process.env[authEnv] : null;
-  if (authEnv && !apiKey) {
-    console.log(c.red(`✗ ${authEnv} is not set in this shell -- export it, then run this registration again.`));
+// Takes a pool entry in its REAL, on-disk shape (snake_case auth_env/
+// base_url, exactly what config/providers.yml and the schema use) rather
+// than a translated camelCase copy -- a prior version of this function
+// destructured `authEnv`/`baseUrl` while every real entry object actually
+// carries `auth_env`/`base_url`, so both were silently always undefined at
+// every call site and the piped credential was the literal string "null".
+function registerProviderWithOpenClaw({ id, provider, model, auth_env: authEnv, base_url: baseUrl, apiKeyOverride }) {
+  // apiKeyOverride is the value from askSecret's "enter it now instead"
+  // path -- checked first so a key typed directly into the wizard is used
+  // immediately, without also requiring it be exported first.
+  const apiKey = apiKeyOverride || (authEnv ? process.env[authEnv] : null);
+  if (!apiKey) {
+    console.log(c.red(authEnv
+      ? `✗ ${authEnv} is not set in this shell -- export it, then run this registration again.`
+      : "✗ No credential available to register (no auth_env on this entry and none entered)."));
     return false;
   }
   const isNative = NATIVE_PROVIDER_TYPES.includes(provider);
   const authProviderId = isNative ? provider : id;
   const skipFlags = ["--skip-daemon", "--skip-channels", "--skip-skills", "--skip-search", "--skip-hooks", "--skip-ui"];
+  // Override point for tests (and for an operator pointing at a specific
+  // openclaw binary/path rather than relying on PATH resolution).
+  const openclawCmd = process.env.NOMARMY_OPENCLAW_CMD || "openclaw";
   try {
     if (!isNative) {
-      execFileSync("openclaw", ["onboard", "--non-interactive", "--accept-risk",
+      execFileSync(openclawCmd, ["onboard", "--non-interactive", "--accept-risk",
         "--custom-base-url", baseUrl, "--custom-model-id", model, "--custom-provider-id", id, "--custom-compatibility", "openai", ...skipFlags], { stdio: "ignore" });
     }
-    execFileSync("openclaw", ["models", "auth", "paste-api-key", "--provider", authProviderId, "--profile-id", `${authProviderId}:nomarmy`],
+    execFileSync(openclawCmd, ["models", "auth", "paste-api-key", "--provider", authProviderId, "--profile-id", `${authProviderId}:nomarmy`],
       { input: `${apiKey}\n`, stdio: ["pipe", "ignore", "ignore"] });
     console.log(c.green(`✓ Registered "${id}" with OpenClaw.`));
     console.log(c.yellow(`This project has not run a real job against this specific provider type yet -- run \`openclaw models list --provider ${authProviderId}\` to confirm it registered as expected, then dispatch one real job against this pool before trusting it in production.`));
@@ -715,7 +765,7 @@ async function cmdProvidersAdd() {
     throw new Error(`config/providers.yml already exists but is invalid -- fix it by hand or delete it before adding: ${error.message}`);
   }
 
-  let poolName, providerType, id, model, weight, authEnv, baseUrl, maxConcurrent, thinking;
+  let poolName, providerType, id, model, weight, authEnv, baseUrl, maxConcurrent, thinking, providedApiKey;
 
   if (json) {
     poolName = value("pool");
@@ -749,12 +799,25 @@ async function cmdProvidersAdd() {
       if (!providerType) throw new Error(`Not a valid choice: "${typeChoice}".`);
       const info = KNOWN_PROVIDERS[providerType] ?? {};
 
-      id = (await rl.question(c.bold(`Entry id [${providerType}]: `))).trim() || providerType;
+      // A SHORT LABEL, never the API key -- validated and re-prompted on the
+      // spot (ID_RE, the same rule config/providers.yml itself enforces),
+      // not left to fail only at the very end via schema validation. This
+      // exact confusion happened live: a user's real key ended up typed
+      // here (the first free-text question after picking a provider) and
+      // only surfaced as an opaque validation error after every other
+      // question had already been answered.
+      id = await askUntilValid(rl, `Entry id -- a short label, NOT the API key [${providerType}]: `, {
+        allowEmpty: true, fallback: providerType, pattern: ID_RE,
+        invalidMessage: "must be 1-64 characters of letters, numbers, dot, underscore or hyphen -- that looks too long/complex to be a label. Did you mean to paste your API key here? Don't -- that's asked for separately, and only ever read from an environment variable, never typed into this wizard.",
+      });
 
       if (providerType !== "llama-cpp") {
         model = (await rl.question(c.bold(`Model${info.defaultModel ? ` [${info.defaultModel}]` : ""}: `))).trim() || info.defaultModel;
         if (!model) throw new Error("A model id is required for this provider type.");
-        authEnv = (await rl.question(c.bold(`Environment variable holding the API key [${info.authEnvSuggestion}]: `))).trim() || info.authEnvSuggestion;
+        authEnv = await askUntilValid(rl, `Environment variable NAME holding the API key (not the key itself) [${info.authEnvSuggestion}]: `, {
+          allowEmpty: true, fallback: info.authEnvSuggestion, pattern: AUTH_ENV_NAME_RE,
+          invalidMessage: "must look like an ENVIRONMENT VARIABLE NAME (uppercase letters, digits, underscores, e.g. NOMARMY_XAI_API_KEY) -- not the credential itself.",
+        });
       } else {
         const modelAnswer = (await rl.question(c.bold("Model override (blank -> use NOMARMY_WORKER_MODEL, today's default): "))).trim();
         if (modelAnswer) model = modelAnswer;
@@ -776,10 +839,24 @@ async function cmdProvidersAdd() {
         thinking = !(thinkingAnswer === "n" || thinkingAnswer === "no");
       }
 
+      // The actual credential is never typed into a question above -- only
+      // its env var's NAME is. If that var isn't already set, offer to type
+      // the real key here instead, for THIS ONE registration step only:
+      // held in a local variable, used once to pipe into `openclaw models
+      // auth paste-api-key` (see registerProviderWithOpenClaw), and never
+      // written to config/providers.yml or any other file. Input is masked
+      // (best-effort; terminal-dependent) since, unlike an exported env var,
+      // this does land in the terminal's own key-press stream momentarily.
       if (authEnv && !process.env[authEnv]) {
-        console.log(c.yellow(`\nNote: ${authEnv} is not set in this shell right now.`));
-        console.log(c.dim(`  export ${authEnv}=...`));
-        console.log(c.dim("The entry is written either way -- it's simply skipped at dispatch time until that's set."));
+        console.log(c.yellow(`\n${authEnv} is not set in this shell right now.`));
+        const provideNow = (await rl.question(c.bold("Enter the key now instead (used once for registration, never saved to a file)? [y/N] "))).trim().toLowerCase();
+        if (provideNow === "y" || provideNow === "yes") {
+          providedApiKey = await askSecret(rl, c.bold(`${authEnv}: `));
+          if (!providedApiKey) console.log(c.yellow("Nothing entered -- skipping; you can export the env var and register later instead."));
+        } else {
+          console.log(c.dim(`  export ${authEnv}=...`));
+          console.log(c.dim("The entry is written either way -- it's simply skipped at dispatch time until that's set."));
+        }
       }
     } finally {
       rl.close();
@@ -837,7 +914,7 @@ async function cmdProvidersAdd() {
     const rl2 = createInterface({ input, output });
     try {
       const answer = (await rl2.question(c.bold(`\nRegister "${id}" with OpenClaw now? [y/N] `))).trim().toLowerCase();
-      if (answer === "y" || answer === "yes") registerProviderWithOpenClaw(written);
+      if (answer === "y" || answer === "yes") registerProviderWithOpenClaw({ ...written, apiKeyOverride: providedApiKey });
       else console.log(c.dim(`Skipped -- this entry can't actually dispatch until it's registered. Rerun \`nomarmy providers add\` isn't needed for that; ask a maintainer for the equivalent \`openclaw onboard\`/\`openclaw models auth paste-api-key\` commands, or answer yes next time.`));
     } finally {
       rl2.close();

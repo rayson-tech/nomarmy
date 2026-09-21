@@ -192,15 +192,52 @@ function scratchNomarmyRoot() {
   return dir;
 }
 
-function runProvidersCLI(root, args) {
+function runProvidersCLI(root, args, extraEnv = {}) {
   try {
     const result = execFileSync(process.execPath, [path.join(root, "bin", "nomarmy.mjs"), "providers", ...args], {
-      cwd: root, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
+      cwd: root, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...extraEnv },
     });
     return { exitCode: 0, stdout: result, stderr: "" };
   } catch (error) {
     return { exitCode: error.status ?? 1, stdout: error.stdout ?? "", stderr: error.stderr ?? "" };
   }
+}
+
+// `nomarmy providers add --register` shells out to a real `openclaw`
+// binary. To verify EXACTLY what it's invoked with (argv and stdin) without
+// touching a real OpenClaw install or a real credential, this points
+// NOMARMY_OPENCLAW_CMD (registerProviderWithOpenClaw's own override, for
+// exactly this purpose) at a fake script that logs every call (argv,
+// joined; the full stdin it received) as one JSON line per invocation, to a
+// fixed file. This is what actually caught (and now guards) a real bug: an
+// earlier version of registerProviderWithOpenClaw destructured
+// `authEnv`/`baseUrl` while the real entry object only ever has
+// `auth_env`/`base_url`, so the piped "credential" was the literal string
+// "null" on every call, silently.
+//
+// The script is written as valid ESM, not CommonJS (no `require`) --
+// scratchNomarmyRoot's copied package.json declares "type": "module", and
+// an extensionless script under that same tree is resolved as ESM by
+// Node's own nearest-package.json walk-up regardless of its shebang line;
+// `require` is undefined there and crashes the script before it can write
+// anything, which is exactly what silently broke the first version of this
+// helper (real invocations, wrong content, zero log entries, no visible
+// error since the child's own stderr is intentionally ignored).
+function withFakeOpenclaw(root) {
+  const logPath = path.join(root, "fake-openclaw.log");
+  const scriptPath = path.join(root, ".fake-openclaw-bin");
+  fs.writeFileSync(scriptPath, `#!/usr/bin/env node
+import fs from "node:fs";
+let stdin = "";
+try { stdin = fs.readFileSync(0, "utf8"); } catch {}
+fs.appendFileSync(process.env.FAKE_OPENCLAW_LOG, JSON.stringify({ argv: process.argv.slice(2), stdin }) + "\\n");
+process.exit(0);
+`);
+  fs.chmodSync(scriptPath, 0o755);
+  return {
+    env: { NOMARMY_OPENCLAW_CMD: scriptPath, FAKE_OPENCLAW_LOG: logPath },
+    calls: () => fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [],
+  };
 }
 
 test("providers add --json (llama-cpp) writes a valid config/providers.yml under a scratch nomarmyRoot", () => {
@@ -211,6 +248,49 @@ test("providers add --json (llama-cpp) writes a valid config/providers.yml under
     const written = JSON.parse(stdout);
     assert.equal(written.entry.id, "local");
     assert.ok(fs.existsSync(path.join(root, "config", "providers.yml")));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("providers add --json --register (native provider, e.g. xai) pipes the REAL credential via stdin, never argv, using the real entry field names", () => {
+  const root = scratchNomarmyRoot();
+  const fake = withFakeOpenclaw(root);
+  try {
+    const { exitCode, stdout } = runProvidersCLI(root, [
+      "add", "--json", "--register", "--pool", "capable", "--provider", "xai", "--id", "grok",
+      "--model", "grok-build-0.1", "--auth-env", "NOMARMY_TEST_KEY_XAI",
+    ], { ...fake.env, NOMARMY_TEST_KEY_XAI: "sk-test-real-secret-value" });
+    assert.equal(exitCode, 0, stdout);
+    const calls = fake.calls();
+    assert.equal(calls.length, 1, "a native provider needs exactly one openclaw call (paste-api-key), no custom onboarding step");
+    const [call] = calls;
+    assert.deepEqual(call.argv.slice(0, 5), ["models", "auth", "paste-api-key", "--provider", "xai"]);
+    assert.equal(call.stdin.trim(), "sk-test-real-secret-value", "the REAL key must be on stdin, not the string \"null\" or \"undefined\"");
+    assert.ok(!call.argv.join(" ").includes("sk-test-real-secret-value"), "the credential must never appear in argv");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("providers add --json --register (custom-endpoint provider) onboards with the REAL model/base_url, then pipes the REAL credential via stdin", () => {
+  const root = scratchNomarmyRoot();
+  const fake = withFakeOpenclaw(root);
+  try {
+    const { exitCode, stdout } = runProvidersCLI(root, [
+      "add", "--json", "--register", "--pool", "capable", "--provider", "azure-openai", "--id", "azure-mini",
+      "--model", "gpt-4o-mini", "--auth-env", "NOMARMY_TEST_KEY_AZURE", "--base-url", "https://my-resource.openai.azure.com",
+    ], { NOMARMY_TEST_KEY_AZURE: "sk-test-azure-secret", ...fake.env });
+    assert.equal(exitCode, 0, stdout);
+    const calls = fake.calls();
+    assert.equal(calls.length, 2, "a custom endpoint needs onboard (define the shape) THEN paste-api-key (attach the credential)");
+    const [onboardCall, pasteCall] = calls;
+    assert.ok(onboardCall.argv.includes("--custom-base-url") && onboardCall.argv.includes("https://my-resource.openai.azure.com"),
+      "the REAL base_url must reach openclaw onboard, not undefined");
+    assert.ok(onboardCall.argv.includes("--custom-model-id") && onboardCall.argv.includes("gpt-4o-mini"),
+      "the REAL model must reach openclaw onboard, not undefined");
+    assert.deepEqual(pasteCall.argv.slice(0, 3), ["models", "auth", "paste-api-key"]);
+    assert.equal(pasteCall.stdin.trim(), "sk-test-azure-secret");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
