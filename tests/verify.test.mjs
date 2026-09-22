@@ -89,7 +89,7 @@ const STANDARD = {
 };
 
 // --------------------------------------------------------------------------
-// resolveProfile — pure
+// resolveProfile: pure
 // --------------------------------------------------------------------------
 
 test("resolveProfile finds a declared profile", () => {
@@ -130,7 +130,7 @@ test("resolveProfile does no I/O and defaults environment to none", () => {
 });
 
 // --------------------------------------------------------------------------
-// classifyResults — pure
+// classifyResults: pure
 // --------------------------------------------------------------------------
 
 test("classifyResults passes only when every command exited zero", () => {
@@ -171,7 +171,7 @@ test("classifyResults is not_run when nothing started, fail when something did",
 });
 
 // --------------------------------------------------------------------------
-// capOutput — pure
+// capOutput: pure
 // --------------------------------------------------------------------------
 
 test("capOutput truncates and records the number of bytes dropped", () => {
@@ -188,7 +188,7 @@ test("capOutput truncates and records the number of bytes dropped", () => {
 });
 
 // --------------------------------------------------------------------------
-// buildPodmanArgs — the sandbox invocation
+// buildPodmanArgs: the sandbox invocation
 // --------------------------------------------------------------------------
 
 test("buildPodmanArgs isolates the container and passes the command as one argv element", () => {
@@ -244,7 +244,7 @@ test("buildPodmanArgs adds a read-only node_modules mount only when a source is 
 });
 
 // --------------------------------------------------------------------------
-// resolveNodeModulesMount — pure-ish (real fs, temp dirs)
+// resolveNodeModulesMount: pure-ish (real fs, temp dirs)
 // --------------------------------------------------------------------------
 
 test("resolveNodeModulesMount: no host node_modules at all is a no-op, not a block", () => {
@@ -312,7 +312,7 @@ test("createVerificationRunner: a matching node_modules is mounted into every co
 });
 
 // --------------------------------------------------------------------------
-// runner — happy path
+// runner: happy path
 // --------------------------------------------------------------------------
 
 test("all commands passing yields pass with a basis naming the profile", async () => {
@@ -398,7 +398,7 @@ test("a non-zero exit yields fail naming the command and exit code, and stops th
 });
 
 // --------------------------------------------------------------------------
-// runner — NOMARMY_CHANGED_TEST_FILES / NOMARMY_CHANGED_PRODUCTION_FILES:
+// runner: NOMARMY_CHANGED_TEST_FILES / NOMARMY_CHANGED_PRODUCTION_FILES:
 // language-agnostic by design (classifyTestChanges already recognizes
 // Python/Go/JS/TS/Ruby/JVM test-file conventions), exposed as plain sandbox
 // env vars rather than nomArmy trying to know every test runner's own CLI
@@ -432,7 +432,7 @@ test("runner: with no record (or a record with no testChanges), both env vars ar
 });
 
 // --------------------------------------------------------------------------
-// runner — absence of a contract is not_run, never an error
+// runner: absence of a contract is not_run, never an error
 // --------------------------------------------------------------------------
 
 test("no .nomarmy.yml, no verification block and an unknown profile are each not_run with a distinct reason", async () => {
@@ -502,7 +502,7 @@ test("an empty command list is not_run rather than a vacuous pass", async () => 
 });
 
 // --------------------------------------------------------------------------
-// runner — unmet environment requirements
+// runner: unmet environment requirements
 // --------------------------------------------------------------------------
 
 test("environment: integration is not_run naming the unmet requirement, NOT fail", async () => {
@@ -524,7 +524,7 @@ test("environment: integration is not_run naming the unmet requirement, NOT fail
 });
 
 // --------------------------------------------------------------------------
-// runner — the sandbox is mandatory
+// runner: the sandbox is mandatory
 // --------------------------------------------------------------------------
 
 test("Podman unavailable is not_run and NOTHING is executed on the host", async () => {
@@ -582,7 +582,7 @@ test("a container that never starts is not_run when nothing ran at all", async (
 });
 
 // --------------------------------------------------------------------------
-// runner — timeouts
+// runner: timeouts
 // --------------------------------------------------------------------------
 
 test("a command that times out is a fail and the runner returns promptly", { timeout: 5000 }, async () => {
@@ -652,7 +652,7 @@ test("the per-command budget never exceeds the remaining overall budget", async 
 });
 
 // --------------------------------------------------------------------------
-// runner — output capping
+// runner: output capping
 // --------------------------------------------------------------------------
 
 test("oversized command output is capped and the drop is recorded in the verdict", async () => {
@@ -694,7 +694,7 @@ test("a failure detail carrying huge stderr stays bounded", async () => {
 });
 
 // --------------------------------------------------------------------------
-// runner — contract shape
+// runner: contract shape
 // --------------------------------------------------------------------------
 
 test("the runner always returns a normalisable verdict and never throws", async () => {

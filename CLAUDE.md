@@ -1,4 +1,4 @@
-# nomArmy by Rayson Technologies — local agent instructions (v1.3)
+# nomArmy by Rayson Technologies (local agent instructions, v1.3)
 
 Use `nomarmy-local-worker` as the default execution layer for bounded engineering work that is cheap to verify. GPT-OSS 20B is the default local coder; Qwen3-Coder-Next is the alternative (swap with `nomarmy model`).
 
@@ -46,7 +46,7 @@ Profiles select where inference runs. `./scripts/*.sh <profile>`, or `NOMARMY_PR
 | `bedrock` | Bedrock `qwen.qwen3-coder-next` | Claude Opus 5 on Bedrock | frontier |
 | `bedrock-cheap` | Bedrock `qwen.qwen3-coder-next` | OpenClaw on the same open-weight model | **degraded** |
 
-Local profiles cost nothing per token and are capped by VRAM. Bedrock profiles are capped by TPM quota and budget, so `max_parallel` above 1 is reachable — measure first-pass accept rate before raising it. Judge cost per accepted task, not per token: the coordinator's review tokens dominate the worker's, so a worker that fails the gate more often is not cheaper.
+Local profiles cost nothing per token and are capped by VRAM. Bedrock profiles are capped by TPM quota and budget, so `max_parallel` above 1 is reachable; measure first-pass accept rate before raising it. Judge cost per accepted task, not per token: the coordinator's review tokens dominate the worker's, so a worker that fails the gate more often is not cheaper.
 
 Cloud profiles send repository content off the machine. That is the decision to weigh, not the engineering.
 
