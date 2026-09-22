@@ -1600,6 +1600,14 @@ test("makeIdleDiffTick: never stops before minElapsedMs even if already idle", a
 // backgrounded process, and the session went completely silent afterward
 // until nomArmy's own hard deadline killed it 16+ minutes later.
 // ---------------------------------------------------------------------------
+// node:sqlite is Node 22.5+ only (confirmed live: CI's Node 20.x job fails
+// with ERR_UNKNOWN_BUILTIN_MODULE) -- lib/transcript.mjs's own readOpenClawTranscript
+// already degrades gracefully on an older Node (available:false), so the
+// PRODUCTION path is fine; only this suite's own fixture writer needs the
+// module directly, so skip these on a Node build that doesn't have it rather
+// than hard-fail the whole run.
+const SQLITE_AVAILABLE = await import("node:sqlite").then(() => true, () => false);
+const skipNoSqlite = SQLITE_AVAILABLE ? false : "node:sqlite is not available on this Node version (added in Node 22.5+)";
 async function writeFakeTranscript(events) {
   const { DatabaseSync } = await import("node:sqlite");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-idle-bg-"));
@@ -1619,7 +1627,7 @@ const toolCallEvent = (name, input = {}) => ({ type: "message", message: { role:
 const toolResultEvent = text => ({ type: "message", message: { role: "toolResult", content: [{ type: "text", text }] } });
 const BACKGROUNDED_RESULT = "Command still running (session amber-tidepool, pid 53263). Use process (list/poll/log/write/send-key)";
 
-test("makeAbandonedBackgroundProcessTick: never stops when nothing has ever backgrounded", async () => {
+test("makeAbandonedBackgroundProcessTick: never stops when nothing has ever backgrounded", { skip: skipNoSqlite }, async () => {
   const dir = await writeFakeTranscript([toolCallEvent("exec", { command: "pytest -q" }), toolResultEvent("....  [100%]\n2 passed")]);
   try {
     const tick = makeAbandonedBackgroundProcessTick(dir, { idleMs: 1000, minElapsedMs: 0 });
@@ -1628,7 +1636,7 @@ test("makeAbandonedBackgroundProcessTick: never stops when nothing has ever back
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("makeAbandonedBackgroundProcessTick: stops once a backgrounded process is the transcript's last known state and nothing follows for the idle window -- the real incident's exact shape", async () => {
+test("makeAbandonedBackgroundProcessTick: stops once a backgrounded process is the transcript's last known state and nothing follows for the idle window -- the real incident's exact shape", { skip: skipNoSqlite }, async () => {
   const dir = await writeFakeTranscript([toolCallEvent("exec", { command: "pytest -q" }), toolResultEvent(BACKGROUNDED_RESULT)]);
   try {
     const tick = makeAbandonedBackgroundProcessTick(dir, { idleMs: 1000, minElapsedMs: 500 });
@@ -1640,7 +1648,7 @@ test("makeAbandonedBackgroundProcessTick: stops once a backgrounded process is t
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("makeAbandonedBackgroundProcessTick: new transcript activity after the handoff resets the clock -- the worker is actively managing it", async () => {
+test("makeAbandonedBackgroundProcessTick: new transcript activity after the handoff resets the clock -- the worker is actively managing it", { skip: skipNoSqlite }, async () => {
   const { DatabaseSync } = await import("node:sqlite");
   const dir = await writeFakeTranscript([toolCallEvent("exec", { command: "pytest -q" }), toolResultEvent(BACKGROUNDED_RESULT)]);
   try {
@@ -1660,7 +1668,7 @@ test("makeAbandonedBackgroundProcessTick: new transcript activity after the hand
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("makeAbandonedBackgroundProcessTick: never stops before minElapsedMs even if already idle", async () => {
+test("makeAbandonedBackgroundProcessTick: never stops before minElapsedMs even if already idle", { skip: skipNoSqlite }, async () => {
   const dir = await writeFakeTranscript([toolCallEvent("exec", { command: "pytest -q" }), toolResultEvent(BACKGROUNDED_RESULT)]);
   try {
     const tick = makeAbandonedBackgroundProcessTick(dir, { idleMs: 100, minElapsedMs: 10000 });
@@ -1669,7 +1677,7 @@ test("makeAbandonedBackgroundProcessTick: never stops before minElapsedMs even i
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("makeAbandonedBackgroundProcessTick: a normal finished result that arrives AFTER a background handoff clears it -- polled to completion is not abandoned", async () => {
+test("makeAbandonedBackgroundProcessTick: a normal finished result that arrives AFTER a background handoff clears it -- polled to completion is not abandoned", { skip: skipNoSqlite }, async () => {
   const dir = await writeFakeTranscript([
     toolCallEvent("exec", { command: "pytest -q" }),
     toolResultEvent(BACKGROUNDED_RESULT),
