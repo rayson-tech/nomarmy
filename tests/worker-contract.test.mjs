@@ -1543,6 +1543,38 @@ test("makeIdleDiffTick: stops once the worktree has changed and then gone idle p
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("makeIdleDiffTick: repeated real edits to the SAME already-dirty file keep resetting the idle clock -- the exact real incident this closes", async () => {
+  // The real bug: once a.txt first appears in `git status`, it stays
+  // reported on every poll regardless of further edits, so a NAME-only
+  // hash never changes again even while the file's content keeps changing.
+  // Live incident: a worker made 5 more genuine edits to a test file after
+  // it first appeared in git status, methodically debugging it, and the
+  // old version of this function killed the job 9.6s after crossing the
+  // idle threshold measured from that file's FIRST appearance -- not from
+  // its actual last edit, 6 seconds before the kill.
+  const dir = await initTempGitRepo();
+  try {
+    const tick = makeIdleDiffTick(dir, { idleMs: 1000, minElapsedMs: 0 });
+    fs.writeFileSync(path.join(dir, "a.txt"), "edit 1");
+    assert.equal((await tick(0)).stop, false, "a.txt first appears in git status");
+
+    // Same file, real content changes, spaced further apart than idleMs --
+    // each one must reset the idle clock, since each is genuine progress.
+    fs.writeFileSync(path.join(dir, "a.txt"), "edit 2 -- different content");
+    assert.equal((await tick(1500)).stop, false, "content changed again -- must NOT have already tripped idle_diff by now under the old, buggy name-only hash");
+
+    fs.writeFileSync(path.join(dir, "a.txt"), "edit 3 -- different again");
+    assert.equal((await tick(3000)).stop, false, "content changed yet again -- still not idle");
+
+    // NOW genuinely stop editing. Idle clock should measure from edit 3
+    // (the last REAL content change), not from a.txt's first appearance.
+    assert.equal((await tick(3500)).stop, false, "only 500ms since the real last edit -- under the 1000ms threshold");
+    const r = await tick(4100);
+    assert.equal(r.stop, true, "1100ms since the real last edit -- correctly idle now");
+    assert.equal(r.reason, "idle_diff");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("makeIdleDiffTick: never stops before minElapsedMs even if already idle", async () => {
   const dir = await initTempGitRepo();
   try {

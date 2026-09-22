@@ -171,9 +171,29 @@ export function makeIdleDiffTick(cwd, { idleMs, minElapsedMs }) {
     // observed directly: filesChangedLive stuck reporting a live "change"
     // that was only .npm/. Hash the files that count, not the raw status.
     const relevantFiles = parseStatusPorcelainZ(statusOut).map(e => e.file).filter(f => !isRuntimeJunk(f)).sort();
-    const hash = crypto.createHash("sha1").update(relevantFiles.join("\0")).digest("hex");
-    if (hash !== lastHash) {
-      lastHash = hash; lastChangeAtMs = elapsedMs;
+    // A real, confirmed incident: hashing only the NAMES of changed files
+    // (the previous version) cannot tell "still actively editing this file"
+    // from "gone idle" -- once a file is already flagged dirty, git status
+    // keeps reporting it on every poll regardless of further edits, so the
+    // name-list hash never changes again even while a worker keeps making
+    // real content edits to that same file. Observed live: a worker made
+    // five more genuine, successful patches to a test file after it first
+    // appeared in `git status`, methodically debugging it, and the breaker
+    // killed the job 9.6 seconds after crossing the idle threshold measured
+    // from that file's FIRST appearance -- not from its last real edit, six
+    // seconds earlier. Hashing each file's actual current content (not just
+    // its name) fixes this: any edit to any relevant file changes the digest.
+    const hash = crypto.createHash("sha1");
+    for (const file of relevantFiles) {
+      hash.update(file);
+      hash.update("\0");
+      try { hash.update(fs.readFileSync(path.join(cwd, file))); }
+      catch { /* deleted or unreadable mid-tick -- the name alone still contributes */ }
+      hash.update("\0");
+    }
+    const digest = hash.digest("hex");
+    if (digest !== lastHash) {
+      lastHash = digest; lastChangeAtMs = elapsedMs;
       if (relevantFiles.length > 0) sawChange = true;
       return { stop: false };
     }
