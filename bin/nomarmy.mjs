@@ -89,9 +89,15 @@ Usage: nomarmy <command> [options]
                   --tier <more|nominal>   with --json, skip the prompt
   model           Change the configured model later, without the rest of
                   setup's questions. Offers to also resync the MCP
-                  registration's worker-routing env vars right then.
-                  --update-mcp  with --json, also resync the MCP
-                                registration (never done silently)
+                  registration's worker-routing env vars, and to restart
+                  local inference so the running llama-server actually
+                  loads the new model (writing the config alone leaves
+                  the running process serving whatever it loaded at its
+                  own last start).
+                  --update-mcp        with --json, also resync the MCP
+                                      registration (never done silently)
+                  --restart-inference with --json, also stop/start local
+                                      inference (never done silently)
   update          Pull the latest nomArmy code and re-sync the installed
                   MCP copy (fast-forward only; refuses on local changes).
   providers <list|add|update|remove|validate>
@@ -585,6 +591,20 @@ async function cmdSetup() {
  * itself, matching every other "propose a config change" command in this
  * CLI.
  */
+// The third layer this closes, alongside NOMARMY_WORKER_MODEL/--update-mcp
+// above: writing config/common.env and resyncing the MCP registration still
+// leaves the ACTUAL RUNNING llama-server serving whatever model it loaded
+// at its own last start -- a real, confirmed incident (config said
+// Qwen3.6-27B, the live process was still gpt-oss-20b 11 minutes later,
+// and a delegated worker correctly refused to guess a launch command or
+// kill a 13.7GB process without authorization rather than silently doing
+// nothing). stop/start-inference.sh already no-op harmlessly on a cloud
+// profile and auto-detect the profile from the OS when none is given
+// (see lib.sh's load_profile), so this needs no profile argument itself.
+function restartInference() {
+  runScript("stop-inference.sh", []);
+  runScript("start-inference.sh", []);
+}
 async function cmdModel() {
   const commonPath = path.join(nomarmyRoot, "config", "common.env");
   if (json) {
@@ -598,9 +618,12 @@ async function cmdModel() {
     // Same destructive-action-needs-explicit-opt-in-under-json rule as
     // uninstall's --clear-*: this runs claude mcp remove/add for real.
     if (flag("update-mcp")) connectClaude({ nomarmyRoot, run: (cmd, args, opts = {}) => execFileSync(cmd, args, { stdio: "ignore", ...opts }) });
-    return out({ written: commonPath, model: m, mcpUpdated: flag("update-mcp") });
+    // Also real and destructive (kills the running llama-server, however
+    // briefly) -- same opt-in-under-json rule.
+    if (flag("restart-inference")) restartInference();
+    return out({ written: commonPath, model: m, mcpUpdated: flag("update-mcp"), inferenceRestarted: flag("restart-inference") });
   }
-  if (!process.stdin.isTTY) throw new Error(`nomarmy model needs an interactive terminal, or --json --model <${Object.keys(KNOWN_MODELS).join("|")}> (add --update-mcp to also resync the MCP registration).`);
+  if (!process.stdin.isTTY) throw new Error(`nomarmy model needs an interactive terminal, or --json --model <${Object.keys(KNOWN_MODELS).join("|")}> (add --update-mcp to also resync the MCP registration, --restart-inference to also reload the running local model).`);
   const rl = createInterface({ input, output });
   try {
     console.log(c.bold("🍪 nomArmy model"));
@@ -637,7 +660,19 @@ async function cmdModel() {
         console.log(c.green("✓ MCP registration updated.") + " Restart your Claude Code session to pick this up (the MCP server is a per-session child process).");
       }
     }
-    console.log(c.dim("\nRestart inference to load this model:\n  ./scripts/stop-inference.sh\n  ./scripts/start-inference.sh <profile>"));
+
+    // The third layer: config/common.env and the MCP registration can both
+    // now say the right model while the actually-running llama-server keeps
+    // serving whatever it loaded at its own last start, unnoticed until
+    // something fails against the wrong model.
+    if (alias) {
+      const answer = (await rl.question(c.bold(`\nAlso restart local inference now to load "${alias}"? [y/N] `))).trim().toLowerCase();
+      if (answer === "y" || answer === "yes") {
+        restartInference();
+      } else {
+        console.log(c.dim("Skipped -- restart inference yourself when ready:\n  nomarmy stop\n  nomarmy start"));
+      }
+    }
   } finally {
     rl.close();
   }

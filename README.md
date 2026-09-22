@@ -209,11 +209,12 @@ nomarmy model
 
 Offers three curated choices verified against this project's own real usage (downloaded, loaded, dispatched against, all measured in `docs/experiments/2026-09-20-model-bakeoff-and-economics.md`) — Qwen3-Coder-Next (shipped default, no thinking mode), gpt-oss-20b, and Qwen3.6-27B — or a Hugging Face search for anything else llama.cpp can load. Each curated choice's menu line states its measured tradeoff plainly (speed, reliability, and the right `reasoning` effort) rather than leaving you to rediscover it. The search path shows the available quantizations and asks you to confirm before writing anything.
 
-Writing the model config also updates the *worker-routing* env vars (`NOMARMY_WORKER_MODEL`, `NOMARMY_MODEL_THINKING`) in the same file, and `nomarmy model` then offers to resync the MCP registration right then — the gap that used to mean picking a model here had no effect on which model workers actually dispatched to until someone separately, manually, re-ran the registration by hand. It still won't restart inference or your coordinator session for you:
+Writing the model config also updates the *worker-routing* env vars (`NOMARMY_WORKER_MODEL`, `NOMARMY_MODEL_THINKING`) in the same file, and `nomarmy model` then offers to resync the MCP registration and restart local inference right then — closing a real, confirmed gap: config and the MCP registration can both say the new model while the actually-running `llama-server` keeps serving whatever it loaded at its own last start, unnoticed until a job fails against the wrong model (or, worse, a delegated worker correctly refuses to guess a launch command or kill the process without authorization, and just stalls). Answering yes to both prompts is normally enough. It still won't restart your coordinator session for you, since that has to happen from outside the process being restarted:
 
 ```bash
-nomarmy stop <profile>
-nomarmy start <profile>
+# only if you skipped the prompts above
+nomarmy stop
+nomarmy start
 # then restart Claude Code / Codex -- the MCP server is a per-session child process
 ```
 
