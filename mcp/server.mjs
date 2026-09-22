@@ -1061,6 +1061,109 @@ export async function detectUnwiredNewDefinitions({ cwd, productionFiles = [], g
 }
 
 // ---------------------------------------------------------------------------
+// Mislabeled test names: a real, recurring pattern -- four separate times, a
+// worker's new test carried a name naming a specific route/handler it never
+// actually exercised (the sharpest instance: test_edit_draft_not_found
+// posted an unrelated action and never touched the edit_request_draft route
+// its own name claims). A green suite that includes a test like this means
+// less than it looks; this was caught each time only by a human rereading
+// the diff, the same luck-dependent gap detectUnwiredNewDefinitions closed
+// for "built but wired to nothing".
+//
+// The check: does this diff's new test's NAME claim a SPECIFIC identifier
+// this same diff just added to production code (real word overlap, not a
+// vague guess), and if so, does the test's own BODY ever reference that
+// identifier (a plain whole-word text search, matching the identifier's
+// literal name as a function call OR as a string/action value -- either
+// shows the test actually reached it)? A name too generic to name anything
+// specific is never flagged; there is no claim to check. Like
+// detectUnwiredNewDefinitions, this is a heuristic (word overlap over a
+// per-language regex outline) and always a review flag, never a block.
+// ---------------------------------------------------------------------------
+const TEST_NAME_STOPWORDS = new Set([
+  "test", "tests", "testing", "should", "when", "then", "given", "and", "or", "the", "a", "an", "for", "to",
+  "from", "on", "off", "with", "without", "not", "no", "none", "null", "nil", "empty", "missing", "invalid",
+  "valid", "success", "successful", "fail", "fails", "failed", "failure", "error", "errors", "exception",
+  "raises", "raise", "returns", "return", "response", "request", "case", "cases", "handles", "handling",
+  "before", "after", "new", "old", "ok", "found", "unfound", "it", "is", "does", "doesnt", "dont", "cant",
+  "cannot", "will", "would", "that", "this", "of", "in", "at", "by", "as", "if", "true", "false", "default",
+  "expected", "actual", "result", "end", "start", "one", "two", "three",
+]);
+function tokenizeIdentifier(name) {
+  return String(name ?? "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .split(/[^A-Za-z0-9]+/)
+    .map((t) => t.toLowerCase())
+    .filter(Boolean);
+}
+function meaningfulTokens(name) {
+  return tokenizeIdentifier(name).filter((t) => t.length >= 3 && !TEST_NAME_STOPWORDS.has(t));
+}
+const TEST_NAME_PATTERN = /^test[_A-Za-z]/i;
+const MIN_CLAIM_OVERLAP = 2; // fewer shared, meaningful words is not a specific-enough claim to check
+const escRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * @param {{ cwd: string, productionFiles: string[], testFiles: string[], gitDiffFn: (file: string) => Promise<string>, outlineFn: Function, readFileFn: (cwd: string, file: string) => string }} input
+ */
+export async function detectMislabeledTestNames({ cwd, productionFiles = [], testFiles = [], gitDiffFn, outlineFn, readFileFn }) {
+  // Candidates: identifiers THIS diff itself just added to production code --
+  // the same universe detectUnwiredNewDefinitions computes, scoped to what a
+  // test in this same diff could plausibly be claiming to be about.
+  const candidates = [];
+  for (const file of productionFiles) {
+    let diffText;
+    try { diffText = await gitDiffFn(file); } catch { continue; }
+    const addedLines = parseAddedLineNumbers(diffText);
+    for (const def of newDefinitionsInFile({ outlineFn, cwd, file, addedLines })) {
+      const tokens = meaningfulTokens(def.name);
+      if (tokens.length > 0) candidates.push({ file, name: def.name, tokens: new Set(tokens) });
+    }
+  }
+  if (candidates.length === 0) return null;
+
+  const flagged = [];
+  for (const file of testFiles) {
+    let diffText;
+    try { diffText = await gitDiffFn(file); } catch { continue; }
+    const addedLines = parseAddedLineNumbers(diffText);
+    const outline = outlineFn(cwd, file);
+    if (!outline.exists) continue;
+    const newTests = newDefinitionsInFile({ outlineFn, cwd, file, addedLines })
+      .filter((def) => def.kind === "function" && TEST_NAME_PATTERN.test(def.name));
+    if (newTests.length === 0) continue;
+    let text;
+    try { text = readFileFn(cwd, file); } catch { continue; }
+    const lines = String(text ?? "").split(/\r?\n/);
+    for (const t of newTests) {
+      const testTokens = new Set(meaningfulTokens(t.name));
+      if (testTokens.size < MIN_CLAIM_OVERLAP) continue; // too generic a name to name anything specific
+      let best = null, bestOverlap = 0;
+      for (const c of candidates) {
+        const overlap = [...c.tokens].filter((tok) => testTokens.has(tok)).length;
+        if (overlap > bestOverlap) { bestOverlap = overlap; best = c; }
+      }
+      if (!best || bestOverlap < MIN_CLAIM_OVERLAP) continue; // no specific-enough claim to check
+      // Body span: from this test's own definition line to the line before
+      // the next top-level definition (or end of file) -- outlineFile gives
+      // no end line, so the next item's start is the only boundary available.
+      const after = outline.items
+        .filter((it) => it.line > t.line && (it.kind === "function" || it.kind === "class"))
+        .sort((a, b) => a.line - b.line)[0];
+      const bodyEnd = after ? after.line - 1 : lines.length;
+      const body = lines.slice(t.line - 1, bodyEnd).join("\n");
+      const referenced = new RegExp(`\\b${escRegex(best.name)}\\b`).test(body);
+      if (!referenced) flagged.push({ file, line: t.line, name: t.name, claims: best.name, claimedIn: best.file });
+    }
+  }
+  if (flagged.length === 0) return null;
+  return {
+    flagged,
+    reason: `test name${flagged.length === 1 ? "" : "s"} appear to claim a specific route/handler this diff just added, but the test body never references it: ${flagged.map((f) => `${f.name} (${f.file}:${f.line}) names ${f.claims} (${f.claimedIn}) but never calls it`).join(", ")} -- a name-vs-body heuristic (word overlap, whole-word text search over the test's own body), stated as such; confirm the test actually exercises what its name claims before trusting it as coverage for that path.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Secret scanning: SECURITY.md's own documented, unmitigated gap -- the diff
 // and report are the one channel that always leaves the sandbox (network is
 // none, but the coordinator still reads and commits what a worker wrote).
@@ -2071,6 +2174,25 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
       ? { ...afterSelectionRisk, reviewRequired: true, reasons: [...afterSelectionRisk.reasons, `UNWIRED NEW DEFINITION: ${unwiredDefinitions.reason}`] }
       : afterSelectionRisk;
 
+    // Real, recurring incident (now its fourth confirmed instance): a
+    // worker's new test names a specific route/handler this same diff added,
+    // but the test's own body never actually reaches it -- see
+    // detectMislabeledTestNames's own doc comment.
+    let mislabeledTests = null;
+    if (mode === "implement") {
+      try {
+        mislabeledTests = await detectMislabeledTestNames({
+          cwd, productionFiles: preCommit.testChanges.production_files_changed,
+          testFiles: [...preCommit.testChanges.new_tests_added, ...preCommit.testChanges.existing_tests_modified],
+          gitDiffFn: (file) => gitRaw(["diff", "-U0", base.sha, "--", file], cwd),
+          outlineFn: outlineFile, readFileFn: (dir, file) => fs.readFileSync(path.join(dir, file), "utf8"),
+        });
+      } catch { /* best-effort review flag; never blocks a commit on its own failure */ }
+    }
+    const afterMislabeledTests = mislabeledTests
+      ? { ...afterUnwiredDefinitions, reviewRequired: true, reasons: [...afterUnwiredDefinitions.reasons, `MISLABELED TEST NAME: ${mislabeledTests.reason}`] }
+      : afterUnwiredDefinitions;
+
     // A HARD block, unlike every review flag above: SECURITY.md's own
     // documented gap made deterministic where it can be (a fixed set of
     // well-known secret shapes), checked against every changed file's
@@ -2091,10 +2213,10 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
       } catch { /* best-effort; never blocks a commit on the scan's OWN failure -- the absence of a signal is not evidence of safety, but a hard block on a scanner crash would be a self-inflicted denial of service */ }
     }
     const finalOutcome = possibleSecrets
-      ? { ...afterUnwiredDefinitions, reviewRequired: true, commitAllowed: false,
+      ? { ...afterMislabeledTests, reviewRequired: true, commitAllowed: false,
           commitBlockedReason: `possible secret detected: ${possibleSecrets.reason}`,
-          reasons: [...afterUnwiredDefinitions.reasons, `POSSIBLE SECRET DETECTED: ${possibleSecrets.reason}`] }
-      : afterUnwiredDefinitions;
+          reasons: [...afterMislabeledTests.reasons, `POSSIBLE SECRET DETECTED: ${possibleSecrets.reason}`] }
+      : afterMislabeledTests;
 
     progress("commit");
     const commit = await createCoordinatorCommit({ cwd, jobId, outcome: finalOutcome });

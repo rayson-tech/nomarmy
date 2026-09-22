@@ -69,6 +69,7 @@ import {
   isProvablyEmptyJob,
   parseAddedLineNumbers,
   detectUnwiredNewDefinitions,
+  detectMislabeledTestNames,
   scanTextForSecrets,
   extractAddedLinesBlob,
   detectPossibleSecrets
@@ -2814,6 +2815,101 @@ test("detectUnwiredNewDefinitions: end to end against a REAL temp git repo, usin
     assert.ok(result, "only_tested must be flagged");
     assert.equal(result.flagged.length, 1);
     assert.equal(result.flagged[0].name, "only_tested");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// detectMislabeledTestNames: the real, recurring incident this closes -- four
+// separate times, a worker's new test named a specific route/handler this
+// same diff added, but the test's own body never actually reached it. The
+// sharpest instance: test_edit_draft_not_found posted an unrelated action and
+// never touched the edit_request_draft route its own name claims.
+// ---------------------------------------------------------------------------
+const PROD_DIFF_EDIT_DRAFT = `diff --git a/lambda/handler.py b/lambda/handler.py\n--- a/lambda/handler.py\n+++ b/lambda/handler.py\n@@ -10,0 +11,2 @@\n+def edit_request_draft():\n+    pass\n`;
+const TEST_DIFF_EDIT_DRAFT = `diff --git a/lambda/tests/test_handler.py b/lambda/tests/test_handler.py\n--- a/lambda/tests/test_handler.py\n+++ b/lambda/tests/test_handler.py\n@@ -5,0 +6,3 @@\n+def test_edit_draft_not_found():\n+    resp = post("unknown-action")\n+    assert resp.status == 404\n`;
+const PROD_OUTLINE = () => ({ exists: true, items: [{ line: 11, kind: "function", name: "edit_request_draft" }] });
+
+test("detectMislabeledTestNames: flags a test naming a route this diff added that its own body never references -- the real incident's exact shape", async () => {
+  const result = await detectMislabeledTestNames({
+    cwd: "/repo",
+    productionFiles: ["lambda/handler.py"],
+    testFiles: ["lambda/tests/test_handler.py"],
+    gitDiffFn: async (file) => (file === "lambda/handler.py" ? PROD_DIFF_EDIT_DRAFT : TEST_DIFF_EDIT_DRAFT),
+    outlineFn: (cwd, file) => (file === "lambda/handler.py" ? PROD_OUTLINE() : { exists: true, items: [{ line: 6, kind: "function", name: "test_edit_draft_not_found" }] }),
+    readFileFn: () => "line1\nline2\nline3\nline4\nline5\ndef test_edit_draft_not_found():\n    resp = post(\"unknown-action\")\n    assert resp.status == 404\n",
+  });
+  assert.ok(result);
+  assert.equal(result.flagged[0].name, "test_edit_draft_not_found");
+  assert.equal(result.flagged[0].claims, "edit_request_draft");
+});
+
+test("detectMislabeledTestNames: a test whose body DOES call the identifier its name claims is not flagged", async () => {
+  const result = await detectMislabeledTestNames({
+    cwd: "/repo",
+    productionFiles: ["lambda/handler.py"],
+    testFiles: ["lambda/tests/test_handler.py"],
+    gitDiffFn: async (file) => (file === "lambda/handler.py" ? PROD_DIFF_EDIT_DRAFT : TEST_DIFF_EDIT_DRAFT),
+    outlineFn: (cwd, file) => (file === "lambda/handler.py" ? PROD_OUTLINE() : { exists: true, items: [{ line: 6, kind: "function", name: "test_edit_draft_not_found" }] }),
+    readFileFn: () => "line1\nline2\nline3\nline4\nline5\ndef test_edit_draft_not_found():\n    resp = edit_request_draft()\n    assert resp.status == 404\n",
+  });
+  assert.equal(result, null);
+});
+
+test("detectMislabeledTestNames: a test name too generic to name anything specific is never flagged -- no claim, no check", async () => {
+  const result = await detectMislabeledTestNames({
+    cwd: "/repo",
+    productionFiles: ["lambda/handler.py"],
+    testFiles: ["lambda/tests/test_handler.py"],
+    gitDiffFn: async (file) => (file === "lambda/handler.py" ? PROD_DIFF_EDIT_DRAFT
+      : `diff --git a/lambda/tests/test_handler.py b/lambda/tests/test_handler.py\n--- a/lambda/tests/test_handler.py\n+++ b/lambda/tests/test_handler.py\n@@ -5,0 +6,2 @@\n+def test_error_case():\n+    pass\n`),
+    outlineFn: (cwd, file) => (file === "lambda/handler.py" ? PROD_OUTLINE() : { exists: true, items: [{ line: 6, kind: "function", name: "test_error_case" }] }),
+    readFileFn: () => "line1\nline2\nline3\nline4\nline5\ndef test_error_case():\n    pass\n",
+  });
+  assert.equal(result, null);
+});
+
+test("detectMislabeledTestNames: no production files means no candidate claims to check -- returns null without ever reading a test file", async () => {
+  const result = await detectMislabeledTestNames({
+    cwd: "/repo", productionFiles: [], testFiles: ["lambda/tests/test_handler.py"],
+    gitDiffFn: async () => { throw new Error("must never be called for a test file -- there are no candidates to check against"); },
+    outlineFn: () => ({ exists: true, items: [] }),
+    readFileFn: () => { throw new Error("must never be called"); },
+  });
+  assert.equal(result, null);
+});
+
+test("detectMislabeledTestNames: end to end against a REAL temp git repo, using the real outlineFile from lib/repo-query.mjs", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { outlineFile: realOutline } = await import("../lib/repo-query.mjs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-mislabeled-test-"));
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    execFileSync("git", ["config", "user.email", "t@example.com"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    fs.mkdirSync(path.join(dir, "tests"));
+    fs.writeFileSync(path.join(dir, "handler.py"), "def existing():\n    return 1\n");
+    fs.writeFileSync(path.join(dir, "tests", "test_handler.py"), "def test_existing():\n    assert existing() == 1\n");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["commit", "-qm", "init"], { cwd: dir });
+    const baseSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+
+    fs.writeFileSync(path.join(dir, "handler.py"),
+      "def existing():\n    return 1\n\n\ndef edit_request_draft():\n    return handle_edit()\n");
+    fs.writeFileSync(path.join(dir, "tests", "test_handler.py"),
+      "def test_existing():\n    assert existing() == 1\n\n\ndef test_edit_draft_not_found():\n    resp = post_unknown_action()\n    assert resp.status == 404\n\n\ndef test_edit_draft_real():\n    resp = edit_request_draft()\n    assert resp is not None\n");
+
+    const gitDiffFn = (file) => execFileSync("git", ["diff", "-U0", baseSha, "--", file], { cwd: dir, encoding: "utf8" });
+    const readFileFn = (cwd, file) => fs.readFileSync(path.join(cwd, file), "utf8");
+    const result = await detectMislabeledTestNames({
+      cwd: dir, productionFiles: ["handler.py"], testFiles: ["tests/test_handler.py"],
+      gitDiffFn, outlineFn: realOutline, readFileFn,
+    });
+    assert.ok(result, "test_edit_draft_not_found must be flagged");
+    assert.equal(result.flagged.length, 1);
+    assert.equal(result.flagged[0].name, "test_edit_draft_not_found");
+    assert.equal(result.flagged[0].claims, "edit_request_draft");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
