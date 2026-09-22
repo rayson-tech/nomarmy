@@ -281,6 +281,8 @@ Codex reads `AGENTS.md`; Cursor's registration is a JSON file nomArmy edits dire
 
 A sharp corollary from real use: writing the coordinator's `evidence` field thoroughly enough to hand a worker every fact it needs *is* the diagnosis. If what's left after that is a small, mechanical change, you already paid the cost delegation exists to save, and the fix has quietly become the losing shape above. A ticket that's part diagnosed-fix and part bulk, mechanically-verified work (writing a batch of tests, say) usually splits better than it delegates whole: keep the fix, hand off only the part that's genuinely nom-shaped.
 
+A second pattern, same session: the cheap tier is worst exactly where the test harness is the hard part, not the change itself. Hand it something a worker can just type, a validation rule with a passing and failing case, and it does well. Hand it code with no existing way to verify it, and that's what both timeouts and inert tests came from that night: it burned its budget hunting for a harness that didn't exist instead of writing the change.
+
 **Scouts and decomposers** are read-only noms for research and planning: every claim carries a `[path:start-end]` citation, resolved against the exact base commit through Git, never the worktree. Most scout-shaped questions ("where is X defined") aren't questions for a model at all: `repo_evidence` answers them deterministically in milliseconds; reach for a nom only for what that can't answer.
 
 **A concrete result**: a local 20B worker was asked to add a `doctor` command with tests. It produced 156 lines that read as competent (JSDoc throughout, clean structure) with six real defects invisible without executing it, including a file that didn't even parse and a "no test file" gap despite an explicit acceptance criterion. nomArmy committed nothing; the record showed `tests added: 0`, from the repository, not the worker's claim. That's the whole argument: reading the diff would have plausibly approved it; executing it didn't.
@@ -301,7 +303,7 @@ Bounded-delegation core is proven: coordinator-owned Git, isolated worktrees, re
 | `.nomarmy.yml` environment contract | Built, unit tested |
 | Disposable per-job service environments (Postgres, mocks) | Not built |
 | Nom-local browser/E2E, autonomous repair loop | Not built |
-| Full-stack thesis test | 7 tickets across 3 local models: task-size-dependent, not unconditionally true |
+| Full-stack thesis test | 7 tickets across 3 local models: task-size-dependent, not unconditionally true. A separate single-night, single-codebase run of 7 cheap-tier jobs scored 2 clean, 4 needing correction (mostly the inert-test defect `verify_regression`/`testSelectionRisk` now catch automatically), 2 timeouts on functions with no existing test harness. Read-only scout delegation was the more consistent win that same night: 5 surveys changed real decisions on ~520k tokens the coordinator never had to read itself |
 | Swapping the active local model | Working |
 | Go/Rust target repos | Verification live-verified; worker's own tool execution uses one global sandbox config |
 | Multi-provider dispatch pools | Live-verified for `llama-cpp` and `xai`; other native providers unverified against real credentials |
