@@ -1000,6 +1000,108 @@ export async function detectUnwiredNewDefinitions({ cwd, productionFiles = [], g
   };
 }
 
+// ---------------------------------------------------------------------------
+// Secret scanning: SECURITY.md's own documented, unmitigated gap -- the diff
+// and report are the one channel that always leaves the sandbox (network is
+// none, but the coordinator still reads and commits what a worker wrote).
+//
+// Backed by secretlint's recommended rule preset (a real, maintained scanner
+// -- AWS/GCP/Azure, GitHub/GitLab, Slack, Stripe, OpenAI/Anthropic, npm,
+// private key blocks and more), not a hand-rolled pattern list: verified
+// live against this codebase's own real dependency that a hand-rolled list
+// would only ever be a worse, staler subset of. It does NOT solve the
+// harder, genuinely open half of SECURITY.md's gap: adversarially steered
+// content with no recognizable secret shape. Say so, don't overclaim.
+//
+// Unlike testSelectionRisk/unwiredNewDefinitions, this is a HARD BLOCK, not
+// a review nudge -- the asymmetry runs the other way: a missed weak test
+// costs a review cycle, a leaked credential that reaches a real commit is
+// often irreversible the moment it's pushed.
+const SECRETLINT_CONFIG = Object.freeze({ rules: [{ id: "@secretlint/secretlint-rule-preset-recommend" }] });
+let cachedSecretlintEngine;
+async function secretlintEngine() {
+  if (cachedSecretlintEngine === undefined) {
+    try {
+      const { createEngine } = await import("@secretlint/node");
+      cachedSecretlintEngine = await createEngine({ color: false, formatter: "json", configFileJSON: SECRETLINT_CONFIG });
+    } catch { cachedSecretlintEngine = null; } // secretlint unavailable -- callers treat absence of a signal honestly, never as proof of safety
+  }
+  return cachedSecretlintEngine;
+}
+
+/**
+ * Which secretlint rule(s) fired on `text`, by ruleId/messageId ONLY.
+ *
+ * NEVER reads `message` or `data.*` from secretlint's own result: verified
+ * live that engine.executeOnContent's raw messages embed the ACTUAL matched
+ * credential value in both fields, unmasked -- the CLI's masking is a
+ * formatter-layer feature (`--no-maskSecrets`), never applied by the engine
+ * itself. Surfacing either field here would leak the very secret this
+ * exists to catch into coordinator.log, the job manifest, and a chat
+ * transcript. Only the rule identifier and line number are safe to keep.
+ */
+export async function scanTextForSecrets(text, filePath = "content") {
+  const value = String(text ?? "");
+  if (!value.trim()) return [];
+  const engine = await secretlintEngine();
+  if (!engine) return [];
+  let parsed;
+  try {
+    const result = await engine.executeOnContent({ content: value, filePath });
+    parsed = JSON.parse(result.output);
+  } catch { return []; }
+  const found = new Set();
+  for (const file of parsed ?? []) for (const m of file?.messages ?? []) found.add(m.messageId || m.ruleId || "unknown");
+  return [...found];
+}
+
+// `git diff -U0`'s hunk body lines are either "+added" or "-removed" (no
+// context lines). Joined back into ONE multi-line blob per file, not
+// scanned line by line: a private-key block or a multi-line JSON credential
+// spans several lines, and scanning one line at a time would never let a
+// multi-line rule match at all. Line NUMBERS (parseAddedLineNumbers, this
+// deliberately does not change) and line TEXT are two different needs, kept
+// as two small functions rather than reshaping an already-shipped one.
+export function extractAddedLinesBlob(diffText) {
+  const lines = [];
+  let inHunk = false;
+  for (const line of String(diffText ?? "").split("\n")) {
+    if (/^@@ /.test(line)) { inHunk = true; continue; }
+    if (!inHunk) continue;
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) lines.push(line.slice(1));
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Scan every changed file's ADDED content (not the whole file -- a secret
+ * already sitting in the repo before this job is not this job's leak to
+ * flag) plus the worker's own report text, for the known secret shapes
+ * above. Deletions are skipped -- nothing new to read there.
+ *
+ * @param {{ cwd: string, changedFiles: {path: string, status: string}[], gitDiffFn: (file: string) => Promise<string>, reportText?: string }} input
+ */
+export async function detectPossibleSecrets({ cwd, changedFiles = [], gitDiffFn, reportText = "" }) {
+  const flagged = [];
+  for (const entry of changedFiles) {
+    if (String(entry?.status ?? "").toUpperCase().startsWith("D")) continue; // a deletion has no new content to scan
+    let diffText;
+    try { diffText = await gitDiffFn(entry.path); } catch { continue; }
+    const blob = extractAddedLinesBlob(diffText);
+    if (!blob.trim()) continue;
+    const patterns = await scanTextForSecrets(blob, entry.path);
+    if (patterns.length > 0) flagged.push({ file: entry.path, patterns });
+  }
+  const reportPatterns = await scanTextForSecrets(reportText, "worker-report.txt");
+  if (reportPatterns.length > 0) flagged.push({ file: "(worker report)", patterns: reportPatterns });
+  if (flagged.length === 0) return null;
+  return {
+    flagged,
+    reason: `pattern(s) matching a known secret shape found in ${flagged.map((f) => `${f.file} (${f.patterns.join(", ")})`).join("; ")} -- the diff/report is the one channel that always leaves the sandbox regardless of network isolation. Never auto-committed; rotate the credential if this is real, then review by hand. This is a deterministic pattern match for well-known secret shapes (AWS/GitHub/Slack/Stripe/OpenAI-shaped keys, PEM headers, JWTs), not a general content scan -- it cannot see a secret shaped like ordinary text.`,
+  };
+}
+
 // `git diff` against the base SHA cannot see files the worker created but that
 // were never committed, and a retained worktree is exactly that case. Fold the
 // untracked paths in as additions so a retained job's test changes are still
@@ -1905,9 +2007,34 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
         });
       } catch { /* best-effort review flag; never blocks a commit on its own failure */ }
     }
-    const finalOutcome = unwiredDefinitions
+    const afterUnwiredDefinitions = unwiredDefinitions
       ? { ...afterSelectionRisk, reviewRequired: true, reasons: [...afterSelectionRisk.reasons, `UNWIRED NEW DEFINITION: ${unwiredDefinitions.reason}`] }
       : afterSelectionRisk;
+
+    // A HARD block, unlike every review flag above: SECURITY.md's own
+    // documented gap made deterministic where it can be (a fixed set of
+    // well-known secret shapes), checked against every changed file's
+    // ADDED content plus the worker's own report text -- the diff/report is
+    // the one channel that always leaves the sandbox regardless of network
+    // isolation. A missed weak test costs a review cycle; a leaked
+    // credential that reaches a real commit is often irreversible the
+    // moment it's pushed, so this overrides commitAllowed regardless of
+    // what verification or the report otherwise say.
+    let possibleSecrets = null;
+    if (mode === "implement") {
+      try {
+        possibleSecrets = await detectPossibleSecrets({
+          cwd, changedFiles: preCommit.nameStatus,
+          gitDiffFn: (file) => gitRaw(["diff", "-U0", base.sha, "--", file], cwd),
+          reportText: report,
+        });
+      } catch { /* best-effort; never blocks a commit on the scan's OWN failure -- the absence of a signal is not evidence of safety, but a hard block on a scanner crash would be a self-inflicted denial of service */ }
+    }
+    const finalOutcome = possibleSecrets
+      ? { ...afterUnwiredDefinitions, reviewRequired: true, commitAllowed: false,
+          commitBlockedReason: `possible secret detected: ${possibleSecrets.reason}`,
+          reasons: [...afterUnwiredDefinitions.reasons, `POSSIBLE SECRET DETECTED: ${possibleSecrets.reason}`] }
+      : afterUnwiredDefinitions;
 
     progress("commit");
     const commit = await createCoordinatorCommit({ cwd, jobId, outcome: finalOutcome });

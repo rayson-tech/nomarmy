@@ -67,7 +67,10 @@ import {
   isBranchContentIntegrated,
   isProvablyEmptyJob,
   parseAddedLineNumbers,
-  detectUnwiredNewDefinitions
+  detectUnwiredNewDefinitions,
+  scanTextForSecrets,
+  extractAddedLinesBlob,
+  detectPossibleSecrets
 } from "../mcp/server.mjs";
 
 const report = ({ status = "done", tests = "pass", notDone = "none", note = "n/a" } = {}) =>
@@ -2713,4 +2716,84 @@ test("detectUnwiredNewDefinitions: end to end against a REAL temp git repo, usin
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// scanTextForSecrets / extractAddedLinesBlob / detectPossibleSecrets:
+// SECURITY.md's own documented gap, closed with a REAL scanner (secretlint's
+// recommended preset), not a hand-rolled pattern list -- these tests run
+// against the actual dependency, not a mock, the same discipline as
+// detectUnwiredNewDefinitions's end-to-end test above.
+// ---------------------------------------------------------------------------
+
+test("scanTextForSecrets: flags a real AWS secret access key (the exact shape verified live against this dependency)", async () => {
+  const findings = await scanTextForSecrets("AWS_ACCESS_KEY_ID=AKIAZZZZZZZZZZZZZZZZ\nAWS_SECRET_ACCESS_KEY=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\n");
+  assert.ok(findings.length > 0);
+});
+
+test("scanTextForSecrets: flags a real npm access token", async () => {
+  const findings = await scanTextForSecrets("//registry.npmjs.org/:_authToken=npm_1234567890abcdefghijklmnopqrstuvwxyz\n");
+  assert.ok(findings.length > 0);
+});
+
+test("scanTextForSecrets: never returns the matched value itself, only rule/message identifiers -- the whole point, since the raw engine result embeds the actual credential", async () => {
+  const findings = await scanTextForSecrets("AWS_ACCESS_KEY_ID=AKIAZZZZZZZZZZZZZZZZ\nAWS_SECRET_ACCESS_KEY=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\n");
+  const joined = findings.join(" ");
+  assert.doesNotMatch(joined, /zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz/, "must never contain the raw secret value");
+  assert.doesNotMatch(joined, /AKIAZZZZZZZZZZZZZZZZ/, "must never contain the raw secret value");
+});
+
+test("scanTextForSecrets: does not false-positive on nomArmy's own real config pattern (auth_env names an env var, not a secret)", async () => {
+  const findings = await scanTextForSecrets("auth_env: NOMARMY_XAI_API_KEY\nmodel: grok-4.7\nweight: 1\n");
+  assert.deepEqual(findings, []);
+});
+
+test("scanTextForSecrets: empty/blank text never calls the scanner and returns nothing", async () => {
+  assert.deepEqual(await scanTextForSecrets(""), []);
+  assert.deepEqual(await scanTextForSecrets("   \n  "), []);
+  assert.deepEqual(await scanTextForSecrets(undefined), []);
+});
+
+test("extractAddedLinesBlob: joins added lines back into one multi-line blob, not scanned one line at a time -- a multi-line secret (a private key block) would never match split apart", () => {
+  const diff = `diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -0,0 +1,3 @@\n+line one\n+line two\n+line three\n`;
+  assert.equal(extractAddedLinesBlob(diff), "line one\nline two\nline three");
+});
+
+test("extractAddedLinesBlob: a removed-only hunk contributes nothing", () => {
+  const diff = `diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +0,0 @@\n-gone one\n-gone two\n`;
+  assert.equal(extractAddedLinesBlob(diff), "");
+});
+
+test("detectPossibleSecrets: flags a real secret added to a changed file, and skips a deleted file entirely", async () => {
+  const awsDiff = `diff --git a/config.env b/config.env\n--- a/config.env\n+++ b/config.env\n@@ -0,0 +2 @@\n+AWS_ACCESS_KEY_ID=AKIAZZZZZZZZZZZZZZZZ\n+AWS_SECRET_ACCESS_KEY=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\n`;
+  const result = await detectPossibleSecrets({
+    cwd: "/repo",
+    changedFiles: [{ status: "M", path: "config.env" }, { status: "D", path: "old-secret.env" }],
+    gitDiffFn: (file) => { if (file === "old-secret.env") throw new Error("must never be diffed -- it was deleted, nothing new to scan"); return awsDiff; },
+  });
+  assert.ok(result);
+  assert.equal(result.flagged.length, 1);
+  assert.equal(result.flagged[0].file, "config.env");
+});
+
+test("detectPossibleSecrets: also scans the worker's own report text, labeled distinctly from a file finding", async () => {
+  const result = await detectPossibleSecrets({
+    cwd: "/repo",
+    changedFiles: [],
+    gitDiffFn: async () => "",
+    reportText: "STATUS: done\nTESTS: pass\nNOT_DONE: none\nNOTE: used AWS_ACCESS_KEY_ID=AKIAZZZZZZZZZZZZZZZZ and AWS_SECRET_ACCESS_KEY=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz to verify",
+  });
+  assert.ok(result);
+  assert.equal(result.flagged[0].file, "(worker report)");
+});
+
+test("detectPossibleSecrets: a clean diff and report return null, never a false alarm", async () => {
+  const cleanDiff = `diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ -0,0 +1 @@\n+def real_function():\n+    return 42\n`;
+  const result = await detectPossibleSecrets({
+    cwd: "/repo",
+    changedFiles: [{ status: "M", path: "f.py" }],
+    gitDiffFn: async () => cleanDiff,
+    reportText: "STATUS: done\nTESTS: pass\nNOT_DONE: none\nNOTE: added a helper function",
+  });
+  assert.equal(result, null);
 });
