@@ -43,6 +43,7 @@ import {
   withSandboxProvisioningRetry,
   run,
   makeIdleDiffTick,
+  makeAbandonedBackgroundProcessTick,
   planProductionRevert,
   revertToBase,
   restoreWorkerVersion,
@@ -1587,6 +1588,106 @@ test("makeIdleDiffTick: never stops before minElapsedMs even if already idle", a
     fs.writeFileSync(path.join(dir, "a.txt"), "changed");
     assert.equal((await tick(50)).stop, false);
     assert.equal((await tick(9000)).stop, false, "idle for a while, but still short of minElapsedMs");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------
+// makeAbandonedBackgroundProcessTick(): the circuit breaker for the OTHER
+// real incident (worker-20260922-045250-c6d147) idle-diff cannot see -- the
+// worktree was never the signal, since nothing was left to change. The
+// worker ran an unscoped `pytest -q`, OpenClaw handed it back as a
+// backgrounded process, and the session went completely silent afterward
+// until nomArmy's own hard deadline killed it 16+ minutes later.
+// ---------------------------------------------------------------------------
+async function writeFakeTranscript(events) {
+  const { DatabaseSync } = await import("node:sqlite");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-idle-bg-"));
+  const dbPath = path.join(dir, "agents", "main", "agent", "openclaw-agent.sqlite");
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  const db = new DatabaseSync(dbPath);
+  db.exec(`CREATE TABLE transcript_events (
+    session_id TEXT NOT NULL, seq INTEGER NOT NULL, event_json TEXT NOT NULL, created_at INTEGER NOT NULL,
+    PRIMARY KEY (session_id, seq)
+  )`);
+  const insert = db.prepare("INSERT INTO transcript_events (session_id, seq, event_json, created_at) VALUES (?, ?, ?, ?)");
+  events.forEach((e, i) => insert.run("s1", i, JSON.stringify(e), Date.now()));
+  db.close();
+  return dir;
+}
+const toolCallEvent = (name, input = {}) => ({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", name, input }] } });
+const toolResultEvent = text => ({ type: "message", message: { role: "toolResult", content: [{ type: "text", text }] } });
+const BACKGROUNDED_RESULT = "Command still running (session amber-tidepool, pid 53263). Use process (list/poll/log/write/send-key)";
+
+test("makeAbandonedBackgroundProcessTick: never stops when nothing has ever backgrounded", async () => {
+  const dir = await writeFakeTranscript([toolCallEvent("exec", { command: "pytest -q" }), toolResultEvent("....  [100%]\n2 passed")]);
+  try {
+    const tick = makeAbandonedBackgroundProcessTick(dir, { idleMs: 1000, minElapsedMs: 0 });
+    assert.equal((await tick(0)).stop, false);
+    assert.equal((await tick(5000)).stop, false, "an ordinary finished result is never mistaken for an abandoned background process");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("makeAbandonedBackgroundProcessTick: stops once a backgrounded process is the transcript's last known state and nothing follows for the idle window -- the real incident's exact shape", async () => {
+  const dir = await writeFakeTranscript([toolCallEvent("exec", { command: "pytest -q" }), toolResultEvent(BACKGROUNDED_RESULT)]);
+  try {
+    const tick = makeAbandonedBackgroundProcessTick(dir, { idleMs: 1000, minElapsedMs: 500 });
+    assert.equal((await tick(0)).stop, false, "just saw the handoff; not idle yet");
+    assert.equal((await tick(800)).stop, false, "300ms since the handoff -- under the 1000ms threshold");
+    const r = await tick(1600);
+    assert.equal(r.stop, true);
+    assert.equal(r.reason, "idle_background_process");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("makeAbandonedBackgroundProcessTick: new transcript activity after the handoff resets the clock -- the worker is actively managing it", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const dir = await writeFakeTranscript([toolCallEvent("exec", { command: "pytest -q" }), toolResultEvent(BACKGROUNDED_RESULT)]);
+  try {
+    const tick = makeAbandonedBackgroundProcessTick(dir, { idleMs: 1000, minElapsedMs: 0 });
+    assert.equal((await tick(0)).stop, false, "handoff seen at elapsed=0");
+    assert.equal((await tick(800)).stop, false, "800ms since the handoff -- still under the 1000ms threshold");
+
+    // The worker actually polled it: a real new event arrives before the
+    // idle window would have expired.
+    const db = new DatabaseSync(path.join(dir, "agents", "main", "agent", "openclaw-agent.sqlite"));
+    db.prepare("INSERT INTO transcript_events (session_id, seq, event_json, created_at) VALUES (?, ?, ?, ?)")
+      .run("s1", 99, JSON.stringify(toolCallEvent("process", { action: "poll" })), Date.now());
+    db.close();
+
+    assert.equal((await tick(900)).stop, false, "new activity just landed -- the clock restarts from here");
+    assert.equal((await tick(1500)).stop, false, "only 600ms since the real new activity -- under the 1000ms threshold");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("makeAbandonedBackgroundProcessTick: never stops before minElapsedMs even if already idle", async () => {
+  const dir = await writeFakeTranscript([toolCallEvent("exec", { command: "pytest -q" }), toolResultEvent(BACKGROUNDED_RESULT)]);
+  try {
+    const tick = makeAbandonedBackgroundProcessTick(dir, { idleMs: 100, minElapsedMs: 10000 });
+    assert.equal((await tick(50)).stop, false);
+    assert.equal((await tick(9000)).stop, false, "idle for a while, but still short of minElapsedMs");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("makeAbandonedBackgroundProcessTick: a normal finished result that arrives AFTER a background handoff clears it -- polled to completion is not abandoned", async () => {
+  const dir = await writeFakeTranscript([
+    toolCallEvent("exec", { command: "pytest -q" }),
+    toolResultEvent(BACKGROUNDED_RESULT),
+    toolCallEvent("process", { action: "poll", session: "amber-tidepool" }),
+    toolResultEvent("2 failed, 118 passed"),
+  ]);
+  try {
+    const tick = makeAbandonedBackgroundProcessTick(dir, { idleMs: 1000, minElapsedMs: 0 });
+    assert.equal((await tick(0)).stop, false, "the transcript's LAST result is the poll's own finished output, not the handoff -- never armed");
+    assert.equal((await tick(5000)).stop, false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("makeAbandonedBackgroundProcessTick: a missing transcript database never stops the run", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-idle-bg-empty-"));
+  try {
+    const tick = makeAbandonedBackgroundProcessTick(dir, { idleMs: 100, minElapsedMs: 0 });
+    assert.equal((await tick(0)).stop, false);
+    assert.equal((await tick(5000)).stop, false);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
