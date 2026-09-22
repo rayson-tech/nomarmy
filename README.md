@@ -474,6 +474,12 @@ This does not, on its own, solve the harder problem of "which tests exercise a *
 
 **For the cost problem** (the broad sweep still runs in full, twice under `verify_regression`), **scoping is the wrong lever — parallelism is.** A CPU-bound unit-test suite on a multi-core box is exactly what `pytest-xdist`'s `-n auto` is for; distributing 2,000+ tests across cores can turn a 100-second run into 15-20 seconds without giving up any coverage at all, which beats any selection strategy that has to trade coverage for speed.
 
+### Catching a new function or class that's wired to nothing
+
+A real, recurring failure mode, independent of test coverage entirely: a worker introduces a new function or class as part of a diff, and nothing outside its own test ever calls it — built, but never actually wired in. Caught three separate times in one day by a human reading the diff, which is exactly the kind of thing that shouldn't depend on luck.
+
+For each production file a diff touches, nomArmy finds definitions whose own line is genuinely new in this diff (not a pre-existing function the diff merely sits near — a real `git diff -U0` line-level check, so a file full of already-used helpers never floods this with noise), using the same heuristic, per-language-family definition patterns `repo_evidence`'s `definitions`/`references`/`outline` ops already share (JS/TS/Python/Go/Rust/JVM/Ruby/shell). Each new definition is then checked for a reference anywhere in the repository outside a test file. Zero real callers flags the job for review — never a block, since this is a grep-based heuristic like everything else `repo_evidence` does: a dynamically dispatched or decorator-registered caller can look exactly like this and isn't actually a problem. It's a nudge to look, not a verdict.
+
 ## Other coordinators: Codex and Cursor
 
 Codex reads `AGENTS.md` for repository guidance, kept alongside `CLAUDE.md` so both coordinators follow the same trust boundary and integration rules. `install.sh` registers the nomArmy MCP server for Codex automatically when the `codex` command is available.
@@ -538,6 +544,7 @@ The bounded-delegation core is proven: coordinator-owned Git, isolated worktrees
 | `nomarmy doctor` — host readiness with a fix for every failure | Working, verified on a real host |
 | Scout and decompose modes — read-only noms with verified citations | Built, unit + live tested |
 | `auto_union`, `verify_regression`, sandboxed independent verification | Built, unit tested. `verify_regression` defaults ON whenever a job sets `verification` (pass `verify_regression: false` to opt out of the doubled wall-clock cost) -- a verification profile's exit code alone cannot tell a genuine pass from a test-selection flag (`-k`, `--grep`, ...) that accidentally excluded the changed file's own tests; a separate, always-on, zero-cost check (`detectScopedTestSelectionRisk`) flags that specific pattern for review immediately, without waiting for the regression rerun |
+| Unwired new definitions (`detectUnwiredNewDefinitions`) | Built, unit + live tested against a real git repo. Flags a new function/class this diff added that no non-test code anywhere in the repo references -- see [Catching a new function or class that's wired to nothing](#catching-a-new-function-or-class-thats-wired-to-nothing). Heuristic, review-only, never a block |
 | `.nomarmy.yml` environment contract — schema, loader, validator | Built, unit tested |
 | Disposable per-job service environments (Postgres, mocks, app) | Not built |
 | Nom-local browser/E2E and the autonomous repair loop | Not built |

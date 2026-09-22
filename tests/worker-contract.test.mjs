@@ -65,7 +65,9 @@ import {
   parseUnsupportedThinkingError,
   resolveReasoningApplied,
   isBranchContentIntegrated,
-  isProvablyEmptyJob
+  isProvablyEmptyJob,
+  parseAddedLineNumbers,
+  detectUnwiredNewDefinitions
 } from "../mcp/server.mjs";
 
 const report = ({ status = "done", tests = "pass", notDone = "none", note = "n/a" } = {}) =>
@@ -2596,4 +2598,119 @@ test("isProvablyEmptyJob: missing either SHA never guesses \"safe\" -- always fa
   assert.equal(isProvablyEmptyJob({ branchTipSha: null, baseSha: "abc123", workingTreeDirty: false }), false);
   assert.equal(isProvablyEmptyJob({ branchTipSha: "abc123", baseSha: null, workingTreeDirty: false }), false);
   assert.equal(isProvablyEmptyJob({ branchTipSha: null, baseSha: null, workingTreeDirty: false }), false);
+});
+
+// ---------------------------------------------------------------------------
+// parseAddedLineNumbers / detectUnwiredNewDefinitions: the real, recurring
+// incident this closes -- three separate times in one day, a worker
+// introduced a new function/class in its diff that nothing outside its own
+// test calls. Caught three times by a human reading the diff; this makes it
+// a standing check instead of luck.
+// ---------------------------------------------------------------------------
+
+// Captured from a real `git diff -U0 HEAD -- f.py` run, not hand-typed --
+// verified live: a 2-line function added at new-file lines 3-4, plus an
+// unrelated single-line addition at line 8 from a second hunk.
+const REAL_ADDED_LINES_DIFF = `diff --git a/f.py b/f.py
+index b3c5a95..ec2ccf0 100644
+--- a/f.py
++++ b/f.py
+@@ -2,0 +3,2 @@ line2
++def new_func():
++    pass
+@@ -5,0 +8 @@ line5
++line6
+`;
+
+test("parseAddedLineNumbers: matches the real git diff -U0 output exactly", () => {
+  assert.deepEqual([...parseAddedLineNumbers(REAL_ADDED_LINES_DIFF)], [3, 4, 8]);
+});
+
+test("parseAddedLineNumbers: a hunk with only removed lines contributes no added line numbers", () => {
+  const diff = `diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ -3,2 +3,0 @@ line2\n-removed one\n-removed two\n`;
+  assert.deepEqual([...parseAddedLineNumbers(diff)], []);
+});
+
+test("parseAddedLineNumbers: empty or garbage input returns an empty set, never throws", () => {
+  assert.deepEqual([...parseAddedLineNumbers("")], []);
+  assert.deepEqual([...parseAddedLineNumbers(undefined)], []);
+  assert.deepEqual([...parseAddedLineNumbers("not a diff at all")], []);
+});
+
+test("detectUnwiredNewDefinitions: flags a new function with zero non-test references -- the real incident's exact shape", async () => {
+  const result = await detectUnwiredNewDefinitions({
+    cwd: "/repo",
+    productionFiles: ["lambda/inspect.py"],
+    gitDiffFn: async () => REAL_ADDED_LINES_DIFF,
+    outlineFn: () => ({ exists: true, items: [{ line: 3, kind: "function", name: "new_func" }] }),
+    referencesFn: () => ({ hits: [{ path: "lambda/tests/test_inspect.py", line: 10 }] }), // ONLY a test file references it
+    isTestPathFn: (p) => p.includes("/tests/"),
+  });
+  assert.ok(result);
+  assert.match(result.reason, /new_func/);
+  assert.equal(result.flagged[0].testOnlyReferences, true);
+});
+
+test("detectUnwiredNewDefinitions: a new function WITH a real (non-test) caller is not flagged", async () => {
+  const result = await detectUnwiredNewDefinitions({
+    cwd: "/repo",
+    productionFiles: ["lambda/inspect.py"],
+    gitDiffFn: async () => REAL_ADDED_LINES_DIFF,
+    outlineFn: () => ({ exists: true, items: [{ line: 3, kind: "function", name: "new_func" }] }),
+    referencesFn: () => ({ hits: [{ path: "lambda/handler.py", line: 42 }] }), // a real, non-test caller
+    isTestPathFn: (p) => p.includes("/tests/"),
+  });
+  assert.equal(result, null);
+});
+
+test("detectUnwiredNewDefinitions: a PRE-EXISTING function in a touched file is never flagged, only a definition whose own line was actually added", async () => {
+  const result = await detectUnwiredNewDefinitions({
+    cwd: "/repo",
+    productionFiles: ["lambda/inspect.py"],
+    gitDiffFn: async () => REAL_ADDED_LINES_DIFF, // added lines: 3, 4, 8
+    outlineFn: () => ({ exists: true, items: [{ line: 50, kind: "function", name: "long_standing_helper" }] }), // line 50 was never added
+    referencesFn: () => { throw new Error("must never be called -- this definition was never a candidate"); },
+    isTestPathFn: (p) => p.includes("/tests/"),
+  });
+  assert.equal(result, null);
+});
+
+test("detectUnwiredNewDefinitions: no production files, or a file the diff didn't touch, yields nothing to flag", async () => {
+  assert.equal(await detectUnwiredNewDefinitions({ cwd: "/repo", productionFiles: [], gitDiffFn: async () => "", outlineFn: () => ({}), referencesFn: () => ({}), isTestPathFn: () => false }), null);
+});
+
+test("detectUnwiredNewDefinitions: end to end against a REAL temp git repo, using the real outlineFile/findReferences from lib/repo-query.mjs", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { outlineFile: realOutline, findReferences: realReferences } = await import("../lib/repo-query.mjs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-unwired-"));
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    execFileSync("git", ["config", "user.email", "t@example.com"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    fs.mkdirSync(path.join(dir, "tests"));
+    fs.writeFileSync(path.join(dir, "lib.py"), "def existing():\n    return 1\n");
+    fs.writeFileSync(path.join(dir, "tests", "test_lib.py"), "from lib import existing\ndef test_existing():\n    assert existing() == 1\n");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    execFileSync("git", ["commit", "-qm", "init"], { cwd: dir });
+    const baseSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+
+    // A real diff: one new function called only from a new test, one new
+    // function called from real (non-test) code too.
+    fs.writeFileSync(path.join(dir, "lib.py"),
+      "def existing():\n    return 1\n\n\ndef only_tested():\n    return 2\n\n\ndef really_wired():\n    return 3\n");
+    fs.writeFileSync(path.join(dir, "tests", "test_lib.py"),
+      "from lib import existing, only_tested\ndef test_existing():\n    assert existing() == 1\ndef test_only_tested():\n    assert only_tested() == 2\n");
+    fs.writeFileSync(path.join(dir, "caller.py"), "from lib import really_wired\nreally_wired()\n");
+
+    const gitDiffFn = (file) => execFileSync("git", ["diff", "-U0", baseSha, "--", file], { cwd: dir, encoding: "utf8" });
+    const result = await detectUnwiredNewDefinitions({
+      cwd: dir, productionFiles: ["lib.py"], gitDiffFn,
+      outlineFn: realOutline, referencesFn: realReferences, isTestPathFn: (p) => p.includes("tests/"),
+    });
+    assert.ok(result, "only_tested must be flagged");
+    assert.equal(result.flagged.length, 1);
+    assert.equal(result.flagged[0].name, "only_tested");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

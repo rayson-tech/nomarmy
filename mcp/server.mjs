@@ -11,7 +11,7 @@ import { SCOUT_OUTCOMES, SCOUT_STATUS_BY_OUTCOME, scoutPrompt, parseScoutReport,
 import { DECOMPOSE_OUTCOMES, DECOMPOSE_STATUS_BY_OUTCOME, decomposePrompt, parseDecomposeReport, buildDecomposeFindings, resolveDecomposeOutcome, checkDecompositionOverlap, renderDecomposeReport } from "../lib/decompose.mjs";
 import { deriveBudgets, checkBrief, resolveContextPerNom, assessAdmission, describeBudgets, deriveTimeBudget } from "../lib/budget.mjs";
 import { readOpenClawTranscript, estimateDisplacement } from "../lib/transcript.mjs";
-import { runQuery, formatCitations, OPS as EVIDENCE_OPS } from "../lib/repo-query.mjs";
+import { runQuery, formatCitations, OPS as EVIDENCE_OPS, outlineFile, findReferences } from "../lib/repo-query.mjs";
 import { loadConfig, ConfigError } from "../lib/config.mjs";
 import { resolveSandboxImage, detectPrimaryLanguage, EXEC_PATH_PREPEND } from "../lib/sandbox-images.mjs";
 import { DEFAULT_AGENT_IMAGE } from "../lib/verify.mjs";
@@ -923,6 +923,83 @@ export function detectScopedTestSelectionRisk({ commands = [], testChanges = nul
   };
 }
 
+// ---------------------------------------------------------------------------
+// Unwired new definitions: a real, recurring incident today -- three separate
+// times, a worker introduced a new function or class in this diff that no
+// real (non-test) code anywhere in the repository actually calls. "Built but
+// wired to nothing" was caught three times by luck (a human reading the
+// diff); this makes it a standing, automatic check instead.
+// ---------------------------------------------------------------------------
+
+// `git diff -U0 <baseSha> -- <file>` emits zero context lines, so every line
+// inside a hunk body is either added or removed -- no ` ` context lines to
+// tell apart. A hunk header `@@ -oldStart,oldCount +newStart,newCount @@`
+// gives the starting line number IN THE NEW FILE; only `+` lines advance
+// that counter (a `-` line refers to the OLD file's numbering, which this
+// does not track, since only "what's new" matters here).
+export function parseAddedLineNumbers(diffText) {
+  const added = new Set();
+  let newLineNum = null;
+  for (const line of String(diffText ?? "").split("\n")) {
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    if (hunk) { newLineNum = Number(hunk[1]); continue; }
+    if (newLineNum === null) continue;
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) { added.add(newLineNum); newLineNum++; }
+    // a "-" line (old-file only) or a "\ No newline..." marker never
+    // advances the new-file counter.
+  }
+  return added;
+}
+
+/**
+ * Which of a file's definitions (via lib/repo-query.mjs's outlineFile, the
+ * same heuristic-per-language-family patterns definitions/references/outline
+ * already share) are themselves NEW in this diff -- their own definition
+ * line is an added line, not a pre-existing one this diff merely sits near.
+ * A file with many already-used helpers that happens to be touched must
+ * never flag all of them; only a genuinely new declaration counts.
+ */
+function newDefinitionsInFile({ outlineFn, cwd, file, addedLines }) {
+  if (addedLines.size === 0) return [];
+  const outline = outlineFn(cwd, file);
+  if (!outline.exists) return [];
+  return outline.items.filter((item) => (item.kind === "function" || item.kind === "class") && addedLines.has(item.line));
+}
+
+/**
+ * For each production file this diff touched, find definitions newly added
+ * BY this diff, then check whether any real (non-test) file anywhere in the
+ * repository actually references that name. Heuristic like everything else
+ * repo-query.mjs does (a whole-word grep, per-language regex definitions) --
+ * a dynamic-dispatch or decorator-registered caller a static grep cannot see
+ * will false-positive here, so this is always a review flag, never a block.
+ *
+ * @param {{ cwd: string, productionFiles: string[], gitDiffFn: (file: string) => Promise<string>, outlineFn: Function, referencesFn: Function, isTestPathFn: (path: string) => boolean }} input
+ */
+export async function detectUnwiredNewDefinitions({ cwd, productionFiles = [], gitDiffFn, outlineFn, referencesFn, isTestPathFn }) {
+  const flagged = [];
+  for (const file of productionFiles) {
+    let diffText;
+    try { diffText = await gitDiffFn(file); } catch { continue; }
+    const addedLines = parseAddedLineNumbers(diffText);
+    const newDefs = newDefinitionsInFile({ outlineFn, cwd, file, addedLines });
+    for (const def of newDefs) {
+      let refs;
+      try { refs = referencesFn(cwd, def.name); } catch { continue; }
+      const realCallers = (refs?.hits ?? []).filter((h) => !isTestPathFn(h.path));
+      if (realCallers.length === 0) {
+        flagged.push({ file, line: def.line, name: def.name, kind: def.kind, testOnlyReferences: (refs?.hits ?? []).length > 0 });
+      }
+    }
+  }
+  if (flagged.length === 0) return null;
+  return {
+    flagged,
+    reason: `new ${flagged.length === 1 ? "definition" : "definitions"} added by this diff with no reference outside a test file: ${flagged.map((f) => `${f.name} (${f.file}:${f.line})`).join(", ")} -- built, but nothing outside its own test calls it yet. A dynamic-dispatch or decorator-registered caller can look like this too (a grep-based heuristic, stated as such); confirm before trusting this as wired in.`,
+  };
+}
+
 // `git diff` against the base SHA cannot see files the worker created but that
 // were never committed, and a retained worktree is exactly that case. Fold the
 // untracked paths in as additions so a retained job's test changes are still
@@ -1810,9 +1887,27 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
         selectionRisk = detectScopedTestSelectionRisk({ commands: profileCommands, testChanges: preCommit.testChanges });
       } catch { /* a config load failure here is the verification runner's own problem to report, not this check's */ }
     }
-    const finalOutcome = selectionRisk
+    const afterSelectionRisk = selectionRisk
       ? { ...afterRegression, reviewRequired: true, reasons: [...afterRegression.reasons, `SCOPED TEST SELECTION RISK: ${selectionRisk.reason}`] }
       : afterRegression;
+
+    // Real, recurring incident: a worker introduces a new function/class in
+    // this diff that nothing outside its own test calls -- caught three
+    // times today by a human reading the diff, which is exactly the kind of
+    // luck a standing check should replace.
+    let unwiredDefinitions = null;
+    if (mode === "implement") {
+      try {
+        unwiredDefinitions = await detectUnwiredNewDefinitions({
+          cwd, productionFiles: preCommit.testChanges.production_files_changed,
+          gitDiffFn: (file) => gitRaw(["diff", "-U0", base.sha, "--", file], cwd),
+          outlineFn: outlineFile, referencesFn: findReferences, isTestPathFn: isTestPath,
+        });
+      } catch { /* best-effort review flag; never blocks a commit on its own failure */ }
+    }
+    const finalOutcome = unwiredDefinitions
+      ? { ...afterSelectionRisk, reviewRequired: true, reasons: [...afterSelectionRisk.reasons, `UNWIRED NEW DEFINITION: ${unwiredDefinitions.reason}`] }
+      : afterSelectionRisk;
 
     progress("commit");
     const commit = await createCoordinatorCommit({ cwd, jobId, outcome: finalOutcome });
@@ -1857,6 +1952,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
       // not_run-substituted view) -- full transparency for the caller.
       regressionCheck,
       testSelectionRisk: selectionRisk,
+      unwiredDefinitions,
       testChanges: record.testChanges, metrics,
       worktreePointerBefore: beforePointer, worktreePointerAfterWorker: afterPointer, worktreeRetained: Boolean(worktree),
       commit, gitBeforeCoordinatorCommit: preCommit, git: record, worker, workerError, workerStopReason,
