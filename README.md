@@ -432,6 +432,30 @@ A bare `requirements.txt` at the repo root is picked up with no config at all. A
 
 **The worker's own tool calls get the same image, automatically.** `openclaw agent exec` has no per-call `--image`/`--sandbox` flag (checked against its own `--help`), so this used to only reach nomArmy's own verification step; a worker fixing a Go bug could propose and verify a diff but couldn't run `go build` itself mid-task. It does have `--config <path>`, which runs that one call "against this config file instead of the ambient config" (its own `--help` text) — the per-call lever that actually reaches the sandbox OpenClaw starts. nomArmy now clones the ambient OpenClaw config for any job whose repo resolved to a non-default image, points `agents.defaults.sandbox.docker.image` at it, and passes that clone via `--config`. One more piece was needed and was not obvious from the docs: OpenClaw's `exec` tool does not inherit a sandbox image's own baked `PATH` on its own — verified live, a freshly built Go image's `go` resolved fine under a direct `podman exec` but came back `not found` through `openclaw agent exec`, until `tools.exec.pathPrepend` carried `/usr/local/go/bin` explicitly. The clone adds that too, per language. The clone is written 0600 under the job's own runtime directory (never bind-mounted into the sandbox), and deleted right after the run — it necessarily carries whatever the ambient config's `auth` section holds, which is not a new exposure (the host-side OpenClaw process this spawns already holds and uses that same credential from its one permanent copy), but is a second, short-lived copy at the same trust level rather than zero copies.
 
+### Scoping verification to the diff
+
+A verification command that runs a repo's entire test suite on every job is both slow and, paradoxically, less trustworthy: the cheap way to make it fast is a test-selection flag (`pytest -k`, `--testNamePattern`, `-run`), and a hand-maintained one is exactly the failure mode `verify_regression` and `testSelectionRisk` above exist to catch — a keyword list that silently excludes the file a worker actually changed. The real fix is to select tests *by what the diff touched*, not by a keyword someone has to remember to update.
+
+nomArmy already knows exactly which files a diff touched language-agnostically (`classifyTestChanges` recognizes Python/Go/Rust/JS/TS/Ruby/JVM test-file conventions on its own), and exposes that to every verification command as two real environment variables inside the sandbox:
+
+| Variable | Contents |
+|---|---|
+| `NOMARMY_CHANGED_TEST_FILES` | New + modified test files this diff touched, space-separated. Never includes a deleted test file — nothing to run. |
+| `NOMARMY_CHANGED_PRODUCTION_FILES` | Non-test files this diff touched, space-separated. |
+
+Both are always present (empty string when nothing applies), so a command that never references them behaves exactly as before this existed. What a repo's own verification command does with them is deliberately left to that repo, since every language's test runner wants a different shape of input — pytest and Jest both accept file paths directly; `go test` wants a package directory; Cargo wants a test binary name. nomArmy has no business guessing which of those a given repo's toolchain expects; it only guarantees the underlying fact (which files changed) is available and correct.
+
+```yaml
+# python (pytest takes file paths directly)
+verification:
+  python:
+    environment: none
+    commands:
+      - 'test -n "$NOMARMY_CHANGED_TEST_FILES" && python3 -m pytest $NOMARMY_CHANGED_TEST_FILES -q || python3 -m pytest lambda/tests/ -k "gx or descriptor or fixture" -q'
+```
+
+That pattern — run exactly the touched test files when there are any, fall back to a broader sweep otherwise — closes the specific gap a keyword filter can't: a test file the diff itself modified is now *always* included, with no list to maintain. It does not, on its own, solve the harder problem of "which tests exercise a *production* file with no test file in this diff" — that needs either a naming convention a repo already follows, or coverage-based tooling like `pytest-testmon` for repos that want that guarantee.
+
 ## Other coordinators: Codex and Cursor
 
 Codex reads `AGENTS.md` for repository guidance, kept alongside `CLAUDE.md` so both coordinators follow the same trust boundary and integration rules. `install.sh` registers the nomArmy MCP server for Codex automatically when the `codex` command is available.

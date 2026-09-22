@@ -216,6 +216,25 @@ test("buildPodmanArgs isolates the container and passes the command as one argv 
   assert.equal(args.filter((a) => a === "npm test; echo $(whoami)").length, 1);
 });
 
+test("buildPodmanArgs adds extra env vars as real --env args, and none at all when env is omitted", () => {
+  const without = buildPodmanArgs({ cwd: "/jobs/j1/worktree", command: "pytest" });
+  assert.doesNotMatch(without.join(" "), /NOMARMY_CHANGED_TEST_FILES/, "no env given -- no new args, existing behavior unchanged");
+
+  const withEnv = buildPodmanArgs({
+    cwd: "/jobs/j1/worktree", command: "pytest $NOMARMY_CHANGED_TEST_FILES",
+    env: { NOMARMY_CHANGED_TEST_FILES: "tests/test_a.py tests/test_b.py", NOMARMY_CHANGED_PRODUCTION_FILES: "" },
+  });
+  assert.ok(withEnv.includes("--env"));
+  const envIndex = withEnv.indexOf("NOMARMY_CHANGED_TEST_FILES=tests/test_a.py tests/test_b.py");
+  assert.notEqual(envIndex, -1);
+  assert.equal(withEnv[envIndex - 1], "--env");
+  // The command must still be the very last argv element regardless of how
+  // many extra --env pairs precede it -- the repo-controlled string is never
+  // spliced elsewhere.
+  assert.equal(withEnv.at(-1), "pytest $NOMARMY_CHANGED_TEST_FILES");
+  assert.equal(withEnv.at(-2), "-c");
+});
+
 test("buildPodmanArgs adds a read-only node_modules mount only when a source is given", () => {
   const without = buildPodmanArgs({ cwd: "/jobs/j1/worktree", command: "npm test" });
   assert.ok(!without.some((a) => typeof a === "string" && a.includes("node_modules")));
@@ -376,6 +395,40 @@ test("a non-zero exit yields fail naming the command and exit code, and stops th
   assert.match(verdict.detail, /npm test/);
   assert.match(verdict.detail, /exit code 7/);
   assert.equal(executor.calls.run.length, 2, "execution stops at the first failure");
+});
+
+// --------------------------------------------------------------------------
+// runner — NOMARMY_CHANGED_TEST_FILES / NOMARMY_CHANGED_PRODUCTION_FILES:
+// language-agnostic by design (classifyTestChanges already recognizes
+// Python/Go/JS/TS/Ruby/JVM test-file conventions), exposed as plain sandbox
+// env vars rather than nomArmy trying to know every test runner's own CLI
+// shape for "run just these files". A command that never references them
+// behaves exactly as before this existed.
+// --------------------------------------------------------------------------
+
+test("runner exposes the diff's changed test/production files as real env vars to the sandbox", async () => {
+  const executor = fakeExecutor({ fallback: { started: true, exitCode: 0, stdout: "ok", stderr: "" } });
+  const run = createVerificationRunner({ loadConfig: fixedConfig(STANDARD), executor });
+  const record = {
+    testChanges: {
+      new_tests_added: ["tests/test_new.py"],
+      existing_tests_modified: ["tests/test_existing.py"],
+      existing_tests_deleted: ["tests/test_gone.py"],
+      production_files_changed: ["src/module.py"],
+    },
+  };
+  await run({ ...CONTEXT, record });
+  assert.equal(executor.calls.run[0].env.NOMARMY_CHANGED_TEST_FILES, "tests/test_new.py tests/test_existing.py",
+    "new + modified, in that order -- a deleted test file is never included, there is nothing to run");
+  assert.equal(executor.calls.run[0].env.NOMARMY_CHANGED_PRODUCTION_FILES, "src/module.py");
+});
+
+test("runner: with no record (or a record with no testChanges), both env vars are present but empty -- never undefined, never a crash", async () => {
+  const executor = fakeExecutor({ fallback: { started: true, exitCode: 0, stdout: "ok", stderr: "" } });
+  const run = createVerificationRunner({ loadConfig: fixedConfig(STANDARD), executor });
+  await run({ ...CONTEXT }); // no `record` at all -- the shape every pre-existing caller/test already used
+  assert.equal(executor.calls.run[0].env.NOMARMY_CHANGED_TEST_FILES, "");
+  assert.equal(executor.calls.run[0].env.NOMARMY_CHANGED_PRODUCTION_FILES, "");
 });
 
 // --------------------------------------------------------------------------
