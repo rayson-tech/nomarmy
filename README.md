@@ -451,10 +451,28 @@ verification:
   python:
     environment: none
     commands:
-      - 'test -n "$NOMARMY_CHANGED_TEST_FILES" && python3 -m pytest $NOMARMY_CHANGED_TEST_FILES -q || python3 -m pytest lambda/tests/ -k "gx or descriptor or fixture" -q'
+      # Fast, sharp signal: do the tests THIS diff itself touched actually
+      # pass. Skips cleanly (exit 0, no-op) when nothing applies.
+      - 'if [ -n "$NOMARMY_CHANGED_TEST_FILES" ]; then python3 -m pytest $NOMARMY_CHANGED_TEST_FILES -q; fi'
+      # Blast radius: anything that touched production still gets the real,
+      # broader sweep, unconditionally -- a shared module can have far more
+      # tests depending on it than whichever test file the diff happened to
+      # touch, and skipping this for a narrower run would trade real
+      # coverage away, not just speed.
+      - 'if [ -n "$NOMARMY_CHANGED_PRODUCTION_FILES" ]; then python3 -m pytest lambda/tests/ -k "gx or descriptor or fixture" -q; fi'
 ```
 
-That pattern — run exactly the touched test files when there are any, fall back to a broader sweep otherwise — closes the specific gap a keyword filter can't: a test file the diff itself modified is now *always* included, with no list to maintain. It does not, on its own, solve the harder problem of "which tests exercise a *production* file with no test file in this diff" — that needs either a naming convention a repo already follows, or coverage-based tooling like `pytest-testmon` for repos that want that guarantee.
+**Two real mistakes an earlier version of this example made, both worth naming plainly rather than quietly fixing:**
+
+First, a shell bug that reintroduced the exact false-pass this whole mechanism exists to prevent: `test -n "$X" && pytest $X || pytest broad/` does **not** mean "run the scoped set, or fall back if empty" — in `A && B || C`, a *failing* `B` also falls through to `C`, and the overall exit code becomes whatever `C` returns. A scoped test that genuinely fails still gets masked by a passing fallback sweep, silently, the moment the fallback's own selector doesn't happen to cover the failing file. Verified live before writing this down. `if`/`then`/`fi` (above) doesn't have this failure mode — a failing command's exit code propagates, full stop.
+
+Second, and more importantly: **running only the touched test files instead of the broader sweep is the wrong trade on a shared module.** A file 25% of a real test suite imports gets, under an instead-of pattern, verified by only the handful of tests in whichever file the diff happened to touch — a regression in every *other* file that depends on it goes uncaught. The two commands above run *both*: the narrow pass for a sharp, fast signal, and the broad pass whenever production changed, unconditionally. Neither replaces the other.
+
+One genuine upside this surfaced: it makes `verify_regression`'s question sharper. Reverting production and re-running only `NOMARMY_CHANGED_TEST_FILES` answers "do the new/modified tests specifically catch this regression" — a much more pointed question than "does anything in the whole suite," and precisely the signal that caught a real inert test in a live model comparison this session (see the worker prompt's own strengthened self-verification requirement above).
+
+This does not, on its own, solve the harder problem of "which tests exercise a *production* file with no test file in this diff" — that still needs either a naming convention a repo already follows, or coverage-based tooling like `pytest-testmon`.
+
+**For the cost problem** (the broad sweep still runs in full, twice under `verify_regression`), **scoping is the wrong lever — parallelism is.** A CPU-bound unit-test suite on a multi-core box is exactly what `pytest-xdist`'s `-n auto` is for; distributing 2,000+ tests across cores can turn a 100-second run into 15-20 seconds without giving up any coverage at all, which beats any selection strategy that has to trade coverage for speed.
 
 ## Other coordinators: Codex and Cursor
 
