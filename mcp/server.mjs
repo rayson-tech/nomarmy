@@ -868,8 +868,21 @@ export function classifyTestChanges(entries) {
 // plausibly be excluding by accident.
 const TEST_SELECTION_FLAG_PATTERNS = Object.freeze([
   { name: "pytest -k", re: /(^|\s)-k(\s|=)/ },
-  { name: "pytest -m", re: /(^|\s)-m(\s|=)/ },
-  { name: "jest/vitest -t / --testNamePattern", re: /(^|\s)(-t|--testNamePattern)(\s|=)/ },
+  // A real, confirmed false positive on day one: `python3 -m pytest` (the
+  // standard, extremely common way to invoke pytest as a module) matches
+  // "-m" preceded and followed by whitespace exactly like a genuine marker
+  // filter does -- this fired on the SAME command written specifically to
+  // fix the risk it was warning about. `-m pytest` (module invocation) is a
+  // fixed, unambiguous idiom to exclude; a real marker filter is never
+  // literally the bare word "pytest" right after -m.
+  { name: "pytest -m", re: /(^|\s)-m(?:\s+|=)(?!pytest\b)/ },
+  // --testNamePattern only, not the bare "-t" jest/vitest alias: "-t" is a
+  // single generic letter shared by docker (-t <image>), ssh (-t), tar (-t),
+  // curl (-t) and more, with no single idiom to exclude the way `-m pytest`
+  // has -- keeping it would trade one confirmed false positive for another,
+  // less obvious one. Narrower recall (misses the short form) beats a
+  // chronically noisy flag.
+  { name: "jest/vitest --testNamePattern", re: /(^|\s)--testNamePattern(\s|=)/ },
   { name: "go test -run", re: /(^|\s)-run(\s|=)/ },
   { name: "--grep", re: /(^|\s)--grep(\s|=)/ },
   { name: "--filter", re: /(^|\s)--filter(\s|=)/ },

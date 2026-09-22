@@ -2392,11 +2392,34 @@ test("detectScopedTestSelectionRisk: a test file changed but no selection flag i
   }), null);
 });
 
-test("detectScopedTestSelectionRisk: recognizes jest/vitest -t, go test -run, and --grep, not just pytest -k", () => {
+test("detectScopedTestSelectionRisk: recognizes jest/vitest --testNamePattern, go test -run, and --grep, not just pytest -k", () => {
   const changes = { new_tests_added: ["src/foo.test.ts"], existing_tests_modified: [] };
-  assert.ok(detectScopedTestSelectionRisk({ commands: ["jest -t 'unrelated'"], testChanges: changes }));
+  assert.ok(detectScopedTestSelectionRisk({ commands: ["jest --testNamePattern 'unrelated'"], testChanges: changes }));
   assert.ok(detectScopedTestSelectionRisk({ commands: ["go test -run TestOther ./..."], testChanges: changes }));
   assert.ok(detectScopedTestSelectionRisk({ commands: ["mocha --grep unrelated"], testChanges: changes }));
+});
+
+test("detectScopedTestSelectionRisk: a real, confirmed false positive -- 'python3 -m pytest' (module invocation) must never match the -m marker-filter pattern", () => {
+  // The exact real command this bit: written specifically to fix the
+  // scoping risk, and the detector fired on itself.
+  assert.equal(detectScopedTestSelectionRisk({
+    commands: ['if [ -n "$NOMARMY_CHANGED_TEST_FILES" ]; then python3 -m pytest $NOMARMY_CHANGED_TEST_FILES -q; fi'],
+    testChanges: { new_tests_added: [], existing_tests_modified: ["lambda/tests/test_gx_sheet_classifier.py"] },
+  }), null);
+});
+
+test("detectScopedTestSelectionRisk: a genuine pytest -m marker filter still flags, including alongside 'python -m pytest'", () => {
+  const changes = { new_tests_added: [], existing_tests_modified: ["tests/test_a.py"] };
+  assert.ok(detectScopedTestSelectionRisk({ commands: ["pytest -m 'not slow'"], testChanges: changes }));
+  assert.ok(detectScopedTestSelectionRisk({ commands: ["python -m pytest -m slow"], testChanges: changes }),
+    "the module-invocation -m must not shadow a REAL marker filter later on the same line");
+});
+
+test("detectScopedTestSelectionRisk: a bare '-t' (jest/vitest's short alias) no longer flags on its own -- too generic (docker -t, ssh -t, tar -t, curl -t all collide)", () => {
+  assert.equal(detectScopedTestSelectionRisk({
+    commands: ["docker build -t myimage ."],
+    testChanges: { new_tests_added: ["src/foo.test.ts"], existing_tests_modified: [] },
+  }), null);
 });
 
 test("detectScopedTestSelectionRisk: a flag-shaped substring inside an unrelated word does not false-positive (e.g. '-keep', 'bookmark')", () => {
