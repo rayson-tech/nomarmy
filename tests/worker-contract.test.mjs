@@ -1096,6 +1096,19 @@ test("prompt: keeps the hard safety rules and the compact contract", () => {
   assert.equal(/NOT DONE:/.test(p), false, "the old un-underscored field must be gone");
 });
 
+test("prompt: requires actually reverting and re-running a new/modified test, not just claiming it would fail -- a real, confirmed 3-for-3 gpt-oss defect (an inert test that passes either way)", () => {
+  const p = workerPrompt({ task: "t", acceptance: ["a"], verification: "quick", mode: "implement", baseRef: "HEAD", baseSha: "abc", workerId: "w1" });
+  assert.match(p, /actually revert your production change/);
+  assert.match(p, /re-run that exact test -- confirm it fails/);
+  assert.match(p, /[Ii]nert test/);
+});
+
+test("prompt: requires exact-value and exact-key-set assertions, not just presence -- the specific weakness a real qwen-vs-gpt-oss comparison surfaced", () => {
+  const p = workerPrompt({ task: "t", acceptance: ["a"], verification: "quick", mode: "implement", baseRef: "HEAD", baseSha: "abc", workerId: "w1" });
+  assert.match(p, /assert the exact expected value/);
+  assert.match(p, /assert its exact key set/);
+});
+
 test("prompt: warns against repeating 'workspace' as a path segment, anchored to a real observed failure", () => {
   // Observed live: a worker's own tool call used "workspace/lib/x.mjs" as a
   // path, which the sandbox joined against its own /workspace root and
