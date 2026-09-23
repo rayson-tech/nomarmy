@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import {
   SCOUT_OUTCOMES, SCOUT_STATUS_BY_OUTCOME, DEFAULT_SCOUT_LIMITS,
   scoutPrompt, parseCitation, parseCitationToken, extractCitations, parseScoutReport, verifyCitations, resolveScoutOutcome, renderScoutReport,
-  distinctiveTerms,
+  distinctiveTerms, isScoutReportUnusable, scoutReportRecoveryPrompt,
 } from "../lib/scout.mjs";
 
 const FILES = {
@@ -410,4 +410,49 @@ test("resolveScoutOutcome: a genuinely empty report (no findings, no NOT_FOUND) 
   const r = parseScoutReport("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: high\nEND");
   const o = resolveScoutOutcome({ report: r, verified: null });
   assert.equal(o.outcome, SCOUT_OUTCOMES.SCOUT_REPORT_INVALID);
+});
+
+// ---------------------------------------------------------------------------
+// isScoutReportUnusable / scoutReportRecoveryPrompt: the gap a real field
+// incident surfaced -- a gate-name scout's reply came back truncated with no
+// findings, and unlike an implement job's cut-off report, nothing ever gave
+// it a second chance. isScoutReportUnusable is the same rule
+// resolveScoutOutcome already uses to decide SCOUT_REPORT_INVALID, pulled
+// out so a caller can ask before outcome resolution runs.
+// ---------------------------------------------------------------------------
+test("isScoutReportUnusable: a missing report is unusable", () => {
+  assert.equal(isScoutReportUnusable(parseScoutReport("")), true);
+});
+
+test("isScoutReportUnusable: truncated with zero findings and no real NOT_FOUND -- the real incident's exact shape", () => {
+  const r = parseScoutReport("SCOUT REPORT\nQUESTION: where is the gate name defined?\nCONFIDENCE: high\n");
+  assert.equal(r.truncated, true);
+  assert.equal(r.findings.length, 0);
+  assert.equal(isScoutReportUnusable(r), true);
+});
+
+test("isScoutReportUnusable: a report with at least one finding is usable, even if truncated", () => {
+  const r = parseScoutReport("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: high\nFINDING: x is defined here. [lib/x.mjs:5]\n");
+  assert.equal(r.truncated, true);
+  assert.equal(isScoutReportUnusable(r), false);
+});
+
+test("isScoutReportUnusable: a well-formed zero-findings report with a real NOT_FOUND is usable (SCOUT_NOT_FOUND is a legitimate answer)", () => {
+  const r = parseScoutReport("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: high\nNOT_FOUND: looked in lib/ and src/, no match\nEND");
+  assert.equal(r.strict, true);
+  assert.equal(isScoutReportUnusable(r), false);
+});
+
+test("isScoutReportUnusable: zero findings and NOT_FOUND: none, but not strict (truncated) -- still unusable", () => {
+  const r = parseScoutReport("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: high\nNOT_FOUND: none\n"); // no END
+  assert.equal(r.strict, false);
+  assert.equal(isScoutReportUnusable(r), true);
+});
+
+test("scoutReportRecoveryPrompt: asks for the report shape only, never to explore further, and states the token budget", () => {
+  const p = scoutReportRecoveryPrompt({ report: { targetTokens: 500, hardCapTokens: 900 } });
+  assert.match(p, /Do not repeat, redo, retry, or explore further/);
+  assert.match(p, /Do not call any tool/);
+  assert.match(p, /SCOUT REPORT\nQUESTION:/);
+  assert.match(p, /Target 500 tokens; 900 is the hard cap/);
 });

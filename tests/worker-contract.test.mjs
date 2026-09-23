@@ -11,6 +11,7 @@ import { execFileSync } from "node:child_process";
 
 import { ConfigError } from "../lib/config.mjs";
 import { DEFAULT_AGENT_IMAGE } from "../lib/verify.mjs";
+import { parseScoutReport } from "../lib/scout.mjs";
 
 import {
   OUTCOMES,
@@ -61,6 +62,7 @@ import {
   track,
   looksLikeTransientInferenceAbort,
   shouldRetryTransientAbort,
+  shouldAttemptScoutRecovery,
   resolveVerifyRegression,
   detectScopedTestSelectionRisk,
   parseUnsupportedThinkingError,
@@ -2472,6 +2474,38 @@ test("shouldRetryTransientAbort: false when too little of the job's own timeout 
     stderrText: REAL_TRANSIENT_ABORT_LINE,
     remainingSeconds: 60,
   }), true);
+});
+
+// ---------------------------------------------------------------------------
+// shouldAttemptScoutRecovery: the real field gap this closes -- a gate-name
+// scout's report came back truncated with no findings, and unlike an
+// implement job's cut-off report, nothing ever gave it a second chance.
+// Scout has no reserved report-phase budget the way implement does, so this
+// is gated by whatever time is actually left against the caller's original
+// deadline instead.
+// ---------------------------------------------------------------------------
+const UNUSABLE_REPORT = parseScoutReport("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: high\n"); // truncated, no findings, no NOT_FOUND
+const USABLE_REPORT = parseScoutReport("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: high\nFINDING: x. [lib/x.mjs:1]\nNOT_FOUND: none\nEND");
+
+test("shouldAttemptScoutRecovery: true when the report is unusable, the worker didn't crash, and real time remains", () => {
+  assert.equal(shouldAttemptScoutRecovery({ workerFailed: false, workerTimedOut: false, report: UNUSABLE_REPORT, remainingSeconds: 120 }), true);
+});
+
+test("shouldAttemptScoutRecovery: a genuine timeout is still eligible -- it's excluded in practice only by having no remaining seconds left", () => {
+  assert.equal(shouldAttemptScoutRecovery({ workerFailed: true, workerTimedOut: true, report: UNUSABLE_REPORT, remainingSeconds: 120 }), true);
+});
+
+test("shouldAttemptScoutRecovery: false if the worker crashed outright (failed, not timed out) -- an unknown-shape failure is not assumed resumable", () => {
+  assert.equal(shouldAttemptScoutRecovery({ workerFailed: true, workerTimedOut: false, report: UNUSABLE_REPORT, remainingSeconds: 120 }), false);
+});
+
+test("shouldAttemptScoutRecovery: false if the report is already usable -- nothing to recover", () => {
+  assert.equal(shouldAttemptScoutRecovery({ workerFailed: false, workerTimedOut: false, report: USABLE_REPORT, remainingSeconds: 120 }), false);
+});
+
+test("shouldAttemptScoutRecovery: false when too little of the job's own timeout remains for a retry to have a real chance", () => {
+  assert.equal(shouldAttemptScoutRecovery({ workerFailed: false, workerTimedOut: false, report: UNUSABLE_REPORT, remainingSeconds: 30 }), false);
+  assert.equal(shouldAttemptScoutRecovery({ workerFailed: false, workerTimedOut: false, report: UNUSABLE_REPORT, remainingSeconds: 60 }), true, "exactly at the floor is still allowed");
 });
 
 test("metrics: worker_transient_abort_retried defaults to false and is only ever true when explicitly passed", () => {

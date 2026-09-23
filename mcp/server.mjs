@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { SCOUT_OUTCOMES, SCOUT_STATUS_BY_OUTCOME, scoutPrompt, parseScoutReport, verifyCitations, resolveScoutOutcome, renderScoutReport } from "../lib/scout.mjs";
+import { SCOUT_OUTCOMES, SCOUT_STATUS_BY_OUTCOME, scoutPrompt, parseScoutReport, verifyCitations, resolveScoutOutcome, renderScoutReport, isScoutReportUnusable, scoutReportRecoveryPrompt } from "../lib/scout.mjs";
 import { DECOMPOSE_OUTCOMES, DECOMPOSE_STATUS_BY_OUTCOME, decomposePrompt, parseDecomposeReport, buildDecomposeFindings, resolveDecomposeOutcome, checkDecompositionOverlap, renderDecomposeReport } from "../lib/decompose.mjs";
 import { deriveBudgets, checkBrief, resolveContextPerNom, assessAdmission, describeBudgets, deriveTimeBudget } from "../lib/budget.mjs";
 import { readOpenClawTranscript, estimateDisplacement } from "../lib/transcript.mjs";
@@ -2337,7 +2337,37 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
     const finishedAt = new Date().toISOString(), reportText = workerFailed ? "" : finalText(result);
 
     progress("verification");
-    const report = parseScoutReport(reportText, budgets.scout);
+    let report = parseScoutReport(reportText, budgets.scout);
+
+    // See shouldAttemptScoutRecovery's own doc comment: this only fires when
+    // the report is genuinely unusable, gated by whatever time is actually
+    // left against the caller's original timeout (scout has no reserved
+    // report-phase budget the way implement does).
+    let reportRecoveryAttempted = false, reportRecovered = false;
+    const remainingSeconds = timeoutSeconds - Math.round(workerElapsedMs / 1000);
+    if (shouldAttemptScoutRecovery({ workerFailed, workerTimedOut, report, remainingSeconds })) {
+      reportRecoveryAttempted = true;
+      try {
+        const recoveryResult = await runOpenClaw({
+          task, acceptance, verification: null, mode, cwd: worktree, baseRef: base.ref, baseSha: base.sha,
+          timeoutSeconds: remainingSeconds, runtimeDir, profile, reasoning, pool, jobDir, workerId: workerId || jobId,
+          evidenceTool: evidencePlaced ? evidenceTool : null,
+          overridePrompt: scoutReportRecoveryPrompt({ report: budgets.report.scout }), logSuffix: "-recovery",
+        });
+        const recoveryReport = parseScoutReport(finalText(recoveryResult), budgets.scout);
+        if (!isScoutReportUnusable(recoveryReport)) {
+          report = recoveryReport; reportRecovered = true;
+          // Mirrors executeImplement's identical reset: nomArmy paused the
+          // run on purpose to make room for this call, so a recovered report
+          // now goes through the normal outcome path instead of staying
+          // pinned to whatever workerFailed/workerTimedOut said before it.
+          workerFailed = false; workerTimedOut = false;
+        }
+      } catch (error) {
+        fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} scout report-recovery call failed: ${error.stack || error.message}\n`);
+      }
+    }
+
     const record = await collectGitRecord({ cwd: worktree, baseSha: base.sha, branch: null, baseRef: base.ref, jobId });
     const dirty = record.repoStatusFiles.length > 0;
     const readFile = async p => { try { return await gitRaw(["show", `${base.sha}:${p}`], projectDir); } catch { return null; } };
@@ -2353,6 +2383,11 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
     if (workerError) issues.push(`scout error: ${String(workerError).split("\n")[0]}`);
     const failures = worker.toolSummary?.failures ?? 0; if (failures > 0) issues.push(`scout recorded ${failures} tool failure(s)`);
     if (dirty) issues.push(`snapshot changed: ${record.repoStatusFiles.join(", ")}`);
+    if (reportRecoveryAttempted) {
+      issues.push(reportRecovered
+        ? "scout report recovered via a follow-up call after the first reply was cut off"
+        : "scout report-recovery follow-up call did not produce a usable report either");
+    }
 
     // The number this project is for: repository content the scout pulled
     // through its tools (what the coordinator would otherwise have carried)
@@ -2393,7 +2428,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
       transcript: transcript.available
         ? { modelCalls: transcript.modelCalls, toolCalls: transcript.toolCalls, filesRead: transcript.filesRead, commands: transcript.commands, toolResultChars: transcript.toolResultChars, assistantChars: transcript.assistantChars, dbPath: transcript.dbPath }
         : { available: false, reason: transcript.reason },
-      displacement,
+      displacement, reportRecoveryAttempted, reportRecovered,
       dirty, snapshotChanges: record.repoStatusFiles, worktreeRetained, metrics, worker, workerError,
       budgets: { contextPerNom: budgets.contextPerNom, source: budgets.source, scout: budgets.scout, report: budgets.report.scout },
       // requestedReasoning is always what the caller passed, even when it has
@@ -2731,6 +2766,24 @@ export function shouldRetryTransientAbort({ workerFailed, reportValidation, stde
     && reportValidation?.fields?.STATUS === "blocked"
     && looksLikeTransientInferenceAbort(stderrText)
     && remainingSeconds >= MIN_TRANSIENT_INFERENCE_RETRY_SECONDS;
+}
+
+// executeImplement's report-recovery gets a call for free because implement
+// pre-splits its timeout into a work budget plus a reserved report budget
+// (deriveTimeBudget); executeScout spends its ENTIRE caller-given timeout on
+// the one call, so there is nothing pre-reserved to spend on a follow-up.
+// Gating on whatever time is actually left against the original deadline --
+// the same "only worth it if there's a real chance to finish" idea
+// MIN_TRANSIENT_INFERENCE_RETRY_SECONDS already uses -- means a scout that
+// used its whole budget just skips recovery rather than running over. A
+// scout that crashed outright (workerFailed && !workerTimedOut) is excluded
+// for the same reason implement excludes it: an unknown-shape failure is not
+// somewhere a resumable session can be assumed to exist.
+const MIN_SCOUT_RECOVERY_SECONDS = 60;
+export function shouldAttemptScoutRecovery({ workerFailed, workerTimedOut, report, remainingSeconds }) {
+  return (!workerFailed || workerTimedOut)
+    && isScoutReportUnusable(report)
+    && remainingSeconds >= MIN_SCOUT_RECOVERY_SECONDS;
 }
 
 /**
