@@ -3691,6 +3691,16 @@ server.tool("army", "Who you, the General, are and who you call for what in this
       const models = provider && catalog ? [...catalog.keys()].filter((k) => k.startsWith(`${provider}/`)).map((k) => k.slice(provider.length + 1)) : [];
       return [name, { runsOn: describeAgent(agent), defaultModel: agent.model ?? null, models }];
     }));
+    // A pinned model missing from the catalog isn't necessarily wrong:
+    // `army assign` proves an unlisted model with a real test call, and the
+    // catalog lags new releases (grok-4.7 works while unlisted). Say which,
+    // so a General doesn't conclude it doesn't exist.
+    for (const role of Object.values(summary.roles)) {
+      const listed = summary.agents[role.agent]?.models ?? [];
+      if (role.model && !role.modelIsAuto && listed.length && !listed.includes(role.model)) {
+        role.modelNote = `${role.model} isn't in OpenClaw's catalog for ${role.agent}; \`army assign\` checked it with a real test call when it was set, and the catalog can lag new models. Use it as assigned; if a job reports "Unknown model", reassign.`;
+      }
+    }
     return toolText(JSON.stringify(summary, null, 2));
   } catch (error) {
     return toolText(error.message, true);

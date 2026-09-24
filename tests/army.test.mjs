@@ -265,3 +265,10 @@ test("loadArmy: a .nomarmy.local.yml that git tracks is refused -- local must me
   execFileSync("git", ["add", "-f", ".nomarmy.local.yml"], { cwd: repo });
   assert.throws(() => loadArmy({ projectDir: repo, env: { NOMARMY_CONFIG_DIR: globalDir } }), /tracked by git, so it isn't local.*git rm --cached/);
 });
+
+test("describeArmy: a subscription owned by someone other than the General's owner gets a note, not a refusal", () => {
+  const agents = { ...AGENTS, meta: { kind: "subscription", provider: "meta", owner: "personal@example.com" } };
+  const summary = describeArmy({ army: { general: "opus", workflow: null, roles: { "data-architect": { agent: "meta", model: "muse-spark-1.3" }, pm: { agent: "grok" } } }, sources: { roles: { "data-architect": {}, pm: {} } }, layers: [] }, { agents });
+  assert.match(summary.roles["data-architect"].ownerNote, /owned by personal@example\.com, not the General's own you@example\.com; jobs on it need on_behalf_of "personal@example\.com"\. If that's the operator's own other account, it's fine/);
+  assert.equal(summary.roles.pm.ownerNote, null, "an api agent has no owner to compare");
+});
