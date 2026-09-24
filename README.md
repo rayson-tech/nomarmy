@@ -217,6 +217,30 @@ An army section can only **name agents**: it has no field for a credential, endp
 
 **The sandbox and the network**: a worker's sandbox has no network (`network: none`), which covers its shell, file edits and test commands: no `npm install` of a new package, no `curl`. The model call itself is made by OpenClaw on the host, so an api or subscription agent reaches its vendor normally.
 
+## `/feature`: a feature, end to end
+
+```
+/feature add join partners to the schema context
+```
+
+The General (your coordinator session) runs the army's whole workflow on its own and comes back when it's done: a plan, the build (Sr Dev, Jr Dev, UI/UX), the reviews that apply (data architect, security analyst, then the PM against the plan), and acceptance (PO, stakeholder), with fixes sent back to the builders along the way. It ends with **a branch ready for you to review and merge**: nomArmy never merges or pushes, and it never deploys or touches cloud credentials, so those are hard stops. For any other decision it would normally ask you about, it picks the conservative option, records it, and keeps going; every such decision is in the final report.
+
+`nomarmy connect` installs it for each coordinator: `/feature` in Claude Code (`~/.claude/commands/`), a `nomarmy-feature` skill in Codex (`~/.codex/skills/`), and `/feature` in Cursor (`~/.cursor/commands/`; that path follows Cursor's documentation and hasn't been tested against a real install). A same-named command of your own is never overwritten.
+
+**Limits.** Each feature is a *run* (`run_start`), and every job carries its `run_id`. Admission enforces the run's limits and warns at 80%:
+
+```yaml
+# ~/.config/nomarmy/config.yml (or .nomarmy.local.yml; never the committed .nomarmy.yml)
+army:
+  run_limits:
+    max_jobs: 40        # defaults shown
+    max_api_usd: 10     # api agents only; a subscription isn't billed per call
+    max_hours: 6
+    warn_at: 0.8
+```
+
+The General can lower these for one run, never raise them. When a vendor answers with a usage-limit error, that agent is paused for the rest of the run and the General stops and tells you; it never moves the role to another vendor to get around it. The one thing no tool can see is your coordinator's own seat: if it runs out mid-feature, the run log (kept current after every phase) lets `/feature resume <run-id>` in a fresh session continue instead of starting over.
+
 ## The `nomarmy` CLI
 
 Not published to npm (`"private": true`): clone and `npm install && npm link` (done for you by `install.sh`), or run commands directly: `node bin/nomarmy.mjs doctor`.
@@ -370,6 +394,7 @@ Every job takes the same shape: a `task`, optional `acceptance`, a `mode`, a tim
 | `local_worker_cleanup` | Remove one worktree/branch. Recognizes a cherry-picked branch as integrated by content, not just ancestry. |
 | `local_worker_sweep` | Bulk-reap worktrees that are provably empty (zero commits, nothing uncommitted), any age. `dry_run` previews. |
 | `local_worker_config` | Surface `.nomarmy.yml`'s verification profiles. |
+| `run_start` / `run_status` / `run_finish` | A `/feature` run: its limits, what it has used per agent, warnings, paused agents, and its log. |
 | `army` | The General's charter and agent, then this repo's roles: descriptions, phases, each role's agent, which layer set it, and overlaps with the General. |
 
 **Admission**: context-per-nom bounds brief/report size; free memory bounds whether a new job starts at all. The local model keeps its calibrated caps (a 3,000-character brief, 6,000 characters of evidence, a 512-token implement report), measured on a ~20B model where longer briefs made it thrash. An api or subscription agent gets frontier ceilings that scale with its model's context: up to a 16,000-character brief and 24,000 characters of evidence. A job's `report` (`brief`, `standard`, `full`) sets how much comes back, up to about 2k tokens for an implement job and 4k for a scout; the report lands in the coordinator's own context, so it's the coordinator's call per job.

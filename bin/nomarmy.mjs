@@ -1497,6 +1497,8 @@ async function cmdConnect() {
       const result = connectTarget(target, { nomarmyRoot, run });
       results.push({ target, connected: true, ...result });
       if (!json) console.log(c.green(`✓ Registered nomarmy-local-worker with ${target}.`));
+      if (!json && result?.commands?.installed?.length) console.log(c.green(`✓ Playbooks: ${result.commands.installed.join(", ")}`) + c.dim(` in ${result.commands.dir} (restart ${target} to pick up a new one)`));
+      if (!json && result?.commands?.skipped?.length) console.log(c.yellow(`⚠ Left your own ${result.commands.skipped.join(", ")} in ${result.commands.dir} alone (not nomArmy's); nomArmy's version is in playbooks/.`));
     } catch (error) {
       results.push({ target, connected: false, error: error.message });
       if (!json) console.log(c.red(`✗ ${target}: ${error.message}`));

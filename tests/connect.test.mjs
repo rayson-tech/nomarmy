@@ -531,3 +531,48 @@ test("cursorAlreadyConnected: true only when the file exists and has our entry",
     fs.rmSync(path.dirname(configPath), { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// The /feature playbook, rendered into each coordinator's own format.
+// ---------------------------------------------------------------------------
+import { installPlaybooks, renderPlaybook } from "../lib/connect.mjs";
+
+const REPO_ROOT = path.join(path.dirname(new URL(import.meta.url).pathname), "..");
+const FEATURE_BODY = fs.readFileSync(path.join(REPO_ROOT, "playbooks", "feature.md"), "utf8");
+
+test("renderPlaybook: Claude gets a /feature command, Codex a skill, Cursor a command -- each marked as nomArmy's", () => {
+  const claude = renderPlaybook("feature", FEATURE_BODY, "claude");
+  assert.equal(claude.relPath, "feature.md");
+  assert.match(claude.text, /^---\ndescription: nomArmy/);
+  assert.match(claude.text, /argument-hint: <the feature you want>/);
+  assert.ok(claude.text.includes("$ARGUMENTS"), "Claude Code substitutes the request");
+  const codex = renderPlaybook("feature", FEATURE_BODY, "codex");
+  assert.equal(codex.relPath, path.join("nomarmy-feature", "SKILL.md"));
+  assert.match(codex.text, /^---\nname: nomarmy-feature\ndescription: .*Use when the user asks nomArmy/);
+  const cursor = renderPlaybook("feature", FEATURE_BODY, "cursor");
+  assert.match(cursor.text, /^<!-- nomarmy:feature/);
+  for (const r of [claude, codex, cursor]) {
+    assert.ok(r.text.includes("<!-- nomarmy:feature"), "the marker that protects an operator's own file");
+    assert.ok(!r.text.includes("{{REQUEST}}"), "the placeholder is always filled");
+    assert.ok(r.text.includes("run_start") && r.text.includes("Never merge"), "the same playbook everywhere");
+  }
+});
+
+test("installPlaybooks: installs, refreshes its own copy, and never overwrites the operator's own same-named file", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-playbooks-"));
+  try {
+    assert.deepEqual(installPlaybooks({ nomarmyRoot: REPO_ROOT, target: "claude", dir }).installed, ["feature.md"]);
+    fs.writeFileSync(path.join(dir, "feature.md"), fs.readFileSync(path.join(dir, "feature.md"), "utf8") + "stale\n");
+    assert.deepEqual(installPlaybooks({ nomarmyRoot: REPO_ROOT, target: "claude", dir }).installed, ["feature.md"]);
+    assert.ok(!fs.readFileSync(path.join(dir, "feature.md"), "utf8").includes("stale"), "nomArmy's own copy is refreshed");
+    fs.writeFileSync(path.join(dir, "feature.md"), "my own /feature command\n");
+    const out = installPlaybooks({ nomarmyRoot: REPO_ROOT, target: "claude", dir });
+    assert.deepEqual(out, { installed: [], skipped: ["feature.md"], dir });
+    assert.equal(fs.readFileSync(path.join(dir, "feature.md"), "utf8"), "my own /feature command\n");
+    const codexDir = path.join(dir, "codex");
+    installPlaybooks({ nomarmyRoot: REPO_ROOT, target: "codex", dir: codexDir });
+    assert.ok(fs.existsSync(path.join(codexDir, "nomarmy-feature", "SKILL.md")));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

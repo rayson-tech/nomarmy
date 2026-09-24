@@ -38,6 +38,7 @@
     "lib",
     "mcp",
     "config",
+    "playbooks",
     "scripts",
     "policies",
     "docker",

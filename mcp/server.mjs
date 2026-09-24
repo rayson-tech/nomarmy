@@ -18,6 +18,7 @@ import { DEFAULT_AGENT_IMAGE } from "../lib/verify.mjs";
 import { resolvePool, pickProvider, poolContextPerNom, entryContextPerNom } from "../lib/dispatch-config.mjs";
 import { openclawProviderId } from "../lib/dispatch-schema.mjs";
 import { loadArmy, expandArmyRole, describeArmy, globalConfigDir } from "../lib/army.mjs";
+import { createRun, loadRun, runTotals, runAdmissionProblems, recordRunJob, finishRun, resolveRunLimits, detectUsageLimit } from "../lib/runs.mjs";
 import { loadAgents, agentsConfigPath, agentsAsDispatchConfig, agentsAsSubscriptionConfig, agentDispatchFields, resolveAgentModel, agentProviderId, describeAgent } from "../lib/agents.mjs";
 import { resolveSubscriptionWorker, findProviderConflicts, describeProviderConflict } from "../lib/subscription-config.mjs";
 import { queryModelCatalog } from "../lib/model-catalog.mjs";
@@ -34,6 +35,7 @@ const server = new McpServer({ name: "nomarmy-local-worker", version: VERSION })
 const projectDir = path.resolve(process.env.CLAUDE_PROJECT_DIR || process.cwd());
 const stateRoot = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
 const jobsRoot = path.join(stateRoot, "jobs");
+const runsRoot = path.join(stateRoot, "runs");
 // NOMARMY_MAX_WORKERS, when set, is the operator's own declared ceiling.
 // Left unset, the natural default is however many inference slots
 // llama-server actually reports right now (contextInfo.slots, refreshed
@@ -2070,7 +2072,10 @@ export async function buildUnionBranch({ batchId, baseSha, baseRef, accepted, un
 }
 
 function finalText(result) { return result?.final ?? result?.payloads?.[0]?.text ?? ""; }
-function workerMetadata(result) { return { model: result?.model ?? null, provider: result?.provider ?? null, sessionId: result?.sessionId ?? null, status: result?.status ?? null, usage: result?.usage ?? null, toolSummary: result?.toolSummary ?? null }; }
+// `error` is OpenClaw's own failure message when it returned an ok:false
+// envelope rather than exiting nonzero (how "Unknown model" and vendor limit
+// errors can arrive); without it a run couldn't tell a usage limit apart.
+function workerMetadata(result) { return { model: result?.model ?? null, provider: result?.provider ?? null, sessionId: result?.sessionId ?? null, status: result?.status ?? null, usage: result?.usage ?? null, toolSummary: result?.toolSummary ?? null, error: result?.ok === false ? String(result?.error?.message ?? "").slice(0, 1000) || null : null }; }
 function intOrNull(value) { const n = Number(value); return Number.isFinite(n) ? n : null; }
 function usageMetrics(result) {
   const u = result?.usage;
@@ -3181,6 +3186,15 @@ async function admit(jobs) {
       } catch (error) { problems.push(jobs.length > 1 ? `job ${i + 1}: ${error.message}` : error.message); }
     }
   });
+  // A job in a /feature run: the run's own limits and paused agents.
+  jobs.forEach((j, i) => {
+    if (!j.run_id) return;
+    try {
+      const run = loadRun(runsRoot, j.run_id);
+      if (run.repo !== projectDir) problems.push(`${jobs.length > 1 ? `job ${i + 1}: ` : ""}run "${run.id}" belongs to ${run.repo}, not this repository`);
+      for (const p of runAdmissionProblems(run, { agentName: j.agentName ?? "local" })) problems.push(jobs.length > 1 ? `job ${i + 1}: ${p}` : p);
+    } catch (error) { problems.push(jobs.length > 1 ? `job ${i + 1}: ${error.message}` : error.message); }
+  });
   // Slot capacity only concerns local jobs: a remote job's inference runs
   // at its vendor and never competes for llama-server's slots. Free memory
   // still applies to every job (each one runs a local sandbox), so a
@@ -3202,10 +3216,46 @@ async function admit(jobs) {
 function refusal(problems) {
   return toolText(`REFUSED - nothing was started.\n${problems.map(p => `- ${p}`).join("\n")}\n\nCapacity right now:\n${JSON.stringify(capacitySnapshot(), null, 2)}`, true);
 }
+/** A run's totals and warnings, for a tool response. */
+function runBrief(runId) {
+  try {
+    const run = loadRun(runsRoot, runId);
+    const totals = runTotals(run);
+    return { id: run.id, status: run.status, limits: run.limits, used: totals.used, warnings: totals.warnings };
+  } catch (error) { return { id: runId, error: error.message }; }
+}
+
+/**
+ * Record a finished job into its run. A usage-limit message is looked for
+ * only in error text (OpenClaw's failure envelope, and the error lines of
+ * a thrown run), never in the worker's report or tool output, where "rate
+ * limit" may just be the code under review.
+ */
+function recordJobInRun(args, jobId, result, error = null) {
+  if (!args.run_id) return;
+  const kind = args.pool ? "api" : args.subscription_worker ? "subscription" : "local";
+  const m = result?.manifest ?? {};
+  const errorLines = [m.worker?.error, error?.message,
+    ...String(m.workerError ?? "").split(/\r?\n/).filter((l) => /error|limit|429/i.test(l))].filter(Boolean).join("\n");
+  const usageLimit = kind === "local" ? null : detectUsageLimit(errorLines);
+  try {
+    recordRunJob(runsRoot, args.run_id, {
+      jobId, agent: args.agentName ?? "local", kind, model: args.model ?? null, role: args.armyRole ?? null, mode: args.mode,
+      outcome: m.outcome ?? (error ? "ERROR" : null), costUsd: m.metrics?.worker_cost_usd ?? null,
+      tokens: m.metrics?.worker_tokens_total ?? null, usageLimit,
+    });
+  } catch (recordError) {
+    fs.appendFileSync(path.join(jobsRoot, jobId, "coordinator.log"), `${new Date().toISOString()} could not record into run ${args.run_id}: ${recordError.message}\n`);
+  }
+}
+function trackInRun(args, entry) {
+  if (args.run_id) entry.promise.then((r) => recordJobInRun(args, entry.jobId, r), (e) => recordJobInRun(args, entry.jobId, null, e));
+  return entry;
+}
 function launch(args) {
   const workerId = args.worker_id || null;
   const jobId = slug(workerId || (args.mode === "scout" ? "scout" : "worker"));
-  return track(jobId, { mode: args.mode, workerId: workerId || jobId, lane: jobLane(args) }, executeJob({ ...jobArgs(args, workerId), jobId }));
+  return trackInRun(args, track(jobId, { mode: args.mode, workerId: workerId || jobId, lane: jobLane(args) }, executeJob({ ...jobArgs(args, workerId), jobId })));
 }
 // Best-effort progress signal for a job still mid-run: a plain "phase: worker,
 // elapsed: Ns" told a caller nothing about whether the worker was still
@@ -3271,6 +3321,7 @@ export const jobSchema = z.object({
   reasoning: z.enum(["low", "medium", "high"]).default("medium").describe("Thinking level passed to the worker model. On the local model it takes effect when that model supports thinking (NOMARMY_MODEL_THINKING); on an api or subscription agent it applies per that agent's own `thinking` setting (false = off, a fixed level = always that level). Default is medium, not high, on real measured evidence: on an identical ticket, gpt-oss-20b at high took 318s with 21 tool calls and 4 failures, and at medium took 62s with 9 calls and 0 failures -- high did not produce a better answer, it thrashed. A separate open-ended task made Qwen3.6-27B time out completely at high (630s, zero output) and succeed at medium. Do not raise this to high by default reasoning that more thinking should help -- it has only ever hurt or timed out in testing so far. Reach for high only after a task has already failed once at medium and the failure looks like an under-thinking problem specifically (wrong root cause, not a formatting or scope issue)."),
   agent: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().describe("Run on this agent from the operator's agents.yml, by name (e.g. \"codex\", \"grok\", \"local\"): the local model, a metered api key, or one person's subscription. Omit agent and army_role to use the local model. Refuses an unknown name, never falls back. Mutually exclusive with army_role. A subscription agent also requires on_behalf_of."),
   model: z.string().regex(/^\S{1,200}$/).optional().describe("The model to run on the job's agent (an api or subscription agent), e.g. \"gpt-6-sol\". Overrides the role's model and the agent's default. Required when the role's model is \"auto\" or the agent has no default. The `army` tool lists each agent's models. Refused on the local agent, whose model `nomarmy model` sets."),
+  run_id: z.string().regex(/^run-[a-z0-9-]{1,80}$/).optional().describe("The /feature run this job belongs to (from run_start). Admission then enforces the run's limits (jobs, api spend, hours) and refuses an agent the run has paused after a vendor usage-limit error; the finished job is recorded into the run."),
   report: z.enum(["brief", "standard", "full"]).optional().describe("How much the worker may report back, capped by its agent's tier: brief (today's local-sized report), standard (the default), full (the frontier ceiling: about 2k tokens for implement, 4k for a scout). The report lands in your own context and is re-read every later turn, so ask for full only when the job's findings are the point (a broad review). No effect on the local model, whose caps are calibrated."),
   army_role: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional().describe("Dispatch by army role (e.g. \"sr-dev\", \"security-analyst\"): nomArmy runs it on the agent this repo assigns to that role and puts the role's description at the top of the brief. Call the `army` tool first to see this repo's roles. Mutually exclusive with agent. Add on_behalf_of in case the role's agent is a subscription; it's ignored otherwise."),
   on_behalf_of: z.string().min(1).max(254).optional().describe("Required when the job's agent is a subscription: must exactly match that agent's owner in agents.yml, or nomArmy refuses the job. A self-reported attestation, not an independently verified identity check -- nomArmy has no caller-identity boundary today, so what this guarantees is explicit, auditable intent and hard refusal on mismatch or omission, not cryptographic proof of who issued the call. Ignored for a local or api agent."),
@@ -3340,6 +3391,7 @@ server.tool("local_worker_start", "Start one worker or scout in the background a
       // This job's own lane and budget: a subscription job used to be
       // reported with the local model's figures.
       lane: jobLane(args), agent: args.agentName ?? "local", model: args.model ?? null,
+      ...(args.run_id ? { run: runBrief(args.run_id) } : {}),
       admission: { level: admission.level, notes: admission.reasons }, budgets: describeBudgets(budgetsForJob(args)) }, null, 2));
   });
 // A long poll must return inside the MCP client's own idle-timeout: it aborts
@@ -3399,6 +3451,33 @@ export function buildConfigSummary(repoDir, loadConfigFn = loadConfig) {
   return { found: true, valid: true, path: loaded.path, profiles, elevated: loaded.elevated,
     note: profiles.length ? null : ".nomarmy.yml exists but defines no verification profiles; verification/union_verification/verify_regression will report not_run." };
 }
+server.tool("run_start", "Start a /feature run: one feature, end to end, with limits. Every job for it then carries this run_id, and admission enforces the run's limits -- jobs, api spend in dollars, wall-clock hours -- warning at the configured share and refusing at the cap. A vendor usage-limit error pauses that agent for the rest of the run. Limits come from the operator's army run_limits; you may lower them for this run, never raise them. Returns the run id and a log path: keep the run log (plan, decisions, progress) there so a fresh session can resume if yours hits its own usage limit.", {
+  name: z.string().min(1).max(120).describe("A short name for the feature."),
+  max_jobs: z.number().int().positive().optional(), max_api_usd: z.number().positive().optional(), max_hours: z.number().positive().optional(),
+}, async ({ name, max_jobs, max_api_usd, max_hours }) => {
+  try {
+    const limits = resolveRunLimits(currentArmy().army.runLimits, { max_jobs, max_api_usd, max_hours });
+    const run = createRun(runsRoot, { name, repo: projectDir, limits });
+    return toolText(JSON.stringify({ runId: run.id, limits: run.limits, logPath: run.logPath, repo: run.repo }, null, 2));
+  } catch (error) { return toolText(error.message, true); }
+});
+server.tool("run_status", "A /feature run's limits, what it has used (jobs, api spend, hours), per-agent jobs/spend/tokens, warnings (80% of a limit, paused agents), and its log path. Read-only.", {
+  run_id: z.string().regex(/^run-[a-z0-9-]{1,80}$/),
+}, async ({ run_id }) => {
+  try {
+    const run = loadRun(runsRoot, run_id);
+    const totals = runTotals(run);
+    return toolText(JSON.stringify({ id: run.id, name: run.name, status: run.status, repo: run.repo, createdAt: run.createdAt, limits: run.limits, ...totals, pausedAgents: run.pausedAgents, jobs: run.jobs, logPath: run.logPath, summary: run.summary }, null, 2));
+  } catch (error) { return toolText(error.message, true); }
+});
+server.tool("run_finish", "Close a /feature run as complete or stopped, with a one-paragraph summary. A closed run admits no more jobs. Nothing is merged: the run's branch still waits for the operator.", {
+  run_id: z.string().regex(/^run-[a-z0-9-]{1,80}$/), status: z.enum(["complete", "stopped"]), summary: z.string().min(1).max(4000),
+}, async ({ run_id, status, summary }) => {
+  try {
+    const run = finishRun(runsRoot, run_id, { status, summary });
+    return toolText(JSON.stringify({ id: run.id, status: run.status, ...runTotals(run) }, null, 2));
+  } catch (error) { return toolText(error.message, true); }
+});
 server.tool("army", "Who you, the General, are and who you call for what in this repository: your fixed charter and the agent you're defined as, the army's workflow, then each role's description, phase (build, review, acceptance), suggested mode, and the agent it runs on, with which config layer set each value (global, project .nomarmy.yml, local .nomarmy.local.yml). Flags roles with no usable agent, and roles that share your model or subscription (not an independent review). Dispatch a role with `army_role`, or an agent directly with `agent`. Read-only, re-read on every call.", {}, async () => {
   try {
     const agents = agentsConfig().agents;
@@ -3463,7 +3542,7 @@ server.tool("local_workers", "Run independent jobs (implement or scout) with bou
       const effectiveJob = auto_union ? { ...j, base_ref: forcedBase.sha } : j;
       // The lane is what admission counts; a batch job used to carry none,
       // so it was invisible to both ceilings while it ran.
-      return track(jobId, { mode: j.mode, workerId, lane: jobLane(j) }, executeJob({ ...jobArgs(effectiveJob, workerId), jobId })).promise;
+      return trackInRun(j, track(jobId, { mode: j.mode, workerId, lane: jobLane(j) }, executeJob({ ...jobArgs(effectiveJob, workerId), jobId }))).promise;
     }, { staggerMs: WORKER_START_STAGGER_MS });
     indices.forEach((i, laneI) => { results[i] = laneResults[laneI]; });
   };
