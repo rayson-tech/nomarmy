@@ -2174,9 +2174,10 @@ async function streamJobEvents() {
  */
 function pruneJobRuntimeCli() {
   const days = Math.max(0, Number(value("older-than", "2")) || 0);
-  const { pruned, freedBytes: bytes } = pruneJobRuntime({ stateRoot: agentStateRoot(), olderThanMs: days * 86400000 });
-  if (json) return out({ pruned, freedBytes: bytes, olderThanDays: days });
-  console.log(pruned ? c.green(`✓ Removed runtime data from ${pruned} finished job(s) older than ${days} day(s), freeing ${(bytes / 1024 ** 3).toFixed(2)} GB. Their records and reports are kept.`) : c.dim(`Nothing to prune: no finished job older than ${days} day(s) still has runtime data.`));
+  const { pruned, scratchCleared, freedBytes: bytes } = pruneJobRuntime({ stateRoot: agentStateRoot(), olderThanMs: days * 86400000 });
+  if (json) return out({ pruned, scratchCleared, freedBytes: bytes, olderThanDays: days });
+  const parts = [pruned ? `runtime data from ${pruned} finished job(s) older than ${days} day(s)` : null, scratchCleared ? `OpenClaw scratch files from ${scratchCleared} more recent one(s)` : null].filter(Boolean);
+  console.log(parts.length ? c.green(`✓ Removed ${parts.join(" and ")}, freeing ${(bytes / 1024 ** 3).toFixed(2)} GB. Records and reports are kept.`) : c.dim(`Nothing to prune: no finished job older than ${days} day(s) still has runtime data.`));
 }
 
 async function cmdJobs() {

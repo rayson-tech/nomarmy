@@ -60,3 +60,19 @@ test("checkAndRecordHealth: prunes on its own and says so as an info line, never
     if (saved === undefined) delete process.env.NOMARMY_OPENCLAW_CMD; else process.env.NOMARMY_OPENCLAW_CMD = saved;
   }
 });
+
+test("pruneJobRuntime: a recent finished job keeps its transcript but loses OpenClaw's scratch files; a running one keeps both", () => {
+  const root = stateWith([{ id: "recent", finishedAgoH: 2 }, { id: "running" }]);
+  for (const id of ["recent", "running"]) {
+    const d = path.join(root, "jobs", id, "runtime", "state");
+    fs.mkdirSync(path.join(d, "tmp", "plugin-captures"), { recursive: true });
+    fs.writeFileSync(path.join(d, "tmp", "plugin-captures", "codex"), "x".repeat(4096));
+    fs.mkdirSync(path.join(d, "agents"), { recursive: true });
+    fs.writeFileSync(path.join(d, "agents", "openclaw-agent.sqlite"), "db");
+  }
+  const out = pruneJobRuntime({ stateRoot: root, olderThanMs: 24 * HOUR });
+  assert.deepEqual({ pruned: out.pruned, scratchCleared: out.scratchCleared, freedBytes: out.freedBytes }, { pruned: 0, scratchCleared: 1, freedBytes: 4096 });
+  assert.equal(fs.existsSync(path.join(root, "jobs", "recent", "runtime", "state", "tmp")), false);
+  assert.equal(fs.existsSync(path.join(root, "jobs", "recent", "runtime", "state", "agents", "openclaw-agent.sqlite")), true, "the transcript stays");
+  assert.equal(fs.existsSync(path.join(root, "jobs", "running", "runtime", "state", "tmp", "plugin-captures", "codex")), true, "never a running job");
+});

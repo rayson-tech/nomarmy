@@ -1117,6 +1117,11 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
       // outlive this one run.
       if (sandboxOverridePath) fs.rmSync(sandboxOverridePath, { force: true });
       await reapSandboxContainers(stateDir, jobDir);
+      // OpenClaw's own scratch space: copies of the Codex plugin build,
+      // 212 MB binary included, several per call, 1.2 GB for one Codex job,
+      // never removed. The transcript lives in agents/, not here, so report
+      // recovery and review lose nothing; a later call recreates what it needs.
+      fs.rmSync(path.join(stateDir, "tmp"), { recursive: true, force: true });
     }
   });
 }
