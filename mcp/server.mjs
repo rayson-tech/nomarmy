@@ -19,6 +19,7 @@ import { resolvePool, pickProvider, poolContextPerNom, entryContextPerNom } from
 import { openclawProviderId } from "../lib/dispatch-schema.mjs";
 import { loadArmy, expandArmyRole, describeArmy, globalConfigDir } from "../lib/army.mjs";
 import { readClaudeSessionTranscript } from "../lib/claude-transcript.mjs";
+import { detectTestSabotage, addedLinesOf, loadDependencyNames } from "../lib/sabotage.mjs";
 import { writeLease, removeLease, liveLeases, liveSlots, acquireSlot } from "../lib/slots.mjs";
 import { createRun, loadRun, runTotals, runAdmissionProblems, recordRunJob, finishRun, resolveRunLimits, describeLoweredLimits, detectUsageLimit } from "../lib/runs.mjs";
 import { loadAgents, agentsConfigPath, agentsAsDispatchConfig, agentsAsSubscriptionConfig, agentDispatchFields, resolveAgentModel, agentProviderId, describeAgent } from "../lib/agents.mjs";
@@ -835,7 +836,10 @@ function ambientOpenClawConfigPath() {
 // ordinary case -- default image, nothing to override -- which is every
 // Node repo and every Go/Rust/Python repo before this existed.
 export function resolveWorkerSandboxOverride(cwd, runtimeDir, {
-  loadConfigFn = loadConfig,
+  // The operator's checkout's .nomarmy.yml, not the job worktree's (see
+  // registerVerificationRunner's call): the sandbox image follows the same
+  // contract verification does.
+  loadConfigFn = () => loadConfig(projectDir),
   resolveSandboxImageFn = resolveSandboxImage,
   detectPrimaryLanguageFn = detectPrimaryLanguage,
   ambientConfigPathFn = ambientOpenClawConfigPath,
@@ -2494,7 +2498,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
     let selectionRisk = null;
     if (mode === "implement" && verification) {
       try {
-        const loaded = loadConfig(cwd);
+        const loaded = loadConfig(projectDir); // the operator's contract; see registerVerificationRunner's call
         const profileCommands = loaded.found ? (loaded.config?.verification?.[verification]?.commands ?? []) : [];
         selectionRisk = detectScopedTestSelectionRisk({ commands: profileCommands, testChanges: preCommit.testChanges });
       } catch { /* a config load failure here is the verification runner's own problem to report, not this check's */ }
@@ -2536,9 +2540,33 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
         });
       } catch { /* best-effort review flag; never blocks a commit on its own failure */ }
     }
-    const afterMislabeledTests = mislabeledTests
+    const afterMislabeledTestsOnly = mislabeledTests
       ? { ...afterUnwiredDefinitions, reviewRequired: true, reasons: [...afterUnwiredDefinitions.reasons, `MISLABELED TEST NAME: ${mislabeledTests.reason}`] }
       : afterUnwiredDefinitions;
+
+    // A worker that made the tests pass instead of the code work: new skip
+    // markers, production code carrying on without an import, a file
+    // shadowing a dependency, stray backup copies (lib/sabotage.mjs). A real
+    // Senti job did all four when its sandbox lacked sqlglot.
+    let sabotage = null;
+    if (mode === "implement") {
+      try {
+        const changes = [];
+        for (const c of (preCommit.nameStatus ?? []).slice(0, 300)) {
+          let addedLines = [];
+          if (c.status === "A") {
+            try { const text = fs.readFileSync(path.join(cwd, c.path), "utf8"); if (text.length < 2_000_000) addedLines = text.split("\n"); } catch { /* unreadable: status alone still counts */ }
+          } else if (c.status !== "D") {
+            try { addedLines = addedLinesOf(await gitRaw(["diff", "-U0", base.sha, "--", c.path], cwd)); } catch { /* skip this file */ }
+          }
+          changes.push({ status: c.status, path: c.path, addedLines });
+        }
+        sabotage = detectTestSabotage({ changes, isTestPathFn: isTestPath, dependencyNames: loadDependencyNames(cwd) });
+      } catch { /* best-effort review flag; never blocks a commit on its own failure */ }
+    }
+    const afterMislabeledTests = sabotage
+      ? { ...afterMislabeledTestsOnly, reviewRequired: true, reasons: [...afterMislabeledTestsOnly.reasons, `POSSIBLE TEST WORKAROUND: ${sabotage.reason}`] }
+      : afterMislabeledTestsOnly;
 
     // A HARD block, unlike every review flag above: SECURITY.md's own
     // documented gap made deterministic where it can be (a fixed set of
@@ -3605,6 +3633,8 @@ export function buildConfigSummary(repoDir, loadConfigFn = loadConfig) {
   }
   const profiles = Object.entries(loaded.config?.verification ?? {}).map(([name, p]) => ({ name, environment: p.environment ?? "none", commands: p.commands ?? [] }));
   return { found: true, valid: true, path: loaded.path, profiles, elevated: loaded.elevated,
+    pythonRequirements: loaded.config?.environment?.python?.requirements ?? [],
+    usedBy: "every job's sandbox image and every verification, whichever branch the job starts from: this checkout's copy, including uncommitted edits, never the job's own worktree copy",
     note: profiles.length ? null : ".nomarmy.yml exists but defines no verification profiles; verification/union_verification/verify_regression will report not_run." };
 }
 server.tool("run_start", "Start a /feature run (or reattach to one with `resume`): one feature, end to end, with limits. It becomes this session's active run: every job you dispatch from now on joins it automatically (pass run_id only to target a different run). Admission enforces the run's limits -- jobs, api spend in dollars, wall-clock hours -- warning at the configured share and refusing at the cap. A vendor usage-limit error pauses that agent for the rest of the run. Limits come from the operator's army run_limits; you may lower them for this run, never raise them. Returns the run id and a log path: keep the run log (plan, decisions, progress) there so a fresh session can resume if yours hits its own usage limit.", {
@@ -3666,7 +3696,7 @@ server.tool("army", "Who you, the General, are and who you call for what in this
     return toolText(error.message, true);
   }
 });
-server.tool("local_worker_config", "What .nomarmy.yml (if any) defines for this repository: every verification profile name and its commands/environment, and any elevated (shared/remote) services that need explicit policy approval before a job may use them. Pass a profile name to `verification`/`union_verification`/`verify_regression` only if it appears here. Read-only; never writes or proposes a config (see `nomarmy scan` for that).", {}, async () => {
+server.tool("local_worker_config", "What this checkout's .nomarmy.yml defines -- the one file every job's sandbox image and every verification uses, whichever branch the job starts from (never the job worktree's own copy, which a worker could edit): every verification profile name and its commands/environment, and any elevated (shared/remote) services that need explicit policy approval before a job may use them. Pass a profile name to `verification`/`union_verification`/`verify_regression` only if it appears here. Read-only; never writes or proposes a config (see `nomarmy scan` for that).", {}, async () => {
   const summary = buildConfigSummary(projectDir);
   return toolText(JSON.stringify(summary, null, 2), summary.valid === false);
 });
@@ -3952,7 +3982,13 @@ if (isMain) {
   // import this module and inject their own runner, and an unregistered runner
   // yields `not_run`, which can never produce a recovered success.
   const { createVerificationRunner } = await import("../lib/verify.mjs");
-  registerVerificationRunner(createVerificationRunner({ hostProjectDir: projectDir }));
+  // The environment contract is the operator's checkout's .nomarmy.yml --
+  // what local_worker_config shows -- never the job worktree's copy: a
+  // job cut from a branch without the file ran with no contract at all (a
+  // real Senti run on `refinement`: no Python requirements, so no ruff or
+  // sqlglot, so verification could never pass), and a worker could edit its
+  // own worktree's copy to weaken the checks that judge it.
+  registerVerificationRunner(createVerificationRunner({ hostProjectDir: projectDir, loadConfig: () => loadConfig(projectDir) }));
   // Warm the budget from the profile or the running llama-server. Not awaited:
   // admission refreshes it anyway, and a slow hardware probe must not delay
   // the MCP handshake.
