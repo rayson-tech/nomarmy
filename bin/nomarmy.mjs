@@ -19,12 +19,10 @@ import { detectHardware } from "../lib/hardware.mjs";
 import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf.mjs";
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
 import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected } from "../lib/connect.mjs";
-import { loadDispatchConfig, dispatchConfigPath, stringifyDispatchConfig } from "../lib/dispatch-config.mjs";
-import { dispatchConfigSchema, formatDispatchIssues, findReservedPoolName, RESERVED_POOL_NAMES, PROVIDER_TYPES, ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
-import { loadSubscriptionConfig, subscriptionConfigPath, stringifySubscriptionConfig, findProviderConflicts, describeProviderConflict } from "../lib/subscription-config.mjs";
-import { subscriptionConfigSchema, formatSubscriptionIssues, RESERVED_WORKER_NAMES } from "../lib/subscription-schema.mjs";
+import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
+import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
 import { loadArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
-import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeSucceeded, defaultWorkerName, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
+import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeSucceeded, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
 
 // Add a new coordinator: add its name here, teach commandExists/connectTarget
 // about it below (a JSON-file target like Cursor has no PATH binary to check
@@ -47,7 +45,7 @@ const value = (name, fallback = null) => {
   return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[i + 1] : fallback;
 };
 const repoDir = path.resolve(value("repo", process.cwd()));
-// --json shape for `providers add`/`providers update`'s thinking field:
+// --json shape for `agents add`/`agents update`'s thinking field:
 // `--thinking low|medium|high` sets that entry's own fixed reasoning floor
 // (see thinkingSchema's doc comment); a bare `--thinking` (no value, or a
 // value that isn't a real level) keeps the original boolean meaning (pass
@@ -105,125 +103,71 @@ Usage: nomarmy <command> [options]
                                       inference (never done silently)
   update          Pull the latest nomArmy code and re-sync the installed
                   MCP copy (fast-forward only; refuses on local changes).
-  providers <list|add|update|remove|validate>
-                  Manage config/providers.yml -- optional, weighted pools of
-                  worker providers (local, Bedrock, DeepInfra, Anthropic,
-                  OpenAI, xAI, Azure OpenAI, or a custom OpenAI-compatible
-                  endpoint) a job can be dispatched against with
-                  local_worker's \`pool\` field instead of the single global
-                  worker model. Absent entirely, nothing changes.
-                  list      show configured pools and which entries have
-                            their credential set right now
-                  add       interactive wizard to add one entry to a pool.
-                            Provider "openclaw" covers any provider OpenClaw
-                            supports that isn't listed (DeepSeek, Mistral,
-                            Groq, ...), by its OpenClaw id.
-                            (or --json --pool --provider --id [--model]
-                            [--auth-env] [--base-url] [--weight]
-                            [--openclaw-provider <id> [--plugin <spec>]]
-                            [--max-concurrent] [--context-window]
-                            [--thinking [low|medium|high]] [--no-thinking]
-                            [--register] [--update-mcp])
-                            --thinking          follow the job's requested
-                                                 reasoning level (default)
-                            --thinking <level>  always use this level for
-                                                 this entry, regardless of
-                                                 what the job requested --
-                                                 the entry's own floor
-                            --register    also register the credential with
-                                          OpenClaw right away (needs
-                                          auth_env set in this shell)
-                            --update-mcp  bake auth_env's NAME into the
-                                          Claude Code MCP registration as a
-                                          placeholder, so dispatch sees it's
-                                          configured regardless of shell/
-                                          launch-method timing (never the
-                                          real credential -- that only ever
-                                          lives in OpenClaw's own store)
-                            --context-window <tokens>
-                                          override this model's context
-                                          window instead of looking it up
-                                          from openclaw's own model catalog
-                                          at dispatch time -- for a model
-                                          newer than that catalog's cache
-                  update <pool> <id>
-                            change an existing entry's model, weight,
-                            max_concurrent, auth_env, base_url,
-                            context_window or thinking flag (or --json with
-                            the matching flags). A model swap on a native
-                            provider (anthropic/openai/xai/deepinfra/openclaw) needs
-                            no re-registration -- the model is composed
-                            fresh at dispatch time.
-                  remove <pool> <id>
-                            remove one entry (or the whole pool if now empty)
-                  validate  check config/providers.yml against the schema
-  subscriptions <setup|list|add|update|remove>
-                  Manage config/subscriptions.yml -- optional, individually-
-                  owned workers backed by ONE PERSON'S OWN already-
-                  authenticated subscription (Claude Pro/Max/Team via
-                  OpenClaw's claude-cli provider, OpenAI Codex, or Meta
-                  Muse Code), never
-                  a weighted pick the way \`providers\` pools are. Dispatch
-                  with local_worker's \`subscription_worker\` field (or the
-                  deterministic \`subscription_role\`, e.g. "architect" --
-                  always the same entry, never a pick among several) plus a
-                  required \`on_behalf_of\` naming that exact person --
-                  nomArmy refuses the job (never substitutes a different
-                  worker) if it's missing or doesn't match. Credential setup
-                  is wrapped by \`setup\` below -- nomArmy never touches a
-                  token by hand. Absent entirely, nothing changes.
-                  setup [claude|codex|meta]
-                            the easy path: installs the vendor CLI if
-                            missing, runs its login, updates OpenClaw and
-                            installs its plugin if needed, lists the real
-                            models to pick from, defaults the owner from
-                            your login, and proves it with a real test call
-                            before saving. For Meta it also copies the key
-                            Muse Code's own login minted (macOS keychain)
-                            into OpenClaw over stdin -- re-run it if that key
-                            rotates. Interactive only (logins need a
-                            browser or device code).
-                  list      show configured workers
-                  add       lower-level: write one worker entry for a
-                            credential you've already set up yourself
-                            (or --json --name --provider --model --owner
-                            [--role] [--max-concurrent]
-                            [--thinking [low|medium|high]] [--no-thinking])
+  agents <list|add|update|remove>
+                  Every model a job can run on, in one list:
+                  ~/.config/nomarmy/agents.yml (or NOMARMY_CONFIG_DIR).
+                    local         the local model (built in as \`local\`)
+                    api           a metered API key: xai, openai,
+                                  anthropic, deepinfra, bedrock, azure,
+                                  any OpenClaw provider by id ("openclaw",
+                                  e.g. DeepSeek), or an OpenAI-compatible URL
+                    subscription  ONE person's own Claude, ChatGPT or Muse
+                                  Code plan; never pooled, and every job
+                                  must name its owner in on_behalf_of
+                  Changes apply to the next job, no restart.
+                  list      show your agents
+                  add [local|api|subscription] [claude|codex|meta]
+                            walks through what that kind needs: an API
+                            key registered with OpenClaw (over stdin,
+                            never saved to a file), or the vendor's own
+                            CLI install and login, OpenClaw's plugin and
+                            login, and for Meta the key Muse Code's login
+                            left in the macOS keychain. Then a real test
+                            call before saving. Interactive, or --json
+                            --name <n> --kind <kind> plus that kind's
+                            fields: --slot coder|gpt (local); --provider
+                            --model --auth-env [--base-url]
+                            [--openclaw-provider --plugin] [--register]
+                            [--update-mcp] (api); --provider --model
+                            --owner (subscription); and optionally
+                            --max-concurrent --context-window
+                            --thinking [low|medium|high] --no-thinking
                   update <name>
-                            change a worker's model (picked from what
-                            OpenClaw lists, then proven with a real test
-                            call), role, max_concurrent or thinking. Owner
-                            and provider stay fixed: those are a new setup.
-                            (or --json [--model] [--role|--no-role]
-                            [--max-concurrent] [--context-window]
-                            [--thinking [low|medium|high]] [--no-thinking]
-                            [--probe to test-call a new model first])
+                            change the model (picked from what OpenClaw
+                            lists; a subscription gets a real test call),
+                            slot, auth_env, base_url, max_concurrent,
+                            context_window or thinking. Kind, provider and
+                            owner stay fixed: that's a different agent.
+                            (--json with the matching flags; --probe to
+                            test-call a subscription's new model first)
                   remove <name>
-                            remove one worker
-  army <show|init|assign>
-                  Who the General (your coordinator session) calls for
-                  what. Each role has a description, a phase (build,
-                  review, acceptance) and one agent: a subscription worker,
-                  a pool, or the local model. Layers merge like Claude
-                  Code's settings, later wins: subscriptions.yml roles,
-                  global ~/.config/nomarmy/config.yml, the repo's
-                  .nomarmy.yml, then its gitignored .nomarmy.local.yml.
-                  Army sections only pick among agents you defined
-                  globally; they can never hold a credential or endpoint.
-                  Jobs dispatch with \`army_role\`; edits apply to the
-                  next job, no restart.
-                  show      the merged roster and which layer set what
-                            (--json gives what the General's \`army\` tool sees)
-                  init      write the default army (Sr Dev, Jr Dev, UI/UX,
-                            data architect, security analyst, PM, PO,
-                            stakeholder) to --global (default), --project
-                            or --local; --force replaces an existing one
-                  assign <role> <worker:NAME|pool:NAME|local|local:gpt|none>
-                            point a role at an agent in --global (default),
+                            remove one agent
+  army <show|init|assign|general>
+                  Who does what. The General is your coordinator session:
+                  its charter is fixed by nomArmy, and you define which
+                  agent it is. Each other role has a description, a phase
+                  (build, review, acceptance) and one agent. Layers merge
+                  like Claude Code's settings, later wins: global
+                  ~/.config/nomarmy/config.yml, the repo's .nomarmy.yml,
+                  then its gitignored .nomarmy.local.yml. Army sections
+                  only pick agents by name; they can never hold a
+                  credential or endpoint. Jobs dispatch with
+                  \`army_role\`; edits apply to the next job, no restart.
+                  show      the General, the roster, which layer set what,
+                            and roles that share the General's model or
+                            usage (--json is what the \`army\` tool returns)
+                  init      write the default roster (Sr Dev, Jr Dev,
+                            UI/UX, data architect, security analyst, PM,
+                            PO, stakeholder, all on \`local\`) to --global
+                            (default), --project or --local; --force
+                            replaces an existing one
+                  assign <role> <agent|none>
+                            give a role an agent in --global (default),
                             --project or --local
-  config paths    where each config file lives: providers.yml and
-                  subscriptions.yml in ~/.config/nomarmy (or
-                  NOMARMY_CONFIG_DIR), and the three army layers
+                  general <agent>
+                            which agent the General is, in --global
+                            (default) or --local
+  config paths    where agents.yml and the three army layers live
   connect [claude] [codex] [cursor]
                   (Re-)register the MCP server with one or more coordinators.
                   With no target and not --json, prompts an interactive
@@ -424,12 +368,6 @@ async function cmdInit() {
 // of bin/, the same way select-model.mjs resolves its own root.
 const nomarmyRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 
-/** Write a global config file (providers.yml / subscriptions.yml), creating ~/.config/nomarmy on first use. */
-function writeGlobalConfig(filePath, text) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, text);
-}
-
 /** Read one KEY=VALUE line's value, or null if the file or key doesn't exist. */
 function readEnvValue(filePath, key) {
   if (!fs.existsSync(filePath)) return null;
@@ -485,7 +423,7 @@ async function askUntilValid(rl, prompt, { pattern, invalidMessage, allowEmpty =
  * this environment cannot do. So this echoes plainly, like every other
  * question in this file, and says so up front rather than silently doing
  * something fragile. The value is still never written to config/
- * providers.yml or any other file -- it's held in memory for the one
+ * agents.yml or any other file -- it's held in memory for the one
  * immediate registration call and discarded.
  */
 async function askSecret(rl, prompt) {
@@ -768,7 +706,7 @@ async function cmdModel() {
   }
 }
 
-// One label/default per provider type `nomarmy providers add` menu shows.
+// One label/default per api provider type the `nomarmy agents add api` menu shows.
 // `native: true` types register through OpenClaw's own dedicated onboarding
 // flag (--anthropic-api-key etc, verified via `openclaw onboard --help`);
 // the rest register as a custom endpoint (the same mechanism
@@ -853,537 +791,7 @@ function registerProviderWithOpenClaw({ id, provider, model, auth_env: authEnv, 
   }
 }
 
-async function cmdProvidersList() {
-  const configPath = dispatchConfigPath(globalConfigDir());
-  let loaded;
-  try {
-    loaded = loadDispatchConfig(globalConfigDir());
-  } catch (error) {
-    if (json) { out({ error: error.message, errors: error.errors, path: error.path }); process.exit(1); }
-    console.error(c.red(`${error.path ?? "config/providers.yml"} is invalid:`));
-    for (const line of error.errors) console.error(`  - ${line}`);
-    process.exit(1);
-  }
-  if (!loaded.found) {
-    if (json) return out({ found: false, path: configPath, pools: {} });
-    console.log(c.dim(`No config/providers.yml yet (would live at ${configPath}).`));
-    console.log(`Run ${c.bold("nomarmy providers add")} to create one, or copy config/providers.yml.example.`);
-    return;
-  }
-  if (json) {
-    const pools = {};
-    for (const [name, entries] of Object.entries(loaded.config.pools)) {
-      pools[name] = entries.map((e) => ({ ...e, auth_set: e.auth_env ? Boolean(process.env[e.auth_env]) : true }));
-    }
-    return out({ found: true, path: loaded.path, pools });
-  }
-  console.log(c.bold(`🍪 nomArmy providers`) + c.dim(`  (${loaded.path})`));
-  for (const [name, entries] of Object.entries(loaded.config.pools)) {
-    console.log(`\n${c.bold(name)}:`);
-    for (const entry of entries) {
-      const authOk = !entry.auth_env || Boolean(process.env[entry.auth_env]);
-      const authNote = entry.auth_env ? `  auth_env=${entry.auth_env} ${authOk ? c.green("✓") : c.red("✗ unset")}` : "";
-      const contextNote = entry.context_window ? `  context_window=${entry.context_window}` : "";
-      const thinkingNote = entry.thinking === false ? "  thinking=off" : typeof entry.thinking === "string" ? `  thinking=${entry.thinking} (fixed)` : "";
-      console.log(`  - ${c.cyan(entry.id)}  (${openclawProviderId(entry)}${entry.model ? `/${entry.model}` : ""})  weight=${entry.weight}  max_concurrent=${entry.max_concurrent}${contextNote}${thinkingNote}${authNote}`);
-    }
-  }
-  console.log(c.dim(`\nDispatch a job against one of these with local_worker's \`pool\` field, e.g. pool: "${Object.keys(loaded.config.pools)[0] ?? "cheap"}".`));
-}
-
-async function cmdProvidersValidate() {
-  try {
-    const loaded = loadDispatchConfig(globalConfigDir());
-    if (json) return out({ valid: true, found: loaded.found, path: loaded.path });
-    console.log(loaded.found ? c.green(`✓ ${loaded.path} is valid.`) : c.dim("No config/providers.yml yet -- nothing to validate."));
-  } catch (error) {
-    if (json) { out({ valid: false, errors: error.errors, path: error.path }); process.exit(1); }
-    console.error(c.red(`✗ ${error.path ?? "config/providers.yml"} is invalid:`));
-    for (const line of error.errors) console.error(`  - ${line}`);
-    process.exit(1);
-  }
-}
-
-async function cmdProvidersRemove() {
-  const poolName = argv[2], id = argv[3];
-  if (!poolName || !id) throw new Error("Usage: nomarmy providers remove <pool> <id>");
-  if (RESERVED_POOL_NAMES.includes(poolName)) throw new Error(`Unknown pool "${poolName}" (that name is reserved and can never be a real pool).`);
-  const loaded = loadDispatchConfig(globalConfigDir());
-  if (!loaded.found) throw new Error("No config/providers.yml exists yet -- nothing to remove.");
-  // hasOwnProperty, not a truthy check: `loaded.config.pools["__proto__"]`
-  // (a plain object's own real prototype) is truthy even when no such pool
-  // was ever configured, and would otherwise reach `pool.filter(...)` below
-  // and crash with "pool.filter is not a function" instead of this clear
-  // error -- moot now that RESERVED_POOL_NAMES is checked above first, but
-  // this guard also covers any OTHER inherited-but-not-own key.
-  const pool = Object.prototype.hasOwnProperty.call(loaded.config.pools, poolName) ? loaded.config.pools[poolName] : undefined;
-  if (!pool) throw new Error(`Unknown pool "${poolName}". Configured pools: ${Object.keys(loaded.config.pools).join(", ") || "(none)"}`);
-  const remaining = pool.filter((e) => e.id !== id);
-  if (remaining.length === pool.length) throw new Error(`No entry with id "${id}" in pool "${poolName}".`);
-
-  if (!json) {
-    const rl = createInterface({ input, output });
-    let answer;
-    try {
-      answer = (await rl.question(c.bold(`Remove "${id}" from pool "${poolName}"${remaining.length ? "" : " (this empties and removes the pool)"}? [y/N] `))).trim().toLowerCase();
-    } finally {
-      rl.close();
-    }
-    if (answer !== "y" && answer !== "yes") { console.log(c.dim("Cancelled; nothing changed.")); return; }
-  }
-
-  const nextPools = { ...loaded.config.pools };
-  if (remaining.length) nextPools[poolName] = remaining; else delete nextPools[poolName];
-  writeGlobalConfig(dispatchConfigPath(globalConfigDir()), stringifyDispatchConfig({ pools: nextPools }));
-  if (json) return out({ removed: true, pool: poolName, id });
-  console.log(c.green(`✓ Removed "${id}" from pool "${poolName}".`));
-}
-
-// Changes fields on an EXISTING entry in place (model, weight,
-// max_concurrent, auth_env, base_url, thinking). Provider type and id are
-// immutable here -- `remove` then `add` is the path for either, since
-// changing them is really "a different entry," not an edit. A model swap on
-// a native provider (anthropic/openai/xai/deepinfra) needs no re-
-// registration with OpenClaw at all: registration there is per-PROVIDER
-// (the credential/profile), not per-model -- resolvePoolSelection composes
-// "<provider>/<model>" fresh at dispatch time, so editing this file's
-// `model:` field is the entire fix (see registerProviderWithOpenClaw).
-async function cmdProvidersUpdate() {
-  const poolName = argv[2], id = argv[3];
-  if (!poolName || !id) throw new Error("Usage: nomarmy providers update <pool> <id> [--model <m>] [--weight <n>] [--max-concurrent <n>] [--auth-env <NAME>] [--base-url <url>] [--context-window <tokens>] [--thinking|--no-thinking]");
-  if (RESERVED_POOL_NAMES.includes(poolName)) throw new Error(`Unknown pool "${poolName}" (that name is reserved and can never be a real pool).`);
-  const loaded = loadDispatchConfig(globalConfigDir());
-  if (!loaded.found) throw new Error("No config/providers.yml exists yet -- nothing to update.");
-  const pool = Object.prototype.hasOwnProperty.call(loaded.config.pools, poolName) ? loaded.config.pools[poolName] : undefined;
-  if (!pool) throw new Error(`Unknown pool "${poolName}". Configured pools: ${Object.keys(loaded.config.pools).join(", ") || "(none)"}`);
-  const index = pool.findIndex((e) => e.id === id);
-  if (index === -1) throw new Error(`No entry with id "${id}" in pool "${poolName}".`);
-  const current = pool[index];
-
-  const changes = {};
-  if (json) {
-    if (value("model") !== null) changes.model = value("model");
-    if (value("weight") !== null) changes.weight = Number(value("weight"));
-    if (value("max-concurrent") !== null) changes.max_concurrent = Number(value("max-concurrent"));
-    if (value("auth-env") !== null) changes.auth_env = value("auth-env");
-    if (value("base-url") !== null) changes.base_url = value("base-url");
-    if (value("context-window") !== null) changes.context_window = Number(value("context-window"));
-    const thinkingFlag = resolveThinkingFlag();
-    if (thinkingFlag !== undefined) changes.thinking = thinkingFlag;
-    if (Object.keys(changes).length === 0) throw new Error("Nothing to update -- pass at least one of --model/--weight/--max-concurrent/--auth-env/--base-url/--context-window/--thinking [low|medium|high]/--no-thinking.");
-  } else {
-    if (!process.stdin.isTTY) throw new Error("nomarmy providers update needs an interactive terminal, or --json with explicit flags (see `nomarmy help`).");
-    const rl = createInterface({ input, output });
-    try {
-      console.log(c.bold(`🍪 nomArmy providers update`) + c.dim(`  (${current.provider}, pool "${poolName}", id "${id}")`));
-      console.log(c.dim("Blank keeps the current value.\n"));
-
-      if (current.provider !== "llama-cpp") {
-        const modelAnswer = (await rl.question(c.bold(`Model [${current.model ?? "(none)"}]: `))).trim();
-        if (modelAnswer) changes.model = modelAnswer;
-      }
-
-      const weightAnswer = (await rl.question(c.bold(`Weight [${current.weight}]: `))).trim();
-      if (weightAnswer) changes.weight = Number(weightAnswer);
-
-      const maxConcurrentAnswer = (await rl.question(c.bold(`max_concurrent [${current.max_concurrent}]: `))).trim();
-      if (maxConcurrentAnswer) changes.max_concurrent = Number(maxConcurrentAnswer);
-
-      if (current.provider !== "llama-cpp") {
-        const authEnvAnswer = await askUntilValid(rl, `Environment variable NAME holding the API key [${current.auth_env}]: `, {
-          allowEmpty: true, fallback: current.auth_env, pattern: AUTH_ENV_NAME_RE,
-          invalidMessage: "must look like an ENVIRONMENT VARIABLE NAME, not the credential itself.",
-        });
-        if (authEnvAnswer !== current.auth_env) changes.auth_env = authEnvAnswer;
-
-        const currentThinkingLabel = current.thinking === false ? "off" : current.thinking === true ? "on, follows the job" : `fixed at "${current.thinking}"`;
-        const thinkingAnswer = (await rl.question(c.bold(`Thinking/reasoning: y = follow the job's requested level, n = off, or type a level (low/medium/high) to always use that regardless of the job [current: ${currentThinkingLabel}]: `))).trim().toLowerCase();
-        if (thinkingAnswer === "y" || thinkingAnswer === "yes") changes.thinking = true;
-        else if (thinkingAnswer === "n" || thinkingAnswer === "no") changes.thinking = false;
-        else if (THINKING_LEVELS.includes(thinkingAnswer)) changes.thinking = thinkingAnswer;
-
-        const contextWindowAnswer = (await rl.question(c.bold(`Context window override in tokens [${current.context_window ?? "looked up from openclaw's catalog"}]: `))).trim();
-        if (contextWindowAnswer) changes.context_window = Number(contextWindowAnswer);
-      }
-
-      if (["bedrock", "azure-openai", "openai-compatible"].includes(current.provider)) {
-        const baseUrlAnswer = (await rl.question(c.bold(`Base URL [${current.base_url}]: `))).trim();
-        if (baseUrlAnswer) changes.base_url = baseUrlAnswer;
-      }
-    } finally {
-      rl.close();
-    }
-    if (Object.keys(changes).length === 0) {
-      console.log(c.dim("\nNothing changed."));
-      return;
-    }
-  }
-
-  const updatedEntry = { ...current, ...changes };
-  const nextPool = [...pool];
-  nextPool[index] = updatedEntry;
-  const nextPools = { ...loaded.config.pools, [poolName]: nextPool };
-  const parsed = dispatchConfigSchema.safeParse({ pools: nextPools });
-  if (!parsed.success) {
-    const errors = formatDispatchIssues(parsed.error);
-    if (json) { out({ error: "invalid update", errors }); process.exit(1); }
-    console.error(c.red("That update is not valid:"));
-    for (const line of errors) console.error(`  - ${line}`);
-    process.exit(1);
-  }
-
-  writeGlobalConfig(dispatchConfigPath(globalConfigDir()), stringifyDispatchConfig(parsed.data));
-  const written = parsed.data.pools[poolName][index];
-
-  if (json) return out({ updated: true, pool: poolName, id, entry: written, changed: Object.keys(changes) });
-
-  console.log(c.green(`\n✓ Updated "${id}" in pool "${poolName}".`));
-  if (changes.model && isNativeProviderType(current.provider)) {
-    console.log(c.dim(`No OpenClaw re-registration needed for a model swap on a native provider -- "${openclawProviderId(current)}/${written.model}" is composed fresh at dispatch time.`));
-  }
-  if (changes.auth_env) {
-    console.log(c.yellow(`auth_env changed to ${changes.auth_env} -- run \`nomarmy connect claude\` (or reconnect) so the MCP registration picks up the new name.`));
-  }
-  console.log(c.yellow("Restart your Claude Code / Codex session to pick this up -- config/providers.yml is read once per MCP server process."));
-}
-
-async function cmdProvidersAdd() {
-  const configPath = dispatchConfigPath(globalConfigDir());
-  let existingPools = {};
-  try {
-    const loaded = loadDispatchConfig(globalConfigDir());
-    if (loaded.found) existingPools = loaded.config.pools;
-  } catch (error) {
-    throw new Error(`config/providers.yml already exists but is invalid -- fix it by hand or delete it before adding: ${error.message}`);
-  }
-
-  let poolName, providerType, id, model, weight, authEnv, baseUrl, maxConcurrent, thinking, contextWindow, providedApiKey, genericId, plugin;
-
-  if (json) {
-    poolName = value("pool");
-    providerType = value("provider");
-    id = value("id");
-    model = value("model");
-    weight = Number(value("weight", "1"));
-    authEnv = value("auth-env");
-    baseUrl = value("base-url");
-    maxConcurrent = value("max-concurrent") ? Number(value("max-concurrent")) : undefined;
-    thinking = resolveThinkingFlag();
-    contextWindow = value("context-window") ? Number(value("context-window")) : undefined;
-    genericId = value("openclaw-provider");
-    plugin = value("plugin");
-    if (!poolName || !providerType || !id) {
-      throw new Error(`--json requires --pool <name> --provider <${PROVIDER_TYPES.join("|")}> --id <id>, plus --model/--auth-env/--base-url (or --openclaw-provider [--plugin] for "openclaw") as that provider type needs.`);
-    }
-  } else {
-    if (!process.stdin.isTTY) throw new Error("nomarmy providers add needs an interactive terminal, or --json with explicit flags (see `nomarmy help`).");
-    const rl = createInterface({ input, output });
-    try {
-      console.log(c.bold("🍪 nomArmy providers add"));
-      const existingNames = Object.keys(existingPools);
-      const poolPrompt = existingNames.length
-        ? `Pool name [existing: ${existingNames.join(", ")}, or type a new one]: `
-        : `Pool name (new -- e.g. "cheap" or "capable"): `;
-      poolName = (await rl.question(c.bold(poolPrompt))).trim();
-      if (!poolName) throw new Error("A pool name is required.");
-
-      console.log("\n" + c.bold("Which provider?"));
-      PROVIDER_TYPES.forEach((t, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${KNOWN_PROVIDERS[t]?.label ?? t}`));
-      const typeChoice = (await rl.question(c.bold("Choice: "))).trim();
-      providerType = PROVIDER_TYPES[Number(typeChoice) - 1];
-      if (!providerType) throw new Error(`Not a valid choice: "${typeChoice}".`);
-      const info = KNOWN_PROVIDERS[providerType] ?? {};
-
-      if (providerType === "openclaw") {
-        console.log(c.dim("Any provider OpenClaw can talk to. Find its id with `openclaw models list --all`, or `openclaw plugins search <name>` if it needs a plugin."));
-        genericId = await askUntilValid(rl, "OpenClaw provider id (e.g. deepseek, mistral, groq): ", {
-          allowEmpty: false, pattern: OPENCLAW_PROVIDER_ID_RE,
-          invalidMessage: "must be an OpenClaw provider id (lowercase letters, digits, dot, underscore, hyphen).",
-        });
-        const pluginAnswer = (await rl.question(c.bold("Plugin to install first, if it isn't stock (e.g. clawhub:@openclaw/deepseek-provider; blank = none): "))).trim();
-        if (pluginAnswer) plugin = pluginAnswer;
-      }
-
-      // A SHORT LABEL, never the API key -- validated and re-prompted on the
-      // spot (ID_RE, the same rule config/providers.yml itself enforces),
-      // not left to fail only at the very end via schema validation. This
-      // exact confusion happened live: a user's real key ended up typed
-      // here (the first free-text question after picking a provider) and
-      // only surfaced as an opaque validation error after every other
-      // question had already been answered.
-      id = await askUntilValid(rl, `Entry id -- a short label, NOT the API key [${genericId ?? providerType}]: `, {
-        allowEmpty: true, fallback: genericId ?? providerType, pattern: ID_RE,
-        invalidMessage: "must be 1-64 characters of letters, numbers, dot, underscore or hyphen -- that looks too long/complex to be a label. Did you mean to paste your API key here? Don't -- that's asked for separately, and only ever read from an environment variable, never typed into this wizard.",
-      });
-
-      if (providerType !== "llama-cpp") {
-        model = (await rl.question(c.bold(`Model${info.defaultModel ? ` [${info.defaultModel}]` : ""}: `))).trim() || info.defaultModel;
-        if (!model) throw new Error("A model id is required for this provider type.");
-        const authEnvSuggestion = info.authEnvSuggestion ?? `NOMARMY_${genericId.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
-        authEnv = await askUntilValid(rl, `Environment variable NAME holding the API key (not the key itself) [${authEnvSuggestion}]: `, {
-          allowEmpty: true, fallback: authEnvSuggestion, pattern: AUTH_ENV_NAME_RE,
-          invalidMessage: "must look like an ENVIRONMENT VARIABLE NAME (uppercase letters, digits, underscores, e.g. NOMARMY_XAI_API_KEY) -- not the credential itself.",
-        });
-      } else {
-        const modelAnswer = (await rl.question(c.bold("Model override (blank -> use NOMARMY_WORKER_MODEL, today's default): "))).trim();
-        if (modelAnswer) model = modelAnswer;
-      }
-
-      if (["bedrock", "azure-openai", "openai-compatible"].includes(providerType)) {
-        baseUrl = (await rl.question(c.bold(`Base URL${info.baseUrlHint ? ` (e.g. ${info.baseUrlHint})` : ""}: `))).trim();
-        if (!baseUrl) throw new Error("A base_url is required for this provider type.");
-      }
-
-      const weightAnswer = (await rl.question(c.bold("Weight [1]: "))).trim();
-      weight = weightAnswer ? Number(weightAnswer) : 1;
-
-      const maxConcurrentAnswer = (await rl.question(c.bold("max_concurrent [2]: "))).trim();
-      if (maxConcurrentAnswer) maxConcurrent = Number(maxConcurrentAnswer);
-
-      if (providerType !== "llama-cpp") {
-        const thinkingAnswer = (await rl.question(c.bold("Thinking/reasoning: Y = follow the job's requested level (default), n = off, or type a level (low/medium/high) to always use that regardless of the job: "))).trim().toLowerCase();
-        thinking = THINKING_LEVELS.includes(thinkingAnswer) ? thinkingAnswer : !(thinkingAnswer === "n" || thinkingAnswer === "no");
-
-        // Optional. Left blank, dispatch looks this up from OpenClaw's own
-        // model catalog at job time (see lib/model-catalog.mjs) -- this is
-        // only for a model newer than that catalog's cache (the exact
-        // situation a brand-new model release creates on day one) or an
-        // operator who wants to be more conservative than the rated max.
-        const contextWindowAnswer = (await rl.question(c.bold("Context window override in tokens (blank -> looked up from openclaw's catalog automatically): "))).trim();
-        if (contextWindowAnswer) contextWindow = Number(contextWindowAnswer);
-      }
-
-      // The actual credential is never typed into a question above -- only
-      // its env var's NAME is. If that var isn't already set, offer to type
-      // the real key here instead, for THIS ONE registration step only:
-      // held in a local variable, used once to pipe into `openclaw models
-      // auth paste-api-key` (see registerProviderWithOpenClaw), and never
-      // written to config/providers.yml or any other file. Input is masked
-      // (best-effort; terminal-dependent) since, unlike an exported env var,
-      // this does land in the terminal's own key-press stream momentarily.
-      if (authEnv && !process.env[authEnv]) {
-        console.log(c.yellow(`\n${authEnv} is not set in this shell right now.`));
-        const provideNow = (await rl.question(c.bold("Enter the key now instead (used once for registration, never saved to a file)? [y/N] "))).trim().toLowerCase();
-        if (provideNow === "y" || provideNow === "yes") {
-          providedApiKey = await askSecret(rl, c.bold(`${authEnv}: `));
-          if (!providedApiKey) console.log(c.yellow("Nothing entered -- skipping; you can export the env var and register later instead."));
-        } else {
-          console.log(c.dim(`  export ${authEnv}=...`));
-          console.log(c.dim("The entry is written either way -- it's simply skipped at dispatch time until that's set."));
-        }
-      }
-    } finally {
-      rl.close();
-    }
-  }
-
-  // Checked as early as possible, on `poolName` alone -- `existingPools[poolName]`
-  // a few lines below is itself unsafe for this exact value: `{}["__proto__"]`
-  // returns Object.prototype (a real, truthy object, so `?? []` never
-  // catches it), and spreading that into an array throws "is not iterable"
-  // instead of ever reaching the schema-level reserved-name error below.
-  if (RESERVED_POOL_NAMES.includes(poolName)) {
-    const msg = `"${poolName}" is a reserved name and cannot be used as a pool name.`;
-    if (json) { out({ error: msg }); process.exit(1); }
-    console.error(c.red(msg));
-    process.exit(1);
-  }
-
-  const entry = { id, provider: providerType, weight };
-  if (model) entry.model = model;
-  if (authEnv) entry.auth_env = authEnv;
-  if (baseUrl) entry.base_url = baseUrl;
-  if (genericId) entry.openclaw_provider = genericId;
-  if (plugin) entry.plugin = plugin;
-  if (maxConcurrent !== undefined) entry.max_concurrent = maxConcurrent;
-  if (thinking !== undefined) entry.thinking = thinking;
-  if (contextWindow !== undefined) entry.context_window = contextWindow;
-
-  const nextPools = { ...existingPools, [poolName]: [...(existingPools[poolName] ?? []), entry] };
-  const reservedName = findReservedPoolName({ pools: nextPools });
-  if (reservedName) {
-    const msg = `"${reservedName}" is a reserved name and cannot be used as a pool name.`;
-    if (json) { out({ error: msg }); process.exit(1); }
-    console.error(c.red(msg));
-    process.exit(1);
-  }
-  const parsed = dispatchConfigSchema.safeParse({ pools: nextPools });
-  if (!parsed.success) {
-    const errors = formatDispatchIssues(parsed.error);
-    if (json) { out({ error: "invalid provider entry", errors }); process.exit(1); }
-    console.error(c.red("This entry is not valid:"));
-    for (const line of errors) console.error(`  - ${line}`);
-    process.exit(1);
-  }
-
-  fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  writeGlobalConfig(configPath, stringifyDispatchConfig(parsed.data));
-  const written = parsed.data.pools[poolName].at(-1);
-
-  if (json) {
-    const registered = flag("register") ? registerProviderWithOpenClaw(written) : null;
-    // A pool entry's auth_env is only ever checked for TRUTHINESS by the MCP
-    // server (see lib/dispatch-config.mjs's availableEntries) -- the real
-    // credential already lives in OpenClaw's own store from registration
-    // above. But that check runs inside the server's OWN process.env, which
-    // is whatever was baked into its registration, not whatever an operator
-    // happens to have exported in some shell. connectClaude now derives and
-    // bakes in a placeholder for EVERY configured pool's auth_env
-    // automatically on every connect (see derivePoolAuthEnvPlaceholders in
-    // lib/connect.mjs) -- this entry will get picked up the next time this
-    // operator reconnects for any reason regardless. --update-mcp is just
-    // the immediate-feedback path, so it does not have to wait for that
-    // next reconnect (same destructive-under-json-needs-explicit-flag rule
-    // as `model --update-mcp`).
-    let mcpUpdated = false;
-    if (flag("update-mcp") && written.auth_env) {
-      connectClaude({ nomarmyRoot, run: (cmd, args2, opts = {}) => execFileSync(cmd, args2, { stdio: "ignore", ...opts }), extraEnv: { [written.auth_env]: "registered" } });
-      mcpUpdated = true;
-    }
-    return out({ written: configPath, pool: poolName, entry: written, registered, mcpUpdated });
-  }
-
-  console.log(c.green(`\n✓ Wrote ${path.relative(nomarmyRoot, configPath)} -- pool "${poolName}" now has ${nextPools[poolName].length} entr${nextPools[poolName].length === 1 ? "y" : "ies"}.`));
-
-  if (providerType !== "llama-cpp") {
-    const rl2 = createInterface({ input, output });
-    try {
-      const answer = (await rl2.question(c.bold(`\nRegister "${id}" with OpenClaw now? [y/N] `))).trim().toLowerCase();
-      if (answer === "y" || answer === "yes") registerProviderWithOpenClaw({ ...written, apiKeyOverride: providedApiKey });
-      else console.log(c.dim(`Skipped -- this entry can't actually dispatch until it's registered. Rerun \`nomarmy providers add\` isn't needed for that; ask a maintainer for the equivalent \`openclaw onboard\`/\`openclaw models auth paste-api-key\` commands, or answer yes next time.`));
-
-      // A SEPARATE question from OpenClaw registration above: even fully
-      // registered, this entry stays invisible to dispatch until the MCP
-      // server's OWN process.env has auth_env set to something truthy --
-      // exporting it in a terminal has no reliable path to that server
-      // process (a GUI-launched Claude Code never inherited it in the
-      // first place; a terminal-launched one only did if it happened to be
-      // exported before that specific launch). connectClaude now derives
-      // this automatically on every connect for every configured pool
-      // (lib/connect.mjs's derivePoolAuthEnvPlaceholders) -- this entry
-      // will get picked up the next time this operator reconnects for any
-      // reason regardless of whether they say yes here. This prompt is
-      // just the immediate-feedback path, so dispatch can work right now
-      // instead of waiting for that next reconnect.
-      if (written.auth_env && commandExists("claude")) {
-        const mcpAnswer = (await rl2.question(c.bold(`\nAlso add ${written.auth_env} to the Claude Code MCP registration now, so dispatch sees it right away (it'll be picked up automatically next time you reconnect either way)? [y/N] `))).trim().toLowerCase();
-        if (mcpAnswer === "y" || mcpAnswer === "yes") {
-          connectClaude({ nomarmyRoot, run: (cmd, args2, opts = {}) => execFileSync(cmd, args2, { stdio: "inherit", ...opts }), extraEnv: { [written.auth_env]: "registered" } });
-          console.log(c.green(`✓ MCP registration updated with a placeholder for ${written.auth_env}.`) + " The real credential is never stored here -- only OpenClaw's own credential store holds it.");
-        } else {
-          console.log(c.dim(`Skipped for now -- it'll still be picked up automatically the next time you run \`nomarmy connect claude\` or reconnect for any other reason (a model swap, an update).`));
-        }
-      }
-    } finally {
-      rl2.close();
-    }
-  }
-
-  console.log(c.dim("\nRun `nomarmy providers list` to see the full picture."));
-  console.log(c.yellow("Restart your Claude Code / Codex session to pick this up -- both config/providers.yml and the MCP registration are read once per MCP server process."));
-}
-
-async function cmdProviders() {
-  const sub = argv[1];
-  if (sub === "list") return cmdProvidersList();
-  if (sub === "add") return cmdProvidersAdd();
-  if (sub === "update") return cmdProvidersUpdate();
-  if (sub === "remove") return cmdProvidersRemove();
-  if (sub === "validate") return cmdProvidersValidate();
-  throw new Error(`Unknown providers subcommand "${sub ?? ""}". Use: nomarmy providers <list|add|update|remove|validate>`);
-}
-
-// config/subscriptions.yml's own CLI family -- deliberately smaller than
-// `providers`: no weight, no auth_env/API-key dance (OpenClaw owns
-// credential storage entirely for these, see lib/subscription-schema.mjs's
-// own header comment), and always exactly one entry per name, never a
-// weighted array to pick between.
-async function cmdSubscriptionsList() {
-  const configPath = subscriptionConfigPath(globalConfigDir());
-  let loaded;
-  try {
-    loaded = loadSubscriptionConfig(globalConfigDir());
-  } catch (error) {
-    if (json) { out({ error: error.message, errors: error.errors, path: error.path }); process.exit(1); }
-    console.error(c.red(`${error.path ?? "config/subscriptions.yml"} is invalid:`));
-    for (const line of error.errors) console.error(`  - ${line}`);
-    process.exit(1);
-  }
-  if (!loaded.found) {
-    if (json) return out({ found: false, path: configPath, workers: {} });
-    console.log(c.dim(`No config/subscriptions.yml yet (would live at ${configPath}).`));
-    console.log(`Run ${c.bold("nomarmy subscriptions setup")} to create one, or copy config/subscriptions.yml.example.`);
-    return;
-  }
-  if (json) return out({ found: true, path: loaded.path, workers: loaded.config.workers });
-  console.log(c.bold(`🍪 nomArmy subscriptions`) + c.dim(`  (${loaded.path})`));
-  for (const [name, entry] of Object.entries(loaded.config.workers)) {
-    const thinkingNote = entry.thinking === false ? "  thinking=off" : typeof entry.thinking === "string" ? `  thinking=${entry.thinking} (fixed)` : "";
-    const roleNote = entry.role ? `  role=${entry.role}` : "";
-    console.log(`  - ${c.cyan(name)}  (${entry.provider}/${entry.model})  owner=${entry.owner}${roleNote}  max_concurrent=${entry.max_concurrent}${thinkingNote}`);
-  }
-  for (const conflict of subscriptionProviderConflicts(loaded.config.workers)) {
-    console.log(c.red(`\n✗ ${describeProviderConflict(conflict)}`));
-  }
-  console.log(c.dim(`\nDispatch a job against one of these with local_worker's \`subscription_worker\` (or \`subscription_role\`) field, plus \`on_behalf_of\` naming that exact owner.`));
-}
-
-/** Pool/subscription provider-id conflicts, the same check dispatch refuses on. An unreadable providers.yml is reported by `providers validate`, not here. */
-function subscriptionProviderConflicts(workers) {
-  try {
-    const dispatch = loadDispatchConfig(globalConfigDir());
-    return dispatch.found ? findProviderConflicts(dispatch.config.pools, workers) : [];
-  } catch {
-    return [];
-  }
-}
-
-async function cmdSubscriptionsRemove() {
-  const name = argv[2];
-  if (!name) throw new Error("Usage: nomarmy subscriptions remove <name>");
-  if (RESERVED_WORKER_NAMES.includes(name)) throw new Error(`Unknown worker "${name}" (that name is reserved and can never be a real worker).`);
-  const loaded = loadSubscriptionConfig(globalConfigDir());
-  if (!loaded.found) throw new Error("No config/subscriptions.yml exists yet -- nothing to remove.");
-  if (!Object.prototype.hasOwnProperty.call(loaded.config.workers, name)) {
-    throw new Error(`Unknown worker "${name}". Configured workers: ${Object.keys(loaded.config.workers).join(", ") || "(none)"}`);
-  }
-
-  if (!json) {
-    const rl = createInterface({ input, output });
-    let answer;
-    try {
-      answer = (await rl.question(c.bold(`Remove subscription worker "${name}"? [y/N] `))).trim().toLowerCase();
-    } finally {
-      rl.close();
-    }
-    if (answer !== "y" && answer !== "yes") { console.log(c.dim("Cancelled; nothing changed.")); return; }
-  }
-
-  const nextWorkers = { ...loaded.config.workers };
-  delete nextWorkers[name];
-  writeGlobalConfig(subscriptionConfigPath(globalConfigDir()), stringifySubscriptionConfig({ workers: nextWorkers }));
-  if (json) return out({ removed: true, name });
-  console.log(c.green(`✓ Removed subscription worker "${name}".`));
-}
-
-/**
- * Cross-checks a chosen provider/model against OpenClaw's own live model
- * catalog (`openclaw models list --refresh`) before writing the entry -- the
- * one useful, real check available for this provider type: `openclaw models
- * auth list` (what `providers add` checks for an API-key entry) does NOT
- * cover claude-cli at all, confirmed live -- its credential is discovered
- * dynamically from the local CLI's own session, not a persisted OpenClaw
- * auth profile. Catalog presence confirms the plugin knows this
- * provider/model combination; it cannot confirm the session is actually
- * logged in -- `subscriptions setup`'s real test call is what proves that.
- */
-function catalogHasModel(provider, model) {
-  const listed = runQuiet(openclawCmd(), ["models", "list", "--refresh"]);
-  if (!listed.ok) return null; // openclaw unreachable -- not a reason to block writing the entry, just nothing to check against
-  return listed.out.includes(`${provider}/${model}`);
-}
-
-// --- `nomarmy subscriptions setup <vendor>`: wrap every OpenClaw step -------
+// --- subscription setup (`agents add subscription <vendor>`): wrap every OpenClaw step
 //
 // The operator shouldn't need to know OpenClaw exists for the common case.
 // Each helper below runs one real command, reports what it found in plain
@@ -1549,311 +957,399 @@ function openclawProviderLogin(vendor) {
   return ok;
 }
 
-function writeSubscriptionWorker(name, entry, existingWorkers) {
-  const configPath = subscriptionConfigPath(globalConfigDir());
-  const result = subscriptionConfigSchema.safeParse({ workers: { ...existingWorkers, [name]: entry } });
-  if (!result.success) return { ok: false, errors: formatSubscriptionIssues(result.error) };
-  fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  writeGlobalConfig(configPath, stringifySubscriptionConfig(result.data));
-  return { ok: true, path: configPath, entry: result.data.workers[name] };
+// --- `nomarmy agents`: every model a job can run on -------------------------
+//
+// One list in ~/.config/nomarmy/agents.yml (lib/agents.mjs): the local
+// model, api keys, and individual subscriptions. `add` walks through what
+// each kind needs -- a key registered with OpenClaw, or the vendor's own
+// login -- and proves it with a real test call before saving. Changes apply
+// to the next job; the MCP server re-reads the file when it changes.
+
+function loadAgentsOrExit() {
+  try { return loadAgents(globalConfigDir()); }
+  catch (error) { failAgents(error); }
 }
 
-async function cmdSubscriptionsSetup() {
-  const vendorArg = argv[2];
-  if (json) throw new Error("nomarmy subscriptions setup is interactive-only (its logins need a real terminal). Use `nomarmy subscriptions add --json` to write an entry for a credential you've already set up.");
-  if (!process.stdin.isTTY) throw new Error("nomarmy subscriptions setup needs an interactive terminal -- the vendor logins open a browser or print a device code.");
+function fileAgentsOrExit() {
+  try { return readAgentsFile(globalConfigDir()); }
+  catch (error) { failAgents(error); }
+}
 
-  let existingWorkers = {};
-  try { const loaded = loadSubscriptionConfig(globalConfigDir()); if (loaded.found) existingWorkers = loaded.config.workers; }
-  catch (error) { throw new Error(`config/subscriptions.yml exists but is invalid -- fix or delete it first: ${error.message}`); }
+function failAgents(error) {
+  if (json) { out({ error: error.message, errors: error.errors ?? [], path: error.path ?? null }); process.exit(1); }
+  console.error(c.red(error.errors?.length ? "That isn't a valid agents.yml:" : error.message));
+  for (const line of error.errors ?? []) console.error(`  - ${line}`);
+  process.exit(1);
+}
 
+function saveAgents(agents) {
+  try { return writeAgentsFile(globalConfigDir(), agents); }
+  catch (error) { failAgents(error); }
+}
+
+/** Which roles, in any army layer this repo sees, point at `name`. */
+function rolesUsingAgent(name) {
+  try {
+    const { army } = loadArmy({ projectDir: repoDir });
+    return Object.entries(army.roles).filter(([, role]) => role.agent === name).map(([role]) => role);
+  } catch {
+    return [];
+  }
+}
+
+function parseThinkingAnswer(answer, fallback) {
+  const a = answer.trim().toLowerCase();
+  if (!a) return fallback;
+  if (THINKING_LEVELS.includes(a)) return a;
+  return !(a === "n" || a === "no");
+}
+
+async function cmdAgentsList() {
+  const loaded = loadAgentsOrExit();
+  if (json) return out({ found: loaded.found, path: loaded.path, agents: loaded.agents });
+  console.log(c.bold("🍪 nomArmy agents") + c.dim(`  (${loaded.found ? loaded.path : `no agents.yml yet; it will live at ${loaded.path}`})`));
+  const width = Math.max(...Object.keys(loaded.agents).map((n) => n.length), 5) + 2;
+  const inFile = fileAgentsOrExit();
+  for (const [name, agent] of Object.entries(loaded.agents)) {
+    const extra = agent.kind === "api" ? c.dim(`  key: ${agent.auth_env}`) : !Object.prototype.hasOwnProperty.call(inFile, name) ? c.dim("  built in") : "";
+    console.log(`  ${c.cyan(name.padEnd(width))} ${describeAgentLabel(agent)}${extra}`);
+  }
+  console.log(c.dim(`\nAdd one with \`nomarmy agents add\`. Give roles an agent with \`nomarmy army assign <role> <agent>\`, or dispatch with agent: "<name>".`));
+}
+
+async function cmdAgentsRemove() {
+  const name = argv[2];
+  if (!name) throw new Error("Usage: nomarmy agents remove <name>");
+  const agents = fileAgentsOrExit();
+  if (!Object.prototype.hasOwnProperty.call(agents, name)) {
+    throw new Error(name === "local" ? "`local` is built in and can't be removed." : `Unknown agent "${name}". Your agents: ${Object.keys(loadAgentsOrExit().agents).join(", ")}`);
+  }
+  const usedBy = rolesUsingAgent(name);
+  if (!json) {
+    if (usedBy.length) console.log(c.yellow(`Roles using "${name}" in this repo: ${usedBy.join(", ")}. They'll be refused until you reassign them.`));
+    const rl = createInterface({ input, output });
+    try { if (!(await confirm(rl, `Remove agent "${name}"?`, { defaultYes: false }))) { console.log(c.dim("Cancelled; nothing changed.")); return; } }
+    finally { rl.close(); }
+  }
+  const next = { ...agents };
+  delete next[name];
+  saveAgents(next);
+  if (json) return out({ removed: true, name, rolesStillUsingIt: usedBy });
+  console.log(c.green(`✓ Removed agent "${name}".`));
+}
+
+// --- add ---
+
+async function cmdAgentsAdd() {
+  if (json) return cmdAgentsAddJson();
+  if (!process.stdin.isTTY) throw new Error("nomarmy agents add needs an interactive terminal (subscription logins open a browser), or --json with explicit flags (see `nomarmy help`).");
+  const agents = fileAgentsOrExit();
   const rl = createInterface({ input, output });
   try {
-    console.log(c.bold("🍪 nomArmy subscriptions setup"));
-    console.log(c.dim("Connects ONE person's own subscription as a named worker. Never pooled, never shared."));
-
-    const vendorKeys = Object.keys(SUBSCRIPTION_VENDORS);
-    let vendorKey = vendorArg;
-    if (!vendorKey) {
-      console.log("\n" + c.bold("Which subscription?"));
-      vendorKeys.forEach((k, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${SUBSCRIPTION_VENDORS[k].label}`));
-      vendorKey = vendorKeys[Number((await rl.question(c.bold("Choice: "))).trim()) - 1];
+    console.log(c.bold("🍪 nomArmy agents add"));
+    let kind = argv[2];
+    if (!AGENT_KINDS.includes(kind)) {
+      console.log("\n" + c.bold("What kind of agent?"));
+      console.log(`  ${c.cyan("1.")} local         ${c.dim("the local model on this machine (free, private)")}`);
+      console.log(`  ${c.cyan("2.")} api           ${c.dim("a metered API key (xAI, OpenAI, Anthropic, DeepSeek, ...)")}`);
+      console.log(`  ${c.cyan("3.")} subscription  ${c.dim("your own Claude, ChatGPT or Muse Code plan (never shared)")}`);
+      kind = AGENT_KINDS[Number((await rl.question(c.bold("Choice: "))).trim()) - 1];
+      if (!kind) throw new Error("Not a valid choice.");
     }
-    if (!SUBSCRIPTION_VENDORS[vendorKey]) {
-      throw new Error(`Unknown vendor "${vendorArg ?? ""}". Supported: ${vendorKeys.join(", ")}. (DeepSeek has no subscription plan to connect; add its API key with \`nomarmy providers add\` (provider "openclaw").)`);
-    }
-    const vendor = SUBSCRIPTION_VENDORS[vendorKey];
-
-    // Checked before any login: dispatch would refuse both sides anyway, so
-    // don't walk the operator through a browser flow for a worker that can't run.
-    const [conflict] = subscriptionProviderConflicts({ [`(new ${vendorKey} worker)`]: { provider: vendor.provider } });
-    if (conflict) {
-      console.log(c.red(`\n✗ ${describeProviderConflict(conflict)}`));
-      console.log(c.dim(`Remove it with \`nomarmy providers remove ${conflict.poolEntries[0].replace("/", " ")}\`, then re-run this.`));
-      return;
-    }
-
-    const auth = await ensureVendorAuth(rl, vendorKey);
-    if (!auth.ok) { console.log(c.dim("\nStopped; nothing was written.")); return; }
-
-    console.log(`\n${c.bold("→")} Models`);
-    let linkedOpenclaw = false;
-    let models = catalogModelsFor(vendor.provider);
-    const needsOpenclawLogin = vendor.credential.kind === "openclaw-login";
-    if (!models.length && needsOpenclawLogin) {
-      linkedOpenclaw = openclawProviderLogin(vendor);
-      models = catalogModelsFor(vendor.provider);
-    }
-    let model;
-    if (models.length) {
-      models.forEach((m, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${m}`));
-      const pick = (await rl.question(c.bold("Model [1]: "))).trim();
-      model = models[(pick ? Number(pick) : 1) - 1];
-      if (!model) throw new Error(`Not a valid choice: "${pick}".`);
-    } else {
-      console.log(c.yellow(`OpenClaw isn't listing any ${vendor.provider} models yet.`));
-      model = (await rl.question(c.bold(`Model id to use${vendor.defaultModel ? ` [${vendor.defaultModel}]` : ""}: `))).trim() || vendor.defaultModel;
-      if (!model) throw new Error("A model id is required.");
-    }
-
-    const knownOwners = [...new Set(Object.values(existingWorkers).map((w) => w.owner))];
-    const ownerDefault = auth.email ?? (knownOwners.length === 1 ? knownOwners[0] : "");
-    const owner = (await rl.question(c.bold(`Whose subscription is this${ownerDefault ? ` [${ownerDefault}]` : ""}: `))).trim() || ownerDefault;
-    if (!owner) throw new Error("An owner is required -- every job dispatched to this worker must name them in on_behalf_of.");
-
-    const nameDefault = defaultWorkerName(owner, vendorKey);
-    const name = await askUntilValid(rl, `Worker name [${nameDefault}]: `, {
-      allowEmpty: true, fallback: nameDefault, pattern: ID_RE,
-      invalidMessage: "must be 1-64 characters of letters, numbers, dot, underscore or hyphen.",
-    });
-    if (existingWorkers[name] && !(await confirm(rl, `"${name}" already exists. Replace it?`, { defaultYes: false }))) {
-      console.log(c.dim("Stopped; nothing was written.")); return;
-    }
-    const role = (await rl.question(c.bold("Role, optional (e.g. architect, senior-dev -- a job can dispatch by role instead of name): "))).trim() || undefined;
-
-    console.log(`\n${c.bold("→")} Test call`);
-    let works = probeWorker(vendor.provider, model);
-    if (!works && needsOpenclawLogin && !linkedOpenclaw) {
-      openclawProviderLogin(vendor);
-      works = probeWorker(vendor.provider, model);
-    }
-    if (works) console.log(c.green(`✓ ${vendor.provider}/${model} answered a real test prompt.`));
-    else {
-      console.log(c.red(`✗ A real test prompt to ${vendor.provider}/${model} didn't come back.`));
-      if (!(await confirm(rl, "Save the worker anyway?", { defaultYes: false }))) { console.log(c.dim("Stopped; nothing was written.")); return; }
-    }
-
-    const written = writeSubscriptionWorker(name, { provider: vendor.provider, model, owner, ...(role ? { role } : {}) }, existingWorkers);
-    if (!written.ok) {
-      console.error(c.red("That entry is invalid:"));
-      for (const line of written.errors) console.error(`  - ${line}`);
-      process.exit(1);
-    }
-    console.log(c.green(`\n✓ Saved worker "${name}" (${path.relative(nomarmyRoot, written.path)}).`));
-    console.log(c.dim(`Dispatch with ${role ? `subscription_role: "${role}"` : `subscription_worker: "${name}"`} and on_behalf_of: "${owner}". Then run \`nomarmy connect claude\` and restart your coordinator session so the MCP server picks it up.`));
+    if (kind === "local") return await addLocalAgent(rl, agents);
+    if (kind === "api") return await addApiAgent(rl, agents);
+    return await addSubscriptionAgent(rl, agents);
   } finally {
     rl.close();
   }
 }
 
-async function cmdSubscriptionsAdd() {
-  const configPath = subscriptionConfigPath(globalConfigDir());
-  let existingWorkers = {};
-  try {
-    const loaded = loadSubscriptionConfig(globalConfigDir());
-    if (loaded.found) existingWorkers = loaded.config.workers;
-  } catch (error) {
-    throw new Error(`config/subscriptions.yml already exists but is invalid -- fix it by hand or delete it before adding: ${error.message}`);
-  }
-
-  let name, provider, model, owner, role, maxConcurrent, thinking;
-
-  if (json) {
-    name = value("name");
-    provider = value("provider");
-    model = value("model");
-    owner = value("owner");
-    role = value("role");
-    maxConcurrent = value("max-concurrent") ? Number(value("max-concurrent")) : undefined;
-    thinking = resolveThinkingFlag();
-    if (!name || !provider || !model || !owner) {
-      throw new Error("--json requires --name <id> --provider <openclaw-provider-id> --model <id> --owner <person>, plus optional --role <name>.");
-    }
-  } else {
-    if (!process.stdin.isTTY) throw new Error("nomarmy subscriptions add needs an interactive terminal, or --json with explicit flags (see `nomarmy help`).");
-    const rl = createInterface({ input, output });
-    try {
-      console.log(c.bold("🍪 nomArmy subscriptions add"));
-      console.log(c.dim("This is for ONE person's own already-authenticated subscription -- never a shared credential, never pooled capacity."));
-      const existingNames = Object.keys(existingWorkers);
-      const namePrompt = existingNames.length
-        ? `Worker name [existing: ${existingNames.join(", ")}, or type a new one]: `
-        : `Worker name (new -- e.g. "jason-claude"): `;
-      name = await askUntilValid(rl, namePrompt, {
-        allowEmpty: false, pattern: ID_RE,
-        invalidMessage: "must be 1-64 characters of letters, numbers, dot, underscore or hyphen.",
-      });
-
-      console.log(c.dim("\nTip: `nomarmy subscriptions setup` does all of this for you -- installs, logins, model list and a real test call."));
-      provider = (await rl.question(c.bold(`OpenClaw provider id (${Object.values(SUBSCRIPTION_VENDORS).map((v) => v.provider).join(", ")}): `))).trim();
-      if (!provider) throw new Error("A provider id is required.");
-
-      model = (await rl.question(c.bold("Model id (see `openclaw models list --refresh` for what's actually available): "))).trim();
-      if (!model) throw new Error("A model id is required.");
-
-      const known = catalogHasModel(provider, model);
-      if (known === false) {
-        console.log(c.yellow(`\n⚠ "${provider}/${model}" was not found in OpenClaw's own model catalog right now.`));
-        const proceed = (await rl.question(c.bold("Write the entry anyway (e.g. the catalog just hasn't refreshed yet)? [y/N] "))).trim().toLowerCase();
-        if (proceed !== "y" && proceed !== "yes") { console.log(c.dim("Cancelled; nothing changed.")); return; }
-      } else if (known === true) {
-        console.log(c.green(`✓ "${provider}/${model}" is in OpenClaw's model catalog.`));
-      }
-
-      owner = (await rl.question(c.bold("Owner -- exactly who this credential belongs to (e.g. an email): "))).trim();
-      if (!owner) throw new Error("An owner is required -- this is what on_behalf_of is checked against.");
-
-      const roleAnswer = (await rl.question(c.bold("Role, optional -- a fixed name a job can dispatch with instead of this worker's exact name (e.g. \"architect\"; blank = none, dispatch by name only): "))).trim();
-      if (roleAnswer) role = roleAnswer;
-
-      const maxConcurrentAnswer = (await rl.question(c.bold("max_concurrent [1]: "))).trim();
-      if (maxConcurrentAnswer) maxConcurrent = Number(maxConcurrentAnswer);
-
-      const thinkingAnswer = (await rl.question(c.bold("Thinking/reasoning: Y = follow the job's requested level (default), n = off, or type a level (low/medium/high) to always use that regardless of the job: "))).trim().toLowerCase();
-      thinking = THINKING_LEVELS.includes(thinkingAnswer) ? thinkingAnswer : !(thinkingAnswer === "n" || thinkingAnswer === "no");
-    } finally {
-      rl.close();
-    }
-  }
-
-  if (RESERVED_WORKER_NAMES.includes(name)) throw new Error(`"${name}" is a reserved name and cannot be used as a worker name.`);
-
-  const entry = { provider, model, owner, ...(role ? { role } : {}), ...(maxConcurrent !== undefined ? { max_concurrent: maxConcurrent } : {}), ...(thinking !== undefined ? { thinking } : {}) };
-  const candidateConfig = { workers: { ...existingWorkers, [name]: entry } };
-  const result = subscriptionConfigSchema.safeParse(candidateConfig);
-  if (!result.success) {
-    const errors = formatSubscriptionIssues(result.error);
-    if (json) { out({ error: "invalid entry", errors }); process.exit(1); }
-    console.error(c.red("That entry is invalid:"));
-    for (const line of errors) console.error(`  - ${line}`);
-    process.exit(1);
-  }
-
-  fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  writeGlobalConfig(configPath, stringifySubscriptionConfig(result.data));
-  if (json) return out({ written: configPath, name, entry: result.data.workers[name] });
-  console.log(c.green(`\n✓ Wrote ${path.relative(nomarmyRoot, configPath)}.`));
-  const dispatchField = role ? `subscription_role: "${role}"` : `subscription_worker: "${name}"`;
-  console.log(c.dim(`Dispatch against it with local_worker's \`${dispatchField}\` field, plus \`on_behalf_of: "${owner}"\`.`));
+async function askAgentName(rl, agents, fallback) {
+  const name = await askUntilValid(rl, `Agent name [${fallback}]: `, {
+    allowEmpty: true, fallback, pattern: ID_RE,
+    invalidMessage: "must be 1-64 characters of letters, numbers, dot, underscore or hyphen.",
+  });
+  if (RESERVED_AGENT_NAMES.includes(name)) throw new Error(`"${name}" is a reserved name.`);
+  if (Object.prototype.hasOwnProperty.call(agents, name) && !(await confirm(rl, `"${name}" already exists. Replace it?`, { defaultYes: false }))) return null;
+  return name;
 }
 
-// Owner and provider are deliberately not editable: either one changes
-// whose login, or which vendor's, the worker runs on -- that's a new
-// `setup`, not an edit. A model change gets the same real test call setup
-// makes (interactive always; --json only with --probe, since it spends a
-// real request on the subscription), so a typo never gets saved.
-async function cmdSubscriptionsUpdate() {
-  const name = argv[2];
-  if (!name) throw new Error("Usage: nomarmy subscriptions update <name> [--model <m>] [--role <r>|--no-role] [--max-concurrent <n>] [--context-window <tokens>] [--thinking [low|medium|high]|--no-thinking] [--probe]");
-  if (RESERVED_WORKER_NAMES.includes(name)) throw new Error(`Unknown worker "${name}" (that name is reserved and can never be a real worker).`);
-  const loaded = loadSubscriptionConfig(globalConfigDir());
-  if (!loaded.found) throw new Error("No config/subscriptions.yml exists yet -- run `nomarmy subscriptions setup` first.");
-  const workers = loaded.config.workers;
-  if (!Object.prototype.hasOwnProperty.call(workers, name)) {
-    throw new Error(`Unknown worker "${name}". Configured workers: ${Object.keys(workers).join(", ") || "(none)"}`);
+function savedAgentMessage(name, written) {
+  console.log(c.green(`\n✓ Saved agent "${name}": ${describeAgentLabel(written[name])}.`));
+  console.log(c.dim(`Use it with \`nomarmy army assign <role> ${name}\` or agent: "${name}" on a job. It applies to the next job, no restart.`));
+}
+
+async function addLocalAgent(rl, agents) {
+  console.log(c.dim("`local` (the coder slot) is built in. Add another only to name the gpt slot (NOMARMY_WORKER_MODEL_FALLBACK)."));
+  const slot = (await rl.question(c.bold("Slot, coder or gpt [gpt]: "))).trim() || "gpt";
+  if (!["coder", "gpt"].includes(slot)) throw new Error("Slot must be coder or gpt.");
+  const name = await askAgentName(rl, agents, slot === "gpt" ? "local-gpt" : "local");
+  if (!name) { console.log(c.dim("Stopped; nothing was written.")); return; }
+  savedAgentMessage(name, saveAgents({ ...agents, [name]: { kind: "local", slot } }));
+}
+
+async function addApiAgent(rl, agents) {
+  console.log("\n" + c.bold("Which provider?"));
+  API_PROVIDER_TYPES.forEach((t, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${KNOWN_PROVIDERS[t]?.label ?? t}`));
+  const provider = API_PROVIDER_TYPES[Number((await rl.question(c.bold("Choice: "))).trim()) - 1];
+  if (!provider) throw new Error("Not a valid choice.");
+  const info = KNOWN_PROVIDERS[provider] ?? {};
+  const agent = { kind: "api", provider };
+
+  if (provider === "openclaw") {
+    console.log(c.dim("Any provider OpenClaw can talk to. Find its id with `openclaw models list --all`, or `openclaw plugins search <name>` if it needs a plugin."));
+    agent.openclaw_provider = await askUntilValid(rl, "OpenClaw provider id (e.g. deepseek, mistral, groq): ", {
+      pattern: OPENCLAW_PROVIDER_ID_RE, invalidMessage: "must be an OpenClaw provider id (lowercase letters, digits, dot, underscore, hyphen).",
+    });
+    const plugin = (await rl.question(c.bold("Plugin to install first, if it isn't built in (e.g. clawhub:@openclaw/deepseek-provider; blank = none): "))).trim();
+    if (plugin) agent.plugin = plugin;
   }
-  const current = workers[name];
+  const name = await askAgentName(rl, agents, agent.openclaw_provider ?? (provider === "xai" ? "grok" : provider));
+  if (!name) { console.log(c.dim("Stopped; nothing was written.")); return; }
+
+  agent.model = (await rl.question(c.bold(`Model${info.defaultModel ? ` [${info.defaultModel}]` : ""}: `))).trim() || info.defaultModel;
+  if (!agent.model) throw new Error("A model id is required.");
+  const envSuggestion = info.authEnvSuggestion ?? `NOMARMY_${(agent.openclaw_provider ?? name).toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
+  // The variable's NAME, never the key: the key itself goes to OpenClaw's
+  // own store over stdin (registerProviderWithOpenClaw) and never into
+  // agents.yml or any other file nomArmy writes.
+  agent.auth_env = await askUntilValid(rl, `Environment variable NAME for the API key, not the key itself [${envSuggestion}]: `, {
+    allowEmpty: true, fallback: envSuggestion, pattern: AUTH_ENV_NAME_RE,
+    invalidMessage: "must look like an ENVIRONMENT VARIABLE NAME (uppercase letters, digits, underscores) -- not the key itself.",
+  });
+  if (["bedrock", "azure-openai", "openai-compatible"].includes(provider)) {
+    agent.base_url = (await rl.question(c.bold(`Base URL${info.baseUrlHint ? ` (e.g. ${info.baseUrlHint})` : ""}: `))).trim();
+    if (!agent.base_url) throw new Error("A base URL is required for this provider.");
+  }
+  agent.thinking = parseThinkingAnswer(await rl.question(c.bold("Thinking: Y = follow the job's level (default), n = off, or low/medium/high to always use that: ")), true);
+  const cw = (await rl.question(c.bold("Context window in tokens (blank = look it up from OpenClaw's catalog): "))).trim();
+  if (cw) agent.context_window = Number(cw);
+
+  let apiKey = null;
+  if (!process.env[agent.auth_env]) {
+    console.log(c.yellow(`\n${agent.auth_env} isn't set in this shell.`));
+    if (await confirm(rl, "Enter the key now instead? It's used once to register with OpenClaw and never saved to a file.", { defaultYes: true })) {
+      apiKey = await askSecret(rl, c.bold(`${agent.auth_env}: `));
+    }
+  }
+
+  const written = saveAgents({ ...agents, [name]: agent });
+  const saved = written[name];
+  console.log(c.green(`\n✓ Saved agent "${name}": ${describeAgentLabel(saved)}.`));
+
+  console.log(`\n${c.bold("→")} Registering the key with OpenClaw`);
+  const registered = registerProviderWithOpenClaw({ ...apiAgentAsPoolEntry(name, saved), apiKeyOverride: apiKey });
+  if (registered) {
+    console.log(`\n${c.bold("→")} Test call`);
+    const provId = saved.provider === "openclaw" ? saved.openclaw_provider : ["bedrock", "azure-openai", "openai-compatible"].includes(saved.provider) ? name : saved.provider;
+    if (probeWorker(provId, saved.model)) console.log(c.green(`✓ ${provId}/${saved.model} answered a real test prompt.`));
+    else console.log(c.yellow(`⚠ A real test prompt to ${provId}/${saved.model} didn't come back. Check the model id with \`openclaw models list --provider ${provId}\`.`));
+  }
+  // Dispatch only treats an api agent as usable when its auth_env is set
+  // in the MCP server's own environment, which comes from its registration
+  // (see derivePoolAuthEnvPlaceholders in lib/connect.mjs), so a new api
+  // agent needs one reconnect. Every later edit applies without one.
+  if (commandExists("claude") && await confirm(rl, `Reconnect the MCP server so it can use "${name}" (needed once for a new api agent)?`, { defaultYes: true })) {
+    connectClaude({ nomarmyRoot, run: (cmd, args2, opts = {}) => execFileSync(cmd, args2, { stdio: "ignore", ...opts }), extraEnv: { [saved.auth_env]: "registered" } });
+    console.log(c.green("✓ Reconnected.") + c.dim(" Restart your coordinator session once so it picks up the new registration."));
+  } else {
+    console.log(c.dim(`Run \`nomarmy connect claude\` before dispatching to "${name}".`));
+  }
+  console.log(c.dim(`Use it with \`nomarmy army assign <role> ${name}\` or agent: "${name}" on a job.`));
+}
+
+const SUBSCRIPTION_AGENT_DEFAULT_NAMES = { claude: "claude", codex: "codex", meta: "muse" };
+
+async function addSubscriptionAgent(rl, agents) {
+  console.log(c.dim("Connects ONE person's own subscription. Never pooled, never shared."));
+  const vendorKeys = Object.keys(SUBSCRIPTION_VENDORS);
+  let vendorKey = argv[3];
+  if (!SUBSCRIPTION_VENDORS[vendorKey]) {
+    console.log("\n" + c.bold("Which subscription?"));
+    vendorKeys.forEach((k, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${SUBSCRIPTION_VENDORS[k].label}`));
+    vendorKey = vendorKeys[Number((await rl.question(c.bold("Choice: "))).trim()) - 1];
+    if (!vendorKey) throw new Error(`Not a valid choice. Supported: ${vendorKeys.join(", ")}. DeepSeek and others without a plan are api agents.`);
+  }
+  const vendor = SUBSCRIPTION_VENDORS[vendorKey];
+
+  // Checked before any login: an api agent on the same OpenClaw provider id
+  // would share the one credential slot, and the save would be refused
+  // anyway -- don't walk the operator through a browser flow first.
+  const clash = Object.entries(agents).find(([, a]) => a.kind === "api" && (a.provider === "openclaw" ? a.openclaw_provider : a.provider) === vendor.provider);
+  if (clash) {
+    console.log(c.red(`\n✗ Api agent "${clash[0]}" already uses OpenClaw provider "${vendor.provider}", and OpenClaw holds one credential per provider. Remove it first (\`nomarmy agents remove ${clash[0]}\`), or keep using it instead.`));
+    return;
+  }
+
+  const auth = await ensureVendorAuth(rl, vendorKey);
+  if (!auth.ok) { console.log(c.dim("\nStopped; nothing was written.")); return; }
+
+  console.log(`\n${c.bold("→")} Models`);
+  const needsOpenclawLogin = vendor.credential.kind === "openclaw-login";
+  let linkedOpenclaw = false;
+  let models = catalogModelsFor(vendor.provider);
+  if (!models.length && needsOpenclawLogin) {
+    linkedOpenclaw = openclawProviderLogin(vendor);
+    models = catalogModelsFor(vendor.provider);
+  }
+  let model;
+  if (models.length) {
+    models.forEach((m, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${m}`));
+    const pick = (await rl.question(c.bold("Model [1]: "))).trim();
+    model = /^\d+$/.test(pick) || !pick ? models[(pick ? Number(pick) : 1) - 1] : pick;
+    if (!model) throw new Error(`Not a valid choice: "${pick}".`);
+  } else {
+    model = (await rl.question(c.bold(`Model id${vendor.defaultModel ? ` [${vendor.defaultModel}]` : ""}: `))).trim() || vendor.defaultModel;
+    if (!model) throw new Error("A model id is required.");
+  }
+
+  const knownOwners = [...new Set(Object.values(agents).filter((a) => a.kind === "subscription").map((a) => a.owner))];
+  const ownerDefault = auth.email ?? (knownOwners.length === 1 ? knownOwners[0] : "");
+  const owner = (await rl.question(c.bold(`Whose subscription is this${ownerDefault ? ` [${ownerDefault}]` : ""}: `))).trim() || ownerDefault;
+  if (!owner) throw new Error("An owner is required -- every job on this agent must name them in on_behalf_of.");
+
+  const name = await askAgentName(rl, agents, SUBSCRIPTION_AGENT_DEFAULT_NAMES[vendorKey] ?? vendorKey);
+  if (!name) { console.log(c.dim("Stopped; nothing was written.")); return; }
+
+  console.log(`\n${c.bold("→")} Test call`);
+  let works = probeWorker(vendor.provider, model);
+  if (!works && needsOpenclawLogin && !linkedOpenclaw) {
+    openclawProviderLogin(vendor);
+    works = probeWorker(vendor.provider, model);
+  }
+  if (works) console.log(c.green(`✓ ${vendor.provider}/${model} answered a real test prompt.`));
+  else {
+    console.log(c.red(`✗ A real test prompt to ${vendor.provider}/${model} didn't come back.`));
+    if (!(await confirm(rl, "Save the agent anyway?", { defaultYes: false }))) { console.log(c.dim("Stopped; nothing was written.")); return; }
+  }
+  const written = saveAgents({ ...agents, [name]: { kind: "subscription", provider: vendor.provider, model, owner } });
+  savedAgentMessage(name, written);
+  console.log(c.dim(`Jobs on it need on_behalf_of: "${owner}".`));
+}
+
+async function cmdAgentsAddJson() {
+  const agents = fileAgentsOrExit();
+  const name = value("name");
+  const kind = value("kind") ?? (AGENT_KINDS.includes(argv[2]) ? argv[2] : null);
+  if (!name || !kind) throw new Error(`--json requires --name <agent> and --kind <${AGENT_KINDS.join("|")}>, plus that kind's fields (see \`nomarmy help\`).`);
+  if (RESERVED_AGENT_NAMES.includes(name)) throw new Error(`"${name}" is a reserved name.`);
+  const agent = { kind };
+  const num = (flagName) => (value(flagName) !== null ? Number(value(flagName)) : undefined);
+  if (kind === "local") {
+    agent.slot = value("slot") ?? "coder";
+  } else {
+    for (const [field, flagName] of [["provider", "provider"], ["model", "model"], ["owner", "owner"], ["auth_env", "auth-env"], ["base_url", "base-url"], ["openclaw_provider", "openclaw-provider"], ["plugin", "plugin"]]) {
+      if (value(flagName) !== null) agent[field] = value(flagName);
+    }
+    for (const [field, flagName] of [["max_concurrent", "max-concurrent"], ["context_window", "context-window"]]) {
+      if (num(flagName) !== undefined) agent[field] = num(flagName);
+    }
+    const thinking = resolveThinkingFlag();
+    if (thinking !== undefined) agent.thinking = thinking;
+  }
+  const written = saveAgents({ ...agents, [name]: agent });
+  const saved = written[name];
+  let registered = null, mcpUpdated = false;
+  if (kind === "api" && flag("register")) registered = registerProviderWithOpenClaw(apiAgentAsPoolEntry(name, saved));
+  if (kind === "api" && flag("update-mcp")) {
+    connectClaude({ nomarmyRoot, run: (cmd, args2, opts = {}) => execFileSync(cmd, args2, { stdio: "ignore", ...opts }), extraEnv: { [saved.auth_env]: "registered" } });
+    mcpUpdated = true;
+  }
+  return out({ written: agentsConfigPath(globalConfigDir()), name, agent: saved, ...(kind === "api" ? { registered, mcpUpdated } : {}) });
+}
+
+// --- update ---
+
+// Kind, provider and owner are fixed: changing any of them is a different
+// agent (a different model family, vendor, or person's login), so that's
+// `agents add`, not an edit. A subscription model change gets the same real
+// test call `add` makes (interactive always; --json only with --probe,
+// since it spends a real request on the subscription).
+async function cmdAgentsUpdate() {
+  const name = argv[2];
+  if (!name) throw new Error("Usage: nomarmy agents update <name> [--model <m>] [--slot coder|gpt] [--auth-env <NAME>] [--base-url <url>] [--max-concurrent <n>] [--context-window <tokens>] [--thinking [low|medium|high]|--no-thinking] [--probe]");
+  const agents = fileAgentsOrExit();
+  const current = Object.prototype.hasOwnProperty.call(agents, name) ? agents[name] : name === "local" ? { ...BUILTIN_LOCAL_AGENT } : undefined;
+  if (!current) throw new Error(`Unknown agent "${name}". Your agents: ${Object.keys(loadAgentsOrExit().agents).join(", ")}`);
 
   const changes = {};
-  let probe = !json;
+  let probe = false;
   if (json) {
+    const num = (flagName) => (value(flagName) !== null ? Number(value(flagName)) : undefined);
     if (value("model") !== null) changes.model = value("model");
-    if (value("role") !== null) changes.role = value("role");
-    if (flag("no-role")) changes.role = undefined;
-    if (value("max-concurrent") !== null) changes.max_concurrent = Number(value("max-concurrent"));
-    if (value("context-window") !== null) changes.context_window = Number(value("context-window"));
-    const thinkingFlag = resolveThinkingFlag();
-    if (thinkingFlag !== undefined) changes.thinking = thinkingFlag;
-    probe = flag("probe");
-    if (Object.keys(changes).length === 0) throw new Error("Nothing to update -- pass at least one of --model/--role/--no-role/--max-concurrent/--context-window/--thinking [low|medium|high]/--no-thinking.");
+    if (value("slot") !== null) changes.slot = value("slot");
+    if (value("auth-env") !== null) changes.auth_env = value("auth-env");
+    if (value("base-url") !== null) changes.base_url = value("base-url");
+    if (num("max-concurrent") !== undefined) changes.max_concurrent = num("max-concurrent");
+    if (num("context-window") !== undefined) changes.context_window = num("context-window");
+    const thinking = resolveThinkingFlag();
+    if (thinking !== undefined) changes.thinking = thinking;
+    if (flag("owner") || value("owner") !== null || value("provider") !== null || value("kind") !== null) {
+      throw new Error("Kind, provider and owner can't be changed -- that's a different agent. Use `nomarmy agents add`.");
+    }
+    probe = flag("probe") && current.kind === "subscription";
+    if (!Object.keys(changes).length) throw new Error("Nothing to update -- pass at least one field flag (see `nomarmy agents update` usage).");
   } else {
-    if (!process.stdin.isTTY) throw new Error("nomarmy subscriptions update needs an interactive terminal, or --json with explicit flags (see `nomarmy help`).");
+    if (!process.stdin.isTTY) throw new Error("nomarmy agents update needs an interactive terminal, or --json with explicit flags.");
     const rl = createInterface({ input, output });
     try {
-      console.log(c.bold("🍪 nomArmy subscriptions update") + c.dim(`  (${name}: ${current.provider}/${current.model}, owner ${current.owner})`));
+      console.log(c.bold("🍪 nomArmy agents update") + c.dim(`  (${name}: ${describeAgentLabel(current)})`));
       console.log(c.dim("Blank keeps the current value.\n"));
-
-      const models = catalogModelsFor(current.provider);
-      if (models.length) {
-        models.forEach((m, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${m}${m === current.model ? c.dim("  (current)") : ""}`));
-        const pick = (await rl.question(c.bold(`Model -- a number, or type an id [${current.model}]: `))).trim();
-        const chosen = /^\d+$/.test(pick) ? models[Number(pick) - 1] : pick;
+      if (current.kind === "local") {
+        const slot = (await rl.question(c.bold(`Slot, coder or gpt [${current.slot}]: `))).trim();
+        if (slot && slot !== current.slot) changes.slot = slot;
+      } else {
+        const provId = current.kind === "subscription" ? current.provider : current.provider === "openclaw" ? current.openclaw_provider : current.provider;
+        const models = catalogModelsFor(provId);
+        if (models.length) models.forEach((m, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${m}${m === current.model ? c.dim("  (current)") : ""}`));
+        const pick = (await rl.question(c.bold(`Model${models.length ? " -- a number, or type an id" : ""} [${current.model}]: `))).trim();
+        const chosen = /^\d+$/.test(pick) && models.length ? models[Number(pick) - 1] : pick;
         if (pick && !chosen) throw new Error(`Not a valid choice: "${pick}".`);
         if (chosen && chosen !== current.model) changes.model = chosen;
-      } else {
-        const answer = (await rl.question(c.bold(`Model id [${current.model}]: `))).trim();
-        if (answer && answer !== current.model) changes.model = answer;
-      }
-
-      const roleAnswer = (await rl.question(c.bold(`Role [${current.role ?? "none"}] ("-" clears it): `))).trim();
-      if (roleAnswer === "-") { if (current.role) changes.role = undefined; }
-      else if (roleAnswer && roleAnswer !== current.role) changes.role = roleAnswer;
-
-      const maxConcurrentAnswer = (await rl.question(c.bold(`max_concurrent [${current.max_concurrent}]: `))).trim();
-      if (maxConcurrentAnswer) changes.max_concurrent = Number(maxConcurrentAnswer);
-
-      const currentThinkingLabel = current.thinking === false ? "off" : current.thinking === true ? "on, follows the job" : `fixed at "${current.thinking}"`;
-      const thinkingAnswer = (await rl.question(c.bold(`Thinking/reasoning: y = follow the job's requested level, n = off, or low/medium/high to always use that [current: ${currentThinkingLabel}]: `))).trim().toLowerCase();
-      if (thinkingAnswer === "y" || thinkingAnswer === "yes") changes.thinking = true;
-      else if (thinkingAnswer === "n" || thinkingAnswer === "no") changes.thinking = false;
-      else if (THINKING_LEVELS.includes(thinkingAnswer)) changes.thinking = thinkingAnswer;
-
-      if (changes.model) {
-        console.log(`\n${c.bold("→")} Test call`);
-        if (probeWorker(current.provider, changes.model)) {
-          console.log(c.green(`✓ ${current.provider}/${changes.model} answered a real test prompt.`));
-        } else {
-          console.log(c.red(`✗ A real test prompt to ${current.provider}/${changes.model} didn't come back.`));
-          if (!(await confirm(rl, "Save the change anyway?", { defaultYes: false }))) { console.log(c.dim("Stopped; nothing was written.")); return; }
+        if (current.kind === "api") {
+          const env = await askUntilValid(rl, `API key environment variable NAME [${current.auth_env}]: `, {
+            allowEmpty: true, fallback: current.auth_env, pattern: AUTH_ENV_NAME_RE, invalidMessage: "must look like an ENVIRONMENT VARIABLE NAME, not the key itself.",
+          });
+          if (env !== current.auth_env) changes.auth_env = env;
         }
-        probe = false;
+        const mc = (await rl.question(c.bold(`max_concurrent [${current.max_concurrent}]: `))).trim();
+        if (mc) changes.max_concurrent = Number(mc);
+        const label = current.thinking === false ? "off" : current.thinking === true ? "on, follows the job" : `fixed at "${current.thinking}"`;
+        const thinking = parseThinkingAnswer(await rl.question(c.bold(`Thinking: y = follow the job, n = off, or low/medium/high [current: ${label}]: `)), current.thinking);
+        if (thinking !== current.thinking) changes.thinking = thinking;
+        if (changes.model && current.kind === "subscription") {
+          console.log(`\n${c.bold("→")} Test call`);
+          if (probeWorker(current.provider, changes.model)) console.log(c.green(`✓ ${current.provider}/${changes.model} answered a real test prompt.`));
+          else {
+            console.log(c.red(`✗ A real test prompt to ${current.provider}/${changes.model} didn't come back.`));
+            if (!(await confirm(rl, "Save the change anyway?", { defaultYes: false }))) { console.log(c.dim("Stopped; nothing was written.")); return; }
+          }
+        }
       }
     } finally {
       rl.close();
     }
-    if (Object.keys(changes).length === 0) { console.log(c.dim("\nNothing changed.")); return; }
+    if (!Object.keys(changes).length) { console.log(c.dim("\nNothing changed.")); return; }
   }
 
   if (probe && changes.model && !probeWorker(current.provider, changes.model)) {
     out({ error: `a real test prompt to ${current.provider}/${changes.model} didn't come back -- nothing was written` });
     process.exit(1);
   }
-
-  const updated = { ...current, ...changes };
-  for (const key of Object.keys(updated)) if (updated[key] === undefined) delete updated[key];
-  const result = subscriptionConfigSchema.safeParse({ workers: { ...workers, [name]: updated } });
-  if (!result.success) {
-    const errors = formatSubscriptionIssues(result.error);
-    if (json) { out({ error: "invalid update", errors }); process.exit(1); }
-    console.error(c.red("That update is not valid:"));
-    for (const line of errors) console.error(`  - ${line}`);
-    process.exit(1);
-  }
-  writeGlobalConfig(subscriptionConfigPath(globalConfigDir()), stringifySubscriptionConfig(result.data));
-  const written = result.data.workers[name];
-  if (json) return out({ updated: true, name, entry: written, changed: Object.keys(changes) });
-  console.log(c.green(`\n✓ Updated "${name}" (${written.provider}/${written.model}).`));
-  console.log(c.yellow("Run `nomarmy connect claude` and restart your coordinator session so the MCP server picks it up."));
+  const written = saveAgents({ ...agents, [name]: { ...current, ...changes } });
+  if (json) return out({ updated: true, name, agent: written[name], changed: Object.keys(changes) });
+  console.log(c.green(`\n✓ Updated "${name}": ${describeAgentLabel(written[name])}.`));
+  if (changes.auth_env) console.log(c.yellow(`The key's variable changed to ${changes.auth_env}: run \`nomarmy connect claude\` so the MCP server sees it.`));
+  else console.log(c.dim("Applies to the next job, no restart."));
 }
 
-async function cmdSubscriptions() {
-  const sub = argv[1];
-  if (sub === "update") return cmdSubscriptionsUpdate();
-  if (sub === "list") return cmdSubscriptionsList();
-  if (sub === "add") return cmdSubscriptionsAdd();
-  if (sub === "remove") return cmdSubscriptionsRemove();
-  if (sub === "setup") return cmdSubscriptionsSetup();
-  throw new Error(`Unknown subscriptions subcommand "${sub ?? ""}". Use: nomarmy subscriptions <setup|list|add|update|remove>`);
+async function cmdAgents() {
+  const sub = argv[1] ?? "list";
+  if (sub === "list") return cmdAgentsList();
+  if (sub === "add") return cmdAgentsAdd();
+  if (sub === "update") return cmdAgentsUpdate();
+  if (sub === "remove") return cmdAgentsRemove();
+  throw new Error(`Unknown agents subcommand "${sub}". Use: nomarmy agents <list|add|update|remove>`);
 }
 
 function git(args) {
@@ -2282,11 +1778,9 @@ function armyLayerFlag(fallback = "global") {
 }
 
 function loadArmyForCli() {
-  let subscriptionLoaded = null, dispatchLoaded = null;
-  try { subscriptionLoaded = loadSubscriptionConfig(globalConfigDir()); } catch { /* `subscriptions list` reports it */ }
-  try { dispatchLoaded = loadDispatchConfig(globalConfigDir()); } catch { /* `providers validate` reports it */ }
-  const loaded = loadArmy({ projectDir: repoDir, subscriptionLoaded });
-  return { loaded, summary: describeArmy(loaded, { subscriptionLoaded, dispatchLoaded }) };
+  const agents = loadAgentsOrExit().agents;
+  const loaded = loadArmy({ projectDir: repoDir });
+  return { loaded, agents, summary: describeArmy(loaded, { agents, describeAgent: describeAgentLabel }) };
 }
 
 // Claude Code adds settings.local.json to .gitignore for the same reason:
@@ -2300,16 +1794,20 @@ function ensureLocalLayerIgnored() {
   if (!json) console.log(c.dim(`Added ${LOCAL_CONFIG_FILENAME} to .gitignore.`));
 }
 
-function describeAgent(agent) {
-  if (!agent) return c.yellow("(unassigned)");
-  return agent.kind === "local" ? `local:${agent.name}` : `${agent.kind}:${agent.name}`;
+function agentCell(name, runsOn) {
+  if (!name) return c.yellow("(no agent)");
+  return `${name}${runsOn ? c.dim(`  ${runsOn}`) : ""}`;
 }
 
 async function cmdArmyShow() {
   const { summary } = loadArmyForCli();
   if (json) return out(summary);
+  const g = summary.general;
   console.log(c.bold("🪖 nomArmy") + c.dim(`  (${repoDir})`));
-  if (summary.general) console.log(`\n${c.bold("General")}  ${c.dim("(your coordinator session)")}\n  ${summary.general}`);
+  console.log(`\n${c.bold("General")}  ${g.agent ? agentCell(g.agent, g.agentRunsOn) : ""}${g.setBy ? c.dim(`  [${g.setBy}]`) : ""}`);
+  console.log(c.dim(`  ${g.who}`));
+  for (const line of g.responsibilities) console.log(c.dim(`  - ${line}`));
+  if (g.problem) console.log(c.yellow(`  ⚠ ${g.problem}`));
   if (summary.workflow) console.log(`\n${c.bold("Workflow")}\n${summary.workflow.split("\n").map((l) => `  ${l}`).join("\n")}`);
   const names = Object.keys(summary.roles);
   if (!names.length) {
@@ -2325,15 +1823,15 @@ async function cmdArmyShow() {
       console.log(`\n${c.bold(phase[0].toUpperCase() + phase.slice(1))}`);
       for (const name of byPhase.get(phase)) {
         const role = summary.roles[name];
-        const agentLayer = role.setBy.worker ?? role.setBy.pool ?? role.setBy.local;
-        console.log(`  ${c.cyan(name.padEnd(18))} ${describeAgent(role.agent)}${agentLayer ? c.dim(`  [${agentLayer}]`) : ""}${role.mode ? c.dim(`  ${role.mode}`) : ""}`);
+        console.log(`  ${c.cyan(name.padEnd(18))} ${agentCell(role.agent, role.agentRunsOn)}${role.setBy.agent ? c.dim(`  [${role.setBy.agent}]`) : ""}`);
         if (role.description) console.log(c.dim(`    ${role.description}`));
         if (role.problem && role.agent) console.log(c.red(`    ✗ ${role.problem}`));
+        if (role.overlapsGeneral) console.log(c.yellow(`    ⚠ ${role.overlapsGeneral}`));
       }
     }
   }
-  console.log(`\n${c.bold("Layers")}  ${c.dim("(lowest first; later ones win)")}`);
-  for (const layer of summary.layers) console.log(`  ${layer.found ? c.green("●") : c.dim("○")} ${layer.layer.padEnd(14)} ${c.dim(layer.path ?? "(no subscriptions.yml)")}`);
+  console.log(`\n${c.bold("Layers")}  ${c.dim("(later ones win)")}`);
+  for (const layer of summary.layers) console.log(`  ${layer.found ? c.green("●") : c.dim("○")} ${layer.layer.padEnd(8)} ${c.dim(layer.path)}`);
 }
 
 async function cmdArmyInit() {
@@ -2343,31 +1841,53 @@ async function cmdArmyInit() {
   if (existing?.roles && Object.keys(existing.roles).length && !flag("force")) {
     throw new Error(`${filePath} already defines an army (${Object.keys(existing.roles).join(", ")}). Re-run with --force to replace it.`);
   }
-  updateArmyInFile(filePath, () => structuredClone(DEFAULT_ARMY));
+  // Keep a General already defined in this layer; the roster is what init resets.
+  updateArmyInFile(filePath, (army) => ({ ...structuredClone(DEFAULT_ARMY), ...(army.general ? { general: army.general } : {}) }));
   if (layer === "local") ensureLocalLayerIgnored();
   if (json) return out({ written: filePath, layer, roles: Object.keys(DEFAULT_ARMY.roles) });
   console.log(c.green(`✓ Wrote the default army to ${filePath} (${layer}).`));
-  console.log(c.dim(`Every role starts on the local model. Point one elsewhere with \`nomarmy army assign <role> worker:<name>|pool:<name>\`, then \`nomarmy army show\`.`));
+  console.log(c.dim("Every role starts on the local model. Next: `nomarmy army general <agent>` (the agent your coordinator session runs on), then `nomarmy army assign <role> <agent>` for any role you want elsewhere."));
 }
 
 async function cmdArmyAssign() {
-  const [roleName, targetSpec] = [argv[2], argv[3]];
-  if (!roleName || !targetSpec) throw new Error("Usage: nomarmy army assign <role> <worker:NAME|pool:NAME|local|local:gpt|none> [--global|--project|--local]");
+  const [roleName, agentName] = [argv[2], argv[3]];
+  if (!roleName || !agentName) throw new Error("Usage: nomarmy army assign <role> <agent|none> [--global|--project|--local]");
   const layer = armyLayerFlag("global");
   const filePath = armyLayerPath(layer, { projectDir: repoDir });
-  assignRoleInFile(filePath, roleName, parseTargetSpec(targetSpec));
+  assignRoleInFile(filePath, roleName, parseTargetSpec(agentName));
   if (layer === "local") ensureLocalLayerIgnored();
   const { summary } = loadArmyForCli();
   const role = summary.roles[roleName];
   if (json) return out({ written: filePath, layer, role: roleName, effective: role ?? null });
-  console.log(c.green(`✓ ${roleName} → ${targetSpec} in ${filePath} (${layer}).`));
+  console.log(c.green(`✓ ${roleName} → ${agentName} in ${filePath} (${layer}).`));
   if (role) {
-    const agentLayer = role.setBy.worker ?? role.setBy.pool ?? role.setBy.local;
-    if (agentLayer && agentLayer !== layer) console.log(c.yellow(`Note: the ${agentLayer} layer overrides this, so ${roleName} still runs on ${describeAgent(role.agent)}.`));
+    if (role.setBy.agent && role.setBy.agent !== layer) console.log(c.yellow(`Note: the ${role.setBy.agent} layer overrides this, so ${roleName} still runs on ${role.agent}.`));
     if (role.problem && role.agent) console.log(c.yellow(`⚠ ${role.problem}.`));
+    if (role.overlapsGeneral) console.log(c.yellow(`⚠ ${roleName} ${role.overlapsGeneral}.`));
     if (!role.description) console.log(c.dim(`${roleName} has no description in any layer; the General will only see its name.`));
   }
-  if (layer === "project") console.log(c.dim("This is committed with the repo; teammates need a worker or pool with that same name in their own global config."));
+  if (layer === "project") console.log(c.dim("This is committed with the repo; teammates need an agent with that same name in their own agents.yml."));
+}
+
+// Which agent the General is. Global or local only: it describes the
+// person's own coordinator session, which a committed project file can't know.
+async function cmdArmyGeneral() {
+  const agentName = argv[2];
+  if (!agentName) throw new Error("Usage: nomarmy army general <agent> [--global|--local]");
+  const layer = armyLayerFlag("global");
+  if (layer === "project") throw new Error("The General is your own coordinator session, so it's set in --global or --local, never in a committed project file.");
+  const agents = loadAgentsOrExit().agents;
+  if (!Object.prototype.hasOwnProperty.call(agents, agentName)) {
+    throw new Error(`Unknown agent "${agentName}". Define it first with \`nomarmy agents add\` (the General's agent is only described, never dispatched to), or pick one of: ${Object.keys(agents).join(", ")}`);
+  }
+  const filePath = armyLayerPath(layer, { projectDir: repoDir });
+  updateArmyInFile(filePath, (army) => ({ ...army, general: agentName }));
+  if (layer === "local") ensureLocalLayerIgnored();
+  const { summary } = loadArmyForCli();
+  const overlaps = Object.entries(summary.roles).filter(([, r]) => r.overlapsGeneral);
+  if (json) return out({ written: filePath, layer, general: agentName, overlaps: Object.fromEntries(overlaps.map(([n, r]) => [n, r.overlapsGeneral])) });
+  console.log(c.green(`✓ The General is "${agentName}" (${describeAgentLabel(agents[agentName])}), in ${filePath} (${layer}).`));
+  for (const [name, role] of overlaps) console.log(c.yellow(`⚠ ${name} ${role.overlapsGeneral}.`));
 }
 
 async function cmdArmy() {
@@ -2375,21 +1895,19 @@ async function cmdArmy() {
   if (sub === "show") return cmdArmyShow();
   if (sub === "init") return cmdArmyInit();
   if (sub === "assign") return cmdArmyAssign();
-  throw new Error(`Unknown army subcommand "${sub}". Use: nomarmy army <show|init|assign>`);
+  if (sub === "general") return cmdArmyGeneral();
+  throw new Error(`Unknown army subcommand "${sub}". Use: nomarmy army <show|init|assign|general>`);
 }
 
 async function cmdConfigPaths() {
-  const files = ["providers.yml", "subscriptions.yml"].map((name) => {
-    const p = path.join(globalConfigDir(), name);
-    return { name, path: p, exists: fs.existsSync(p) };
-  });
+  const agentsPath = agentsConfigPath(globalConfigDir());
   const army = ["global", "project", "local"].map((layer) => {
     const p = armyLayerPath(layer, { projectDir: repoDir });
     return { layer, path: p, exists: fs.existsSync(p) };
   });
-  if (json) return out({ globalDir: globalConfigDir(), files, army });
+  if (json) return out({ globalDir: globalConfigDir(), agents: { path: agentsPath, exists: fs.existsSync(agentsPath) }, army });
   console.log(c.bold("nomArmy config") + c.dim(`  (global dir: ${globalConfigDir()})`));
-  for (const f of files) console.log(`  ${f.exists ? c.green("●") : c.dim("○")} ${f.name.padEnd(18)} ${c.dim(f.path)}`);
+  console.log(`  ${fs.existsSync(agentsPath) ? c.green("●") : c.dim("○")} ${"agents".padEnd(8)} ${c.dim(agentsPath)}`);
   console.log(c.bold("\nArmy layers"));
   for (const a of army) console.log(`  ${a.exists ? c.green("●") : c.dim("○")} ${a.layer.padEnd(8)} ${c.dim(a.path)}`);
 }
@@ -2400,7 +1918,7 @@ async function cmdConfig() {
   throw new Error(`Unknown config subcommand "${sub}". Use: nomarmy config paths`);
 }
 
-const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, providers: cmdProviders, subscriptions: cmdSubscriptions, army: cmdArmy, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
+const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, agents: cmdAgents, army: cmdArmy, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
   // Import lazily to avoid circular dependencies

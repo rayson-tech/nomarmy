@@ -46,8 +46,6 @@
     "LICENSE",
     "NOTICE",
     "README.md",
-    "!config/providers.yml",
-    "!config/subscriptions.yml",
     "!config/profiles/*.local.env"
   ]
 }

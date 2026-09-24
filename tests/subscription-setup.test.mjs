@@ -12,7 +12,6 @@ import {
   parseCatalogModels,
   parseCliLoginStatus,
   probeSucceeded,
-  defaultWorkerName,
   parseMuseAuthDescriptor,
   extractMintedKey,
 } from "../lib/subscription-setup.mjs";
@@ -112,7 +111,3 @@ test("probeSucceeded: true only for a real completion envelope", () => {
   assert.equal(probeSucceeded("not json"), false);
 });
 
-test("defaultWorkerName: derives a readable name from the owner email", () => {
-  assert.equal(defaultWorkerName("jason.pugh@rayson-tech.com", "claude"), "jason-claude");
-  assert.equal(defaultWorkerName(null, "codex"), "codex");
-});

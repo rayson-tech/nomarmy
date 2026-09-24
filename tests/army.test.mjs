@@ -24,7 +24,8 @@ import {
   parseTargetSpec,
   privateConfigProblem,
   readArmyFile,
-  subscriptionRolesLayer,
+  generalOverlap,
+  GENERAL,
   updateArmyInFile,
 } from "../lib/army.mjs";
 
@@ -47,17 +48,23 @@ test("globalConfigDir: NOMARMY_CONFIG_DIR, then XDG_CONFIG_HOME, then ~/.config"
   assert.equal(globalConfigDir({}), path.join(os.homedir(), ".config", "nomarmy"));
 });
 
-test("armySchema: a role can only select an agent -- credential, endpoint and owner fields are refused", () => {
-  for (const field of ["auth_env", "base_url", "owner", "provider", "api_key"]) {
-    const result = armySchema.safeParse({ roles: { x: { local: "coder", [field]: "anything" } } });
+test("armySchema: a role can only name an agent -- credential, endpoint, owner and old target fields are refused", () => {
+  for (const field of ["auth_env", "base_url", "owner", "provider", "api_key", "worker", "pool", "local"]) {
+    const result = armySchema.safeParse({ roles: { x: { agent: "codex", [field]: "anything" } } });
     assert.equal(result.success, false, field);
   }
 });
 
-test("armySchema: exactly one agent per role, lowercase role names, capped descriptions", () => {
-  assert.equal(armySchema.safeParse({ roles: { x: { worker: "a", pool: "b" } } }).success, false);
-  assert.equal(armySchema.safeParse({ roles: { "Sr Dev": { local: "coder" } } }).success, false);
-  assert.equal(armySchema.safeParse({ roles: { __proto__x: { local: "coder" } } }).success, false);
+test("armySchema: the General is an agent name, never a rewritable charter", () => {
+  assert.equal(armySchema.safeParse({ general: "opus" }).success, true);
+  assert.equal(armySchema.safeParse({ general: { description: "I do whatever I like" } }).success, false);
+  assert.ok(GENERAL.responsibilities.some((r) => /Owns Git/.test(r)));
+  assert.ok(Object.isFrozen(GENERAL) && Object.isFrozen(GENERAL.responsibilities));
+});
+
+test("armySchema: lowercase role names, capped descriptions", () => {
+  assert.equal(armySchema.safeParse({ roles: { "Sr Dev": { agent: "local" } } }).success, false);
+  assert.equal(armySchema.safeParse({ roles: { __proto__x: { agent: "local" } } }).success, false);
   assert.equal(armySchema.safeParse({ roles: { x: { description: "a".repeat(801) } } }).success, false);
   assert.equal(armySchema.safeParse({ roles: { x: {} } }).success, true, "an unassigned role is allowed; dispatch refuses it");
 });
@@ -65,45 +72,40 @@ test("armySchema: exactly one agent per role, lowercase role names, capped descr
 test("DEFAULT_ARMY: valid, and every role is dispatchable out of the box", () => {
   assert.equal(armySchema.safeParse(DEFAULT_ARMY).success, true);
   const { army } = mergeArmy([{ layer: "global", army: structuredClone(DEFAULT_ARMY) }]);
-  assert.deepEqual(armyTargetProblems(army), {});
+  assert.deepEqual(armyTargetProblems(army, { local: { kind: "local", slot: "coder" } }), {}, "every role starts on the built-in local agent");
   assert.deepEqual(Object.keys(DEFAULT_ARMY.roles), ["sr-dev", "jr-dev", "ui-ux", "data-architect", "security-analyst", "pm", "po", "stakeholder"]);
 });
 
 test("mergeArmy: fields merge one at a time, so a higher layer reassigns without restating the description", () => {
   const { army, sources } = mergeArmy([
-    { layer: "global", army: { roles: { "sr-dev": { description: "first cut", phase: "build", local: "coder" } } } },
-    { layer: "project", army: { roles: { "sr-dev": { worker: "jason-codex" } } } },
+    { layer: "global", army: { roles: { "sr-dev": { description: "first cut", phase: "build", agent: "local" } } } },
+    { layer: "project", army: { roles: { "sr-dev": { agent: "codex" } } } },
   ]);
-  assert.deepEqual(army.roles["sr-dev"], { description: "first cut", phase: "build", worker: "jason-codex" }, "local:coder is cleared, never combined with worker");
+  assert.deepEqual(army.roles["sr-dev"], { description: "first cut", phase: "build", agent: "codex" });
   assert.equal(sources.roles["sr-dev"].description, "global");
-  assert.equal(sources.roles["sr-dev"].worker, "project");
-  assert.equal(sources.roles["sr-dev"].local, undefined);
+  assert.equal(sources.roles["sr-dev"].agent, "project");
 });
 
 test("mergeArmy: disabled in a higher layer removes the role; workflow and general take the highest layer", () => {
-  const { army } = mergeArmy([
-    { layer: "global", army: { workflow: "global flow", general: { description: "g" }, roles: { pm: { local: "coder" }, po: { local: "coder" } } } },
-    { layer: "local", army: { workflow: "my flow", roles: { po: { disabled: true } } } },
+  const { army, sources } = mergeArmy([
+    { layer: "global", army: { workflow: "global flow", general: "opus", roles: { pm: { agent: "local" }, po: { agent: "local" } } } },
+    { layer: "local", army: { workflow: "my flow", general: "codex", roles: { po: { disabled: true } } } },
   ]);
   assert.deepEqual(Object.keys(army.roles), ["pm"]);
   assert.equal(army.workflow, "my flow");
-  assert.equal(army.general.description, "g");
-});
-
-test("subscriptionRolesLayer: legacy subscriptions.yml roles become the lowest layer", () => {
-  const layer = subscriptionRolesLayer({ path: "/x", config: { workers: { "jason-claude": { role: "senior-dev" }, other: {} } } });
-  assert.deepEqual(layer, { roles: { "senior-dev": { worker: "jason-claude" } } });
+  assert.equal(army.general, "codex");
+  assert.equal(sources.general, "local");
 });
 
 test("loadArmy: reads global config.yml, the repo's .nomarmy.yml army section, and .nomarmy.local.yml, in that order", () => {
   const globalDir = tmp(), repo = tmp();
   const env = { NOMARMY_CONFIG_DIR: globalDir };
-  write(path.join(globalDir, "config.yml"), "army:\n  roles:\n    sr-dev:\n      description: first cut\n      local: coder\n");
-  write(path.join(repo, ".nomarmy.yml"), "verification:\n  quick:\n    commands: [\"npm test\"]\narmy:\n  roles:\n    sr-dev:\n      pool: capable\n");
-  write(path.join(repo, ".nomarmy.local.yml"), "army:\n  roles:\n    sr-dev:\n      worker: jason-codex\n");
+  write(path.join(globalDir, "config.yml"), "army:\n  roles:\n    sr-dev:\n      description: first cut\n      agent: local\n");
+  write(path.join(repo, ".nomarmy.yml"), "verification:\n  quick:\n    commands: [\"npm test\"]\narmy:\n  roles:\n    sr-dev:\n      agent: grok\n");
+  write(path.join(repo, ".nomarmy.local.yml"), "army:\n  roles:\n    sr-dev:\n      agent: codex\n");
   const loaded = loadArmy({ projectDir: repo, env });
-  assert.deepEqual(loaded.army.roles["sr-dev"], { description: "first cut", worker: "jason-codex" });
-  assert.deepEqual(loaded.layers.map((l) => [l.layer, l.found]), [["subscriptions", false], ["global", true], ["project", true], ["local", true]]);
+  assert.deepEqual(loaded.army.roles["sr-dev"], { description: "first cut", agent: "codex" });
+  assert.deepEqual(loaded.layers.map((l) => [l.layer, l.found]), [["global", true], ["project", true], ["local", true]]);
 });
 
 test("loadArmy: the global and local files are army-only, so a typo'd top-level key is an error, not ignored", () => {
@@ -132,92 +134,96 @@ test("updateArmyInFile: keeps every comment and every other section of .nomarmy.
   const repo = tmp();
   const file = path.join(repo, ".nomarmy.yml");
   write(file, "# the environment contract\nverification:\n  quick:\n    commands:\n      - \"npm test\" # fast\n");
-  assignRoleInFile(file, "security-analyst", { local: "gpt" });
+  assignRoleInFile(file, "security-analyst", { agent: "local-gpt" });
   const text = fs.readFileSync(file, "utf8");
   assert.match(text, /^# the environment contract/);
   assert.match(text, /"npm test" # fast/);
-  assert.match(text, /army:\n  roles:\n    security-analyst:\n      local: gpt/);
+  assert.match(text, /army:\n  roles:\n    security-analyst:\n      agent: local-gpt/);
 });
 
 test("assignRoleInFile: replaces that layer's previous agent, keeps its description, refuses a bad role name", () => {
   const file = path.join(tmp(), "config.yml");
-  assignRoleInFile(file, "pm", { worker: "a" });
+  assignRoleInFile(file, "pm", { agent: "a" });
   updateArmyInFile(file, (army) => { army.roles.pm.description = "reviews"; return army; });
-  const written = assignRoleInFile(file, "pm", { pool: "cheap" });
-  assert.deepEqual(written.roles.pm, { description: "reviews", pool: "cheap" });
+  assert.deepEqual(assignRoleInFile(file, "pm", { agent: "grok" }).roles.pm, { description: "reviews", agent: "grok" });
   assert.deepEqual(assignRoleInFile(file, "pm", {}).roles.pm, { description: "reviews" }, "none unassigns");
-  assert.throws(() => assignRoleInFile(file, "Bad Name", { local: "coder" }), /not a valid role name/);
+  assert.throws(() => assignRoleInFile(file, "Bad Name", { agent: "local" }), /not a valid role name/);
 });
 
-test("parseTargetSpec: worker:/pool:/local/local:gpt/none, and a clear error otherwise", () => {
-  assert.deepEqual(parseTargetSpec("worker:jason-codex"), { worker: "jason-codex" });
-  assert.deepEqual(parseTargetSpec("pool:cheap"), { pool: "cheap" });
-  assert.deepEqual(parseTargetSpec("local"), { local: "coder" });
-  assert.deepEqual(parseTargetSpec("local:gpt"), { local: "gpt" });
+test("parseTargetSpec: a bare agent name or none -- the old worker:/pool:/local: prefixes are refused", () => {
+  assert.deepEqual(parseTargetSpec("codex"), { agent: "codex" });
+  assert.deepEqual(parseTargetSpec("local"), { agent: "local" });
   assert.deepEqual(parseTargetSpec("none"), {});
-  assert.throws(() => parseTargetSpec("jason-codex"), /must be worker:<name>/);
-  assert.throws(() => parseTargetSpec("local:big"), /local:coder or local:gpt/);
+  assert.throws(() => parseTargetSpec("worker:codex"), /not an agent name/);
 });
 
-test("armyTargetProblems: flags unassigned roles and names that aren't defined globally", () => {
-  const army = { roles: { a: {}, b: { worker: "ghost" }, c: { pool: "nope" }, d: { worker: "real" }, e: { local: "coder" } } };
-  const problems = armyTargetProblems(army, {
-    subscriptionLoaded: { config: { workers: { real: {} } } },
-    dispatchLoaded: { config: { pools: { cheap: [] } } },
-  });
-  assert.deepEqual(Object.keys(problems).sort(), ["a", "b", "c"]);
-  assert.match(problems.b, /"ghost" is not defined/);
+const AGENTS = {
+  local: { kind: "local", slot: "coder" },
+  grok: { kind: "api", provider: "xai", model: "grok-4.7", auth_env: "K" },
+  opus: { kind: "subscription", provider: "claude-cli", model: "claude-opus-5", owner: "you@example.com" },
+  sonnet: { kind: "subscription", provider: "claude-cli", model: "claude-sonnet-5", owner: "you@example.com" },
+  codex: { kind: "subscription", provider: "openai", model: "gpt-6-astra", owner: "you@example.com" },
+};
+
+test("armyTargetProblems: flags unassigned roles and agents that don't exist", () => {
+  const problems = armyTargetProblems({ roles: { a: {}, b: { agent: "ghost" }, c: { agent: "grok" } } }, AGENTS);
+  assert.deepEqual(Object.keys(problems).sort(), ["a", "b"]);
+  assert.match(problems.b, /agent "ghost" is not defined in your agents.yml/);
+});
+
+test("generalOverlap: flags a role on the General's own agent, and one sharing the General's subscription login", () => {
+  const overlap = generalOverlap({ general: "opus", roles: { reviewer: { agent: "opus" }, "sr-dev": { agent: "sonnet" }, ui: { agent: "codex" }, pm: { agent: "grok" } } }, AGENTS);
+  assert.deepEqual(Object.keys(overlap).sort(), ["reviewer", "sr-dev"]);
+  assert.match(overlap.reviewer, /isn't independently reviewed/);
+  assert.match(overlap["sr-dev"], /shares the General's claude-cli login \(you@example.com\)/);
+  assert.deepEqual(generalOverlap({ roles: { x: { agent: "opus" } } }, AGENTS), {}, "no General defined, nothing to compare");
 });
 
 const ARMY = {
   roles: {
-    "sr-dev": { description: "Does the first cut.", phase: "build", worker: "jason-codex" },
-    "jr-dev": { description: "Simple work.", pool: "cheap" },
-    "security-analyst": { phase: "review", local: "gpt" },
+    "sr-dev": { description: "Does the first cut.", phase: "build", agent: "codex" },
+    "security-analyst": { phase: "review", agent: "local" },
     pm: {},
   },
 };
 
-test("expandArmyRole: a worker role becomes subscription_worker, keeps on_behalf_of, and heads the brief with the role", () => {
-  const job = expandArmyRole({ task: "Build the form.", army_role: "sr-dev", on_behalf_of: "you@example.com", mode: "implement" }, ARMY);
-  assert.equal(job.subscription_worker, "jason-codex");
-  assert.equal(job.on_behalf_of, "you@example.com");
+test("expandArmyRole: a role becomes agent: <its agent>, headed by the role's description", () => {
+  const job = expandArmyRole({ task: "Build the form.", army_role: "sr-dev", on_behalf_of: "you@example.com" }, ARMY);
+  assert.equal(job.agent, "codex");
+  assert.equal(job.on_behalf_of, "you@example.com", "left for the agent expansion to keep or drop");
   assert.equal(job.army_role, undefined);
+  assert.equal(job.armyRole, "sr-dev");
   assert.equal(job.task, "[nomArmy role: sr-dev, build phase]\nDoes the first cut.\n\nBuild the form.");
+  assert.equal(expandArmyRole({ task: "t", army_role: "security-analyst" }, ARMY).task, "[nomArmy role: security-analyst, review phase]\n\nt");
 });
 
-test("expandArmyRole: pool and local roles drop on_behalf_of instead of tripping the subscription-only check", () => {
-  const pooled = expandArmyRole({ task: "t", army_role: "jr-dev", on_behalf_of: "x" }, ARMY);
-  assert.equal(pooled.pool, "cheap");
-  assert.equal(pooled.on_behalf_of, undefined);
-  const local = expandArmyRole({ task: "t", army_role: "security-analyst", profile: "coder" }, ARMY);
-  assert.equal(local.profile, "gpt", "the role's local slot replaces the default profile");
-  assert.equal(local.task, "[nomArmy role: security-analyst, review phase]\n\nt");
-});
-
-test("expandArmyRole: refuses an unknown role, an unassigned one, and a job that also picks its own agent", () => {
-  assert.throws(() => expandArmyRole({ task: "t", army_role: "cto" }, ARMY), /unknown army_role "cto" -- this repo's roles are: sr-dev, jr-dev, security-analyst, pm/);
-  assert.throws(() => expandArmyRole({ task: "t", army_role: "pm" }, ARMY), /no agent assigned -- run `nomarmy army assign pm/);
-  assert.throws(() => expandArmyRole({ task: "t", army_role: "sr-dev", pool: "cheap" }, ARMY), /drop pool/);
+test("expandArmyRole: refuses an unknown role, an unassigned one, and a job that also names its own agent", () => {
+  assert.throws(() => expandArmyRole({ task: "t", army_role: "cto" }, ARMY), /unknown army_role "cto" -- this repo's roles are: sr-dev, security-analyst, pm/);
+  assert.throws(() => expandArmyRole({ task: "t", army_role: "pm" }, ARMY), /no agent assigned -- run `nomarmy army assign pm <agent>`/);
+  assert.throws(() => expandArmyRole({ task: "t", army_role: "sr-dev", agent: "grok" }, ARMY), /drop agent "grok"/);
   assert.throws(() => expandArmyRole({ task: "t", army_role: "x" }, { roles: {} }), /no army is configured/);
 });
 
 test("expandArmyRole: a job without army_role passes through untouched", () => {
-  const job = { task: "t", pool: "cheap" };
+  const job = { task: "t", agent: "grok" };
   assert.equal(expandArmyRole(job, ARMY), job);
 });
 
-test("describeArmy: what the General sees, including where each value came from", () => {
+test("describeArmy: the fixed charter plus the General's agent, each role's agent and where its values came from", () => {
   const summary = describeArmy({
-    army: { general: { description: "g" }, workflow: "w", roles: { pm: { description: "reviews", phase: "review", pool: "ghost" } } },
-    sources: { roles: { pm: { description: "global", phase: "global", pool: "project" } } },
+    army: { general: "opus", workflow: "w", roles: { pm: { description: "reviews", phase: "review", agent: "sonnet" } } },
+    sources: { general: "global", roles: { pm: { description: "global", phase: "global", agent: "project" } } },
     layers: [],
-  }, { dispatchLoaded: { config: { pools: {} } } });
-  assert.deepEqual(summary.roles.pm, {
-    description: "reviews", phase: "review", mode: null, agent: { kind: "pool", name: "ghost" },
-    problem: 'pool "ghost" is not defined in your global providers.yml', setBy: { description: "global", phase: "global", pool: "project" },
-  });
-  assert.match(summary.howToDispatch, /army_role/);
+  }, { agents: AGENTS, describeAgent: (a) => `${a.kind} ${a.model}` });
+  assert.equal(summary.general.agent, "opus");
+  assert.equal(summary.general.agentRunsOn, "subscription claude-opus-5");
+  assert.equal(summary.general.problem, null);
+  assert.deepEqual(summary.general.responsibilities, GENERAL.responsibilities);
+  assert.equal(summary.roles.pm.agent, "sonnet");
+  assert.equal(summary.roles.pm.setBy.agent, "project");
+  assert.match(summary.roles.pm.overlapsGeneral, /same usage limit/);
+  const undefinedGeneral = describeArmy({ army: { general: null, workflow: null, roles: {} }, sources: { roles: {} }, layers: [] }, { agents: AGENTS });
+  assert.match(undefinedGeneral.general.problem, /nomarmy army general <agent>/);
 });
 
 test("privateConfigProblem: refuses global config another account owns or can write, fine otherwise", () => {
@@ -236,8 +242,8 @@ test("privateConfigProblem: refuses global config another account owns or can wr
 test("loadArmy: a .nomarmy.local.yml that git tracks is refused -- local must mean local", () => {
   const repo = tmp(), globalDir = tmp();
   execFileSync("git", ["init", "-q"], { cwd: repo });
-  write(path.join(repo, ".nomarmy.local.yml"), "army:\n  roles:\n    pm:\n      local: coder\n");
-  assert.equal(loadArmy({ projectDir: repo, env: { NOMARMY_CONFIG_DIR: globalDir } }).army.roles.pm.local, "coder", "untracked is fine");
+  write(path.join(repo, ".nomarmy.local.yml"), "army:\n  roles:\n    pm:\n      agent: local\n");
+  assert.equal(loadArmy({ projectDir: repo, env: { NOMARMY_CONFIG_DIR: globalDir } }).army.roles.pm.agent, "local", "untracked is fine");
   execFileSync("git", ["add", "-f", ".nomarmy.local.yml"], { cwd: repo });
   assert.throws(() => loadArmy({ projectDir: repo, env: { NOMARMY_CONFIG_DIR: globalDir } }), /tracked by git, so it isn't local.*git rm --cached/);
 });

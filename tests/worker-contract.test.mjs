@@ -58,9 +58,8 @@ import {
   resolveWorkerSandboxOverride,
   resolvePoolSelection,
   resolveSubscriptionSelection,
-  resolveSubscriptionRoleSelection,
   subscriptionJobFieldProblems,
-  expandArmyJobs,
+  expandJobs,
   currentMaxPoolWorkers,
   splitJobsByLane,
   runningCount,
@@ -2327,7 +2326,7 @@ test("resolvePoolSelection: a specific thinking level on a hosted entry is alway
 test("resolvePoolSelection: an unknown pool name throws, never silently falling back to profile/local", () => {
   assert.throws(
     () => resolvePoolSelection("typo", "medium", { getDispatchConfig: () => fakeDispatchConfig({ cheap: [] }) }),
-    /unknown pool "typo"/,
+    /unknown api agent "typo"/,
   );
 });
 
@@ -2402,7 +2401,7 @@ test("resolveSubscriptionSelection: mismatched on_behalf_of refuses and names th
 test("resolveSubscriptionSelection: an unknown worker name throws, never silently falling back to profile/pool/local", () => {
   assert.throws(
     () => resolveSubscriptionSelection("typo", "j@example.com", "medium", { getSubscriptionConfig: () => fakeSubscriptionConfig({}) }),
-    /unknown subscription_worker "typo"/,
+    /unknown subscription agent "typo"/,
   );
 });
 
@@ -2412,7 +2411,7 @@ test("resolveSubscriptionSelection: refuses when its provider is also a pool ent
       getSubscriptionConfig: () => fakeSubscriptionConfig({ "you-grok": { provider: "xai", model: "grok-4.6", owner: "you@example.com" } }),
       getDispatchConfig: () => fakeDispatchConfig({ capable: [{ id: "grok", provider: "xai", model: "grok-4.6", weight: 1, auth_env: "X" }] }),
     }),
-    /used by both pool entry capable\/grok/,
+    /used by both api agent grok and subscription agent you-grok/,
   );
 });
 
@@ -2423,7 +2422,7 @@ test("resolvePoolSelection: refuses the same conflict from the pool side -- a po
       getSubscriptionConfig: () => fakeSubscriptionConfig({ "you-grok": { provider: "xai", model: "grok-4.6", owner: "you@example.com" } }),
       pickProviderFn: (pool) => pool[0],
     }),
-    /used by both pool entry capable\/grok/,
+    /used by both api agent grok and subscription agent you-grok/,
   );
 });
 
@@ -2447,75 +2446,7 @@ test("subscriptionJobFieldProblems: subscription_worker without on_behalf_of is 
   assert.match(problems[0], /requires on_behalf_of/);
 });
 
-test("subscriptionJobFieldProblems: on_behalf_of without subscription_worker is a problem -- never silently ignored", () => {
-  const problems = subscriptionJobFieldProblems({ on_behalf_of: "o@example.com" });
-  assert.equal(problems.length, 1);
-  assert.match(problems[0], /has no effect without subscription_worker/);
-});
 
-test("subscriptionJobFieldProblems: pool and subscription_worker together is a problem -- mutually exclusive selectors", () => {
-  const problems = subscriptionJobFieldProblems({ pool: "cheap", subscription_worker: "w", on_behalf_of: "o@example.com" });
-  assert.equal(problems.length, 1);
-  assert.match(problems[0], /mutually exclusive/);
-});
-
-// ---------------------------------------------------------------------------
-// resolveSubscriptionRoleSelection / subscription_role: a DETERMINISTIC
-// alternative to naming a worker directly ("architect" always the same
-// entry) -- never a weighted pick across several. See
-// lib/subscription-schema.mjs's roleSchema comment for why that distinction
-// is the whole point.
-// ---------------------------------------------------------------------------
-
-test("resolveSubscriptionRoleSelection: resolves the one entry declaring a role, same owner-match attestation as resolveSubscriptionSelection", () => {
-  const selection = resolveSubscriptionRoleSelection("architect", "jason.pugh@rayson-tech.com", "medium", {
-    getSubscriptionConfig: () => fakeSubscriptionConfig({
-      opus: { provider: "claude-cli", model: "claude-opus-5", owner: "jason.pugh@rayson-tech.com", role: "architect", thinking: true },
-    }),
-  });
-  assert.equal(selection.model, "claude-cli/claude-opus-5");
-  assert.equal(selection.entry.id, "opus");
-});
-
-test("resolveSubscriptionRoleSelection: a mismatched on_behalf_of refuses, same as resolveSubscriptionSelection -- the attestation check is not bypassed by going through a role", () => {
-  assert.throws(
-    () => resolveSubscriptionRoleSelection("architect", "someone.else@rayson-tech.com", "medium", {
-      getSubscriptionConfig: () => fakeSubscriptionConfig({ opus: { provider: "claude-cli", model: "claude-opus-5", owner: "jason.pugh@rayson-tech.com", role: "architect" } }),
-    }),
-    /belongs to "jason\.pugh@rayson-tech\.com"/,
-  );
-});
-
-test("resolveSubscriptionRoleSelection: an unknown role throws, never silently falling back to a different role/worker", () => {
-  assert.throws(
-    () => resolveSubscriptionRoleSelection("typo-role", "j@example.com", "medium", {
-      getSubscriptionConfig: () => fakeSubscriptionConfig({ opus: { provider: "claude-cli", model: "x", owner: "j@example.com", role: "architect" } }),
-    }),
-    /unknown role "typo-role"/,
-  );
-});
-
-test("subscriptionJobFieldProblems: subscription_role without on_behalf_of is a problem, same as subscription_worker", () => {
-  const problems = subscriptionJobFieldProblems({ subscription_role: "architect" });
-  assert.equal(problems.length, 1);
-  assert.match(problems[0], /subscription_role requires on_behalf_of/);
-});
-
-test("subscriptionJobFieldProblems: subscription_worker and subscription_role together is a problem -- pick one selector, never both", () => {
-  const problems = subscriptionJobFieldProblems({ subscription_worker: "w", subscription_role: "architect", on_behalf_of: "o@example.com" });
-  assert.equal(problems.length, 1);
-  assert.match(problems[0], /mutually exclusive/);
-});
-
-test("subscriptionJobFieldProblems: pool and subscription_role together is a problem", () => {
-  const problems = subscriptionJobFieldProblems({ pool: "cheap", subscription_role: "architect", on_behalf_of: "o@example.com" });
-  assert.equal(problems.length, 1);
-  assert.match(problems[0], /mutually exclusive/);
-});
-
-test("subscriptionJobFieldProblems: on_behalf_of with subscription_role set is clean -- the role path counts as a valid selector, not \"has no effect\"", () => {
-  assert.deepEqual(subscriptionJobFieldProblems({ subscription_role: "architect", on_behalf_of: "o@example.com" }), []);
-});
 
 test("currentMaxPoolWorkers: defaults to 4 with no override, matching the cloud-execution default elsewhere", () => {
   delete process.env.NOMARMY_MAX_POOL_WORKERS;
@@ -3272,40 +3203,72 @@ test("detectPossibleSecrets: a clean diff and report return null, never a false 
 });
 
 // --------------------------------------------------------------------------
-// army_role: expanded into a concrete agent before admission.
+// expandJobs: army_role -> agent -> the internal fields the execution path
+// reads, before admission.
 // --------------------------------------------------------------------------
 
+const FAKE_AGENTS = {
+  local: { kind: "local", slot: "coder" },
+  "local-gpt": { kind: "local", slot: "gpt" },
+  grok: { kind: "api", provider: "xai", model: "grok-4.7", auth_env: "K" },
+  codex: { kind: "subscription", provider: "openai", model: "gpt-6-astra", owner: "you@example.com" },
+};
 const FAKE_ARMY = { army: { roles: {
-  "sr-dev": { description: "First cut.", phase: "build", worker: "you-codex" },
-  pm: { phase: "review", pool: "cheap" },
+  "sr-dev": { description: "First cut.", phase: "build", agent: "codex" },
+  pm: { phase: "review", agent: "grok" },
   po: {},
 } } };
+const expandWith = (jobs) => expandJobs(jobs, { getArmy: () => FAKE_ARMY, getAgents: () => FAKE_AGENTS });
 
-test("expandArmyJobs: jobs without army_role never even load the army", () => {
-  const jobs = [{ task: "t" }];
-  const result = expandArmyJobs(jobs, { getArmy: () => { throw new Error("must not be called"); } });
-  assert.equal(result.jobs, jobs);
-  assert.deepEqual(result.problems, []);
-});
-
-test("expandArmyJobs: each job resolves to its role's agent, and the brief is headed by the role", () => {
-  const { jobs, problems } = expandArmyJobs([
-    { task: "build it", army_role: "sr-dev", on_behalf_of: "you@example.com" },
-    { task: "review it", army_role: "pm", mode: "scout" },
-  ], { getArmy: () => FAKE_ARMY });
+test("expandJobs: no agent and no role means the local model, and never loads the army or agents", () => {
+  const { jobs, problems } = expandJobs([{ task: "t" }], {
+    getArmy: () => { throw new Error("must not be called"); },
+    getAgents: () => { throw new Error("must not be called"); },
+  });
   assert.deepEqual(problems, []);
-  assert.equal(jobs[0].subscription_worker, "you-codex");
-  assert.match(jobs[0].task, /^\[nomArmy role: sr-dev, build phase\]\nFirst cut\.\n\nbuild it$/);
-  assert.equal(jobs[1].pool, "cheap");
-  assert.deepEqual(subscriptionJobFieldProblems(jobs[0]), [], "the expanded worker job passes the on_behalf_of pairing check");
-  assert.deepEqual(subscriptionJobFieldProblems(jobs[1]), []);
+  assert.equal(jobs[0].profile, "coder");
 });
 
-test("expandArmyJobs: refusal lines are numbered per job, and a broken army file refuses the whole call", () => {
-  const { problems } = expandArmyJobs([{ task: "t", army_role: "po" }, { task: "t", army_role: "cto" }], { getArmy: () => FAKE_ARMY });
-  assert.equal(problems.length, 2);
+test("expandJobs: each kind of agent becomes the one internal field the execution path reads", () => {
+  const { jobs, problems } = expandWith([
+    { task: "t", agent: "local-gpt" },
+    { task: "t", agent: "grok", on_behalf_of: "you@example.com" },
+    { task: "t", agent: "codex", on_behalf_of: "you@example.com" },
+  ]);
+  assert.deepEqual(problems, []);
+  assert.equal(jobs[0].profile, "gpt");
+  assert.equal(jobs[1].pool, "grok");
+  assert.equal(jobs[1].on_behalf_of, undefined, "dropped for a non-subscription agent rather than refused");
+  assert.equal(jobs[2].subscription_worker, "codex");
+  assert.equal(jobs[2].on_behalf_of, "you@example.com");
+  assert.deepEqual(subscriptionJobFieldProblems(jobs[2]), []);
+});
+
+test("expandJobs: a role resolves through its agent, with the brief headed by the role", () => {
+  const { jobs, problems } = expandWith([{ task: "build it", army_role: "sr-dev", on_behalf_of: "you@example.com" }, { task: "review it", army_role: "pm", mode: "scout" }]);
+  assert.deepEqual(problems, []);
+  assert.equal(jobs[0].subscription_worker, "codex");
+  assert.match(jobs[0].task, /^\[nomArmy role: sr-dev, build phase\]\nFirst cut\.\n\nbuild it$/);
+  assert.equal(jobs[1].pool, "grok");
+});
+
+test("expandJobs: a subscription agent without on_behalf_of is caught by the admission check", () => {
+  const { jobs } = expandWith([{ task: "t", agent: "codex" }]);
+  assert.match(subscriptionJobFieldProblems(jobs[0])[0], /agent "codex" is a subscription and requires on_behalf_of/);
+});
+
+test("expandJobs: refusal lines are numbered per job; unknown agents and roles, unassigned roles and a broken army file all refuse", () => {
+  const { problems } = expandWith([{ task: "t", army_role: "po" }, { task: "t", army_role: "cto" }, { task: "t", agent: "gork" }]);
+  assert.equal(problems.length, 3);
   assert.match(problems[0], /^job 1: army_role "po" has no agent assigned/);
   assert.match(problems[1], /^job 2: unknown army_role "cto"/);
-  const broken = expandArmyJobs([{ task: "t", army_role: "pm" }], { getArmy: () => { throw new Error(".nomarmy.local.yml is tracked by git"); } });
+  assert.match(problems[2], /^job 3: unknown agent "gork" -- your agents are: local, local-gpt, grok, codex/);
+  const broken = expandJobs([{ task: "t", army_role: "pm" }], { getArmy: () => { throw new Error(".nomarmy.local.yml is tracked by git"); }, getAgents: () => FAKE_AGENTS });
   assert.deepEqual(broken.problems, [".nomarmy.local.yml is tracked by git"]);
+});
+
+test("jobSchema: exposes agent/army_role/on_behalf_of, and not the internal pool/subscription_worker/profile fields", () => {
+  const fields = Object.keys(jobSchema.shape);
+  for (const f of ["agent", "army_role", "on_behalf_of"]) assert.ok(fields.includes(f), f);
+  for (const f of ["pool", "subscription_worker", "subscription_role", "profile"]) assert.ok(!fields.includes(f), f);
 });

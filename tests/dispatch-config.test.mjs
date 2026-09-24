@@ -1,43 +1,22 @@
-// Tests for config/providers.yml's schema, loader, and weighted picker.
+// Tests for the pool-entry schema (every api agent in agents.yml is
+// validated as one), the picker and context budgeting.
 // Run: node --test tests/dispatch-config.test.mjs
 
 import "./helpers/isolate-global-config.mjs";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { after, test } from "node:test";
+import { test } from "node:test";
 
 import {
   CONTEXT_WINDOW_BUFFER,
-  DispatchConfigError,
   UNKNOWN_MODEL_CONTEXT_FALLBACK,
   availableEntries,
-  dispatchConfigPath,
   entryContextPerNom,
-  loadDispatchConfig,
   pickProvider,
   poolContextPerNom,
   resolveEntryContext,
   resolvePool,
-  stringifyDispatchConfig,
 } from "../lib/dispatch-config.mjs";
 import { dispatchConfigSchema, formatDispatchIssues, findReservedPoolName, openclawProviderId } from "../lib/dispatch-schema.mjs";
-
-const tempDirs = [];
-
-function tempNomarmyRoot(yamlText) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-dispatch-"));
-  tempDirs.push(dir);
-  fs.mkdirSync(path.join(dir, "config"), { recursive: true });
-  if (yamlText !== undefined) fs.writeFileSync(path.join(dir, "config", "providers.yml"), yamlText, "utf8");
-  // The loaders take the config directory itself (normally ~/.config/nomarmy).
-  return path.join(dir, "config");
-}
-
-after(() => {
-  for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true });
-});
 
 // --------------------------------------------------------------------------
 // schema
@@ -128,57 +107,6 @@ test("dispatchConfigSchema: a duplicate id across pools is a hard error naming b
 // loader
 // --------------------------------------------------------------------------
 
-test("loadDispatchConfig: no config/providers.yml is found:false, not an error", () => {
-  const root = tempNomarmyRoot(undefined);
-  const result = loadDispatchConfig(root);
-  assert.deepEqual(result, { found: false, path: null, config: null });
-});
-
-test("loadDispatchConfig: a valid file loads and validates", () => {
-  const root = tempNomarmyRoot(`
-pools:
-  cheap:
-    - id: local
-      provider: llama-cpp
-      weight: 10
-`);
-  const result = loadDispatchConfig(root);
-  assert.equal(result.found, true);
-  assert.equal(result.path, dispatchConfigPath(root));
-  assert.equal(result.config.pools.cheap[0].id, "local");
-});
-
-test("loadDispatchConfig: invalid YAML throws DispatchConfigError, not a raw parser exception", () => {
-  const root = tempNomarmyRoot("pools:\n  cheap: [this is not: valid: yaml");
-  assert.throws(() => loadDispatchConfig(root), DispatchConfigError);
-});
-
-test("loadDispatchConfig: a schema violation throws DispatchConfigError with readable lines", () => {
-  const root = tempNomarmyRoot(`
-pools:
-  cheap:
-    - id: sonnet
-      provider: anthropic
-      model: claude-sonnet-4-6
-      weight: 1
-`); // missing required auth_env
-  assert.throws(() => loadDispatchConfig(root), (error) => {
-    assert.ok(error instanceof DispatchConfigError);
-    assert.ok(error.errors.some((line) => line.includes("auth_env")));
-    return true;
-  });
-});
-
-test("loadDispatchConfig: an empty file is treated as an empty document, not a crash", () => {
-  const root = tempNomarmyRoot("");
-  assert.throws(() => loadDispatchConfig(root), /pools/);
-});
-
-// Regression: z.record() silently drops a key literally named "__proto__"
-// (no prototype pollution results, but the pool and every entry in it
-// vanish with zero validation error -- the opposite of this schema's own
-// "unrecognized field is a hard error" rule). Caught explicitly, before
-// schema validation, on the raw parsed object's own keys.
 test("findReservedPoolName: detects __proto__/constructor/prototype as pool names", () => {
   // A `{ __proto__: [] }` OBJECT LITERAL sets the prototype instead of
   // creating an own property (JS's own special-cased literal syntax) --
@@ -191,19 +119,6 @@ test("findReservedPoolName: detects __proto__/constructor/prototype as pool name
   assert.equal(findReservedPoolName({}), null);
   assert.equal(findReservedPoolName(null), null);
 });
-
-test("loadDispatchConfig: a pool literally named __proto__ is a clear DispatchConfigError, not a silent empty pools object", () => {
-  const root = tempNomarmyRoot("pools:\n  __proto__:\n    - id: x\n      provider: llama-cpp\n      weight: 1\n");
-  assert.throws(() => loadDispatchConfig(root), (error) => {
-    assert.ok(error instanceof DispatchConfigError);
-    assert.ok(error.errors.some((line) => line.includes("reserved")));
-    return true;
-  });
-});
-
-// --------------------------------------------------------------------------
-// availableEntries / pickProvider / resolvePool
-// --------------------------------------------------------------------------
 
 test("availableEntries: llama-cpp is always available; a hosted entry needs its auth_env set", () => {
   const pool = [
@@ -288,42 +203,18 @@ test("pickProvider: with no runningById supplied at all, capacity never excludes
 
 test("resolvePool: an unknown pool name lists the pools that DO exist", () => {
   const dispatchConfig = { found: true, config: { pools: { cheap: [{ id: "local", provider: "llama-cpp", weight: 1 }] } } };
-  assert.throws(() => resolvePool(dispatchConfig, "typo"), /unknown pool "typo" -- configured pools are: cheap/);
+  assert.throws(() => resolvePool(dispatchConfig, "typo"), /unknown api agent "typo" -- your api agents are: cheap/);
 });
 
 test("resolvePool: no pools configured at all points at `nomarmy providers add`", () => {
   const dispatchConfig = { found: false, config: null };
-  assert.throws(() => resolvePool(dispatchConfig, "cheap"), /run `nomarmy providers add` first/);
+  assert.throws(() => resolvePool(dispatchConfig, "cheap"), /run `nomarmy agents add api`/);
 });
 
-test("resolvePool: a real hit returns the pool's entries", () => {
-  const dispatchConfig = { found: true, config: { pools: { cheap: [{ id: "local", provider: "llama-cpp", weight: 1 }] } } };
-  assert.deepEqual(resolvePool(dispatchConfig, "cheap"), [{ id: "local", provider: "llama-cpp", weight: 1 }]);
-});
-
-// Regression: `pools?.["__proto__"]` on a plain object returns
-// Object.prototype itself -- truthy, even though no such pool was ever
-// configured (a real config/providers.yml can never legitimately declare
-// one; loadDispatchConfig rejects it at load time). A job's `pool` field
-// passes jobSchema's own regex fine for this exact string, so this must
-// throw the normal "unknown pool" error, not crash downstream in
-// pickProvider with "pool.filter is not a function".
 test("resolvePool: a job requesting pool \"__proto__\" gets the normal unknown-pool error, not a crash", () => {
   const dispatchConfig = { found: true, config: { pools: { cheap: [{ id: "local", provider: "llama-cpp", weight: 1 }] } } };
-  assert.throws(() => resolvePool(dispatchConfig, "__proto__"), /unknown pool "__proto__" -- configured pools are: cheap/);
+  assert.throws(() => resolvePool(dispatchConfig, "__proto__"), /unknown api agent "__proto__" -- your api agents are: cheap/);
 });
-
-test("stringifyDispatchConfig round-trips through loadDispatchConfig", () => {
-  const config = { pools: { cheap: [{ id: "local", provider: "llama-cpp", weight: 10, max_concurrent: 2 }] } };
-  const root = tempNomarmyRoot(stringifyDispatchConfig(config));
-  const result = loadDispatchConfig(root);
-  assert.equal(result.found, true);
-  assert.equal(result.config.pools.cheap[0].id, "local");
-});
-
-// --------------------------------------------------------------------------
-// model-dependent context budgeting (resolveEntryContext / entryContextPerNom / poolContextPerNom)
-// --------------------------------------------------------------------------
 
 test("resolveEntryContext: a llama-cpp entry returns null -- caller must use the local, live-probed number instead", () => {
   assert.equal(resolveEntryContext({ id: "local", provider: "llama-cpp" }), null);
@@ -455,4 +346,11 @@ test("openclawProviderId: the generic type's own id, every other type's provider
 test("resolveEntryContext: a generic entry is looked up in the catalog under its real OpenClaw id", () => {
   const resolved = resolveEntryContext(GENERIC_ENTRY, { catalog: new Map([["deepseek/deepseek-chat", 128000]]) });
   assert.deepEqual(resolved, { raw: 128000, source: "openclaw model catalog (deepseek/deepseek-chat)" });
+});
+
+test("resolvePool: a real hit returns that api agent's one-entry pool; a miss names the api agents that exist", () => {
+  const config = { found: true, config: { pools: { grok: [{ id: "grok", provider: "xai", model: "grok-4.7", weight: 1, auth_env: "K" }] } } };
+  assert.equal(resolvePool(config, "grok")[0].model, "grok-4.7");
+  assert.throws(() => resolvePool(config, "nope"), /unknown api agent "nope" -- your api agents are: grok/);
+  assert.throws(() => resolvePool(config, "__proto__"), /unknown api agent/);
 });

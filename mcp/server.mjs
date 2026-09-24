@@ -15,10 +15,11 @@ import { runQuery, formatCitations, OPS as EVIDENCE_OPS, outlineFile, findRefere
 import { loadConfig, ConfigError } from "../lib/config.mjs";
 import { resolveSandboxImage, detectPrimaryLanguage, EXEC_PATH_PREPEND } from "../lib/sandbox-images.mjs";
 import { DEFAULT_AGENT_IMAGE } from "../lib/verify.mjs";
-import { loadDispatchConfig, dispatchConfigPath, resolvePool, pickProvider, poolContextPerNom, entryContextPerNom } from "../lib/dispatch-config.mjs";
+import { resolvePool, pickProvider, poolContextPerNom, entryContextPerNom } from "../lib/dispatch-config.mjs";
 import { openclawProviderId } from "../lib/dispatch-schema.mjs";
 import { loadArmy, expandArmyRole, describeArmy, globalConfigDir } from "../lib/army.mjs";
-import { loadSubscriptionConfig, subscriptionConfigPath, resolveSubscriptionWorker, resolveSubscriptionWorkerByRole, findProviderConflicts, describeProviderConflict } from "../lib/subscription-config.mjs";
+import { loadAgents, agentsConfigPath, agentsAsDispatchConfig, agentsAsSubscriptionConfig, agentDispatchFields, describeAgent } from "../lib/agents.mjs";
+import { resolveSubscriptionWorker, findProviderConflicts, describeProviderConflict } from "../lib/subscription-config.mjs";
 import { queryModelCatalog } from "../lib/model-catalog.mjs";
 
 // Read from package.json rather than a second hardcoded literal -- the two
@@ -458,11 +459,11 @@ export function resolveReasoningApplied({ result, profile, reasoning, workerMode
   return profile === "gpt" || workerModelThinkingSupported ? reasoning : "off";
 }
 
-// providers.yml and subscriptions.yml live in ~/.config/nomarmy
-// (lib/army.mjs's globalConfigDir), outside both the dev checkout and the
-// installed copy, and are re-read whenever the file changes, so an edit
-// takes effect on the next job with no reconnect or restart. The
-// config/*.env values are still read once at module load.
+// agents.yml lives in ~/.config/nomarmy (lib/army.mjs's globalConfigDir),
+// outside both the dev checkout and the installed copy, and is re-read
+// whenever it changes, so an edit takes effect on the next job with no
+// reconnect or restart. The config/*.env values are still read once at
+// module load.
 function fileKey(filePath) {
   try { const st = fs.statSync(filePath); return `${filePath}:${st.mtimeMs}:${st.size}`; }
   catch { return `${filePath}:missing`; }
@@ -476,30 +477,48 @@ function reloadingConfig(pathFn, loadFn) {
     return value;
   };
 }
-const dispatchConfig = reloadingConfig(() => dispatchConfigPath(globalConfigDir()), () => loadDispatchConfig(globalConfigDir()));
-const subscriptionConfig = reloadingConfig(() => subscriptionConfigPath(globalConfigDir()), () => loadSubscriptionConfig(globalConfigDir()));
+const agentsConfig = reloadingConfig(() => agentsConfigPath(globalConfigDir()), () => loadAgents(globalConfigDir()));
+// The execution path below predates agents.yml and speaks in pools (an api
+// agent is a one-entry pool) and subscription workers; these adapters keep
+// it unchanged.
+const dispatchConfig = () => agentsAsDispatchConfig(agentsConfig());
+const subscriptionConfig = () => agentsAsSubscriptionConfig(agentsConfig());
 
-// The army is small and read per call: four tiny YAML files, merged fresh,
+// The army is small and read per call: three tiny YAML files, merged fresh,
 // so an edit to .nomarmy.yml or .nomarmy.local.yml applies to the next job.
 function currentArmy() {
-  return loadArmy({ projectDir, subscriptionLoaded: subscriptionConfig() });
+  return loadArmy({ projectDir });
 }
 
 /**
- * Expand every job's army_role into the concrete pool / subscription_worker
- * / profile it maps to, before admission -- so budgets, the owner check and
- * everything downstream see an ordinary job. Problems come back as refusal
- * lines, never a fallback to some other agent.
+ * Resolve every job's agent before admission: `army_role` -> that role's
+ * agent -> the internal fields the execution path reads (`profile` for the
+ * local model, `pool` for an api agent, `subscription_worker` for a
+ * subscription), so budgets, the owner check and everything downstream see
+ * an ordinary job. No agent at all means the local model. on_behalf_of is
+ * dropped for a non-subscription agent (the General can't know which
+ * roles are subscription-backed in every repo). Problems come back as
+ * refusal lines, never a fallback to some other agent.
  */
-export function expandArmyJobs(jobs, { getArmy = currentArmy } = {}) {
-  if (!jobs.some((j) => j.army_role)) return { jobs, problems: [] };
-  let army;
-  try { army = getArmy().army; }
-  catch (error) { return { jobs, problems: [error.message] }; }
+export function expandJobs(jobs, { getArmy = currentArmy, getAgents = () => agentsConfig().agents } = {}) {
   const problems = [];
+  let army = null, agents = null;
   const expanded = jobs.map((job, i) => {
-    try { return expandArmyRole(job, army); }
-    catch (error) { problems.push(jobs.length > 1 ? `job ${i + 1}: ${error.message}` : error.message); return job; }
+    try {
+      let j = job;
+      if (j.army_role) { army ??= getArmy().army; j = expandArmyRole(j, army); }
+      const { agent, ...rest } = j;
+      if (!agent) return { ...rest, profile: rest.profile ?? "coder" };
+      agents ??= getAgents();
+      const fields = agentDispatchFields(agents, agent);
+      const out = { ...rest, ...fields, agentName: agent };
+      if (!fields.subscription_worker) delete out.on_behalf_of;
+      out.profile ??= "coder";
+      return out;
+    } catch (error) {
+      problems.push(jobs.length > 1 ? `job ${i + 1}: ${error.message}` : error.message);
+      return job;
+    }
   });
   return { jobs: expanded, problems };
 }
@@ -554,18 +573,6 @@ function budgetsForSubscriptionWorker(name) {
   if (!resolved) return budgets;
   return deriveBudgets({ contextPerNom: resolved.contextPerNom, source: resolved.source, env: process.env });
 }
-// The role-based sibling: resolve role -> name first, then the exact same
-// lookup budgetsForSubscriptionWorker does. Falls back to `budgets` on an
-// unknown/duplicate/unresolvable role for the same reason that function
-// does -- resolveSubscriptionRoleSelection is where the real error belongs.
-function budgetsForSubscriptionRole(role) {
-  const loaded = subscriptionConfig();
-  if (!loaded?.found) return budgets;
-  let entry;
-  try { entry = resolveSubscriptionWorkerByRole(loaded, role); } catch { return budgets; }
-  return budgetsForSubscriptionWorker(entry.id);
-}
-
 // One in-flight-count per pool entry id, incremented/decremented around the
 // single `openclaw agent exec` call that entry backs (see runOpenClaw's use
 // below). This is deliberately NOT derived from `activeJobs` -- an implement
@@ -646,32 +653,15 @@ export function resolveSubscriptionSelection(name, onBehalfOf, reasoning, {
   const subscriptionLoaded = getSubscriptionConfig();
   const entry = resolveSubscriptionWorker(subscriptionLoaded, name);
   if (!onBehalfOf) {
-    throw new Error(`subscription_worker "${name}" requires on_behalf_of naming the specific person this job is for -- it was not supplied`);
+    throw new Error(`agent "${name}" is a subscription and requires on_behalf_of naming the specific person this job is for -- it was not supplied`);
   }
   if (onBehalfOf !== entry.owner) {
-    throw new Error(`subscription_worker "${name}" belongs to "${entry.owner}"; this job's on_behalf_of ("${onBehalfOf}") does not match -- refusing rather than silently running someone else's work under ${name}'s credential`);
+    throw new Error(`agent "${name}" belongs to "${entry.owner}"; this job's on_behalf_of ("${onBehalfOf}") does not match -- refusing rather than silently running someone else's work under ${name}'s credential`);
   }
   assertNoProviderConflict(entry.provider, getDispatchConfig(), subscriptionLoaded);
   const model = `${entry.provider}/${entry.model}`;
   const thinking = entry.thinking === false ? "off" : entry.thinking === true ? reasoning : entry.thinking;
   return { model, thinking, entry };
-}
-
-// A DETERMINISTIC alternative to resolveSubscriptionSelection's exact-name
-// lookup: "architect" always resolves to whichever one worker declares that
-// role (subscriptionConfigSchema's own superRefine already guarantees at
-// most one can), never a pick among several -- see
-// lib/subscription-schema.mjs's roleSchema comment for why that distinction
-// is the whole point. Delegates straight into resolveSubscriptionSelection
-// once the name is known, so the owner-match attestation logic exists in
-// exactly one place.
-export function resolveSubscriptionRoleSelection(role, onBehalfOf, reasoning, {
-  getSubscriptionConfig = subscriptionConfig,
-  getDispatchConfig = dispatchConfig,
-} = {}) {
-  const config = getSubscriptionConfig();
-  const entry = resolveSubscriptionWorkerByRole(config, role);
-  return resolveSubscriptionSelection(entry.id, onBehalfOf, reasoning, { getSubscriptionConfig: () => config, getDispatchConfig });
 }
 
 let cachedAmbientOpenClawConfigPath;
@@ -3070,7 +3060,6 @@ async function admit(jobs) {
   jobs.forEach((j, i) => {
     const jobBudgets = j.pool ? budgetsForPool(j.pool)
       : j.subscription_worker ? budgetsForSubscriptionWorker(j.subscription_worker)
-      : j.subscription_role ? budgetsForSubscriptionRole(j.subscription_role)
       : budgets;
     for (const p of checkBrief(j, jobBudgets)) problems.push(jobs.length > 1 ? `job ${i + 1}: ${p}` : p);
   });
@@ -3094,7 +3083,6 @@ async function admit(jobs) {
     if (fieldProblems.length === 0 && j.on_behalf_of) {
       try {
         if (j.subscription_worker) resolveSubscriptionSelection(j.subscription_worker, j.on_behalf_of, j.reasoning);
-        else if (j.subscription_role) resolveSubscriptionRoleSelection(j.subscription_role, j.on_behalf_of, j.reasoning);
       } catch (error) { problems.push(jobs.length > 1 ? `job ${i + 1}: ${error.message}` : error.message); }
     }
   });
@@ -3182,13 +3170,10 @@ export const jobSchema = z.object({
   mode: z.enum(["scout", "implement", "decompose"]).default("implement").describe("implement: edit in an isolated worktree, coordinator commits on a valid report. scout: read-only research; every finding must cite [path:start-end] and nomArmy attaches the cited lines after verifying them against the base commit. decompose: read-only; proposes 2+ independent, evidence-grounded subtasks for a broad objective instead of doing everything in one worker turn. Never auto-dispatched -- the proposal is reviewed like a scout's findings, and the coordinator makes its own separate dispatch call with whatever subtasks it chooses to use."),
   base_ref: z.string().optional(),
   timeout_seconds: z.number().int().min(30).max(1800).default(600),
-  profile: z.enum(["coder", "gpt"]).default("coder").describe("coder: Qwen3-Coder-Next by default, runs with thinking off regardless of `reasoning` (that model has no thinking mode at all, not a policy choice); if NOMARMY_WORKER_MODEL_THINKING=true (set when a different, reasoning-capable model is configured into this slot), `reasoning` takes effect exactly like on profile gpt. gpt: the gpt-oss-20b fallback, where `reasoning` always sets its thinking level."),
-  reasoning: z.enum(["low", "medium", "high"]).default("medium").describe("Thinking level passed to the worker model. Only takes effect on profile: gpt; silently ignored on the default profile: coder. Also applies on a pool-routed job, per that entry's own `thinking` flag. Default is medium, not high, on real measured evidence: on an identical ticket, gpt-oss-20b at high took 318s with 21 tool calls and 4 failures, and at medium took 62s with 9 calls and 0 failures -- high did not produce a better answer, it thrashed. A separate open-ended task made Qwen3.6-27B time out completely at high (630s, zero output) and succeed at medium. Do not raise this to high by default reasoning that more thinking should help -- it has only ever hurt or timed out in testing so far. Reach for high only after a task has already failed once at medium and the failure looks like an under-thinking problem specifically (wrong root cause, not a formatting or scope issue)."),
-  pool: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().describe("Name of a weighted multi-provider pool from config/providers.yml (e.g. \"cheap\", \"capable\" -- names are whatever that file declares). When set, OVERRIDES `profile`: nomArmy weighted-randomly picks one authenticated, under-capacity provider entry from the named pool for this job instead of using the single global worker provider/model. Omit entirely to keep today's `profile`-only behavior unchanged -- this is fully opt-in and does nothing if config/providers.yml does not exist. Refuses with a clear error (not a silent fallback to local) if the pool name is unknown, or if every entry in it is either missing its credential or already at its max_concurrent. Mutually exclusive with subscription_worker/subscription_role."),
-  subscription_worker: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().describe("Name of an entry in config/subscriptions.yml -- a worker backed by one specific person's own already-authenticated subscription (Claude Pro/Max/Team via OpenClaw's claude-cli provider, or an OpenAI ChatGPT plan via its codex provider), never a weighted-random pick the way `pool` is. OVERRIDES `profile`. Requires `on_behalf_of` naming that exact person; nomArmy refuses the job (never substitutes a different worker) if it's missing, doesn't match the entry's declared owner, or the name is unknown. Mutually exclusive with `pool` and `subscription_role`."),
-  subscription_role: z.string().min(1).max(254).optional().describe("A DETERMINISTIC alternative to `subscription_worker`: resolves to whichever one worker in config/subscriptions.yml declares this exact role (e.g. \"architect\" always the same entry -- never a pick among several, config refuses to load at all if two workers claim the same role). Same `on_behalf_of` requirement and refusal behavior as `subscription_worker`. Mutually exclusive with `pool` and `subscription_worker`."),
-  army_role: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional().describe("Dispatch by army role (e.g. \"sr-dev\", \"security-analyst\"): nomArmy picks the agent this repo assigns to that role (a subscription worker, a pool, or the local model) and puts the role's description at the top of the brief. Call the `army` tool first to see this repo's roles. Mutually exclusive with pool/subscription_worker/subscription_role. Add on_behalf_of when the role runs on a subscription worker; it's ignored otherwise."),
-  on_behalf_of: z.string().min(1).max(254).optional().describe("Required when `subscription_worker` or `subscription_role` is set: must exactly match that entry's declared owner in config/subscriptions.yml. This is a self-reported attestation, not an independently verified identity check -- nomArmy has no caller-identity boundary today, so what this actually guarantees is explicit, auditable intent and hard refusal on mismatch or omission, not cryptographic proof of who issued the call."),
+  reasoning: z.enum(["low", "medium", "high"]).default("medium").describe("Thinking level passed to the worker model. On the local model it takes effect when that model supports thinking (NOMARMY_MODEL_THINKING); on an api or subscription agent it applies per that agent's own `thinking` setting (false = off, a fixed level = always that level). Default is medium, not high, on real measured evidence: on an identical ticket, gpt-oss-20b at high took 318s with 21 tool calls and 4 failures, and at medium took 62s with 9 calls and 0 failures -- high did not produce a better answer, it thrashed. A separate open-ended task made Qwen3.6-27B time out completely at high (630s, zero output) and succeed at medium. Do not raise this to high by default reasoning that more thinking should help -- it has only ever hurt or timed out in testing so far. Reach for high only after a task has already failed once at medium and the failure looks like an under-thinking problem specifically (wrong root cause, not a formatting or scope issue)."),
+  agent: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().describe("Run on this agent from the operator's agents.yml, by name (e.g. \"codex\", \"grok\", \"local\"): the local model, a metered api key, or one person's subscription. Omit agent and army_role to use the local model. Refuses an unknown name, never falls back. Mutually exclusive with army_role. A subscription agent also requires on_behalf_of."),
+  army_role: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional().describe("Dispatch by army role (e.g. \"sr-dev\", \"security-analyst\"): nomArmy runs it on the agent this repo assigns to that role and puts the role's description at the top of the brief. Call the `army` tool first to see this repo's roles. Mutually exclusive with agent. Add on_behalf_of in case the role's agent is a subscription; it's ignored otherwise."),
+  on_behalf_of: z.string().min(1).max(254).optional().describe("Required when the job's agent is a subscription: must exactly match that agent's owner in agents.yml, or nomArmy refuses the job. A self-reported attestation, not an independently verified identity check -- nomArmy has no caller-identity boundary today, so what this guarantees is explicit, auditable intent and hard refusal on mismatch or omission, not cryptographic proof of who issued the call. Ignored for a local or api agent."),
   evidence: z.string().max(maxEvidenceChars,
     `Evidence exceeds the ${maxEvidenceChars}-character budget. This is for facts already resolved (e.g. with repo_evidence), not more description of the task -- if it needs more than this, resolve less per job or put the pointer (a path and line range) here instead of the material itself.`
   ).optional().describe("implement only: facts YOU already resolved (e.g. via repo_evidence) that the worker should trust and not re-derive -- exact signatures, call sites, line ranges, existing behavior. Cuts exploration that would otherwise burn the worker's own context budget on something you already know. Not a substitute for a clear objective and acceptance criteria."),
@@ -3204,22 +3189,12 @@ export const jobSchema = z.object({
 // codebase already lives in admit() as plain checks instead (see
 // verify_regression's own "requires a verification profile" check just
 // below) -- this follows that exact, already-established pattern.
+// Runs on an already-expanded job (see expandJobs), where the agent has
+// become `subscription_worker` for a subscription.
 export function subscriptionJobFieldProblems(args) {
   const problems = [];
   if (args.subscription_worker && !args.on_behalf_of) {
-    problems.push("subscription_worker requires on_behalf_of naming exactly who this job is for -- it was not supplied");
-  }
-  if (args.subscription_role && !args.on_behalf_of) {
-    problems.push("subscription_role requires on_behalf_of naming exactly who this job is for -- it was not supplied");
-  }
-  if (args.on_behalf_of && !args.subscription_worker && !args.subscription_role) {
-    problems.push("on_behalf_of has no effect without subscription_worker or subscription_role -- likely meant to scope a pool/profile job, which it cannot");
-  }
-  if (args.subscription_worker && args.subscription_role) {
-    problems.push("subscription_worker and subscription_role are mutually exclusive -- a job selects a worker one way or the other, never both");
-  }
-  if (args.pool && (args.subscription_worker || args.subscription_role)) {
-    problems.push("pool and subscription_worker/subscription_role are mutually exclusive -- a job selects a provider one way or the other, never both");
+    problems.push(`agent "${args.agentName ?? args.subscription_worker}" is a subscription and requires on_behalf_of naming exactly who this job is for -- it was not supplied`);
   }
   return problems;
 }
@@ -3232,17 +3207,10 @@ export function resolveVerifyRegression(args) {
   if (typeof args.verify_regression === "boolean") return args.verify_regression;
   return args.mode === "implement" && Boolean(args.verification);
 }
+// `args` is already expanded (see expandJobs): its agent is now `profile`,
+// `pool` or `subscription_worker`.
 function jobArgs(args, workerId) {
-  // subscription_role is resolved to a concrete worker name HERE, once, so
-  // everything downstream (executeJob, runOpenClaw, resolveSubscriptionSelection)
-  // only ever deals with subscriptionWorker -- "role" is purely a dispatch-
-  // time convenience for the caller, not a concept the execution path needs
-  // to know about. admit() already proved this resolves cleanly before
-  // launch() is ever reachable; this only re-throws in the rare case
-  // something changed between admission and launch, never silently falls
-  // back to a different worker.
-  const subscriptionWorker = args.subscription_worker
-    ?? (args.subscription_role ? resolveSubscriptionWorkerByRole(subscriptionConfig(), args.subscription_role).id : undefined);
+  const subscriptionWorker = args.subscription_worker;
   return { task: args.task, acceptance: args.acceptance, verification: args.verification, mode: args.mode, baseRef: args.base_ref,
     timeoutSeconds: args.timeout_seconds, profile: args.profile, reasoning: args.reasoning, pool: args.pool,
     subscriptionWorker, onBehalfOf: args.on_behalf_of, evidence: args.evidence,
@@ -3250,9 +3218,9 @@ function jobArgs(args, workerId) {
 }
 server.tool("local_worker", "Run one isolated local worker and wait for it. mode=implement edits in its own worktree and the coordinator commits only on a valid done report (or a recovered job that passed independent verification); failed or incomplete worktrees are retained. mode=scout answers a question from a read-only snapshot with mandatory [path:line] citations that nomArmy verifies and expands. mode=decompose (also read-only) proposes 2+ independent subtasks for a broad objective instead of one worker turn trying to do too much; the proposal is never auto-dispatched, review it and make a separate call with the subtasks you choose. Refuses under memory pressure or over capacity; use local_worker_start + local_worker_status to avoid blocking.", jobSchema.shape,
   async rawArgs => {
-    const army = expandArmyJobs([rawArgs]);
-    if (army.problems.length) return refusal(army.problems);
-    const [args] = army.jobs;
+    const expanded = expandJobs([rawArgs]);
+    if (expanded.problems.length) return refusal(expanded.problems);
+    const [args] = expanded.jobs;
     const { problems } = await admit([args]);
     if (problems.length) return refusal(problems);
     const r = await launch(args).promise;
@@ -3260,9 +3228,9 @@ server.tool("local_worker", "Run one isolated local worker and wait for it. mode
   });
 server.tool("local_worker_start", "Start one worker or scout in the background and return immediately with a job_id. Poll it with local_worker_status (optionally long-polling with wait_seconds). Same admission rules as local_worker: refuses under memory pressure or when NOMARMY_MAX_WORKERS jobs are already running.", jobSchema.shape,
   async rawArgs => {
-    const army = expandArmyJobs([rawArgs]);
-    if (army.problems.length) return refusal(army.problems);
-    const [args] = army.jobs;
+    const expanded = expandJobs([rawArgs]);
+    if (expanded.problems.length) return refusal(expanded.problems);
+    const [args] = expanded.jobs;
     const { problems, admission } = await admit([args]);
     if (problems.length) return refusal(problems);
     const entry = launch(args);
@@ -3326,13 +3294,11 @@ export function buildConfigSummary(repoDir, loadConfigFn = loadConfig) {
   return { found: true, valid: true, path: loaded.path, profiles, elevated: loaded.elevated,
     note: profiles.length ? null : ".nomarmy.yml exists but defines no verification profiles; verification/union_verification/verify_regression will report not_run." };
 }
-server.tool("army", "Who you, the General, call for what in this repository: the army's workflow, then each role's description, phase (build, review, acceptance), suggested mode, and the agent it runs on (a subscription worker, a pool, or the local model), with which config layer set each value (subscriptions, global, project .nomarmy.yml, local .nomarmy.local.yml). Dispatch a role with `army_role` on local_worker / local_worker_start / local_workers. Roles flagged with a problem can't be dispatched yet. Read-only, and re-read on every call.", {}, async () => {
+server.tool("army", "Who you, the General, are and who you call for what in this repository: your fixed charter and the agent you're defined as, the army's workflow, then each role's description, phase (build, review, acceptance), suggested mode, and the agent it runs on, with which config layer set each value (global, project .nomarmy.yml, local .nomarmy.local.yml). Flags roles with no usable agent, and roles that share your model or subscription (not an independent review). Dispatch a role with `army_role`, or an agent directly with `agent`. Read-only, re-read on every call.", {}, async () => {
   try {
-    const loaded = currentArmy();
-    let subscriptionLoaded = null, dispatchLoaded = null;
-    try { subscriptionLoaded = subscriptionConfig(); } catch { /* reported by its own tools */ }
-    try { dispatchLoaded = dispatchConfig(); } catch { /* reported by its own tools */ }
-    const summary = describeArmy(loaded, { subscriptionLoaded, dispatchLoaded });
+    const agents = agentsConfig().agents;
+    const summary = describeArmy(currentArmy(), { agents, describeAgent });
+    summary.agents = Object.fromEntries(Object.entries(agents).map(([name, agent]) => [name, describeAgent(agent)]));
     return toolText(JSON.stringify(summary, null, 2));
   } catch (error) {
     return toolText(error.message, true);
@@ -3351,9 +3317,9 @@ server.tool("local_workers", "Run independent jobs (implement or scout) with bou
     "Verification profile NAME to run once against the union branch after merging (same semantics as each job's own `verification` field). Only meaningful with auto_union: true. Omitted: union-level verification is explicitly not_run and reported as such, never silently skipped."
   )
 }, async ({ jobs: rawJobs, max_parallel, auto_union, union_verification }) => {
-  const army = expandArmyJobs(rawJobs);
-  if (army.problems.length) return refusal(army.problems);
-  const { jobs } = army;
+  const expanded = expandJobs(rawJobs);
+  if (expanded.problems.length) return refusal(expanded.problems);
+  const { jobs } = expanded;
   const { problems } = await admit(jobs);
   let forcedBase = null;
   if (auto_union) {

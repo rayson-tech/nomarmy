@@ -35,17 +35,6 @@ llama.cpp/
 *.pem
 *.key
 
-# config/providers.yml is `nomarmy providers add`'s own output -- one
-# operator's personal choice of pools/providers/weights, never a raw
-# credential (only an env var NAME) but still local-only config, not
-# something to ship or commit. config/providers.yml.example is the
-# tracked template.
-config/providers.yml
-# Same reasoning as config/providers.yml above: no raw credential (OpenClaw
-# owns that entirely), but real personal identity (owner) and one operator's
-# own worker names -- local-only. config/subscriptions.yml.example is the
-# tracked template.
-config/subscriptions.yml
 *.p12
 *.pfx
 id_rsa*

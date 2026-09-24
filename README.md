@@ -138,109 +138,84 @@ nomarmy model
 
 Offers three measured choices (Qwen3-Coder-Next, gpt-oss-20b, Qwen3.6-27B: see `docs/experiments/2026-09-20-model-bakeoff-and-economics.md`) or a Hugging Face search. Also offers to resync the MCP registration and restart inference in the same command: all three (config, registration, running process) need to agree, and it's easy for them to drift silently otherwise.
 
-## Multi-provider dispatch pools
+## Agents: every model a job can run on
 
-Optional: `~/.config/nomarmy/providers.yml` adds named, weighted pools of *several* providers a job can dispatch against instead of the single global worker model: routine work stays local and free, harder work opts into a paid frontier one.
+One list, `~/.config/nomarmy/agents.yml` (or `NOMARMY_CONFIG_DIR`), names each model and says how to reach it. There are three kinds:
 
-```bash
-nomarmy providers add     # interactive wizard
-nomarmy providers list
-```
-
-| Provider | Auth | Needs `base_url`? |
+| Kind | What it is | Set up with |
 |---|---|---|
-| `llama-cpp` | none (local server) | no |
-| `anthropic` / `openai` / `xai` / `deepinfra` | native OpenClaw onboarding | no |
-| `openclaw` | any other OpenClaw provider, named by `openclaw_provider` (e.g. `deepseek`); optional `plugin` is installed first when it isn't stock | no |
-| `bedrock` / `azure-openai` / `openai-compatible` | custom endpoint | yes |
+| `local` | the local llama-server model. `local` is built in; add `local-gpt` for the gpt slot | nothing |
+| `api` | a metered API key: `xai`, `openai`, `anthropic`, `deepinfra`, `bedrock` / `azure-openai` / `openai-compatible` (need `base_url`), or `openclaw` for any other OpenClaw provider by id (e.g. DeepSeek, with an optional `plugin` installed first) | `nomarmy agents add api` |
+| `subscription` | **one person's own** Claude, ChatGPT or Muse Code plan; never pooled, and every job must name its owner | `nomarmy agents add subscription claude\|codex\|meta` |
+
+```bash
+nomarmy agents add        # asks which kind, then walks through it
+nomarmy agents list
+nomarmy agents update codex --json --model gpt-6-sol
+```
+
+`agents add` does the whole chain for each kind, asking only when something needs doing. For an **api** agent it registers the key with OpenClaw over stdin (typed once, or read from the env var you name) and makes a test call; `agents.yml` only ever holds the variable's *name*. For a **subscription** it installs the vendor CLI if missing (`@openai/codex`; Claude Code and Muse Code have their own installers), runs that CLI's login, updates OpenClaw and installs its plugin when the vendor needs one, runs OpenClaw's own login where needed, lists the real models, defaults the owner to the account you logged in as, and makes a real one-token test call before saving. For Meta it also copies the key Muse Code's login minted into the macOS keychain into OpenClaw over stdin (Meta's docs say only that auto-connected key is flat-rate; hand-made keys bill pay-as-you-go). nomArmy starts each login; the vendor CLI and OpenClaw do the authenticating.
 
 ```yaml
-# ~/.config/nomarmy/providers.yml
-pools:
-  cheap:
-    - id: local
-      provider: llama-cpp
-      weight: 10
-  capable:
-    - id: anthropic-sonnet
-      provider: anthropic
-      model: claude-sonnet-4-6
-      weight: 2
-      auth_env: NOMARMY_ANTHROPIC_API_KEY
+# ~/.config/nomarmy/agents.yml   (see config/agents.yml.example)
+agents:
+  grok:   { kind: api, provider: xai, model: grok-4.7, auth_env: NOMARMY_XAI_API_KEY, thinking: high }
+  claude: { kind: subscription, provider: claude-cli, model: claude-sonnet-5, owner: you@example.com }
+  codex:  { kind: subscription, provider: openai, model: gpt-6-astra, owner: you@example.com }
 ```
 
-A pool entry never carries a raw credential, only `auth_env` (the name of an env var). Selection is weighted-random among currently-authenticated entries. Each entry gets its own `max_concurrent`; pool jobs get a separate concurrency ceiling (`NOMARMY_MAX_POOL_WORKERS`) additive to local workers. A hosted entry's context window is looked up from OpenClaw's own model catalog (with a safety margin), not a hand-maintained table: override with `context_window` for a model newer than that catalog knows. `thinking` on an entry can be a fixed level (`"high"`), not just true/false, when that tier should always reason hard regardless of what a job requests.
+A job picks an agent through a role (`army_role`, below) or directly (`agent: "codex"`); with neither it runs on `local`. Nothing picks between agents at random. Changes apply to the next job with no restart, except that a **new** api agent needs one `nomarmy connect claude` so the MCP server sees its key variable (`agents add` offers to do it).
 
-Dispatch with `local_worker`'s `pool` field (`pool: "cheap"`); omitting it keeps today's `profile`-only behavior unchanged.
+**Settings**: `max_concurrent` (default 2 for api, 1 for a subscription: a personal session was never provisioned for parallel automation); `thinking` (`true` follows the job's level, `false` is off, or a fixed `low`/`medium`/`high`); `context_window` to override OpenClaw's catalog for a model newer than it knows (otherwise the catalog value is used, with a safety margin). Api jobs get their own concurrency ceiling (`NOMARMY_MAX_POOL_WORKERS`), additive to local workers.
 
-**Honest gaps**: `worker_cost_usd` in job metrics is best-effort, not authoritative. `anthropic`/`openai`/`xai`/`deepinfra`/`openclaw`'s native onboarding is built from documented `--help` output and isn't verified against a real credential for every one: `nomarmy providers add` says so and points at `openclaw models list` to confirm.
+**Why subscriptions are individual, never pooled**: Anthropic's terms distinguish "individual experimentation and automation" (sanctioned, including third-party apps through the Agent SDK; per-seat and non-transferable across Pro, Max, Team and Enterprise) from "teams running shared production automation" (use the metered API). So a subscription agent is one named person's, a job on it must say `on_behalf_of: "<owner>"` or it's refused, and nothing ever load-balances across subscriptions.
 
-**Picking a tier**: `cheap` (local) for a bounded change against a written spec with a test. `capable` (hosted) when the design is settled but needs real comprehension the brief doesn't quote. No pool, frontier coordinator, when the answer isn't known yet or spans several files. `cheap` never leaves your machine; `capable` sends code to a third party: that's a decision about where source travels, separate from the trust boundary.
+**One credential per provider id**: OpenAI, Meta and xAI keep the subscription and the API key under the same OpenClaw provider id, so `agents.yml` refuses an api agent and a subscription agent on the same one (and `agents add subscription` stops before any login). Only Claude never collides: its subscription is `claude-cli`, its API key is `anthropic`. A ChatGPT plan runs as `openai/<model>` on the OAuth profile the Codex login imports.
 
-## Subscription-backed individual workers
+**Vendor status**: Claude is live-verified end to end. OpenAI (ChatGPT via Codex): a real completion through `openai/gpt-6-astra` is confirmed; a full nomArmy dispatch and OpenAI's own usage-policy text are still unverified. Meta Muse Code is wired but not yet live-verified, and macOS only for now. xAI subscriptions are out of scope until its terms are resolved (an xAI API key is fine). Api providers other than `xai` are built from OpenClaw's documented interface and not all verified against a real key.
 
-Optional, and a genuinely different thing from a dispatch pool above: `~/.config/nomarmy/subscriptions.yml` names a worker backed by **one specific person's own already-authenticated subscription** -- a Claude Pro/Max/Team seat, or an OpenAI ChatGPT plan via Codex -- never a shared credential, and never weighted-random capacity the way a pool entry is. A subscription worker is always addressed by name (or a fixed role), always requires an explicit `on_behalf_of` naming the exact person it's for, and nomArmy refuses the job outright -- never substitutes a different worker -- if that's missing or doesn't match.
+**Picking an agent**: `local` for a bounded change against a written spec with a test; it never leaves your machine. An api or subscription agent when the work needs more than the local model, knowing it sends code to that vendor: a decision about where source travels, separate from the trust boundary. The coordinator itself when the answer isn't known yet.
+
+**Honest gaps**: `worker_cost_usd` in job metrics is best-effort, not authoritative. `on_behalf_of` is a self-reported attestation, not an independently verified identity check; nomArmy has no caller-identity boundary today. See [Security posture](#security-posture) / `SECURITY.md`.
+
+## The army: who does what
+
+The **General** is your coordinator session (Claude Code, Codex, Cursor). Its charter is fixed by nomArmy, not configured: it plans and decomposes, makes the architecture and security decisions, briefs and dispatches each role, reviews every result against nomArmy's verified record, owns Git and integration, and gives final acceptance. It runs outside every sandbox and is never dispatched to. What you *do* define is which agent it is, after your agents exist:
 
 ```bash
-nomarmy subscriptions setup claude   # or: codex
+nomarmy agents add subscription claude   # e.g. an `opus` agent for your Claude seat
+nomarmy army general opus
 ```
 
-That one command does the whole chain, asking only when something actually needs doing: installs the vendor's own CLI if it's missing (`@openai/codex`; Claude Code has its own installer), runs that CLI's login, updates OpenClaw and installs its plugin when the vendor needs one, lists the real models to pick from, defaults the owner to the account you just logged in as, and makes a real one-token test call before it saves anything. Logins open a browser or print a device code, so it needs a real terminal. nomArmy starts each login; the vendor CLI and OpenClaw do the authenticating, and nomArmy never sees a token.
+That lets nomArmy flag a role on the General's own agent (a review that isn't independent) or on the same subscription login (the same usage limit).
+
+Every other role is yours to define: a name, a description of when the General calls it, a phase, and the agent it runs on.
 
 ```bash
-nomarmy subscriptions list
-nomarmy subscriptions add     # lower-level: write an entry for a credential you set up yourself
+nomarmy army init                              # the default roster, globally
+nomarmy army assign sr-dev codex               # by agent name
+nomarmy army assign ui-ux codex --project      # this repo, committed
+nomarmy army assign pm grok --local            # just you, just this repo
+nomarmy army show                              # the General, the roster, and which layer set what
 ```
 
-```yaml
-# ~/.config/nomarmy/subscriptions.yml
-workers:
-  you-claude:
-    provider: claude-cli
-    model: claude-sonnet-5
-    owner: "you@example.com"
-    role: senior-dev
-```
+The default roster follows a normal SDLC: the **Sr Dev** does the first cut, handing simple work to **Jr Devs** and keeping the harder implementation; **UI/UX** gets UI work. Once the General hears the build is done, it calls the specialists who apply (**data architect**: star schema / medallion; **security analyst**), then the **PM** reviews against the plan, then the **PO** and **stakeholders** test end to end. Not every role runs every time. Every role starts on `local`; reassign whichever you like.
 
-Dispatch with `local_worker`'s `subscription_worker` field plus `on_behalf_of` (`subscription_worker: "you-claude", on_behalf_of: "you@example.com"`) -- mutually exclusive with `pool`.
-
-**Roles**: an entry can also declare a `role` (e.g. `role: "architect"`), letting a job dispatch with `subscription_role: "architect"` instead of naming the worker directly -- always the *same* entry for that role, never a pick among several (two entries claiming the same role is a config error, refused at load time). This is a fixed assignment, not a weighted one: "architecture always goes to Opus, UI work always goes to Codex" is one person choosing the right dedicated tool per kind of task -- the same choice they'd make by hand, automated for convenience -- not load-balanced capacity across interchangeable subscriptions.
-
-**Why this exists as a separate mechanism, not another pool provider type**: Anthropic's own terms distinguish "individual experimentation and automation" (sanctioned, including third-party apps authenticating through the Agent SDK -- per-user/per-seat and non-transferable across Pro, Max, Team, and Enterprise alike) from "teams running shared production automation" (should use the metered API instead). A pool's weighted-random selection is fundamentally an interchangeability engine; folding a personal subscription into it would put it one config change away from becoming exactly the pooled-team-capacity pattern that distinction exists to keep separate.
-
-**Vendor status**: Claude is live-verified end to end. OpenAI (ChatGPT plan via Codex) is wired: a real completion through `openai/gpt-6-astra` on the Codex-imported OAuth profile is confirmed, but a full nomArmy dispatch and OpenAI's own primary usage-policy text are both still unverified. Meta Muse Code is wired: its OpenClaw plugin only takes an API key, but Muse Code's own login mints a subscription-covered key into the macOS keychain, and `nomarmy subscriptions setup meta` copies that key into OpenClaw over stdin (Meta's docs say only that auto-connected key is flat-rate; hand-made keys bill pay-as-you-go). Not yet live-verified, and macOS only for now. DeepSeek has no subscription plan; add it as a pool entry with the generic `openclaw` type. xAI is out of scope until its terms are resolved.
-
-**One credential per provider id**: OpenAI, Meta and xAI use the same OpenClaw provider id for the subscription and the API key, so a pool entry and a subscription worker on the same provider would be ambiguous about which credential runs. nomArmy refuses to dispatch either side of that conflict, `subscriptions list` flags it, and `subscriptions setup` stops before any login. Only Claude (`claude-cli` vs `anthropic`) uses distinct ids and never collides. A ChatGPT plan runs as `openai/<model>` on the OAuth profile the Codex login imports, so it conflicts with an `openai` API-key pool entry.
-
-**Honest gap**: `on_behalf_of` is a self-reported attestation, not an independently verified identity check -- nomArmy has no caller-identity boundary today. What it guarantees is explicit, auditable intent and hard refusal on a mismatch, not cryptographic proof of who issued the call. See [Security posture](#security-posture) / `SECURITY.md`.
-
-## The army: who the General calls for what
-
-The **General** is your coordinator session (Claude Code, Codex): it plans, briefs, dispatches, reviews and accepts, runs outside every sandbox, and is never a worker. Every other role is yours to define: a name, a description of when the General calls it, a phase, and the one agent it runs on (a subscription worker, a pool, or the local model).
-
-```bash
-nomarmy army init                                   # the default roster, globally
-nomarmy army assign ui-ux worker:codex --project    # this repo sends UI work to Codex
-nomarmy army assign sr-dev pool:capable --local     # just you, just this repo
-nomarmy army show                                   # merged roster, and which layer set what
-```
-
-The default roster follows a normal SDLC: the **Sr Dev** does the first cut, handing simple work to **Jr Devs** and keeping the harder implementation; **UI/UX** gets UI work. Once the General hears the build is done, it calls the specialists who apply (**data architect**: star schema / medallion; **security analyst**), then the **PM** reviews against the plan, then the **PO** and **stakeholders** test end to end. Not every role runs every time. Every role starts on the local model; reassign whichever you like.
-
-A job dispatches with `army_role: "security-analyst"`: nomArmy picks that role's agent and heads the brief with its description. The General reads the roster through the read-only `army` MCP tool. Edits apply to the next job, with no reconnect or restart.
+A job dispatches with `army_role: "security-analyst"`: nomArmy runs it on that role's agent and heads the brief with the role's description. The General reads everything through the read-only `army` MCP tool. Edits apply to the next job, no restart.
 
 **Config layers**, merged like Claude Code's settings (later wins, field by field):
 
 | Layer | File | Committed | Holds |
 |---|---|---|---|
-| subscriptions | `subscriptions.yml` worker `role:` fields | no | legacy roles |
-| global | `~/.config/nomarmy/config.yml` | no | your default army |
-| project | `<repo>/.nomarmy.yml` (`army:` section, beside `verification:`) | yes | the team's roles for this repo |
+| global | `~/.config/nomarmy/config.yml` | no | your default army and your General |
+| project | `<repo>/.nomarmy.yml` (`army:` section, beside `verification:`) | yes | the team's roles for this repo (never the General) |
 | local | `<repo>/.nomarmy.local.yml` | no, and a tracked copy is refused | your overrides for this repo |
 
-Workers, pools and every credential stay global, in `~/.config/nomarmy/providers.yml` and `subscriptions.yml` (or `NOMARMY_CONFIG_DIR`). An army section can only **pick among** agents you defined globally: it has no field for a credential, endpoint, owner or provider, so a hostile `.nomarmy.yml` in a cloned repo can at worst route a job to one of your own agents. That's also why a project file names workers generically (`worker:codex`, not `worker:jason-codex`): each teammate defines a worker by that name in their own global config, on their own login.
+An army section can only **name agents**: it has no field for a credential, endpoint, owner or provider, so a hostile `.nomarmy.yml` in a cloned repo can at worst route a job to one of your own agents. That's also why a project file uses generic agent names (`codex`, not `jason-codex`): each teammate defines an agent by that name in their own `agents.yml`, on their own login.
 
-**Shared machines (a team DGX Spark)**: give each person their own OS account. Subscription logins live in that account's home directory (`~/.claude`, `~/.codex`, OpenClaw's auth store, the OS keychain), never in any nomArmy file, so each teammate's coordinator session only ever reaches their own subscriptions. nomArmy refuses a global `providers.yml` or `subscriptions.yml` that another account owns or can write. One shared OS account for several people is the pooling this design exists to prevent, and `on_behalf_of` can't detect it. Also note that each session's MCP server counts only its own jobs, so on a shared machine `NOMARMY_MAX_WORKERS` doesn't cap the machine as a whole yet.
+**Shared machines (a team DGX Spark)**: give each person their own OS account. Subscription logins live in that account's home directory (`~/.claude`, `~/.codex`, OpenClaw's auth store, the OS keychain), never in any nomArmy file, so each teammate's coordinator session only ever reaches their own subscriptions. nomArmy refuses an `agents.yml` that another account owns or can write. One shared OS account for several people is the pooling this design exists to prevent, and `on_behalf_of` can't detect it. Each session's MCP server counts only its own jobs, so on a shared machine `NOMARMY_MAX_WORKERS` doesn't cap the machine as a whole yet.
+
+**The sandbox and the network**: a worker's sandbox has no network (`network: none`), which covers its shell, file edits and test commands: no `npm install` of a new package, no `curl`. The model call itself is made by OpenClaw on the host, so an api or subscription agent reaches its vendor normally.
 
 ## The `nomarmy` CLI
 
@@ -254,9 +229,8 @@ Every command proposes before writing anything: explicit `[y/N]` confirmation, o
 | `nomarmy setup` | Detect the machine, recommend a profile, choose a model, write config. Prints (never runs) `install.sh`. |
 | `nomarmy init` | Propose `.nomarmy.yml` from scan evidence. |
 | `nomarmy model` | Change the model later. See [Swapping models](#swapping-models). |
-| `nomarmy providers list/add/update/remove/validate` | Manage `providers.yml`. See [above](#multi-provider-dispatch-pools). |
-| `nomarmy subscriptions setup/list/add/update/remove` | Manage `subscriptions.yml`. See [above](#subscription-backed-individual-workers). |
-| `nomarmy army show/init/assign` | The role roster and its layers. See [above](#the-army-who-the-general-calls-for-what). |
+| `nomarmy agents list/add/update/remove` | Every model a job can run on. See [above](#agents-every-model-a-job-can-run-on). |
+| `nomarmy army show/init/assign/general` | The General, the role roster and its layers. See [above](#the-army-who-does-what). |
 | `nomarmy config paths` | Where each config file lives. |
 | `nomarmy update` | Pull latest (fast-forward only) and resync the installed MCP copy. |
 | `nomarmy connect [claude] [cursor] [codex]` | (Re-)register the MCP server. No target: interactive multi-select. |
@@ -375,8 +349,9 @@ Bounded-delegation core is proven: coordinator-owned Git, isolated worktrees, re
 | Full-stack thesis test | 7 tickets across 3 local models: task-size-dependent, not unconditionally true. A separate adversarial single-night run initially scored 2 clean of 7; recounted after excluding 2 jobs an idle-diff harness bug (since fixed) had killed, it was 5 clean of 5, with per-job corrections trending to zero as the brief improved, not the model. See [How nomArmy works](#how-nomarmy-works-and-why) for what actually survived that recount |
 | Swapping the active local model | Working |
 | Go/Rust target repos | Verification live-verified; worker's own tool execution uses one global sandbox config |
-| Multi-provider dispatch pools | Live-verified for `llama-cpp` and `xai`; other native providers unverified against real credentials |
-| Subscription-backed individual workers (`subscriptions setup`, roles) | Claude live-verified end to end (real dispatch by name and by role); OpenAI Codex and Meta Muse Code wired, not yet live-verified |
+| Agents (`agents.yml`): api keys | Live-verified for `xai`; other providers unverified against real keys |
+| Agents: individual subscriptions | Claude live-verified end to end; OpenAI (Codex) test call confirmed; Meta Muse Code wired, not yet live-verified |
+| The army (roles, the General, layers) | Unit- and CLI-tested; not yet driven by a real coordinator session |
 
 Known limitations: verification profiles needing services beyond `environment: none` report `not_run` rather than executing without them; the environment scanner's Compose parser doesn't resolve YAML anchors/aliases.
 
@@ -395,7 +370,7 @@ Every job takes the same shape: a `task`, optional `acceptance`, a `mode`, a tim
 | `local_worker_cleanup` | Remove one worktree/branch. Recognizes a cherry-picked branch as integrated by content, not just ancestry. |
 | `local_worker_sweep` | Bulk-reap worktrees that are provably empty (zero commits, nothing uncommitted), any age. `dry_run` previews. |
 | `local_worker_config` | Surface `.nomarmy.yml`'s verification profiles. |
-| `army` | The merged role roster for this repo: descriptions, phases, each role's agent, and which layer set it. |
+| `army` | The General's charter and agent, then this repo's roles: descriptions, phases, each role's agent, which layer set it, and overlaps with the General. |
 
 **Admission**: context-per-nom bounds brief/report size; free memory bounds whether a new job starts at all.
 

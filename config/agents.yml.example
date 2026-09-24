@@ -1,0 +1,64 @@
+# ~/.config/nomarmy/agents.yml (or $NOMARMY_CONFIG_DIR/agents.yml)
+#
+# Every model a nomArmy job can run on, by name. You rarely edit this by
+# hand: `nomarmy agents add` walks through each kind (key registration,
+# vendor logins, a real test call) and writes it for you.
+#
+# Roles point at these names (`nomarmy army assign sr-dev codex`), and so
+# does a job directly (agent: "codex"). Nothing ever picks between agents
+# at random.
+#
+# `local` (the coder slot) is built in; you only list it to change it.
+#
+# Security: this file never holds a credential. An api agent names the
+# environment variable its key was registered from (the key itself lives in
+# OpenClaw's own store); a subscription agent's login lives in the vendor
+# CLI's own session or your OS keychain. nomArmy refuses to load this file
+# if another OS account owns it or can write to it.
+
+agents:
+  # The local model's gpt slot (NOMARMY_WORKER_MODEL_FALLBACK).
+  local-gpt:
+    kind: local
+    slot: gpt
+
+  # A metered API key. provider is one of: xai, openai, anthropic,
+  # deepinfra, bedrock / azure-openai / openai-compatible (need base_url),
+  # or openclaw for any other OpenClaw provider by id:
+  #   provider: openclaw
+  #   openclaw_provider: deepseek
+  #   plugin: clawhub:@openclaw/deepseek-provider   # if it isn't built in
+  grok:
+    kind: api
+    provider: xai
+    model: grok-4.7
+    auth_env: NOMARMY_XAI_API_KEY   # the variable's NAME, never the key
+    thinking: high                  # true = follow the job, false = off, or a fixed level
+    # max_concurrent: 2
+    # context_window: 500000        # only for a model newer than OpenClaw's catalog
+
+  # ONE person's own subscription, never pooled: every job on it must name
+  # this owner in on_behalf_of. Set up with `nomarmy agents add subscription
+  # claude|codex|meta`.
+  claude:
+    kind: subscription
+    provider: claude-cli            # Claude Pro/Max/Team seat
+    model: claude-sonnet-5
+    owner: "you@example.com"
+  codex:
+    kind: subscription
+    provider: openai                # ChatGPT plan, via the Codex login
+    model: gpt-6-astra
+    owner: "you@example.com"
+  muse:
+    kind: subscription
+    provider: meta                  # Muse Code subscription
+    model: muse-spark-1.3
+    owner: "you@example.com"
+    # max_concurrent: 1             # the default for a subscription
+
+# One OpenClaw provider id holds one credential. OpenAI, Meta and xAI use the
+# same id for the subscription and the API key, so an api agent and a
+# subscription agent on the same provider are refused. Here, `grok` (xai)
+# means you can't also add an xAI subscription agent. Claude never collides:
+# its subscription is claude-cli, its API key is anthropic.

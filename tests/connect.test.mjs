@@ -294,26 +294,26 @@ test("connectClaude: config/common.env's model keys are added even with no prior
 // connect call") must get its auth_env picked up automatically on every
 // later connect (a model swap, `nomarmy update`, a fresh install), not only
 // if an operator remembers `--update-mcp` at the moment they added it.
-test("derivePoolAuthEnvPlaceholders: collects auth_env across every pool, as placeholders never the real value", () => {
+test("derivePoolAuthEnvPlaceholders: collects every api agent's auth_env (and nothing for subscriptions), as placeholders never the real value", () => {
   const nomarmyRoot = fakeRoot();
   fs.mkdirSync(path.join(nomarmyRoot, "config"), { recursive: true });
-  fs.writeFileSync(path.join(nomarmyRoot, "config", "providers.yml"), `
-pools:
-  cheap:
-    - id: local
-      provider: llama-cpp
-      weight: 1
-  capable:
-    - id: grok
-      provider: xai
-      model: grok-4.6
-      weight: 1
-      auth_env: NOMARMY_XAI_API_KEY
-    - id: sonnet
-      provider: anthropic
-      model: claude-sonnet-4-6
-      weight: 1
-      auth_env: NOMARMY_ANTHROPIC_API_KEY
+  fs.writeFileSync(path.join(nomarmyRoot, "config", "agents.yml"), `
+agents:
+  grok:
+    kind: api
+    provider: xai
+    model: grok-4.6
+    auth_env: NOMARMY_XAI_API_KEY
+  sonnet:
+    kind: api
+    provider: anthropic
+    model: claude-sonnet-4-6
+    auth_env: NOMARMY_ANTHROPIC_API_KEY
+  codex:
+    kind: subscription
+    provider: openai
+    model: gpt-6-astra
+    owner: you@example.com
 `);
   try {
     assert.deepEqual(derivePoolAuthEnvPlaceholders(path.join(nomarmyRoot, "config")), {
@@ -325,22 +325,22 @@ pools:
   }
 });
 
-test("derivePoolAuthEnvPlaceholders: no config/providers.yml (or an invalid one) contributes nothing, not an error", () => {
+test("derivePoolAuthEnvPlaceholders: no agents.yml (or an invalid one) contributes nothing, not an error", () => {
   const nomarmyRoot = fakeRoot();
   try {
     assert.deepEqual(derivePoolAuthEnvPlaceholders(path.join(nomarmyRoot, "config")), {});
     fs.mkdirSync(path.join(nomarmyRoot, "config"), { recursive: true });
-    fs.writeFileSync(path.join(nomarmyRoot, "config", "providers.yml"), "pools:\n  broken: [this is not: valid: yaml");
+    fs.writeFileSync(path.join(nomarmyRoot, "config", "agents.yml"), "agents:\n  broken: [this is not: valid: yaml");
     assert.deepEqual(derivePoolAuthEnvPlaceholders(path.join(nomarmyRoot, "config")), {});
   } finally {
     fs.rmSync(nomarmyRoot, { recursive: true, force: true });
   }
 });
 
-test("connectClaude: a pool entry's auth_env is baked in automatically, with no extraEnv needed at all", () => {
+test("connectClaude: an api agent's auth_env is baked in automatically, with no extraEnv needed at all", () => {
   const nomarmyRoot = fakeRoot();
   fs.mkdirSync(path.join(nomarmyRoot, "config"), { recursive: true });
-  fs.writeFileSync(path.join(nomarmyRoot, "config", "providers.yml"), "pools:\n  capable:\n    - id: grok\n      provider: xai\n      model: grok-4.6\n      weight: 1\n      auth_env: NOMARMY_XAI_API_KEY\n");
+  fs.writeFileSync(path.join(nomarmyRoot, "config", "agents.yml"), "agents:\n  grok:\n    kind: api\n    provider: xai\n    model: grok-4.6\n    auth_env: NOMARMY_XAI_API_KEY\n");
   const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
   const calls = [];
   try {
@@ -356,7 +356,7 @@ test("connectClaude: a pool entry's auth_env is baked in automatically, with no 
 test("connectClaude: an already-registered real value for a pool's auth_env is never clobbered by the derived placeholder", () => {
   const nomarmyRoot = fakeRoot();
   fs.mkdirSync(path.join(nomarmyRoot, "config"), { recursive: true });
-  fs.writeFileSync(path.join(nomarmyRoot, "config", "providers.yml"), "pools:\n  capable:\n    - id: grok\n      provider: xai\n      model: grok-4.6\n      weight: 1\n      auth_env: NOMARMY_XAI_API_KEY\n");
+  fs.writeFileSync(path.join(nomarmyRoot, "config", "agents.yml"), "agents:\n  grok:\n    kind: api\n    provider: xai\n    model: grok-4.6\n    auth_env: NOMARMY_XAI_API_KEY\n");
   const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
   const calls = [];
   const existingEnvOutput = ["nomarmy-local-worker:", "  Environment:", "    NOMARMY_XAI_API_KEY=some-non-placeholder-value", ""].join("\n");
