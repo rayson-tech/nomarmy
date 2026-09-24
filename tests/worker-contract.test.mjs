@@ -3212,11 +3212,14 @@ const FAKE_AGENTS = {
   "local-gpt": { kind: "local", slot: "gpt" },
   grok: { kind: "api", provider: "xai", model: "grok-4.7", auth_env: "K" },
   codex: { kind: "subscription", provider: "openai", model: "gpt-6-astra", owner: "you@example.com" },
+  sub: { kind: "subscription", provider: "claude-cli", owner: "you@example.com" },
 };
 const FAKE_ARMY = { army: { roles: {
   "sr-dev": { description: "First cut.", phase: "build", agent: "codex" },
   pm: { phase: "review", agent: "grok" },
   po: {},
+  "ui-ux": { agent: "sub", model: "gpt-6-astra" },
+  qa: { agent: "sub", model: "auto" },
 } } };
 const expandWith = (jobs) => expandJobs(jobs, { getArmy: () => FAKE_ARMY, getAgents: () => FAKE_AGENTS });
 
@@ -3250,6 +3253,49 @@ test("expandJobs: a role resolves through its agent, with the brief headed by th
   assert.equal(jobs[0].subscription_worker, "codex");
   assert.match(jobs[0].task, /^\[nomArmy role: sr-dev, build phase\]\nFirst cut\.\n\nbuild it$/);
   assert.equal(jobs[1].pool, "grok");
+});
+
+test("expandJobs: the model is the job's, then the role's (unless auto), then the agent's default", () => {
+  const { jobs, problems } = expandWith([
+    { task: "t", army_role: "sr-dev", on_behalf_of: "you@example.com" },
+    { task: "t", army_role: "ui-ux", on_behalf_of: "you@example.com" },
+    { task: "t", army_role: "ui-ux", model: "gpt-6-sol", on_behalf_of: "you@example.com" },
+    { task: "t", army_role: "qa", model: "claude-opus-5", on_behalf_of: "you@example.com" },
+  ]);
+  assert.deepEqual(problems, []);
+  assert.deepEqual(jobs.map((j) => j.model), ["gpt-6-astra", "gpt-6-astra", "gpt-6-sol", "claude-opus-5"]);
+  assert.equal(jobs[0].roleModel, undefined, "an internal field, not passed on");
+});
+
+test("expandJobs: auto with no job model, a model on the local agent, and a model with no agent all refuse", () => {
+  const { problems } = expandWith([
+    { task: "t", army_role: "qa", on_behalf_of: "you@example.com" },
+    { task: "t", agent: "local", model: "x" },
+    { task: "t", model: "gpt-6-sol" },
+  ]);
+  assert.match(problems[0], /^job 1: role "qa" leaves the model to you \(auto\)/);
+  assert.match(problems[1], /^job 2: agent "local" is the local model/);
+  assert.match(problems[2], /^job 3: model "gpt-6-sol" needs an agent/);
+});
+
+test("resolveSubscriptionSelection / resolvePoolSelection: a job's model overrides the agent's default, and no model at all refuses", () => {
+  const sub = resolveSubscriptionSelection("w", "o@example.com", "medium", {
+    getSubscriptionConfig: () => fakeSubscriptionConfig({ w: { provider: "openai", owner: "o@example.com", thinking: true } }),
+    model: "gpt-6-sol",
+  });
+  assert.equal(sub.model, "openai/gpt-6-sol");
+  assert.throws(() => resolveSubscriptionSelection("w", "o@example.com", "medium", {
+    getSubscriptionConfig: () => fakeSubscriptionConfig({ w: { provider: "openai", owner: "o@example.com", thinking: true } }),
+  }), /has no default model and this job named none/);
+  const pooled = resolvePoolSelection("grok", "medium", {
+    getDispatchConfig: () => fakeDispatchConfig({ grok: [{ id: "grok", provider: "xai", model: "grok-4.7", weight: 1, auth_env: "X", thinking: true }] }),
+    pickProviderFn: (pool) => pool[0], model: "grok-5",
+  });
+  assert.equal(pooled.model, "xai/grok-5");
+});
+
+test("jobSchema: model is a public job field", () => {
+  assert.ok(Object.keys(jobSchema.shape).includes("model"));
 });
 
 test("expandJobs: a subscription agent without on_behalf_of is caught by the admission check", () => {

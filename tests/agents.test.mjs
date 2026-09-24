@@ -14,6 +14,7 @@ import {
   agentDispatchFields,
   agentsAsDispatchConfig,
   agentsAsSubscriptionConfig,
+  resolveAgentModel,
   describeAgent,
   loadAgents,
   readAgentsFile,
@@ -139,4 +140,43 @@ test("describeAgent: one readable line per kind", () => {
   assert.equal(describeAgent(REAL.agents.grok), "api xai/grok-4.7");
   assert.equal(describeAgent({ kind: "api", provider: "openclaw", openclaw_provider: "deepseek", model: "deepseek-chat" }), "api deepseek/deepseek-chat");
   assert.equal(describeAgent(REAL.agents.codex), "subscription openai/gpt-6-astra (you@example.com)");
+});
+
+test("validateAgents: an api or subscription agent is an account -- model is an optional default", () => {
+  const result = validateAgents({ agents: {
+    claude: { kind: "subscription", provider: "claude-cli", owner: "you@example.com" },
+    grok: { kind: "api", provider: "xai", auth_env: "K" },
+  } });
+  assert.equal(result.ok, true, JSON.stringify(result.errors));
+  assert.equal(result.data.agents.claude.model, undefined);
+});
+
+const ACCOUNTS = {
+  local: { kind: "local", slot: "coder" },
+  codex: { kind: "subscription", provider: "openai", owner: "o" },
+  grok: { kind: "api", provider: "xai", model: "grok-4.7", auth_env: "K" },
+};
+
+test("resolveAgentModel: the job's model, then the role's, then the agent's default", () => {
+  assert.equal(resolveAgentModel(ACCOUNTS, "grok"), "grok-4.7");
+  assert.equal(resolveAgentModel(ACCOUNTS, "grok", { roleModel: "grok-4.6" }), "grok-4.6");
+  assert.equal(resolveAgentModel(ACCOUNTS, "grok", { roleModel: "grok-4.6", jobModel: "grok-5" }), "grok-5");
+  assert.equal(resolveAgentModel(ACCOUNTS, "codex", { roleModel: "gpt-6-astra" }), "gpt-6-astra");
+});
+
+test("resolveAgentModel: auto leaves it to the job; with no job model and no default it refuses and says what to do", () => {
+  assert.equal(resolveAgentModel(ACCOUNTS, "codex", { roleModel: "auto", jobModel: "gpt-6-sol" }), "gpt-6-sol");
+  assert.equal(resolveAgentModel(ACCOUNTS, "grok", { roleModel: "auto" }), "grok-4.7", "auto with no pick still falls back to the agent's default");
+  assert.throws(() => resolveAgentModel(ACCOUNTS, "codex", { roleModel: "auto", roleName: "pm" }), /role "pm" leaves the model to you \(auto\): pass model on this job/);
+  assert.throws(() => resolveAgentModel(ACCOUNTS, "codex"), /agent "codex" has no default model/);
+});
+
+test("resolveAgentModel: the local agent's model comes from `nomarmy model`, so a job model on it is refused", () => {
+  assert.equal(resolveAgentModel(ACCOUNTS, "local"), null);
+  assert.throws(() => resolveAgentModel(ACCOUNTS, "local", { jobModel: "gpt-6-sol" }), /local model, which `nomarmy model` sets/);
+});
+
+test("describeAgent: an agent with no default model says the model is picked per role", () => {
+  assert.equal(describeAgent(ACCOUNTS.codex), "subscription openai (o), model per role");
+  assert.equal(describeAgent({ kind: "api", provider: "xai", auth_env: "K" }), "api xai (model per role)");
 });

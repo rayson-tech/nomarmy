@@ -415,6 +415,29 @@ test("army init/assign/general/show --json: global roster, a project override, a
   }
 });
 
+test("army assign <role> <agent> <model|auto>: the model lands on the role, and a later reassignment clears it", () => {
+  const root = scratchNomarmyRoot();
+  const repo = mkdtempSync(path.join(tmpdir(), "nomarmy-army-repo-"));
+  try {
+    runAgentsCLI(root, ["add", "--json", "--name", "codex", "--kind", "subscription", "--provider", "openai", "--owner", "you@example.com"]);
+    runAgentsCLI(root, ["add", "--json", "--name", "grok", "--kind", "api", "--provider", "xai", "--model", "grok-4.7", "--auth-env", "NOMARMY_XAI_API_KEY"]);
+    runArmyCLI(root, repo, ["init", "--json"]);
+    assert.equal(runArmyCLI(root, repo, ["assign", "sr-dev", "codex", "gpt-6-astra", "--json"]).exitCode, 0);
+    assert.equal(runArmyCLI(root, repo, ["assign", "pm", "codex", "auto", "--json"]).exitCode, 0);
+    assert.equal(runArmyCLI(root, repo, ["assign", "ui-ux", "codex", "--json"]).exitCode, 0);
+    let roles = JSON.parse(runArmyCLI(root, repo, ["show", "--json"]).stdout).roles;
+    assert.equal(roles["sr-dev"].model, "gpt-6-astra");
+    assert.equal(roles.pm.modelIsAuto, true);
+    assert.match(roles["ui-ux"].problem, /has no default model, so this role needs one/);
+    runArmyCLI(root, repo, ["assign", "sr-dev", "grok", "--json"]);
+    roles = JSON.parse(runArmyCLI(root, repo, ["show", "--json"]).stdout).roles;
+    assert.equal(roles["sr-dev"].model, "grok-4.7", "the old role model is gone; grok's default applies");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("army assign/general refuse a prefixed target, a role name with spaces, and an undefined General", () => {
   const root = scratchNomarmyRoot();
   const repo = mkdtempSync(path.join(tmpdir(), "nomarmy-army-repo-"));

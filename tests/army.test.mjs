@@ -152,6 +152,9 @@ test("assignRoleInFile: replaces that layer's previous agent, keeps its descript
 
 test("parseTargetSpec: a bare agent name or none -- the old worker:/pool:/local: prefixes are refused", () => {
   assert.deepEqual(parseTargetSpec("codex"), { agent: "codex" });
+  assert.deepEqual(parseTargetSpec("codex", "gpt-6-astra"), { agent: "codex", model: "gpt-6-astra" });
+  assert.deepEqual(parseTargetSpec("codex", "auto"), { agent: "codex", model: "auto" });
+  assert.throws(() => parseTargetSpec("none", "auto"), /takes no model/);
   assert.deepEqual(parseTargetSpec("local"), { agent: "local" });
   assert.deepEqual(parseTargetSpec("none"), {});
   assert.throws(() => parseTargetSpec("worker:codex"), /not an agent name/);
@@ -164,6 +167,20 @@ const AGENTS = {
   sonnet: { kind: "subscription", provider: "claude-cli", model: "claude-sonnet-5", owner: "you@example.com" },
   codex: { kind: "subscription", provider: "openai", model: "gpt-6-astra", owner: "you@example.com" },
 };
+
+test("armyTargetProblems: a role needs a model when its agent has no default; a model on the local agent can't apply", () => {
+  const agents = { local: { kind: "local", slot: "coder" }, codex: { kind: "subscription", provider: "openai", owner: "o" } };
+  const problems = armyTargetProblems({ roles: { a: { agent: "codex" }, b: { agent: "codex", model: "auto" }, c: { agent: "codex", model: "gpt-6-sol" }, d: { agent: "local", model: "x" } } }, agents);
+  assert.deepEqual(Object.keys(problems).sort(), ["a", "d"]);
+  assert.match(problems.a, /needs one: `nomarmy army assign a codex <model\|auto>`/);
+  assert.match(problems.d, /local model/);
+});
+
+test("assignRoleInFile: a new assignment replaces the previous agent AND its model", () => {
+  const file = path.join(tmp(), "config.yml");
+  assignRoleInFile(file, "pm", { agent: "codex", model: "gpt-6-astra" });
+  assert.deepEqual(assignRoleInFile(file, "pm", { agent: "grok" }).roles.pm, { agent: "grok" }, "a stale model never carries over to a different agent");
+});
 
 test("armyTargetProblems: flags unassigned roles and agents that don't exist", () => {
   const problems = armyTargetProblems({ roles: { a: {}, b: { agent: "ghost" }, c: { agent: "grok" } } }, AGENTS);
@@ -194,6 +211,7 @@ test("expandArmyRole: a role becomes agent: <its agent>, headed by the role's de
   assert.equal(job.army_role, undefined);
   assert.equal(job.armyRole, "sr-dev");
   assert.equal(job.task, "[nomArmy role: sr-dev, build phase]\nDoes the first cut.\n\nBuild the form.");
+  assert.equal(job.roleModel, null);
   assert.equal(expandArmyRole({ task: "t", army_role: "security-analyst" }, ARMY).task, "[nomArmy role: security-analyst, review phase]\n\nt");
 });
 

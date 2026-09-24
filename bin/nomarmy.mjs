@@ -104,7 +104,7 @@ Usage: nomarmy <command> [options]
   update          Pull the latest nomArmy code and re-sync the installed
                   MCP copy (fast-forward only; refuses on local changes).
   agents <list|add|update|remove>
-                  Every model a job can run on, in one list:
+                  Every account a job can run on, in one list:
                   ~/.config/nomarmy/agents.yml (or NOMARMY_CONFIG_DIR).
                     local         the local model (built in as \`local\`)
                     api           a metered API key: xai, openai,
@@ -116,6 +116,9 @@ Usage: nomarmy <command> [options]
                                   must name its owner in on_behalf_of
                   Changes apply to the next job, no restart.
                   list      show your agents
+                  An api or subscription agent is an account; its
+                  model is only an optional default, since each role
+                  (or the General, per job) picks the model.
                   add [local|api|subscription] [claude|codex|meta]
                             walks through what that kind needs: an API
                             key registered with OpenClaw (over stdin,
@@ -161,9 +164,11 @@ Usage: nomarmy <command> [options]
                             PO, stakeholder, all on \`local\`) to --global
                             (default), --project or --local; --force
                             replaces an existing one
-                  assign <role> <agent|none>
-                            give a role an agent in --global (default),
-                            --project or --local
+                  assign <role> <agent|none> [model|auto]
+                            give a role an agent, and optionally the model
+                            to run on it ("auto" lets the General pick per
+                            job; omitted, the agent's default), in --global
+                            (default), --project or --local
                   general <agent>
                             which agent the General is, in --global
                             (default) or --local
@@ -1107,8 +1112,8 @@ async function addApiAgent(rl, agents) {
   const name = await askAgentName(rl, agents, agent.openclaw_provider ?? (provider === "xai" ? "grok" : provider));
   if (!name) { console.log(c.dim("Stopped; nothing was written.")); return; }
 
-  agent.model = (await rl.question(c.bold(`Model${info.defaultModel ? ` [${info.defaultModel}]` : ""}: `))).trim() || info.defaultModel;
-  if (!agent.model) throw new Error("A model id is required.");
+  const apiModel = (await rl.question(c.bold(`Default model, optional${info.defaultModel ? ` (e.g. ${info.defaultModel})` : ""}; blank = pick per role: `))).trim();
+  if (apiModel) agent.model = apiModel;
   const envSuggestion = info.authEnvSuggestion ?? `NOMARMY_${(agent.openclaw_provider ?? name).toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
   // The variable's NAME, never the key: the key itself goes to OpenClaw's
   // own store over stdin (registerProviderWithOpenClaw) and never into
@@ -1139,7 +1144,7 @@ async function addApiAgent(rl, agents) {
 
   console.log(`\n${c.bold("→")} Registering the key with OpenClaw`);
   const registered = registerProviderWithOpenClaw({ ...apiAgentAsPoolEntry(name, saved), apiKeyOverride: apiKey });
-  if (registered) {
+  if (registered && saved.model) {
     console.log(`\n${c.bold("→")} Test call`);
     const provId = saved.provider === "openclaw" ? saved.openclaw_provider : ["bedrock", "azure-openai", "openai-compatible"].includes(saved.provider) ? name : saved.provider;
     if (probeWorker(provId, saved.model)) console.log(c.green(`✓ ${provId}/${saved.model} answered a real test prompt.`));
@@ -1192,16 +1197,15 @@ async function addSubscriptionAgent(rl, agents) {
     linkedOpenclaw = openclawProviderLogin(vendor);
     models = catalogModelsFor(vendor.provider);
   }
-  let model;
-  if (models.length) {
-    models.forEach((m, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${m}`));
-    const pick = (await rl.question(c.bold("Model [1]: "))).trim();
-    model = /^\d+$/.test(pick) || !pick ? models[(pick ? Number(pick) : 1) - 1] : pick;
-    if (!model) throw new Error(`Not a valid choice: "${pick}".`);
-  } else {
-    model = (await rl.question(c.bold(`Model id${vendor.defaultModel ? ` [${vendor.defaultModel}]` : ""}: `))).trim() || vendor.defaultModel;
-    if (!model) throw new Error("A model id is required.");
-  }
+  // The agent is the account; the model is only a default. Roles pick
+  // their own model (or "auto" for the General to choose per job).
+  if (models.length) models.forEach((m, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${m}`));
+  else console.log(c.dim(`OpenClaw isn't listing ${vendor.provider} models yet.`));
+  const pick = (await rl.question(c.bold(`Default model, optional${models.length ? " (a number or an id)" : ""}; blank = pick per role: `))).trim();
+  const model = /^\d+$/.test(pick) && models.length ? models[Number(pick) - 1] : pick || null;
+  if (pick && !model) throw new Error(`Not a valid choice: "${pick}".`);
+  // The test call needs some model; it proves the login, not the choice.
+  const probeModel = model ?? models[0] ?? vendor.defaultModel;
 
   const knownOwners = [...new Set(Object.values(agents).filter((a) => a.kind === "subscription").map((a) => a.owner))];
   const ownerDefault = auth.email ?? (knownOwners.length === 1 ? knownOwners[0] : "");
@@ -1212,17 +1216,17 @@ async function addSubscriptionAgent(rl, agents) {
   if (!name) { console.log(c.dim("Stopped; nothing was written.")); return; }
 
   console.log(`\n${c.bold("→")} Test call`);
-  let works = probeWorker(vendor.provider, model);
-  if (!works && needsOpenclawLogin && !linkedOpenclaw) {
+  let works = probeModel ? probeWorker(vendor.provider, probeModel) : false;
+  if (!works && needsOpenclawLogin && !linkedOpenclaw && probeModel) {
     openclawProviderLogin(vendor);
-    works = probeWorker(vendor.provider, model);
+    works = probeWorker(vendor.provider, probeModel);
   }
-  if (works) console.log(c.green(`✓ ${vendor.provider}/${model} answered a real test prompt.`));
+  if (works) console.log(c.green(`✓ ${vendor.provider}/${probeModel} answered a real test prompt.`));
   else {
-    console.log(c.red(`✗ A real test prompt to ${vendor.provider}/${model} didn't come back.`));
+    console.log(c.red(probeModel ? `✗ A real test prompt to ${vendor.provider}/${probeModel} didn't come back.` : "✗ No model to make a test call with."));
     if (!(await confirm(rl, "Save the agent anyway?", { defaultYes: false }))) { console.log(c.dim("Stopped; nothing was written.")); return; }
   }
-  const written = saveAgents({ ...agents, [name]: { kind: "subscription", provider: vendor.provider, model, owner } });
+  const written = saveAgents({ ...agents, [name]: { kind: "subscription", provider: vendor.provider, owner, ...(model ? { model } : {}) } });
   savedAgentMessage(name, written);
   console.log(c.dim(`Jobs on it need on_behalf_of: "${owner}".`));
 }
@@ -1794,9 +1798,10 @@ function ensureLocalLayerIgnored() {
   if (!json) console.log(c.dim(`Added ${LOCAL_CONFIG_FILENAME} to .gitignore.`));
 }
 
-function agentCell(name, runsOn) {
+function agentCell(name, runsOn, role = null) {
   if (!name) return c.yellow("(no agent)");
-  return `${name}${runsOn ? c.dim(`  ${runsOn}`) : ""}`;
+  const model = role?.modelIsAuto ? "auto (the General picks)" : role?.model;
+  return `${name}${model ? ` ${c.bold(model)}` : ""}${runsOn ? c.dim(`  ${runsOn}`) : ""}`;
 }
 
 async function cmdArmyShow() {
@@ -1823,7 +1828,7 @@ async function cmdArmyShow() {
       console.log(`\n${c.bold(phase[0].toUpperCase() + phase.slice(1))}`);
       for (const name of byPhase.get(phase)) {
         const role = summary.roles[name];
-        console.log(`  ${c.cyan(name.padEnd(18))} ${agentCell(role.agent, role.agentRunsOn)}${role.setBy.agent ? c.dim(`  [${role.setBy.agent}]`) : ""}`);
+        console.log(`  ${c.cyan(name.padEnd(18))} ${agentCell(role.agent, role.agentRunsOn, role)}${role.setBy.agent ? c.dim(`  [${role.setBy.agent}]`) : ""}`);
         if (role.description) console.log(c.dim(`    ${role.description}`));
         if (role.problem && role.agent) console.log(c.red(`    ✗ ${role.problem}`));
         if (role.overlapsGeneral) console.log(c.yellow(`    ⚠ ${role.overlapsGeneral}`));
@@ -1850,16 +1855,19 @@ async function cmdArmyInit() {
 }
 
 async function cmdArmyAssign() {
-  const [roleName, agentName] = [argv[2], argv[3]];
-  if (!roleName || !agentName) throw new Error("Usage: nomarmy army assign <role> <agent|none> [--global|--project|--local]");
+  // Positionals only: argv also holds flags, and `--json` must never be read as a model.
+  const positional = argv.slice(2);
+  const firstFlag = positional.findIndex((a) => a.startsWith("--"));
+  const [roleName, agentName, model] = firstFlag === -1 ? positional : positional.slice(0, firstFlag);
+  if (!roleName || !agentName) throw new Error("Usage: nomarmy army assign <role> <agent|none> [model|auto] [--global|--project|--local]");
   const layer = armyLayerFlag("global");
   const filePath = armyLayerPath(layer, { projectDir: repoDir });
-  assignRoleInFile(filePath, roleName, parseTargetSpec(agentName));
+  assignRoleInFile(filePath, roleName, parseTargetSpec(agentName, model));
   if (layer === "local") ensureLocalLayerIgnored();
   const { summary } = loadArmyForCli();
   const role = summary.roles[roleName];
   if (json) return out({ written: filePath, layer, role: roleName, effective: role ?? null });
-  console.log(c.green(`✓ ${roleName} → ${agentName} in ${filePath} (${layer}).`));
+  console.log(c.green(`✓ ${roleName} → ${agentName}${model ? ` (${model === "auto" ? "model: the General picks per job" : model})` : ""} in ${filePath} (${layer}).`));
   if (role) {
     if (role.setBy.agent && role.setBy.agent !== layer) console.log(c.yellow(`Note: the ${role.setBy.agent} layer overrides this, so ${roleName} still runs on ${role.agent}.`));
     if (role.problem && role.agent) console.log(c.yellow(`⚠ ${role.problem}.`));

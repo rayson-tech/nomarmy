@@ -140,7 +140,7 @@ Offers three measured choices (Qwen3-Coder-Next, gpt-oss-20b, Qwen3.6-27B: see `
 
 ## Agents: every model a job can run on
 
-One list, `~/.config/nomarmy/agents.yml` (or `NOMARMY_CONFIG_DIR`), names each model and says how to reach it. There are three kinds:
+One list, `~/.config/nomarmy/agents.yml` (or `NOMARMY_CONFIG_DIR`), names each account a job can run on and says how to reach it. An api or subscription agent is the **account**, not a model: which model runs is picked per role or per job (below), and a `model` on the agent is only an optional default. There are three kinds:
 
 | Kind | What it is | Set up with |
 |---|---|---|
@@ -159,12 +159,12 @@ nomarmy agents update codex --json --model gpt-6-sol
 ```yaml
 # ~/.config/nomarmy/agents.yml   (see config/agents.yml.example)
 agents:
-  grok:   { kind: api, provider: xai, model: grok-4.7, auth_env: NOMARMY_XAI_API_KEY, thinking: high }
-  claude: { kind: subscription, provider: claude-cli, model: claude-sonnet-5, owner: you@example.com }
-  codex:  { kind: subscription, provider: openai, model: gpt-6-astra, owner: you@example.com }
+  claude: { kind: subscription, provider: claude-cli, owner: you@example.com }
+  codex:  { kind: subscription, provider: openai, owner: you@example.com }
+  grok:   { kind: api, provider: xai, auth_env: NOMARMY_XAI_API_KEY, thinking: high }
 ```
 
-A job picks an agent through a role (`army_role`, below) or directly (`agent: "codex"`); with neither it runs on `local`. Nothing picks between agents at random. Changes apply to the next job with no restart, except that a **new** api agent needs one `nomarmy connect claude` so the MCP server sees its key variable (`agents add` offers to do it).
+A job picks an agent through a role (`army_role`, below) or directly (`agent: "codex"`); with neither it runs on `local`. The **model** is, first to last: the job's own `model` (the General's choice), the role's model unless it's `auto` (which leaves it to the General), then the agent's default. No model at all is refused, never guessed. Nothing picks between agents at random. Changes apply to the next job with no restart, except that a **new** api agent needs one `nomarmy connect claude` so the MCP server sees its key variable (`agents add` offers to do it).
 
 **Settings**: `max_concurrent` (default 2 for api, 1 for a subscription: a personal session was never provisioned for parallel automation); `thinking` (`true` follows the job's level, `false` is off, or a fixed `low`/`medium`/`high`); `context_window` to override OpenClaw's catalog for a model newer than it knows (otherwise the catalog value is used, with a safety margin). Api jobs get their own concurrency ceiling (`NOMARMY_MAX_POOL_WORKERS`), additive to local workers.
 
@@ -183,8 +183,7 @@ A job picks an agent through a role (`army_role`, below) or directly (`agent: "c
 The **General** is your coordinator session (Claude Code, Codex, Cursor). Its charter is fixed by nomArmy, not configured: it plans and decomposes, makes the architecture and security decisions, briefs and dispatches each role, reviews every result against nomArmy's verified record, owns Git and integration, and gives final acceptance. It runs outside every sandbox and is never dispatched to. What you *do* define is which agent it is, after your agents exist:
 
 ```bash
-nomarmy agents add subscription claude   # e.g. an `opus` agent for your Claude seat
-nomarmy army general opus
+nomarmy army general claude              # the agent for your Claude seat
 ```
 
 That lets nomArmy flag a role on the General's own agent (a review that isn't independent) or on the same subscription login (the same usage limit).
@@ -193,9 +192,10 @@ Every other role is yours to define: a name, a description of when the General c
 
 ```bash
 nomarmy army init                              # the default roster, globally
-nomarmy army assign sr-dev codex               # by agent name
-nomarmy army assign ui-ux codex --project      # this repo, committed
-nomarmy army assign pm grok --local            # just you, just this repo
+nomarmy army assign sr-dev codex gpt-6-astra   # an agent, and the model to run on it
+nomarmy army assign pm codex auto              # the General picks the model per job
+nomarmy army assign ui-ux codex gpt-6-astra --project   # this repo, committed
+nomarmy army assign security-analyst grok grok-4.7 --local   # just you, just this repo
 nomarmy army show                              # the General, the roster, and which layer set what
 ```
 
