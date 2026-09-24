@@ -583,6 +583,24 @@ function budgetsForPool(poolName, model = null, reportSize = null) {
   return deriveBudgets({ contextPerNom: resolved.contextPerNom, source: resolved.source, env: process.env, tier, reportSize: reportSize ?? "standard" });
 }
 
+/**
+ * A transcript can only measure reads when the agent's tools ran through
+ * OpenClaw. A CLI-backed agent (claude-cli runs Claude Code's own tools
+ * inside Claude Code) leaves OpenClaw's transcript with no tool events even
+ * though its result reports the calls -- a real Senti scout reported 51
+ * Bash calls while the transcript held none, and was flagged "read ~0
+ * tokens, negative displacement". That's "can't measure", not "read
+ * nothing", so the transcript is marked unavailable and no displacement
+ * verdict is drawn.
+ */
+export function readsMeasurable(transcript, worker) {
+  const reported = worker?.toolSummary?.calls ?? 0;
+  if (transcript?.available && transcript.toolCalls.length === 0 && reported > 0) {
+    return { ...transcript, available: false, reason: `the agent ran ${reported} tool call(s) outside OpenClaw's transcript (its own CLI's tools), so reads can't be measured` };
+  }
+  return transcript;
+}
+
 /** The budget an (already expanded) job is admitted and briefed against: its own agent's, or the local one. */
 function budgetsForJob(j) {
   if (j.pool) return budgetsForPool(j.pool, j.model, j.report);
@@ -2565,7 +2583,13 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
     const finishedAt = new Date().toISOString(), reportText = workerFailed ? "" : finalText(result);
 
     progress("verification");
-    let report = parseScoutReport(reportText, budgets.scout);
+    // Parse and verify against the budget the worker's prompt was built
+    // with (its agent's tier), not the server-wide local one. The local
+    // limits here cut a frontier scout's 24 findings to 12 and, having
+    // dropped some, also knocked a correctly formatted report into lenient
+    // mode -- both reported from a real Senti run.
+    const used = result?.budgetsUsed ?? budgets;
+    let report = parseScoutReport(reportText, used.scout);
 
     // See shouldAttemptScoutRecovery's own doc comment: this only fires when
     // the report is genuinely unusable, gated by whatever time is actually
@@ -2580,9 +2604,9 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
           task, acceptance, verification: null, mode, cwd: worktree, baseRef: base.ref, baseSha: base.sha,
           timeoutSeconds: remainingSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, model, reportSize, jobDir, workerId: workerId || jobId,
           evidenceTool: evidencePlaced ? evidenceTool : null,
-          overridePrompt: scoutReportRecoveryPrompt({ report: budgets.report.scout }), logSuffix: "-recovery",
+          overridePrompt: scoutReportRecoveryPrompt({ report: used.report.scout }), logSuffix: "-recovery",
         });
-        const recoveryReport = parseScoutReport(finalText(recoveryResult), budgets.scout);
+        const recoveryReport = parseScoutReport(finalText(recoveryResult), (recoveryResult?.budgetsUsed ?? used).scout);
         if (!isScoutReportUnusable(recoveryReport)) {
           report = recoveryReport; reportRecovered = true;
           // Mirrors executeImplement's identical reset: nomArmy paused the
@@ -2599,7 +2623,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
     const record = await collectGitRecord({ cwd: worktree, baseSha: base.sha, branch: null, baseRef: base.ref, jobId });
     const dirty = record.repoStatusFiles.length > 0;
     const readFile = async p => { try { return await gitRaw(["show", `${base.sha}:${p}`], projectDir); } catch { return null; } };
-    const verified = await verifyCitations(report.findings, { readFile, limits: budgets.scout });
+    const verified = await verifyCitations(report.findings, { readFile, limits: used.scout });
     const outcome = resolveScoutOutcome({ report, verified, workerFailed, workerTimedOut, dirty });
 
     progress("record");
@@ -2620,7 +2644,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
     // The number this project is for: repository content the scout pulled
     // through its tools (what the coordinator would otherwise have carried)
     // against the size of what the coordinator receives instead.
-    const transcript = await readOpenClawTranscript(path.join(runtimeDir, "state"));
+    const transcript = readsMeasurable(await readOpenClawTranscript(path.join(runtimeDir, "state")), worker);
     let rendered = renderScoutReport({ report, verified, outcome, baseSha: base.sha });
     // Only repository reads count. tool_search, sessions_* and other harness
     // chatter is the agent framework talking to itself, and counting it made
@@ -2723,11 +2747,12 @@ async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtime
     const finishedAt = new Date().toISOString(), reportText = workerFailed ? "" : finalText(result);
 
     progress("verification");
-    const report = parseDecomposeReport(reportText, budgets.decompose);
+    const used = result?.budgetsUsed ?? budgets; // see executeScout: the job's own budget, not the local one
+    const report = parseDecomposeReport(reportText, used.decompose);
     const record = await collectGitRecord({ cwd: worktree, baseSha: base.sha, branch: null, baseRef: base.ref, jobId });
     const dirty = record.repoStatusFiles.length > 0;
     const readFile = async p => { try { return await gitRaw(["show", `${base.sha}:${p}`], projectDir); } catch { return null; } };
-    const verified = await verifyCitations(buildDecomposeFindings(report.subtasks), { readFile, limits: budgets.decompose });
+    const verified = await verifyCitations(buildDecomposeFindings(report.subtasks), { readFile, limits: used.decompose });
     const overlaps = checkDecompositionOverlap(report.subtasks, verified);
     const outcome = resolveDecomposeOutcome({ report, verified, workerFailed, workerTimedOut, dirty });
 
@@ -2742,7 +2767,7 @@ async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtime
     if (dirty) issues.push(`snapshot changed: ${record.repoStatusFiles.join(", ")}`);
     if (overlaps.length) issues.push(`${overlaps.length} subtask pair(s) claim overlapping files; not safe to dispatch as independent jobs as proposed`);
 
-    const transcript = await readOpenClawTranscript(path.join(runtimeDir, "state"));
+    const transcript = readsMeasurable(await readOpenClawTranscript(path.join(runtimeDir, "state")), worker);
     let rendered = renderDecomposeReport({ report, verified, subtasks: report.subtasks, overlaps, outcome, baseSha: base.sha });
     const displacement = estimateDisplacement({ readChars: transcript.available ? transcript.repoReadChars : null, deliveredChars: rendered.length + 400 });
     if (transcript.available) {

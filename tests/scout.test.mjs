@@ -456,3 +456,21 @@ test("scoutReportRecoveryPrompt: asks for the report shape only, never to explor
   assert.match(p, /SCOUT REPORT\nQUESTION:/);
   assert.match(p, /Target 500 tokens; 900 is the hard cap/);
 });
+
+// A real Senti scout on a frontier agent was offered 24 findings, returned
+// a correctly formatted 24, and had half dropped (and was marked lenient for
+// it) because the parser used the local model's 12-finding limit. The
+// parser must be handed the budget the worker's prompt was built with.
+test("parseScoutReport: 24 findings parse strictly under a frontier full budget, and lose half under the local one", async () => {
+  const { deriveBudgets } = await import("../lib/budget.mjs");
+  const findings = Array.from({ length: 24 }, (_, i) => `FINDING: fact ${i + 1} [src/file${i}.ts:${i + 1}-${i + 3}]`);
+  const text = ["I'll start by mapping the handlers.", "", "SCOUT REPORT", "QUESTION: how does it work?", "CONFIDENCE: medium", ...findings, "NOT_FOUND: nothing else", "END"].join("\n");
+  const frontier = parseScoutReport(text, deriveBudgets({ contextPerNom: 1000000, tier: "frontier", reportSize: "full" }).scout);
+  assert.equal(frontier.findings.length, 24);
+  assert.equal(frontier.droppedFindings, 0);
+  assert.equal(frontier.strict, true, "a preamble line before SCOUT REPORT doesn't break strict parsing");
+  const local = parseScoutReport(text, deriveBudgets({ contextPerNom: 65536 }).scout);
+  assert.equal(local.findings.length, 12);
+  assert.equal(local.droppedFindings, 12);
+  assert.equal(local.strict, false, "exactly the lenient fallback the Senti run hit");
+});

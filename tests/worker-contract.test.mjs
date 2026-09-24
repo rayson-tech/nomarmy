@@ -63,6 +63,7 @@ import {
   currentMaxPoolWorkers,
   splitJobsByLane,
   jobLane,
+  readsMeasurable,
   runningCount,
   track,
   looksLikeTransientInferenceAbort,
@@ -3315,4 +3316,16 @@ test("jobSchema: task/evidence caps are the frontier ceilings; admission (checkB
   assert.equal(jobSchema.shape.evidence.safeParse("e".repeat(24000)).success, true);
   for (const size of ["brief", "standard", "full"]) assert.equal(jobSchema.shape.report.safeParse(size).success, true, size);
   assert.equal(jobSchema.shape.report.safeParse("huge").success, false);
+});
+
+test("readsMeasurable: tool calls the result reports but the transcript lacks mean \"can't measure\", not \"read nothing\"", () => {
+  const empty = { available: true, toolCalls: [], filesRead: [], repoReadChars: 0 };
+  const marked = readsMeasurable(empty, { toolSummary: { calls: 51, tools: ["Bash"], failures: 1 } });
+  assert.equal(marked.available, false, "the real Senti claude-cli scout: 51 Bash calls, none in OpenClaw's transcript");
+  assert.match(marked.reason, /ran 51 tool call\(s\) outside OpenClaw's transcript/);
+  assert.equal(readsMeasurable(empty, { toolSummary: { calls: 0 } }), empty, "no calls reported: an honest zero stays measurable");
+  const real = { available: true, toolCalls: [{ tool: "read" }], filesRead: ["a"], repoReadChars: 900 };
+  assert.equal(readsMeasurable(real, { toolSummary: { calls: 1 } }), real);
+  const missing = { available: false, reason: "no db" };
+  assert.equal(readsMeasurable(missing, { toolSummary: { calls: 5 } }), missing);
 });
