@@ -97,3 +97,30 @@ test("findTranscriptDb / readOpenClawTranscript: absent state is reported, never
     assert.equal(bad.available, false, "a corrupt database is unavailable, not a crash");
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+// readOpenClawTranscriptTail: the cheap read watchers use every few seconds.
+const TAIL_SQLITE = await import("node:sqlite").then(() => true, () => false);
+test("readOpenClawTranscriptTail: the last N events or everything after event N, always with the total count", { skip: TAIL_SQLITE ? false : "node:sqlite unavailable" }, async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { readOpenClawTranscriptTail } = await import("../lib/transcript.mjs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-tail-"));
+  try {
+    const dbPath = path.join(dir, "agents", "main", "agent", "openclaw-agent.sqlite");
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    const db = new DatabaseSync(dbPath);
+    db.exec("CREATE TABLE transcript_events (session_id TEXT NOT NULL, seq INTEGER NOT NULL, event_json TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (session_id, seq))");
+    const insert = db.prepare("INSERT INTO transcript_events VALUES (?, ?, ?, ?)");
+    const say = (text) => JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } });
+    ["one", "two", "three", "four"].forEach((t, i) => insert.run("s", i, say(t), Date.now()));
+    db.close();
+    const tail = await readOpenClawTranscriptTail(dir, { limit: 2 });
+    assert.equal(tail.events, 4);
+    assert.equal(tail.modelCalls, 2, "only the last two were read");
+    assert.equal(tail.lastAssistantText, "four");
+    const since = await readOpenClawTranscriptTail(dir, { sinceEvent: 3 });
+    assert.equal(since.modelCalls, 1);
+    assert.equal(since.lastAssistantText, "four");
+    assert.equal((await readOpenClawTranscriptTail(dir, { sinceEvent: 4 })).lastAssistantText, null);
+    assert.equal((await readOpenClawTranscriptTail(dir, { limit: 0 })).events, 4, "count only");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

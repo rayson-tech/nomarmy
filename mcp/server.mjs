@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { SCOUT_OUTCOMES, SCOUT_STATUS_BY_OUTCOME, scoutPrompt, parseScoutReport, verifyCitations, resolveScoutOutcome, renderScoutReport, isScoutReportUnusable, scoutReportRecoveryPrompt } from "../lib/scout.mjs";
 import { DECOMPOSE_OUTCOMES, DECOMPOSE_STATUS_BY_OUTCOME, decomposePrompt, parseDecomposeReport, buildDecomposeFindings, resolveDecomposeOutcome, checkDecompositionOverlap, renderDecomposeReport } from "../lib/decompose.mjs";
 import { deriveBudgets, checkBrief, resolveContextPerNom, assessAdmission, describeBudgets, deriveTimeBudget, FRONTIER } from "../lib/budget.mjs";
-import { readOpenClawTranscript, estimateDisplacement } from "../lib/transcript.mjs";
+import { readOpenClawTranscript, readOpenClawTranscriptTail, estimateDisplacement } from "../lib/transcript.mjs";
 import { runQuery, formatCitations, OPS as EVIDENCE_OPS, outlineFile, findReferences } from "../lib/repo-query.mjs";
 import { loadConfig, ConfigError } from "../lib/config.mjs";
 import { resolveSandboxImage, detectPrimaryLanguage, EXEC_PATH_PREPEND } from "../lib/sandbox-images.mjs";
@@ -23,7 +23,7 @@ import { writeLease, removeLease, liveLeases, liveSlots, acquireSlot } from "../
 import { createRun, loadRun, runTotals, runAdmissionProblems, recordRunJob, finishRun, resolveRunLimits, detectUsageLimit } from "../lib/runs.mjs";
 import { loadAgents, agentsConfigPath, agentsAsDispatchConfig, agentsAsSubscriptionConfig, agentDispatchFields, resolveAgentModel, agentProviderId, describeAgent } from "../lib/agents.mjs";
 import { resolveSubscriptionWorker, findProviderConflicts, describeProviderConflict } from "../lib/subscription-config.mjs";
-import { queryModelCatalog } from "../lib/model-catalog.mjs";
+import { queryModelCatalog, queryModelCatalogAsync } from "../lib/model-catalog.mjs";
 
 // Read from package.json rather than a second hardcoded literal -- the two
 // drifted apart for real (this constant still said "1.3.0", an internal
@@ -247,7 +247,9 @@ export function makeAbandonedBackgroundProcessTick(stateDir, { idleMs, minElapse
   let lastEventCount = -1, stillSinceMs = 0, sawAbandonedBackground = false;
   return async elapsedMs => {
     let transcript;
-    try { transcript = await readOpenClawTranscript(stateDir); }
+    // Only the count and the latest events matter here: a full parse every
+    // tick froze the server (see readOpenClawTranscriptTail).
+    try { transcript = await readOpenClawTranscriptTail(stateDir, { limit: 5 }); }
     catch { return { stop: false }; } // a broken read must never itself kill the run
     if (!transcript.available) return { stop: false };
     if (transcript.events !== lastEventCount) {
@@ -271,11 +273,15 @@ export function makeAbandonedBackgroundProcessTick(stateDir, { idleMs, minElapse
  * to stop; a failed read just skips that beat.
  */
 export function makeHeartbeatTick(jobDir) {
+  // Never two beats at once: a slow beat used to overlap the next.
+  let busy = false;
   return async (elapsedMs) => {
+    if (busy) return { stop: false };
+    busy = true;
     try {
       const live = await liveProgress(jobDir);
       writeStatus(jobDir, { heartbeatAt: new Date().toISOString(), workerElapsedSeconds: Math.round(elapsedMs / 1000), ...live });
-    } catch { /* skip this beat */ }
+    } catch { /* skip this beat */ } finally { busy = false; }
     return { stop: false };
   };
 }
@@ -568,18 +574,22 @@ export function expandJobs(jobs, { getArmy = currentArmy, getAgents = () => agen
 // and every hosted entry still works via its context_window override or the
 // conservative unknown-model fallback either way (see lib/dispatch-config.mjs).
 let cachedModelCatalog;
+let catalogRefreshStarted = false;
 function modelCatalog() {
-  if (cachedModelCatalog === undefined) {
-    cachedModelCatalog = queryModelCatalog();
-    // The cached catalog can lack a provider entirely, and then every model
-    // on it is budgeted at the unknown-model fallback (32k tokens) instead
-    // of its real window. If any agent's provider is missing, refresh once
-    // per process (~15s, on first use only).
+  if (cachedModelCatalog === undefined) cachedModelCatalog = queryModelCatalog();
+  // The cached catalog can lack a provider entirely, and then every model on
+  // it is budgeted at the unknown-model fallback (32k tokens) instead of its
+  // real window. Refresh once per process -- in the background: the refresh
+  // contacts every provider, and run synchronously it could freeze the
+  // whole server for as long as one provider stalled. Until it lands, a job
+  // simply uses the cached catalog or the fallback.
+  if (!catalogRefreshStarted) {
     let providers = [];
     try { providers = [...new Set(Object.values(agentsConfig().agents).map(agentProviderId).filter(Boolean))]; } catch { /* reported elsewhere */ }
     const keys = cachedModelCatalog ? [...cachedModelCatalog.keys()] : [];
     if (providers.some((p) => !keys.some((k) => k.startsWith(`${p}/`)))) {
-      cachedModelCatalog = queryModelCatalog({ refresh: true }) ?? cachedModelCatalog;
+      catalogRefreshStarted = true;
+      queryModelCatalogAsync({ refresh: true }).then((fresh) => { if (fresh?.size) cachedModelCatalog = fresh; });
     }
   }
   return cachedModelCatalog;
@@ -785,7 +795,7 @@ function ambientOpenClawConfigPath() {
     // `execFileSync("openclaw", ...)` unresolved hits the identical
     // Windows .cmd-shim ENOENT/EINVAL problem documented at resolveExecutable.
     const exe = resolveExecutable("openclaw");
-    try { cachedAmbientOpenClawConfigPath = execFileSync(exe.file, [...exe.prefixArgs, "config", "file"], { encoding: "utf8" }).trim(); }
+    try { cachedAmbientOpenClawConfigPath = execFileSync(exe.file, [...exe.prefixArgs, "config", "file"], { encoding: "utf8", timeout: 20000 }).trim(); }
     catch { cachedAmbientOpenClawConfigPath = null; }
   }
   return cachedAmbientOpenClawConfigPath;
@@ -979,6 +989,8 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
     ...(idleDiff ? [makeIdleDiffTick(cwd, idleDiff), makeAbandonedBackgroundProcessTick(stateDir, idleDiff)] : []),
   ]);
   const liveLogs = { stdout: path.join(jobDir, `openclaw${logSuffix}.stdout.log`), stderr: path.join(jobDir, `openclaw${logSuffix}.stderr.log`) };
+  // Where this call's own transcript events will start (see salvageFinishedRun).
+  const eventsBefore = (await readOpenClawTranscriptTail(stateDir, { limit: 0 }).catch(() => ({ events: 0 }))).events ?? 0;
   for (const f of Object.values(liveLogs)) { try { fs.writeFileSync(f, ""); } catch { /* best-effort */ } }
   const execOnce = (thinking) => withSandboxProvisioningRetry(
     () => run("openclaw", buildArgs(thinking), { cwd, env, timeoutMs: (timeoutSeconds + 30) * 1000, onTick, tickMs: (idleDiff?.pollSeconds ?? 15) * 1000, teeTo: liveLogs }),
@@ -1051,7 +1063,7 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
       if (error.stdout !== undefined) fs.writeFileSync(path.join(jobDir, `openclaw${logSuffix}.stdout.log`), `${error.stdout ?? ""}\n`);
       if (error.stderr !== undefined) fs.writeFileSync(path.join(jobDir, `openclaw${logSuffix}.stderr.log`), `${error.stderr ?? ""}\n`);
       const bareModel = selected.model.includes("/") ? selected.model.slice(selected.model.indexOf("/") + 1) : selected.model;
-      const salvaged = !error.timedOut ? await salvageFinishedRun(error, stateDir) : null;
+      const salvaged = !error.timedOut ? await salvageFinishedRun(error, stateDir, { sinceEvent: eventsBefore }) : null;
       if (salvaged) {
         fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} OpenClaw exited with an error after the run finished (${salvaged.salvagedFrom}); using the report from the run's transcript\n${error.message}\n`);
         return { ...salvaged, model: bareModel, provider: selected.entry?.provider ?? workerProvider, thinkingApplied: selected.thinking, budgetsUsed: jobBudgets };
@@ -1079,11 +1091,15 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
  * transcript holds a final assistant message, that is the report. Only for
  * a normal stop: a timeout, abort or crash mid-run is never salvaged.
  */
-export async function salvageFinishedRun(error, stateDir) {
+export async function salvageFinishedRun(error, stateDir, { sinceEvent = 0 } = {}) {
   const stderr = String(error?.stderr ?? "");
   if (!/ended with stopReason=stop\b/.test(stderr)) return null;
   let transcript;
-  try { transcript = await readOpenClawTranscript(stateDir); } catch { return null; }
+  // Only what THIS call wrote. A report-recovery call resumes the same
+  // session, and salvaging the whole transcript's last assistant message
+  // picked a stale mid-run message from the earlier work phase (a real
+  // Senti job), which then parsed as no report at all.
+  try { transcript = await readOpenClawTranscriptTail(stateDir, { sinceEvent }); } catch { return null; }
   const final = transcript?.available ? String(transcript.lastAssistantText ?? "").trim() : "";
   if (!final) return null;
   const why = /cleanup/i.test(stderr) ? "OpenClaw's cleanup failed after the run" : "a nonzero exit after the run";
@@ -1616,10 +1632,10 @@ export function mergeUntrackedIntoNameStatus(nameStatus, untrackedFiles) {
 // a deletion); M/A files only ever need the CURRENT worktree bytes, which
 // fs.readFileSync already returns as a Buffer -- no risk there.
 export function gitShowBuffer(cwd, sha, relPath) {
-  return execFileSync("git", ["show", `${sha}:${relPath}`], { cwd, maxBuffer: 64 * 1024 * 1024 });
+  return execFileSync("git", ["show", `${sha}:${relPath}`], { cwd, maxBuffer: 64 * 1024 * 1024, timeout: 30000 });
 }
 export function gitModeAtBase(cwd, sha, relPath) {
-  const out = execFileSync("git", ["ls-tree", sha, "--", relPath], { cwd, encoding: "utf8" });
+  const out = execFileSync("git", ["ls-tree", sha, "--", relPath], { cwd, encoding: "utf8", timeout: 30000 });
   return out.split(/\s+/, 1)[0] === "100755" ? 0o755 : 0o644;
 }
 
@@ -3385,7 +3401,10 @@ async function liveProgress(jobDir) {
   try {
     const worktree = path.join(jobDir, "worktree");
     if (fs.existsSync(worktree)) {
-      const statusOut = await gitRaw(["status", "--porcelain=v1", "-z", "--untracked-files=all"], worktree);
+      // --untracked-files=normal, not all: "all" descends into every
+      // untracked directory (a virtualenv, a cache) a job creates. Bounded:
+      // a live progress read must never hold anything up.
+      const statusOut = (await run("git", ["status", "--porcelain=v1", "-z", "--untracked-files=normal"], { cwd: worktree, trim: false, timeoutMs: 10000 })).stdout;
       // Same runtime-junk filter as collectGitRecord/makeIdleDiffTick: .npm/
       // etc. is the sandbox's own churn, not the worker's progress, and
       // counting it made a job that had made zero real edits report
@@ -3395,7 +3414,7 @@ async function liveProgress(jobDir) {
   } catch { /* worktree not ready yet, or mutated mid-read; omit */ }
   try {
     const stateDir = path.join(jobDir, "runtime", "state");
-    const transcript = await readOpenClawTranscript(stateDir);
+    const transcript = await readOpenClawTranscriptTail(stateDir, { limit: 6 });
     if (transcript.available) {
       const last = transcript.toolCalls.at(-1);
       if (last) out.lastTool = { tool: last.tool, target: last.path ?? last.command ?? null };
@@ -3404,7 +3423,7 @@ async function liveProgress(jobDir) {
     // transcript, not OpenClaw's.
     if (!out.lastTool) {
       const startedMs = Date.parse(readJson(path.join(jobDir, "status.json"))?.startedAt ?? "") || 0;
-      const claude = readClaudeSessionTranscript(path.join(jobDir, "worktree"), { sinceMs: startedMs });
+      const claude = readClaudeSessionTranscript(path.join(jobDir, "worktree"), { sinceMs: startedMs, tailBytes: 262144 });
       const last = claude.available ? claude.toolCalls.at(-1) : null;
       if (last) { out.lastTool = { tool: last.tool, target: last.path ?? last.command ?? null }; out.toolCallsLive = claude.toolCalls.length; }
     }
@@ -3541,7 +3560,12 @@ server.tool("local_worker_status", `Status of one job started by this server: ph
   if (entry && !entry.settled && wait_seconds > 0) await Promise.race([entry.promise.catch(() => {}), sleep(wait_seconds * 1000)]);
   const files = { status: readJson(path.join(jobDir, "status.json")), meta: readJson(path.join(jobDir, "metadata.json")), failure: readJson(path.join(jobDir, "failure.json")) };
   if (!entry && !files.status && !files.meta && !files.failure) return toolText(`Unknown job: ${job_id}`, true);
-  const summary = await summarize(entry, files, jobDir);
+  // A hard deadline on building the answer: live progress is best-effort,
+  // and a status call must never hang (one did, for 35 minutes).
+  const summary = await Promise.race([
+    summarize(entry, files, jobDir),
+    sleep(15000).then(() => summarize(entry, files, null)),
+  ]);
   if (summary.state === "running") return toolText(JSON.stringify({ ...summary, jobDir, hint: `poll again with wait_seconds up to ${MAX_STATUS_WAIT_SECONDS}; lastTool/filesChangedLive are best-effort and may be absent early in a run` }, null, 2));
   if (entry?.error) return toolText(JSON.stringify({ ...summary, jobDir }, null, 2), true);
   if (full && entry?.result) return toolText(formatResult(entry.result), !entry.result.ok);

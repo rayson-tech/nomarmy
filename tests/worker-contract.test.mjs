@@ -3388,3 +3388,14 @@ test("run: teeTo streams output into log files while the command runs", async ()
     assert.equal(fs.readFileSync(teeTo.stderr, "utf8"), "warn");
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("salvageFinishedRun: only messages written during the call being salvaged -- never a stale one from an earlier phase", { skip: skipNoSqlite }, async () => {
+  // The real Senti shape: the work phase's last assistant message, then a
+  // report-recovery call in the same session that wrote nothing OpenClaw saw.
+  const dir = await writeFakeTranscript([assistantText("The sandbox has no pytest installed, so the suite is blocked."), toolCallEvent("read", { path: "a.py" })]);
+  try {
+    assert.equal(await salvageFinishedRun({ stderr: REAL_CLEANUP_STDERR }, dir, { sinceEvent: 2 }), null, "nothing new since the call began: refuse, don't salvage the stale message");
+    const whole = await salvageFinishedRun({ stderr: REAL_CLEANUP_STDERR }, dir, { sinceEvent: 0 });
+    assert.match(whole.final, /no pytest/, "(a call that began at the start would see it)");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
