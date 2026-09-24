@@ -32,24 +32,18 @@ main {
   margin-bottom: 2rem;
 }
 
+/* The logo is the page's heading: no repeated "nomArmy" text under it. */
 .hero .logo {
-  font-family: monospace;
-  font-size: 0.75rem;
-  margin-bottom: 1rem;
-  white-space: pre;
+  margin: 0 auto 1rem;
+  line-height: 0;
 }
 
 .hero .logo img {
+  display: block;
+  margin: 0 auto;
   max-width: 100%;
   height: auto;
   border-radius: 0.75rem;
-}
-
-.hero h1 {
-  font-size: 2.5rem;
-  font-weight: 700;
-  margin-bottom: 0.5rem;
-  letter-spacing: -0.02em;
 }
 
 .hero .subtitle {
@@ -145,10 +139,6 @@ footer a:hover {
 @media (max-width: 640px) {
   .hero {
     padding: 1.5rem 0;
-  }
-
-  .hero h1 {
-    font-size: 2rem;
   }
 
   main {

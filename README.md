@@ -1,12 +1,12 @@
-# nomArmy
+<h1 align="center"><img src="https://raw.githubusercontent.com/rayson-tech/nomarmy/main/nomarmy-logo.png" alt="nomArmy" width="320"></h1>
 
-<img src="https://raw.githubusercontent.com/rayson-tech/nomarmy/main/nomarmy-logo.png" alt="nomArmy" width="320">
+<p align="center">
+  <a href="https://github.com/rayson-tech/nomarmy/actions/workflows/ci.yml"><img src="https://github.com/rayson-tech/nomarmy/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://www.npmjs.com/package/nomarmy"><img src="https://img.shields.io/npm/v/nomarmy/alpha?label=npm%40alpha" alt="npm"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
+</p>
 
-[![CI](https://github.com/rayson-tech/nomarmy/actions/workflows/ci.yml/badge.svg)](https://github.com/rayson-tech/nomarmy/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/nomarmy/alpha?label=npm%40alpha)](https://www.npmjs.com/package/nomarmy)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-
-> Tiny coders, big appetites for bounded tickets. 🍪
+<p align="center"><em>Tiny coders, big appetites for bounded tickets.</em> 🍪</p>
 
 **An agent harness where a worker's claims are never trusted, and the environment your tests need is declared, disposable and reproducible.**
 
