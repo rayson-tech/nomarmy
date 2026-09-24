@@ -115,3 +115,11 @@ test("statusLineText: a lease without a repo is attributed from its worktree's .
   const line = statusLineText({ session: { workspace: { project_dir: "/r/rayson-senti", current_dir: "/r/rayson-senti/lambda/sub" } }, stateRoot: root });
   assert.match(line, /^rayson-senti │ 🍪 old-job codex /);
 });
+
+test("statusLineText: shows the most serious recent health warning, briefly", () => {
+  const root = tmp();
+  fs.writeFileSync(path.join(root, "health.json"), JSON.stringify({ checkedAt: new Date().toISOString(), issues: [
+    { severity: "info", short: null, id: "a" }, { severity: "warn", short: "openai login 5d", id: "b" },
+  ] }));
+  assert.equal(statusLineText({ session: { workspace: { project_dir: "/r/x" } }, stateRoot: root }), "x │ 🍪 idle │ ⚠ openai login 5d");
+});

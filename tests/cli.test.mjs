@@ -523,3 +523,27 @@ test("agents update --json --no-model clears a default model; --model and --no-m
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("jobs --prune removes runtime data only from finished jobs past the age cutoff, keeping records", () => {
+  const state = mkdtempSync(path.join(tmpdir(), "nomarmy-prune-"));
+  try {
+    const mk = (id, finishedAt, running = false) => {
+      const d = path.join(state, "jobs", id);
+      fs.mkdirSync(path.join(d, "runtime", "npm-cache"), { recursive: true });
+      fs.writeFileSync(path.join(d, "runtime", "npm-cache", "blob"), "x".repeat(1000));
+      fs.writeFileSync(path.join(d, "status.json"), JSON.stringify({ jobId: id, state: running ? "running" : "finished", serverPid: running ? process.pid : 0, updatedAt: finishedAt }));
+      if (!running) fs.writeFileSync(path.join(d, "metadata.json"), JSON.stringify({ outcome: "WORKER_DONE", finishedAt }));
+    };
+    mk("old-done", new Date(Date.now() - 5 * 86400000).toISOString());
+    mk("new-done", new Date().toISOString());
+    mk("still-running", new Date(Date.now() - 5 * 86400000).toISOString(), true);
+    const out = JSON.parse(execFileSync(process.execPath, [CLI_PATH, "jobs", "--prune", "--json"], { encoding: "utf8", env: { ...process.env, NOMARMY_AGENT_STATE: state } }));
+    assert.equal(out.pruned, 1);
+    assert.equal(fs.existsSync(path.join(state, "jobs", "old-done", "runtime")), false);
+    assert.equal(fs.existsSync(path.join(state, "jobs", "old-done", "metadata.json")), true, "the record stays");
+    assert.equal(fs.existsSync(path.join(state, "jobs", "new-done", "runtime")), true, "too recent");
+    assert.equal(fs.existsSync(path.join(state, "jobs", "still-running", "runtime")), true, "never a running job");
+  } finally {
+    rmSync(state, { recursive: true, force: true });
+  }
+});

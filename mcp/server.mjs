@@ -20,6 +20,7 @@ import { openclawProviderId } from "../lib/dispatch-schema.mjs";
 import { loadArmy, expandArmyRole, describeArmy, globalConfigDir } from "../lib/army.mjs";
 import { readClaudeSessionTranscript } from "../lib/claude-transcript.mjs";
 import { notify } from "../lib/notify.mjs";
+import { checkAndRecordHealth } from "../lib/health.mjs";
 import { detectTestSabotage, addedLinesOf, loadDependencyNames } from "../lib/sabotage.mjs";
 import { writeLease, removeLease, liveLeases, liveSlots, acquireSlot } from "../lib/slots.mjs";
 import { createRun, loadRun, runTotals, runAdmissionProblems, recordRunJob, finishRun, resolveRunLimits, describeLoweredLimits, detectUsageLimit } from "../lib/runs.mjs";
@@ -4051,6 +4052,14 @@ if (isMain) {
   // Start the model-catalog refresh now, so it's ready by the first
   // `army` call or remote job rather than kicked off by it.
   try { ensureCatalogRefresh(); } catch { /* best-effort */ }
+  // Health checks (lib/health.mjs): soon after start, then every 6 hours.
+  // New warnings notify once across all sessions; the status line shows
+  // them. Unref'd, so they never keep the process alive.
+  const runHealth = () => checkAndRecordHealth({ projectDir, stateRoot, configDir: globalConfigDir() })
+    .then(({ toNotify }) => { for (const i of toNotify) notify(`nomArmy: ${i.title}`, `${i.detail} Fix: ${i.fix}`); })
+    .catch(() => {});
+  setTimeout(runHealth, 60000).unref();
+  setInterval(runHealth, 6 * 3600000).unref();
   // Catches accumulation from a session that ended without a job ever
   // running again (a crash, a Podman machine restart) rather than waiting
   // for the next job to trigger the per-job sweep in executeJob.

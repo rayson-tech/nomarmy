@@ -177,13 +177,20 @@ Usage: nomarmy <command> [options]
                             which agent the General is, in --global
                             (default) or --local
   config paths    where agents.yml and the three army layers live
-  jobs [--watch|--events] [--interval N]
+  jobs [--watch|--events|--prune] [--interval N] [--older-than DAYS]
                   what's running across every session (agent, model, phase,
                   last tool call, files changed, heartbeat) and what just
                   finished; --watch redraws every N seconds (default 3);
                   --events prints one line per start, phase change and
                   finish (for Claude Code's background monitor; --json for
-                  JSON lines)
+                  JSON lines); --prune removes the bulky runtime data
+                  from finished jobs older than DAYS (default 2), keeping
+                  their records, reports and any retained worktree
+  health          check what's likely to break a run before it does:
+                  expiring logins, an outdated OpenClaw or plugin, roles
+                  that can't be dispatched, an unloadable agents.yml,
+                  piled-up job storage. The MCP server also runs this
+                  every 6 hours and notifies once per new warning
   statusline      the one-line summary Claude Code's status line shows
                   (installed by \`nomarmy connect claude\` when no status
                   line is set); reads the session JSON on stdin
@@ -2104,8 +2111,34 @@ async function streamJobEvents() {
   }
 }
 
+/**
+ * `nomarmy jobs --prune [--older-than DAYS]`: remove runtime/ (per-job npm
+ * cache, harness state such as Codex's, OpenClaw's transcript) from
+ * finished jobs older than DAYS (default 2). Each job's record, logs,
+ * report and any retained worktree stay. Job storage reached 1.9 GB and
+ * then 2.4 GB again within a day of real runs, mostly this.
+ */
+function pruneJobRuntime() {
+  const days = Math.max(0, Number(value("older-than", "2")) || 0);
+  const cutoff = Date.now() - days * 86400000;
+  let pruned = 0, bytes = 0;
+  const sizeOf = (dir) => { let n = 0; const stack = [dir]; while (stack.length) { const d = stack.pop(); let es = []; try { es = fs.readdirSync(d, { withFileTypes: true }); } catch { continue; } for (const e of es) { const p = path.join(d, e.name); if (e.isDirectory()) stack.push(p); else { try { n += fs.lstatSync(p).size; } catch { /* gone */ } } } } return n; };
+  for (const job of collectJobs({ recent: Infinity }).recent) {
+    const runtime = path.join(job.dir, "runtime");
+    if (!fs.existsSync(runtime)) continue;
+    const finishedAt = readJsonSafe(path.join(job.dir, "metadata.json"))?.finishedAt ?? readJsonSafe(path.join(job.dir, "status.json"))?.updatedAt;
+    if (!finishedAt || Date.parse(finishedAt) > cutoff) continue;
+    bytes += sizeOf(runtime);
+    fs.rmSync(runtime, { recursive: true, force: true });
+    pruned++;
+  }
+  if (json) return out({ pruned, freedBytes: bytes, olderThanDays: days });
+  console.log(pruned ? c.green(`✓ Removed runtime data from ${pruned} finished job(s) older than ${days} day(s), freeing ${(bytes / 1024 ** 3).toFixed(2)} GB. Their records and reports are kept.`) : c.dim(`Nothing to prune: no finished job older than ${days} day(s) still has runtime data.`));
+}
+
 async function cmdJobs() {
   if (flag("events")) return streamJobEvents();
+  if (flag("prune")) return pruneJobRuntime();
   if (json) return out(collectJobs());
   if (!flag("watch")) return console.log(renderJobs(collectJobs()));
   // No `watch` on macOS, and a shell loop can't run through Claude Code's `!`.
@@ -2117,6 +2150,24 @@ async function cmdJobs() {
   }
 }
 
+// `nomarmy health`: run the checks now (the MCP server also runs them every
+// 6 hours) and record them, which also refreshes the status line's warning.
+async function cmdHealth() {
+  const { checkAndRecordHealth } = await import("../lib/health.mjs");
+  const stateRoot = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
+  const { result } = await checkAndRecordHealth({ projectDir: repoDir, stateRoot, configDir: globalConfigDir() });
+  if (json) return out(result);
+  console.log(c.bold("🍪 nomArmy health") + c.dim(`  ${new Date(result.checkedAt).toLocaleString()}`));
+  if (!result.issues.length) { console.log(c.green("\n✓ Nothing to fix.")); return; }
+  const mark = { error: c.red("✗"), warn: c.yellow("⚠"), info: c.dim("·") };
+  for (const i of result.issues) {
+    console.log(`\n${mark[i.severity]} ${c.bold(i.title)}`);
+    console.log(c.dim(`  ${i.detail}`));
+    console.log(`  fix: ${i.fix}`);
+  }
+  if (result.issues.some((i) => i.severity === "error")) process.exitCode = 1;
+}
+
 async function cmdStatusline() {
   const { statusLineText } = await import("../lib/statusline.mjs");
   let session = {};
@@ -2124,7 +2175,7 @@ async function cmdStatusline() {
   process.stdout.write(`${statusLineText({ session })}\n`);
 }
 
-const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
+const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
   // Import lazily to avoid circular dependencies
