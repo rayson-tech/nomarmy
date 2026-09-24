@@ -488,3 +488,24 @@ test("army assign checks a named model: listed is accepted, unlisted-and-failing
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("agents list --json shows which roles, and the General, use each agent", () => {
+  const root = scratchNomarmyRoot();
+  const repo = mkdtempSync(path.join(tmpdir(), "nomarmy-army-repo-"));
+  try {
+    runAgentsCLI(root, ["add", "--json", "--name", "codex", "--kind", "subscription", "--provider", "openai", "--owner", "you@example.com"]);
+    runAgentsCLI(root, ["add", "--json", "--name", "claude", "--kind", "subscription", "--provider", "claude-cli", "--owner", "you@example.com"]);
+    runArmyCLI(root, repo, ["init", "--json"]);
+    runArmyCLI(root, repo, ["assign", "sr-dev", "codex", "gpt-6-astra", "--json"]);
+    runArmyCLI(root, repo, ["general", "claude", "--json"]);
+    const list = JSON.parse(execFileSync(process.execPath, [path.join(root, "bin", "nomarmy.mjs"), "agents", "list", "--json", "--repo", repo], {
+      cwd: repo, encoding: "utf8", env: { ...process.env, NOMARMY_CONFIG_DIR: path.join(root, "config") },
+    }));
+    assert.deepEqual(list.assignments.codex, { general: false, roles: [{ role: "sr-dev", model: "gpt-6-astra" }] });
+    assert.equal(list.assignments.claude.general, true);
+    assert.ok(list.assignments.local.roles.some((r) => r.role === "jr-dev"), "the default roster's local roles");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});

@@ -1015,15 +1015,40 @@ function parseThinkingAnswer(answer, fallback) {
   return !(a === "n" || a === "no");
 }
 
+/**
+ * For each agent: the roles pointing at it in this repo's merged army
+ * (with each role's model), and whether it's the General. Empty when the
+ * army doesn't load -- `army show` reports why.
+ */
+function agentAssignments() {
+  const byAgent = {};
+  try {
+    const { army } = loadArmy({ projectDir: repoDir });
+    if (army.general) (byAgent[army.general] ??= { general: true, roles: [] }).general = true;
+    for (const [role, r] of Object.entries(army.roles)) {
+      if (!r.agent) continue;
+      (byAgent[r.agent] ??= { general: false, roles: [] }).roles.push({ role, model: r.model ?? null });
+    }
+  } catch { /* army problems are army show's to report */ }
+  return byAgent;
+}
+
 async function cmdAgentsList() {
   const loaded = loadAgentsOrExit();
-  if (json) return out({ found: loaded.found, path: loaded.path, agents: loaded.agents });
+  const assigned = agentAssignments();
+  if (json) return out({ found: loaded.found, path: loaded.path, agents: loaded.agents, assignments: assigned });
   console.log(c.bold("🍪 nomArmy agents") + c.dim(`  (${loaded.found ? loaded.path : `no agents.yml yet; it will live at ${loaded.path}`})`));
   const width = Math.max(...Object.keys(loaded.agents).map((n) => n.length), 5) + 2;
   const inFile = fileAgentsOrExit();
   for (const [name, agent] of Object.entries(loaded.agents)) {
     const extra = agent.kind === "api" ? c.dim(`  key: ${agent.auth_env}`) : !Object.prototype.hasOwnProperty.call(inFile, name) ? c.dim("  built in") : "";
     console.log(`  ${c.cyan(name.padEnd(width))} ${describeAgentLabel(agent)}${extra}`);
+    const a = assigned[name];
+    const uses = [
+      ...(a?.general ? [c.bold("the General")] : []),
+      ...(a?.roles ?? []).map((r) => `${r.role}${r.model ? ` (${r.model === "auto" ? "auto" : r.model})` : agent.model ? ` (${agent.model})` : ""}`),
+    ];
+    console.log(c.dim(`  ${" ".repeat(width)} ${uses.length ? `used by: ${uses.join(", ")}` : "not used by any role in this repo"}`));
   }
   console.log(c.dim(`\nAdd one with \`nomarmy agents add\`. Give roles an agent with \`nomarmy army assign <role> <agent>\`, or dispatch with agent: "<name>".`));
 }
