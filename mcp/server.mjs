@@ -1005,7 +1005,19 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
         error.timedOut = true;
         error.stopReason = error.stopReason ?? "openclaw_internal_timeout";
       }
+      // The logs are written on failure too, so a failed job still has them.
+      if (error.stdout !== undefined) fs.writeFileSync(path.join(jobDir, `openclaw${logSuffix}.stdout.log`), `${error.stdout ?? ""}\n`);
+      if (error.stderr !== undefined) fs.writeFileSync(path.join(jobDir, `openclaw${logSuffix}.stderr.log`), `${error.stderr ?? ""}\n`);
+      const bareModel = selected.model.includes("/") ? selected.model.slice(selected.model.indexOf("/") + 1) : selected.model;
+      const salvaged = !error.timedOut ? await salvageFinishedRun(error, stateDir) : null;
+      if (salvaged) {
+        fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} OpenClaw exited with an error after the run finished (${salvaged.salvagedFrom}); using the report from the run's transcript\n${error.message}\n`);
+        return { ...salvaged, model: bareModel, provider: selected.entry?.provider ?? workerProvider, thinkingApplied: selected.thinking, budgetsUsed: jobBudgets };
+      }
       fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} OpenClaw failure${logSuffix}\n${error.stack || error.message}\n`);
+      // What was attempted, for the job record: a failed job used to be
+      // labeled with the local default model, whatever it really ran on.
+      error.partialResult = { model: bareModel, provider: selected.entry?.provider ?? workerProvider, budgetsUsed: jobBudgets };
       throw error;
     } finally {
       // A cloned copy of the ambient OpenClaw config (which may carry a real
@@ -1015,6 +1027,25 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
       await reapSandboxContainers(stateDir, jobDir);
     }
   });
+}
+
+/**
+ * A run whose work finished but whose exit failed: OpenClaw logged the run
+ * ending normally (stopReason=stop) and then errored, e.g. "Codex one-shot
+ * client cleanup could not be confirmed" -- seen live on a Senti scout,
+ * whose complete report was discarded as WORKER_FAILED. When the run's
+ * transcript holds a final assistant message, that is the report. Only for
+ * a normal stop: a timeout, abort or crash mid-run is never salvaged.
+ */
+export async function salvageFinishedRun(error, stateDir) {
+  const stderr = String(error?.stderr ?? "");
+  if (!/ended with stopReason=stop\b/.test(stderr)) return null;
+  let transcript;
+  try { transcript = await readOpenClawTranscript(stateDir); } catch { return null; }
+  const final = transcript?.available ? String(transcript.lastAssistantText ?? "").trim() : "";
+  if (!final) return null;
+  const why = /cleanup/i.test(stderr) ? "OpenClaw's cleanup failed after the run" : "a nonzero exit after the run";
+  return { ok: true, status: "ok", final, salvaged: true, salvagedFrom: why, usage: null, toolSummary: null };
 }
 
 // OpenClaw names each job's sandbox container after the hash of its skills
@@ -2222,7 +2253,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
     // worker that already has a complete diff and keeps running is spending
     // wall-clock nobody asked it to.
     const timeBudget = deriveTimeBudget({ timeoutSeconds });
-    let result = null, workerFailed = false, workerTimedOut = false, workerStopReason = null, workerError = null;
+    let result = null, attempted = null, workerFailed = false, workerTimedOut = false, workerStopReason = null, workerError = null;
     const workerStartedMs = Date.now();
     progress("worker");
     try {
@@ -2245,6 +2276,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
       workerTimedOut = Boolean(error.timedOut);
       workerStopReason = error.stopReason ?? null;
       workerError = error.stack || error.message;
+      attempted = error.partialResult ?? attempted;
     }
     let workerElapsedMs = Date.now() - workerStartedMs;
     if (result && (result.timedOut === true || result.status === "timeout" || result.status === "timed_out")) workerTimedOut = true;
@@ -2471,7 +2503,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
     progress("commit");
     const commit = await createCoordinatorCommit({ cwd, jobId, outcome: finalOutcome });
     progress("record");
-    const record = await collectGitRecord({ cwd, baseSha: base.sha, branch, baseRef: base.ref, jobId }), worker = workerMetadata(result);
+    const record = await collectGitRecord({ cwd, baseSha: base.sha, branch, baseRef: base.ref, jobId }), worker = workerMetadata(result ?? attempted);
 
     let coordinatorStatus = COORDINATOR_STATUS_BY_OUTCOME[finalOutcome.outcome] ?? "incomplete";
     const issues = [...finalOutcome.reasons];
@@ -2501,7 +2533,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
         : `report-recovery follow-up call did not produce a usable report either (${cause})`);
     }
 
-    const metrics = buildMetrics({ result, record, reportValidation, outcome: finalOutcome, workerElapsedMs, totalElapsedMs: Date.now() - jobStartedMs, regressionCheckElapsedMs, transientAbortRetried });
+    const metrics = buildMetrics({ result: result ?? attempted, record, reportValidation, outcome: finalOutcome, workerElapsedMs, totalElapsedMs: Date.now() - jobStartedMs, regressionCheckElapsedMs, transientAbortRetried });
     const manifest = { version: VERSION, jobId, workerId: workerId || jobId, mode, projectDir, worktree, branch, startedAt, finishedAt,
       objective: task, acceptance: acceptance ?? [], verificationProfile: verification ?? null,
       outcome: finalOutcome.outcome, recovered: finalOutcome.recovered, recoveryAttempted: finalOutcome.recoveryAttempted,
@@ -2517,7 +2549,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
       testChanges: record.testChanges, metrics,
       worktreePointerBefore: beforePointer, worktreePointerAfterWorker: afterPointer, worktreeRetained: Boolean(worktree),
       commit, gitBeforeCoordinatorCommit: preCommit, git: record, worker, workerError, workerStopReason,
-      budgets: recordedBudgets(result, "implement", task),
+      budgets: recordedBudgets(result ?? attempted, "implement", task),
       timeBudget,
       // requestedReasoning is always what the caller passed, even when it has
       // no effect: profile "coder"'s shipped default (Qwen3-Coder-Next) has no
@@ -2565,7 +2597,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
     } catch (error) { fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} evidence tool not placed: ${error.message}\n`); }
     const evidencePlaced = fs.existsSync(path.join(worktree, evidenceTool));
 
-    let result = null, workerFailed = false, workerTimedOut = false, workerError = null;
+    let result = null, attempted = null, workerFailed = false, workerTimedOut = false, workerError = null;
     const workerStartedMs = Date.now();
     progress("worker");
     try {
@@ -2582,6 +2614,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
       // timed-out worker's partial work is never auto-committed).
       workerTimedOut = Boolean(error.timedOut);
       workerError = error.stack || error.message;
+      attempted = error.partialResult ?? attempted;
     }
     const workerElapsedMs = Date.now() - workerStartedMs;
     if (result && (result.timedOut === true || result.status === "timeout" || result.status === "timed_out")) workerTimedOut = true;
@@ -2635,7 +2668,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
     if (outcome.retainWorktree) worktreeRetained = true;
     else await run("git", ["worktree", "remove", "--force", worktree], { cwd: projectDir }).catch(() => { worktreeRetained = fs.existsSync(worktree); });
 
-    const worker = workerMetadata(result);
+    const worker = workerMetadata(result ?? attempted);
     const issues = [...outcome.reasons];
     if (workerError) issues.push(`scout error: ${String(workerError).split("\n")[0]}`);
     const failures = worker.toolSummary?.failures ?? 0; if (failures > 0) issues.push(`scout recorded ${failures} tool failure(s)`);
@@ -2663,7 +2696,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
     if (displacement.verdict === "negative") issues.push("negative displacement: this scout cost more coordinator context than reading directly would have");
 
     const metrics = {
-      ...buildMetrics({ result, record: null, reportValidation: null, outcome: null, workerElapsedMs, totalElapsedMs: Date.now() - jobStartedMs }),
+      ...buildMetrics({ result: result ?? attempted, record: null, reportValidation: null, outcome: null, workerElapsedMs, totalElapsedMs: Date.now() - jobStartedMs }),
       report_truncated: report.truncated, report_strict: report.strict, worker_timeout: workerTimedOut,
       scout_findings_supported: verified.supported, scout_findings_unsupported: verified.unsupported,
       scout_findings_weak: verified.weak, scout_excerpt_lines: verified.excerptLinesUsed,
@@ -2687,7 +2720,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
         : { available: false, reason: transcript.reason },
       displacement, reportRecoveryAttempted, reportRecovered,
       dirty, snapshotChanges: record.repoStatusFiles, worktreeRetained, metrics, worker, workerError,
-      budgets: recordedBudgets(result, "scout", task),
+      budgets: recordedBudgets(result ?? attempted, "scout", task),
       // requestedReasoning is always what the caller passed, even when it has
       // no effect: profile "coder"'s shipped default (Qwen3-Coder-Next) has no
       // thinking mode and always runs with it off (see jobSchema's `reasoning`
@@ -2737,7 +2770,7 @@ async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtime
     } catch (error) { fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} evidence tool not placed: ${error.message}\n`); }
     const evidencePlaced = fs.existsSync(path.join(worktree, evidenceTool));
 
-    let result = null, workerFailed = false, workerTimedOut = false, workerError = null;
+    let result = null, attempted = null, workerFailed = false, workerTimedOut = false, workerError = null;
     const workerStartedMs = Date.now();
     progress("worker");
     try {
@@ -2746,6 +2779,7 @@ async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtime
       workerFailed = true;
       workerTimedOut = Boolean(error.timedOut);
       workerError = error.stack || error.message;
+      attempted = error.partialResult ?? attempted;
     }
     const workerElapsedMs = Date.now() - workerStartedMs;
     if (result && (result.timedOut === true || result.status === "timeout" || result.status === "timed_out")) workerTimedOut = true;
@@ -2765,7 +2799,7 @@ async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtime
     if (outcome.retainWorktree) worktreeRetained = true;
     else await run("git", ["worktree", "remove", "--force", worktree], { cwd: projectDir }).catch(() => { worktreeRetained = fs.existsSync(worktree); });
 
-    const worker = workerMetadata(result);
+    const worker = workerMetadata(result ?? attempted);
     const issues = [...outcome.reasons];
     if (workerError) issues.push(`decompose error: ${String(workerError).split("\n")[0]}`);
     const failures = worker.toolSummary?.failures ?? 0; if (failures > 0) issues.push(`decomposer recorded ${failures} tool failure(s)`);
@@ -2783,7 +2817,7 @@ async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtime
     if (displacement.verdict === "negative") issues.push("negative displacement: this decompose job cost more coordinator context than reading directly would have");
 
     const metrics = {
-      ...buildMetrics({ result, record: null, reportValidation: null, outcome: null, workerElapsedMs, totalElapsedMs: Date.now() - jobStartedMs }),
+      ...buildMetrics({ result: result ?? attempted, record: null, reportValidation: null, outcome: null, workerElapsedMs, totalElapsedMs: Date.now() - jobStartedMs }),
       report_truncated: report.truncated, report_strict: report.strict, worker_timeout: workerTimedOut,
       decompose_subtasks_supported: verified.supported, decompose_subtasks_unsupported: verified.unsupported,
       decompose_subtasks_weak: verified.weak, decompose_overlaps: overlaps.length,
@@ -2807,7 +2841,7 @@ async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtime
         : { available: false, reason: transcript.reason },
       displacement,
       dirty, snapshotChanges: record.repoStatusFiles, worktreeRetained, metrics, worker, workerError,
-      budgets: recordedBudgets(result, "decompose", task),
+      budgets: recordedBudgets(result ?? attempted, "decompose", task),
       requestedProfile: profile, requestedReasoning: reasoning, reasoningApplied: resolveReasoningApplied({ result, profile, reasoning, workerModelThinkingSupported }), execution };
     fs.writeFileSync(path.join(jobDir, "metadata.json"), JSON.stringify(manifest, null, 2));
     if (result) fs.writeFileSync(path.join(jobDir, "result.json"), JSON.stringify(result, null, 2));

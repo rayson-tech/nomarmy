@@ -64,6 +64,7 @@ import {
   splitJobsByLane,
   jobLane,
   readsMeasurable,
+  salvageFinishedRun,
   runningCount,
   track,
   looksLikeTransientInferenceAbort,
@@ -3328,4 +3329,34 @@ test("readsMeasurable: tool calls the result reports but the transcript lacks me
   assert.equal(readsMeasurable(real, { toolSummary: { calls: 1 } }), real);
   const missing = { available: false, reason: "no db" };
   assert.equal(readsMeasurable(missing, { toolSummary: { calls: 5 } }), missing);
+});
+
+// salvageFinishedRun: a Senti Codex scout finished its work, then OpenClaw's
+// own cleanup failed and it exited 1 with an empty envelope, so the whole
+// report was discarded as WORKER_FAILED. The real stderr shape:
+const REAL_CLEANUP_STDERR = [
+  "\u001b[33m[agent/embedded]\u001b[39m \u001b[33magent cleanup failed: runId=32b0 sessionId=32b0 step=codex-shared-client-release error=Codex one-shot client cleanup could not be confirmed\u001b[39m",
+  "\u001b[33m[agents/agent-command]\u001b[39m \u001b[36m[agent] run 32b0 ended with stopReason=stop\u001b[39m",
+  "Agent exec cleanup failed: Agent runtime cleanup did not settle; state ownership retained until this process exits",
+].join("\n");
+const assistantText = (text) => ({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } });
+
+test("salvageFinishedRun: a finished run whose cleanup failed keeps its report, from the transcript's last assistant message", { skip: skipNoSqlite }, async () => {
+  const dir = await writeFakeTranscript([toolCallEvent("read", { path: "a.ts" }), toolResultEvent("..."), assistantText("working..."), assistantText("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: high\nNOT_FOUND: none\nEND")]);
+  try {
+    const out = await salvageFinishedRun({ stderr: REAL_CLEANUP_STDERR, message: "openclaw exited 1" }, dir);
+    assert.equal(out.ok, true);
+    assert.equal(out.final, "SCOUT REPORT\nQUESTION: q\nCONFIDENCE: high\nNOT_FOUND: none\nEND", "the LAST assistant message, not an earlier one");
+    assert.equal(out.salvagedFrom, "OpenClaw's cleanup failed after the run");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("salvageFinishedRun: never salvages a run that didn't end normally, or one with nothing to salvage", { skip: skipNoSqlite }, async () => {
+  const dir = await writeFakeTranscript([assistantText("half a report")]);
+  const empty = await writeFakeTranscript([toolCallEvent("read", { path: "a.ts" })]);
+  try {
+    assert.equal(await salvageFinishedRun({ stderr: "[agent] run 32b0 ended with stopReason=timeout" }, dir), null, "a timeout is not a finished run");
+    assert.equal(await salvageFinishedRun({ stderr: "Error: model call aborted" }, dir), null, "a crash mid-run is not a finished run");
+    assert.equal(await salvageFinishedRun({ stderr: REAL_CLEANUP_STDERR }, empty), null, "no final assistant text, nothing to salvage");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(empty, { recursive: true, force: true }); }
 });
