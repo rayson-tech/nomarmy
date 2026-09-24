@@ -583,6 +583,22 @@ function budgetsForPool(poolName, model = null, reportSize = null) {
   return deriveBudgets({ contextPerNom: resolved.contextPerNom, source: resolved.source, env: process.env, tier, reportSize: reportSize ?? "standard" });
 }
 
+/**
+ * What a job record says about its budget: the one its prompt was really
+ * built with (runOpenClaw's budgetsUsed), or the server-wide local one when
+ * the worker never produced a result. `briefChars` sits next to the brief
+ * ceiling so records show how close real briefs come to it.
+ */
+function recordedBudgets(result, section, task) {
+  const used = result?.budgetsUsed ?? budgets;
+  return {
+    contextPerNom: used.contextPerNom, source: used.source, tier: used.tier ?? "local", reportSize: used.reportSize ?? "standard",
+    brief: used.brief, briefChars: String(task ?? "").length,
+    ...(section === "implement" ? {} : { [section]: used[section] }),
+    report: used.report[section],
+  };
+}
+
 // The subscription-worker sibling of budgetsForPool -- simpler, since a
 // named worker is a single known entry, not a pool of many to take the
 // minimum across. Falls back to the outer `budgets` the same way
@@ -947,6 +963,10 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
       // formula, which had no way to reflect a pool-routed job's real value
       // at all (a real, separate bug this closes alongside the retry).
       parsed.thinkingApplied = selected.thinking;
+      // The budget this job's prompt was actually built with (its agent's
+      // tier and model), so the job record reports it rather than the
+      // server-wide local one.
+      parsed.budgetsUsed = jobBudgets;
       return parsed;
     } catch (error) {
       // See parseOpenClawInternalTimeout's own doc comment: a nonzero exit
@@ -2467,7 +2487,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
       testChanges: record.testChanges, metrics,
       worktreePointerBefore: beforePointer, worktreePointerAfterWorker: afterPointer, worktreeRetained: Boolean(worktree),
       commit, gitBeforeCoordinatorCommit: preCommit, git: record, worker, workerError, workerStopReason,
-      budgets: { contextPerNom: budgets.contextPerNom, source: budgets.source, brief: budgets.brief, report: budgets.report.implement },
+      budgets: recordedBudgets(result, "implement", task),
       timeBudget,
       // requestedReasoning is always what the caller passed, even when it has
       // no effect: profile "coder"'s shipped default (Qwen3-Coder-Next) has no
@@ -2631,7 +2651,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
         : { available: false, reason: transcript.reason },
       displacement, reportRecoveryAttempted, reportRecovered,
       dirty, snapshotChanges: record.repoStatusFiles, worktreeRetained, metrics, worker, workerError,
-      budgets: { contextPerNom: budgets.contextPerNom, source: budgets.source, scout: budgets.scout, report: budgets.report.scout },
+      budgets: recordedBudgets(result, "scout", task),
       // requestedReasoning is always what the caller passed, even when it has
       // no effect: profile "coder"'s shipped default (Qwen3-Coder-Next) has no
       // thinking mode and always runs with it off (see jobSchema's `reasoning`
@@ -2750,7 +2770,7 @@ async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtime
         : { available: false, reason: transcript.reason },
       displacement,
       dirty, snapshotChanges: record.repoStatusFiles, worktreeRetained, metrics, worker, workerError,
-      budgets: { contextPerNom: budgets.contextPerNom, source: budgets.source, decompose: budgets.decompose, report: budgets.report.decompose },
+      budgets: recordedBudgets(result, "decompose", task),
       requestedProfile: profile, requestedReasoning: reasoning, reasoningApplied: resolveReasoningApplied({ result, profile, reasoning, workerModelThinkingSupported }), execution };
     fs.writeFileSync(path.join(jobDir, "metadata.json"), JSON.stringify(manifest, null, 2));
     if (result) fs.writeFileSync(path.join(jobDir, "result.json"), JSON.stringify(result, null, 2));
