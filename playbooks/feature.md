@@ -5,8 +5,8 @@ You are the General. Build this feature end to end with nomArmy's army and come 
 ## Before anything else
 
 1. Call the `army` tool. It tells you who you are, the workflow, and each role's agent and model. Call `local_worker_config` for this repo's verification profiles.
-2. If the request starts with `resume run-`, call `run_status` for that run, read its log, and continue from where it stopped. Do not start a new run.
-3. Otherwise call `run_start` with a short name for the feature. Put its `run_id` on **every** job you dispatch, and keep its log file current (see below).
+2. If the request starts with `resume run-`, call `run_start` with `resume: "<run-id>"` to reattach this session to it, read its log, and continue from where it stopped. Do not start a new run.
+3. Otherwise call `run_start` with a short name for the feature. It becomes this session's active run, so every job you dispatch joins it automatically. Keep its log file current (see below).
 
 ## The run
 

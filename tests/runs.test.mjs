@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
-import { createRun, detectUsageLimit, finishRun, loadRun, recordRunJob, resolveRunLimits, runAdmissionProblems, runTotals, DEFAULT_RUN_LIMITS } from "../lib/runs.mjs";
+import { createRun, describeLoweredLimits, detectUsageLimit, finishRun, loadRun, recordRunJob, resolveRunLimits, runAdmissionProblems, runTotals, DEFAULT_RUN_LIMITS } from "../lib/runs.mjs";
 import { armySchema, loadArmy } from "../lib/army.mjs";
 
 const dirs = [];
@@ -98,4 +98,19 @@ test("army run_limits: validated, and personal -- refused in a committed .nomarm
   assert.throws(() => loadArmy({ projectDir: repo, env }), /sets army.run_limits, which is personal/);
   fs.writeFileSync(path.join(repo, ".nomarmy.yml"), "army:\n  general: claude\n");
   assert.throws(() => loadArmy({ projectDir: repo, env }), /sets army.general, which is personal/);
+});
+
+test("runTotals: past a limit is the loudest warning, not silence -- the real run at 8.46 of 4 hours", () => {
+  const dir = tmp();
+  const { id } = createRun(dir, { name: "f", repo: "/r", limits: LIMITS, now: Date.parse("2026-09-24T04:26:14Z") });
+  const totals = runTotals(loadRun(dir, id), { now: Date.parse("2026-09-24T12:53:50Z") });
+  assert.ok(totals.warnings.some((w) => /OVER its hours limit \(8.46 of 6\); no more jobs are admitted/.test(w)), totals.warnings.join("; "));
+});
+
+test("describeLoweredLimits: says why a request was capped, and where to raise the ceiling", () => {
+  const resolved = resolveRunLimits({}, { max_api_usd: 15, max_hours: 4 });
+  const notes = describeLoweredLimits({}, { max_api_usd: 15, max_hours: 4 }, resolved);
+  assert.equal(notes.length, 1, "lowering hours to 4 is honored and needs no note");
+  assert.match(notes[0], /api spend \(\$\) capped at 10, not 15: that's the ceiling from the default \(no run_limits configured\)\. Raise it with army\.run_limits\.max_api_usd/);
+  assert.match(describeLoweredLimits({ max_api_usd: 12 }, { max_api_usd: 15 }, resolveRunLimits({ max_api_usd: 12 }, { max_api_usd: 15 }))[0], /from your configured run_limits/);
 });

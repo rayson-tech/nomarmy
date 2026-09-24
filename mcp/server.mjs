@@ -20,7 +20,7 @@ import { openclawProviderId } from "../lib/dispatch-schema.mjs";
 import { loadArmy, expandArmyRole, describeArmy, globalConfigDir } from "../lib/army.mjs";
 import { readClaudeSessionTranscript } from "../lib/claude-transcript.mjs";
 import { writeLease, removeLease, liveLeases, liveSlots, acquireSlot } from "../lib/slots.mjs";
-import { createRun, loadRun, runTotals, runAdmissionProblems, recordRunJob, finishRun, resolveRunLimits, detectUsageLimit } from "../lib/runs.mjs";
+import { createRun, loadRun, runTotals, runAdmissionProblems, recordRunJob, finishRun, resolveRunLimits, describeLoweredLimits, detectUsageLimit } from "../lib/runs.mjs";
 import { loadAgents, agentsConfigPath, agentsAsDispatchConfig, agentsAsSubscriptionConfig, agentDispatchFields, resolveAgentModel, agentProviderId, describeAgent } from "../lib/agents.mjs";
 import { resolveSubscriptionWorker, findProviderConflicts, describeProviderConflict } from "../lib/subscription-config.mjs";
 import { queryModelCatalog, queryModelCatalogAsync } from "../lib/model-catalog.mjs";
@@ -538,12 +538,19 @@ function currentArmy() {
  * roles are subscription-backed in every repo). Problems come back as
  * refusal lines, never a fallback to some other agent.
  */
-export function expandJobs(jobs, { getArmy = currentArmy, getAgents = () => agentsConfig().agents } = {}) {
+// The /feature run this session started (run_start) or resumed. Every job
+// the session dispatches joins it unless it names another run: enforcement
+// used to depend on the General tagging each job with run_id, and in a real
+// Senti run none were tagged, so a 4-hour run went 8.46 hours unchecked.
+let activeRunId = null;
+
+export function expandJobs(jobs, { getArmy = currentArmy, getAgents = () => agentsConfig().agents, getActiveRun = () => activeRunId } = {}) {
   const problems = [];
   let army = null, agents = null;
+  const runId = getActiveRun();
   const expanded = jobs.map((job, i) => {
     try {
-      let j = job;
+      let j = runId && !job.run_id ? { ...job, run_id: runId } : job;
       if (j.army_role) { army ??= getArmy().army; j = expandArmyRole(j, army); }
       const { agent, roleModel = null, ...rest } = j;
       if (!agent) {
@@ -3600,14 +3607,28 @@ export function buildConfigSummary(repoDir, loadConfigFn = loadConfig) {
   return { found: true, valid: true, path: loaded.path, profiles, elevated: loaded.elevated,
     note: profiles.length ? null : ".nomarmy.yml exists but defines no verification profiles; verification/union_verification/verify_regression will report not_run." };
 }
-server.tool("run_start", "Start a /feature run: one feature, end to end, with limits. Every job for it then carries this run_id, and admission enforces the run's limits -- jobs, api spend in dollars, wall-clock hours -- warning at the configured share and refusing at the cap. A vendor usage-limit error pauses that agent for the rest of the run. Limits come from the operator's army run_limits; you may lower them for this run, never raise them. Returns the run id and a log path: keep the run log (plan, decisions, progress) there so a fresh session can resume if yours hits its own usage limit.", {
-  name: z.string().min(1).max(120).describe("A short name for the feature."),
+server.tool("run_start", "Start a /feature run (or reattach to one with `resume`): one feature, end to end, with limits. It becomes this session's active run: every job you dispatch from now on joins it automatically (pass run_id only to target a different run). Admission enforces the run's limits -- jobs, api spend in dollars, wall-clock hours -- warning at the configured share and refusing at the cap. A vendor usage-limit error pauses that agent for the rest of the run. Limits come from the operator's army run_limits; you may lower them for this run, never raise them. Returns the run id and a log path: keep the run log (plan, decisions, progress) there so a fresh session can resume if yours hits its own usage limit.", {
+  name: z.string().min(1).max(120).optional().describe("A short name for the feature (required unless resuming)."),
+  resume: z.string().regex(/^run-[a-z0-9-]{1,80}$/).optional().describe("Reattach this session to an existing, still-running run (e.g. after the previous session hit its own limit) instead of starting a new one."),
   max_jobs: z.number().int().positive().optional(), max_api_usd: z.number().positive().optional(), max_hours: z.number().positive().optional(),
-}, async ({ name, max_jobs, max_api_usd, max_hours }) => {
+}, async ({ name, resume, max_jobs, max_api_usd, max_hours }) => {
   try {
-    const limits = resolveRunLimits(currentArmy().army.runLimits, { max_jobs, max_api_usd, max_hours });
+    if (resume) {
+      const run = loadRun(runsRoot, resume);
+      if (run.repo !== projectDir) return toolText(`run "${run.id}" belongs to ${run.repo}, not this repository`, true);
+      if (run.status !== "running") return toolText(`run "${run.id}" is ${run.status}; start a new run instead`, true);
+      activeRunId = run.id;
+      return toolText(JSON.stringify({ runId: run.id, resumed: true, limits: run.limits, logPath: run.logPath, ...runTotals(run) }, null, 2));
+    }
+    if (!name) return toolText("run_start needs a name (or resume: <run-id>)", true);
+    const configured = currentArmy().army.runLimits;
+    const requested = { max_jobs, max_api_usd, max_hours };
+    const limits = resolveRunLimits(configured, requested);
     const run = createRun(runsRoot, { name, repo: projectDir, limits });
-    return toolText(JSON.stringify({ runId: run.id, limits: run.limits, logPath: run.logPath, repo: run.repo }, null, 2));
+    activeRunId = run.id;
+    const notes = describeLoweredLimits(configured, requested, limits);
+    return toolText(JSON.stringify({ runId: run.id, limits: run.limits, ...(notes.length ? { limitNotes: notes } : {}), logPath: run.logPath, repo: run.repo,
+      note: "This is now the session's active run: every job you dispatch joins it automatically." }, null, 2));
   } catch (error) { return toolText(error.message, true); }
 });
 server.tool("run_status", "A /feature run's limits, what it has used (jobs, api spend, hours), per-agent jobs/spend/tokens, warnings (80% of a limit, paused agents), and its log path. Read-only.", {
@@ -3624,6 +3645,7 @@ server.tool("run_finish", "Close a /feature run as complete or stopped, with a o
 }, async ({ run_id, status, summary }) => {
   try {
     const run = finishRun(runsRoot, run_id, { status, summary });
+    if (activeRunId === run_id) activeRunId = null;
     return toolText(JSON.stringify({ id: run.id, status: run.status, ...runTotals(run) }, null, 2));
   } catch (error) { return toolText(error.message, true); }
 });

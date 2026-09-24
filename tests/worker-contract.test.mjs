@@ -3399,3 +3399,10 @@ test("salvageFinishedRun: only messages written during the call being salvaged -
     assert.match(whole.final, /no pytest/, "(a call that began at the start would see it)");
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("expandJobs: every job joins the session's active run unless it names another -- enforcement can't depend on the General tagging each job", () => {
+  const { jobs } = expandJobs([{ task: "t" }, { task: "t", run_id: "run-other-abc123" }], { getActiveRun: () => "run-scan-hygiene-bb66d4", getArmy: () => FAKE_ARMY, getAgents: () => FAKE_AGENTS });
+  assert.equal(jobs[0].run_id, "run-scan-hygiene-bb66d4");
+  assert.equal(jobs[1].run_id, "run-other-abc123");
+  assert.equal(expandJobs([{ task: "t" }], { getActiveRun: () => null }).jobs[0].run_id, undefined, "no active run, no run_id");
+});
