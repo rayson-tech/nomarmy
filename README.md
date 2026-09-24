@@ -251,7 +251,7 @@ The General can lower these for one run, never raise them. When a vendor answers
 
 ## The `nomarmy` CLI
 
-Not published to npm (`"private": true`): clone and `npm install && npm link` (done for you by `install.sh`), or run commands directly: `node bin/nomarmy.mjs doctor`.
+An alpha on npm: `npm install -g nomarmy@alpha` (the `alpha` tag, never `latest`). Or clone and `npm install && npm link` (done for you by `install.sh`), or run commands directly: `node bin/nomarmy.mjs doctor`.
 
 Every command proposes before writing anything: explicit `[y/N]` confirmation, or an explicit flag standing in for one under `--json`. None touch system-level infrastructure; `install.sh` stays a separate, manual step.
 
