@@ -3327,9 +3327,11 @@ server.tool("local_worker_start", "Start one worker or scout in the background a
 // (CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT). This constant must stay comfortably
 // under whatever that idle-timeout is actually configured to on the client
 // polling this server, with real margin for the response itself to be built
-// and sent -- 240s assumes a 300s (5-minute) per-server timeout is already
-// configured; override down if it is not, or up if a longer one is.
-export const MAX_STATUS_WAIT_SECONDS = Number.parseInt(process.env.NOMARMY_MAX_STATUS_WAIT_SECONDS ?? "", 10) || 240;
+// and sent. Claude Code also moves any tool call still running at 120s to
+// the background (reported from a real Senti run), which a 240s default
+// always crossed; 110s returns in-line with margin. Raise it only for a
+// client that neither backgrounds nor times out that early.
+export const MAX_STATUS_WAIT_SECONDS = Number.parseInt(process.env.NOMARMY_MAX_STATUS_WAIT_SECONDS ?? "", 10) || 110;
 server.tool("local_worker_status", `Status of one job started by this server: phase (starting, worktree, worker, verification, commit, record, finished), elapsed time against its timeout, and the result once finished. wait_seconds long-polls up to that long for completion (max ${MAX_STATUS_WAIT_SECONDS}, to stay inside MCP client request timeouts; poll again for longer jobs). full=true returns the complete formatted result instead of a summary.`, {
   job_id: z.string().min(1), wait_seconds: z.number().int().min(0).max(MAX_STATUS_WAIT_SECONDS).default(0), full: z.boolean().default(false)
 }, async ({ job_id, wait_seconds, full }) => {
