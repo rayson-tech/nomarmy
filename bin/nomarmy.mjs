@@ -2179,8 +2179,13 @@ function pruneJobRuntime() {
   for (const job of collectJobs({ recent: Infinity }).recent) {
     const runtime = path.join(job.dir, "runtime");
     if (!fs.existsSync(runtime)) continue;
-    const finishedAt = readJsonSafe(path.join(job.dir, "metadata.json"))?.finishedAt ?? readJsonSafe(path.join(job.dir, "status.json"))?.updatedAt;
+    // Finished means a final record. A running job's status.json heartbeat
+    // is always in the past too, so with --older-than 0 falling back to it
+    // deleted a live job's OpenClaw state mid-run. An orphaned job (its
+    // server gone, no record) isn't touched either: it may be recoverable.
+    const finishedAt = readJsonSafe(path.join(job.dir, "metadata.json"))?.finishedAt;
     if (!finishedAt || Date.parse(finishedAt) > cutoff) continue;
+    if (fs.existsSync(path.join(agentStateRoot(), "leases", `${path.basename(job.dir)}.json`))) continue;
     bytes += sizeOf(runtime);
     fs.rmSync(runtime, { recursive: true, force: true });
     pruned++;

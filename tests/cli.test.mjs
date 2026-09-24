@@ -548,6 +548,16 @@ test("jobs --prune removes runtime data only from finished jobs past the age cut
     assert.equal(fs.existsSync(path.join(state, "jobs", "old-done", "metadata.json")), true, "the record stays");
     assert.equal(fs.existsSync(path.join(state, "jobs", "new-done", "runtime")), true, "too recent");
     assert.equal(fs.existsSync(path.join(state, "jobs", "still-running", "runtime")), true, "never a running job");
+    // --older-than 0: a live job's heartbeat is in the past too, and must
+    // never make it look finished (this deleted a running job's state).
+    mk("live-now", new Date(Date.now() - 60000).toISOString(), true);
+    mk("leased", new Date(Date.now() - 60000).toISOString());
+    fs.mkdirSync(path.join(state, "leases"), { recursive: true });
+    fs.writeFileSync(path.join(state, "leases", "leased.json"), JSON.stringify({ jobId: "leased", pid: process.pid }));
+    const all = JSON.parse(execFileSync(process.execPath, [CLI_PATH, "jobs", "--prune", "--older-than", "0", "--json"], { encoding: "utf8", env: { ...process.env, NOMARMY_AGENT_STATE: state } }));
+    assert.equal(all.pruned, 1, "only new-done");
+    assert.equal(fs.existsSync(path.join(state, "jobs", "new-done", "runtime")), false);
+    for (const id of ["still-running", "live-now", "leased"]) assert.equal(fs.existsSync(path.join(state, "jobs", id, "runtime")), true, id);
   } finally {
     rmSync(state, { recursive: true, force: true });
   }
