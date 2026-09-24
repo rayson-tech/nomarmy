@@ -375,10 +375,13 @@ test("scan --json against empty temp directory returns evidence with zero counts
 // --------------------------------------------------------------------------
 // nomarmy army <init|assign|show>
 // --------------------------------------------------------------------------
-function runArmyCLI(root, repo, args) {
+// NOMARMY_OPENCLAW_CMD points at nothing by default, so `army assign`'s
+// model check never reaches a real OpenClaw (or spends a real request);
+// a test that wants the check passes its own fake in extraEnv.
+function runArmyCLI(root, repo, args, extraEnv = {}) {
   try {
     const result = execFileSync(process.execPath, [path.join(root, "bin", "nomarmy.mjs"), "army", ...args, "--repo", repo], {
-      cwd: repo, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NOMARMY_CONFIG_DIR: path.join(root, "config") },
+      cwd: repo, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NOMARMY_CONFIG_DIR: path.join(root, "config"), NOMARMY_OPENCLAW_CMD: path.join(root, "no-openclaw-here"), ...extraEnv },
     });
     return { exitCode: 0, stdout: result };
   } catch (error) {
@@ -445,6 +448,41 @@ test("army assign/general refuse a prefixed target, a role name with spaces, and
     assert.notEqual(runArmyCLI(root, repo, ["assign", "pm", "worker:codex", "--json"]).exitCode, 0);
     assert.notEqual(runArmyCLI(root, repo, ["assign", "Project Manager", "local", "--json"]).exitCode, 0);
     assert.notEqual(runArmyCLI(root, repo, ["general", "ghost", "--json"]).exitCode, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// A fake openclaw whose catalog lists only openai/gpt-6-astra, and whose
+// test calls fail -- the exact shape of the live gpt-6-sol surprise.
+function withCatalogOpenclaw(root) {
+  const scriptPath = path.join(root, ".fake-catalog-openclaw");
+  fs.writeFileSync(scriptPath, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "models" && args[1] === "list") { console.log("openai/gpt-6-astra   text+image 272k   no   yes"); process.exit(0); }
+if (args[0] === "agent") { console.log(JSON.stringify({ ok: false, status: "error", final: "", error: { message: "Unknown model" } })); process.exit(0); }
+process.exit(0);
+`);
+  fs.chmodSync(scriptPath, 0o755);
+  return { NOMARMY_OPENCLAW_CMD: scriptPath };
+}
+
+test("army assign checks a named model: listed is accepted, unlisted-and-failing is refused without writing, --no-check skips", () => {
+  const root = scratchNomarmyRoot();
+  const repo = mkdtempSync(path.join(tmpdir(), "nomarmy-army-repo-"));
+  try {
+    runAgentsCLI(root, ["add", "--json", "--name", "codex", "--kind", "subscription", "--provider", "openai", "--owner", "you@example.com"]);
+    const fake = withCatalogOpenclaw(root);
+    const ok = runArmyCLI(root, repo, ["assign", "sr-dev", "codex", "gpt-6-astra", "--json"], fake);
+    assert.equal(ok.exitCode, 0, ok.stdout);
+    assert.equal(JSON.parse(ok.stdout).modelCheck.status, "listed");
+    const bad = runArmyCLI(root, repo, ["assign", "po", "codex", "gpt-6-sol", "--json"], fake);
+    assert.notEqual(bad.exitCode, 0);
+    assert.match(JSON.parse(bad.stdout).error, /codex\/gpt-6-sol isn't in OpenClaw's catalog and a real test call to it failed -- nothing was written\. Pick a model from: gpt-6-astra/);
+    assert.equal(JSON.parse(runArmyCLI(root, repo, ["show", "--json"]).stdout).roles.po, undefined, "the refused assignment wrote nothing");
+    assert.equal(runArmyCLI(root, repo, ["assign", "po", "codex", "gpt-6-sol", "--no-check", "--json"], fake).exitCode, 0);
+    assert.equal(JSON.parse(runArmyCLI(root, repo, ["assign", "pm", "codex", "auto", "--json"], fake).stdout).modelCheck.status, "none");
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(repo, { recursive: true, force: true });

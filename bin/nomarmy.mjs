@@ -168,7 +168,9 @@ Usage: nomarmy <command> [options]
                             give a role an agent, and optionally the model
                             to run on it ("auto" lets the General pick per
                             job; omitted, the agent's default), in --global
-                            (default), --project or --local
+                            (default), --project or --local. A named model
+                            is checked first (OpenClaw's catalog, or one
+                            real test call); --no-check skips that
                   general <agent>
                             which agent the General is, in --global
                             (default) or --local
@@ -1862,11 +1864,21 @@ async function cmdArmyAssign() {
   if (!roleName || !agentName) throw new Error("Usage: nomarmy army assign <role> <agent|none> [model|auto] [--global|--project|--local]");
   const layer = armyLayerFlag("global");
   const filePath = armyLayerPath(layer, { projectDir: repoDir });
-  assignRoleInFile(filePath, roleName, parseTargetSpec(agentName, model));
+  const target = parseTargetSpec(agentName, model);
+  const check = flag("no-check") ? { status: "skipped" } : checkRoleModel(agentName, model);
+  if (check.status === "failed") {
+    const msg = `${agentName}/${model} ${check.detail} -- nothing was written. Pick a model from: ${check.listed.join(", ") || "(OpenClaw lists none for this agent)"}, or pass --no-check if you're sure.`;
+    if (json) { out({ error: msg, check }); process.exit(1); }
+    throw new Error(msg);
+  }
+  assignRoleInFile(filePath, roleName, target);
   if (layer === "local") ensureLocalLayerIgnored();
   const { summary } = loadArmyForCli();
   const role = summary.roles[roleName];
-  if (json) return out({ written: filePath, layer, role: roleName, effective: role ?? null });
+  if (json) return out({ written: filePath, layer, role: roleName, effective: role ?? null, modelCheck: check });
+  if (check.status === "listed") console.log(c.dim(`${model} is in OpenClaw's catalog for ${agentName}.`));
+  else if (check.status === "probed") console.log(c.dim(`${model} isn't in OpenClaw's catalog yet, but a real test call to it worked.`));
+  else if (check.status === "unchecked") console.log(c.yellow(`⚠ Couldn't check ${model} (${check.detail}); the first job on this role will find out.`));
   console.log(c.green(`✓ ${roleName} → ${agentName}${model ? ` (${model === "auto" ? "model: the General picks per job" : model})` : ""} in ${filePath} (${layer}).`));
   if (role) {
     if (role.setBy.agent && role.setBy.agent !== layer) console.log(c.yellow(`Note: the ${role.setBy.agent} layer overrides this, so ${roleName} still runs on ${role.agent}.`));
@@ -1875,6 +1887,29 @@ async function cmdArmyAssign() {
     if (!role.description) console.log(c.dim(`${roleName} has no description in any layer; the General will only see its name.`));
   }
   if (layer === "project") console.log(c.dim("This is committed with the repo; teammates need an agent with that same name in their own agents.yml."));
+}
+
+/**
+ * Whether `model` really runs on `agentName`, before a role is pointed at
+ * it: listed in OpenClaw's freshly refreshed catalog, or -- since that
+ * catalog lags new models (xai/grok-4.7 worked while unlisted) -- answering
+ * one real test call. Caught live: gpt-6-sol is in the Codex CLI's own
+ * model list but OpenClaw's openai provider answers "Unknown model".
+ * Nothing to check for "auto", no model, or a local or unknown agent.
+ */
+function checkRoleModel(agentName, model) {
+  if (!model || model === "auto") return { status: "none" };
+  let agent;
+  try { agent = loadAgents(globalConfigDir()).agents[agentName]; } catch { return { status: "unchecked", detail: "agents.yml didn't load" }; }
+  if (!agent || agent.kind === "local") return { status: "none" };
+  const provider = agent.kind === "api" ? openclawProviderId(agent) : agent.provider;
+  if (!json) console.log(c.dim(`Checking ${model} against OpenClaw's ${provider} models (a catalog refresh takes a few seconds)...`));
+  const listing = runQuiet(openclawCmd(), ["models", "list", "--all", "--refresh"]);
+  if (!listing.ok && !listing.out.trim()) return { status: "unchecked", detail: "openclaw isn't reachable" };
+  const listed = parseCatalogModels(listing.out, provider);
+  if (listed.includes(model)) return { status: "listed", listed };
+  if (probeWorker(provider, model)) return { status: "probed", listed };
+  return { status: "failed", detail: "isn't in OpenClaw's catalog and a real test call to it failed", listed };
 }
 
 // Which agent the General is. Global or local only: it describes the

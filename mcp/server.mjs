@@ -537,7 +537,19 @@ export function expandJobs(jobs, { getArmy = currentArmy, getAgents = () => agen
 // conservative unknown-model fallback either way (see lib/dispatch-config.mjs).
 let cachedModelCatalog;
 function modelCatalog() {
-  if (cachedModelCatalog === undefined) cachedModelCatalog = queryModelCatalog();
+  if (cachedModelCatalog === undefined) {
+    cachedModelCatalog = queryModelCatalog();
+    // The cached catalog can lack a provider entirely, and then every model
+    // on it is budgeted at the unknown-model fallback (32k tokens) instead
+    // of its real window. If any agent's provider is missing, refresh once
+    // per process (~15s, on first use only).
+    let providers = [];
+    try { providers = [...new Set(Object.values(agentsConfig().agents).map(agentProviderId).filter(Boolean))]; } catch { /* reported elsewhere */ }
+    const keys = cachedModelCatalog ? [...cachedModelCatalog.keys()] : [];
+    if (providers.some((p) => !keys.some((k) => k.startsWith(`${p}/`)))) {
+      cachedModelCatalog = queryModelCatalog({ refresh: true }) ?? cachedModelCatalog;
+    }
+  }
   return cachedModelCatalog;
 }
 
