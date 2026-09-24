@@ -256,6 +256,7 @@ Every command proposes before writing anything: explicit `[y/N]` confirmation, o
 | `nomarmy agents list/add/update/remove` | Every model a job can run on. See [above](#agents-every-model-a-job-can-run-on). |
 | `nomarmy army show/init/assign/general` | The General, the role roster and its layers. See [above](#the-army-who-does-what). |
 | `nomarmy config paths` | Where each config file lives. |
+| `nomarmy jobs [--watch]` | What's running across every session (agent, model, phase, last tool call, files changed, heartbeat) and what just finished. `--watch` redraws live; macOS has no `watch`. |
 | `nomarmy update` | Pull latest (fast-forward only) and resync the installed MCP copy. |
 | `nomarmy connect [claude] [cursor] [codex]` | (Re-)register the MCP server. No target: interactive multi-select. |
 | `nomarmy start` / `stop` | Start/stop local inference. |

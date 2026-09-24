@@ -175,6 +175,10 @@ Usage: nomarmy <command> [options]
                             which agent the General is, in --global
                             (default) or --local
   config paths    where agents.yml and the three army layers live
+  jobs [--watch] [--interval N]
+                  what's running across every session (agent, model, phase,
+                  last tool call, files changed, heartbeat) and what just
+                  finished; --watch redraws every N seconds (default 3)
   connect [claude] [codex] [cursor]
                   (Re-)register the MCP server with one or more coordinators.
                   With no target and not --json, prompts an interactive
@@ -1963,7 +1967,76 @@ async function cmdConfig() {
   throw new Error(`Unknown config subcommand "${sub}". Use: nomarmy config paths`);
 }
 
-const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, agents: cmdAgents, army: cmdArmy, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
+// --- `nomarmy jobs [--watch]`: what's running, from any session -----------
+//
+// Reads the shared job directory, so it shows every session's jobs. A job
+// is running when its status says so AND its server process is alive (a
+// server that died mid-job leaves a stale "running" status behind).
+
+function jobsRootDir() {
+  return path.join(process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents"), "jobs");
+}
+
+function readJsonSafe(file) { try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; } }
+
+function pidIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; }
+}
+
+function collectJobs({ recent = 8 } = {}) {
+  const root = jobsRootDir();
+  let names = [];
+  try { names = fs.readdirSync(root); } catch { return { running: [], recent: [] }; }
+  const jobs = names.map((name) => {
+    const dir = path.join(root, name);
+    const status = readJsonSafe(path.join(dir, "status.json")) ?? {};
+    const meta = readJsonSafe(path.join(dir, "metadata.json"));
+    const started = Date.parse(status.startedAt ?? meta?.startedAt ?? "") || fs.statSync(dir).mtimeMs;
+    const running = status.state === "running" && pidIsAlive(status.serverPid);
+    return {
+      jobId: status.jobId ?? name, mode: status.mode ?? meta?.mode ?? null, running,
+      phase: running ? status.phase : (meta?.outcome ?? (status.state === "running" ? "orphaned" : status.phase ?? "?")),
+      agent: status.agent ?? meta?.worker?.provider ?? null, model: status.model ?? meta?.metrics?.worker_model ?? null,
+      elapsedSeconds: Math.round(((running ? Date.now() : Date.parse(meta?.finishedAt ?? status.updatedAt ?? "") || Date.now()) - started) / 1000),
+      lastTool: status.lastTool ? `${status.lastTool.tool}${status.lastTool.target ? ` ${String(status.lastTool.target).slice(0, 40)}` : ""}` : null,
+      filesChanged: status.filesChangedLive ?? meta?.git?.filesChanged?.length ?? null,
+      heartbeatAgeSeconds: status.heartbeatAt ? Math.round((Date.now() - Date.parse(status.heartbeatAt)) / 1000) : null,
+      started, dir,
+    };
+  }).sort((a, b) => b.started - a.started);
+  return { running: jobs.filter((j) => j.running), recent: jobs.filter((j) => !j.running).slice(0, recent) };
+}
+
+const fmtSeconds = (n) => (n == null ? "-" : n < 60 ? `${n}s` : n < 3600 ? `${Math.floor(n / 60)}m${String(n % 60).padStart(2, "0")}s` : `${Math.floor(n / 3600)}h${String(Math.floor((n % 3600) / 60)).padStart(2, "0")}m`);
+
+function renderJobs({ running, recent }) {
+  const lines = [c.bold(`🍪 nomArmy jobs`) + c.dim(`  ${new Date().toLocaleTimeString()}  (${jobsRootDir()})`), ""];
+  lines.push(c.bold(`Running (${running.length})`));
+  if (!running.length) lines.push(c.dim("  nothing running"));
+  for (const j of running) {
+    const beat = j.heartbeatAgeSeconds == null ? c.dim("no heartbeat yet") : j.heartbeatAgeSeconds > 60 ? c.yellow(`heartbeat ${fmtSeconds(j.heartbeatAgeSeconds)} ago`) : c.dim(`heartbeat ${fmtSeconds(j.heartbeatAgeSeconds)} ago`);
+    lines.push(`  ${c.cyan(j.jobId)}  ${j.agent ?? "local"}${j.model ? `/${j.model}` : ""}  ${j.phase}  ${fmtSeconds(j.elapsedSeconds)}  ${beat}`);
+    lines.push(c.dim(`    last tool: ${j.lastTool ?? "-"}   files changed: ${j.filesChanged ?? "-"}   log: tail -f ${path.join(j.dir, "openclaw.stderr.log")}`));
+  }
+  lines.push("", c.bold("Recent"));
+  for (const j of recent) lines.push(`  ${j.jobId.padEnd(40)} ${String(j.phase).padEnd(20)} ${fmtSeconds(j.elapsedSeconds).padStart(7)}  ${c.dim(`${j.agent ?? ""}${j.model ? `/${j.model}` : ""}`)}`);
+  return lines.join("\n");
+}
+
+async function cmdJobs() {
+  if (json) return out(collectJobs());
+  if (!flag("watch")) return console.log(renderJobs(collectJobs()));
+  // No `watch` on macOS, and a shell loop can't run through Claude Code's `!`.
+  const interval = Math.max(1, Number(value("interval", "3")) || 3) * 1000;
+  process.on("SIGINT", () => { process.stdout.write("\n"); process.exit(0); });
+  for (;;) {
+    process.stdout.write("\u001b[2J\u001b[H" + renderJobs(collectJobs()) + c.dim("\n\nCtrl-C to stop.") + "\n");
+    await new Promise((r) => setTimeout(r, interval));
+  }
+}
+
+const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
   // Import lazily to avoid circular dependencies

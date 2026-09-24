@@ -65,6 +65,7 @@ import {
   jobLane,
   readsMeasurable,
   salvageFinishedRun,
+  makeHeartbeatTick,
   runningCount,
   track,
   looksLikeTransientInferenceAbort,
@@ -3359,4 +3360,31 @@ test("salvageFinishedRun: never salvages a run that didn't end normally, or one 
     assert.equal(await salvageFinishedRun({ stderr: "Error: model call aborted" }, dir), null, "a crash mid-run is not a finished run");
     assert.equal(await salvageFinishedRun({ stderr: REAL_CLEANUP_STDERR }, empty), null, "no final assistant text, nothing to salvage");
   } finally { fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(empty, { recursive: true, force: true }); }
+});
+
+// A running job used to be unwatchable: status.json kept its launch-time
+// updatedAt and the OpenClaw logs only appeared at the end.
+test("makeHeartbeatTick: every beat writes a fresh heartbeat into status.json, and never asks to stop", async () => {
+  const jobDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-heartbeat-"));
+  try {
+    fs.writeFileSync(path.join(jobDir, "status.json"), JSON.stringify({ jobId: "j", phase: "worker", state: "running", updatedAt: "2026-01-01T00:00:00.000Z" }));
+    const verdict = await makeHeartbeatTick(jobDir)(42000);
+    assert.equal(verdict.stop, false);
+    const status = JSON.parse(fs.readFileSync(path.join(jobDir, "status.json"), "utf8"));
+    assert.equal(status.workerElapsedSeconds, 42);
+    assert.ok(Date.parse(status.heartbeatAt) > Date.parse("2026-09-01"));
+    assert.notEqual(status.updatedAt, "2026-01-01T00:00:00.000Z");
+    assert.equal(status.phase, "worker", "the rest of the status is kept");
+  } finally { fs.rmSync(jobDir, { recursive: true, force: true }); }
+});
+
+test("run: teeTo streams output into log files while the command runs", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-tee-"));
+  try {
+    const teeTo = { stdout: path.join(dir, "out.log"), stderr: path.join(dir, "err.log") };
+    const res = await run(process.execPath, ["-e", "process.stdout.write('hello'); process.stderr.write('warn')"], { cwd: dir, teeTo });
+    assert.equal(res.stdout, "hello");
+    assert.equal(fs.readFileSync(teeTo.stdout, "utf8"), "hello");
+    assert.equal(fs.readFileSync(teeTo.stderr, "utf8"), "warn");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

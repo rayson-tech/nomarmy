@@ -123,7 +123,10 @@ function resolveExecutable(command) {
 // its full budget" (undefined -- the original, unlabeled case) from a named
 // early stop, so a caller can decide whether that specific reason still
 // leaves a resumable session worth following up on.
-export function run(command, args, { cwd = projectDir, env = process.env, timeoutMs = 120000, trim = true, onTick = null, tickMs = 15000 } = {}) {
+// teeTo, when given ({ stdout, stderr } file paths), appends output to those
+// files as it arrives, so a running job can be watched (tail -f) instead of
+// its logs appearing only once it finishes.
+export function run(command, args, { cwd = projectDir, env = process.env, timeoutMs = 120000, trim = true, onTick = null, tickMs = 15000, teeTo = null } = {}) {
   return new Promise((resolve, reject) => {
     const exe = resolveExecutable(command);
     const child = spawn(exe.file, [...exe.prefixArgs, ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -147,8 +150,9 @@ export function run(command, args, { cwd = projectDir, env = process.env, timeou
       try { verdict = await onTick(Date.now() - startedAt); } catch { return; } // a broken watcher must never itself kill the run
       if (verdict?.stop) stopEarly(`${command} stopped early: ${verdict.reason ?? "requested by watcher"}`, verdict.reason ?? "early_stop");
     }, tickMs) : null;
-    child.stdout.on("data", d => stdout += d.toString());
-    child.stderr.on("data", d => stderr += d.toString());
+    const tee = (file, text) => { if (file) { try { fs.appendFileSync(file, text); } catch { /* a log write must never break the run */ } } };
+    child.stdout.on("data", d => { const t = d.toString(); stdout += t; tee(teeTo?.stdout, t); });
+    child.stderr.on("data", d => { const t = d.toString(); stderr += t; tee(teeTo?.stderr, t); });
     child.on("error", e => { if (!settled) { settled = true; clearTimeout(timer); if (ticker) clearInterval(ticker); reject(e); } });
     child.on("close", code => {
       if (settled) return;
@@ -260,6 +264,21 @@ export function makeAbandonedBackgroundProcessTick(stateDir, { idleMs, minElapse
 }
 
 // Runs each tick in order and stops at the first one asking to stop, so
+/**
+ * Every tick, write what the worker is doing into status.json: the last
+ * tool call and files changed so far (liveProgress), and when. Never asks
+ * to stop; a failed read just skips that beat.
+ */
+export function makeHeartbeatTick(jobDir) {
+  return async (elapsedMs) => {
+    try {
+      const live = await liveProgress(jobDir);
+      writeStatus(jobDir, { heartbeatAt: new Date().toISOString(), workerElapsedSeconds: Math.round(elapsedMs / 1000), ...live });
+    } catch { /* skip this beat */ }
+    return { stop: false };
+  };
+}
+
 // runOpenClaw's single onTick slot can watch the worktree (idle-diff) and the
 // transcript (abandoned background process) at once without either watcher
 // knowing the other exists.
@@ -939,11 +958,16 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
   // stopped changing", this one means "the transcript stopped advancing after
   // the worker walked away from a process it started" -- same "how long is
   // genuinely too long to be idle" question, no separate knob needed.
-  const onTick = idleDiff
-    ? combineTicks([makeIdleDiffTick(cwd, idleDiff), makeAbandonedBackgroundProcessTick(stateDir, idleDiff)])
-    : null;
+  // The heartbeat runs for every job, so a running job is always watchable
+  // (status.json used to keep its launch-time updatedAt until the end).
+  const onTick = combineTicks([
+    makeHeartbeatTick(jobDir),
+    ...(idleDiff ? [makeIdleDiffTick(cwd, idleDiff), makeAbandonedBackgroundProcessTick(stateDir, idleDiff)] : []),
+  ]);
+  const liveLogs = { stdout: path.join(jobDir, `openclaw${logSuffix}.stdout.log`), stderr: path.join(jobDir, `openclaw${logSuffix}.stderr.log`) };
+  for (const f of Object.values(liveLogs)) { try { fs.writeFileSync(f, ""); } catch { /* best-effort */ } }
   const execOnce = (thinking) => withSandboxProvisioningRetry(
-    () => run("openclaw", buildArgs(thinking), { cwd, env, timeoutMs: (timeoutSeconds + 30) * 1000, onTick, tickMs: (idleDiff?.pollSeconds ?? 15) * 1000 }),
+    () => run("openclaw", buildArgs(thinking), { cwd, env, timeoutMs: (timeoutSeconds + 30) * 1000, onTick, tickMs: (idleDiff?.pollSeconds ?? 15) * 1000, teeTo: liveLogs }),
     { onRetry: (attempt, error) => fs.appendFileSync(path.join(jobDir, "coordinator.log"),
         `${new Date().toISOString()} transient sandbox provisioning error${logSuffix}, retry ${attempt}/${MAX_SANDBOX_PROVISIONING_RETRIES}\n${error.message}\n`) },
   );
@@ -2233,7 +2257,7 @@ export async function executeJob({ task, acceptance, verification, mode = "imple
     jobId, workerId: workerId || jobId, mode, phase, state: phase === "finished" ? "finished" : "running",
     serverPid: process.pid, baseSha: base.sha, timeoutSeconds, ...extra
   });
-  progress("starting", { startedAt: new Date().toISOString() });
+  progress("starting", { startedAt: new Date().toISOString(), agent: pool ?? subscriptionWorker ?? "local", model: model ?? null });
   const common = { task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool, subscriptionWorker, onBehalfOf, model, reportSize, workerId, progress, jobStartedMs };
   if (mode === "scout") return executeScout(common);
   if (mode === "decompose") return executeDecompose(common);
