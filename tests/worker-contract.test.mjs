@@ -62,6 +62,7 @@ import {
   expandJobs,
   currentMaxPoolWorkers,
   splitJobsByLane,
+  jobLane,
   runningCount,
   track,
   looksLikeTransientInferenceAbort,
@@ -2461,57 +2462,46 @@ test("currentMaxPoolWorkers: an explicit override is respected and clamped to [1
   delete process.env.NOMARMY_MAX_POOL_WORKERS;
 });
 
-// splitJobsByLane / runningCount("local"|"pool"): regression coverage for
-// the gap a peer review found -- local_workers used to dispatch every job
-// in a batch through ONE shared mapLimit call sized only from the local
-// ceiling, so an all-pool batch could ignore NOMARMY_MAX_POOL_WORKERS
-// entirely. splitJobsByLane is the pure partition step that now makes each
-// lane get its own, independently-sized mapLimit call.
+// splitJobsByLane / jobLane / runningCount("local"|"remote"): each lane
+// gets its own ceiling. A job is "remote" when its inference runs at a
+// vendor (an api agent's `pool`, or a `subscription_worker`); it used to be
+// decided by `pool` alone, so a subscription job took the local model's
+// only slot and blocked local work -- reported from a real Senti run.
 
-test("splitJobsByLane: partitions original indices by whether `pool` is set, order preserved within each lane", () => {
-  const jobs = [{ pool: "cheap" }, {}, { pool: "capable" }, {}, {}];
-  const { localIndices, poolIndices } = splitJobsByLane(jobs);
+test("jobLane: api and subscription jobs are remote; anything else is local", () => {
+  assert.equal(jobLane({ pool: "grok" }), "remote");
+  assert.equal(jobLane({ subscription_worker: "claude" }), "remote", "the Senti bug: this used to be local");
+  assert.equal(jobLane({ profile: "coder" }), "local");
+  assert.equal(jobLane({ pool: "" }), "local", "an empty optional field is not set");
+});
+
+test("splitJobsByLane: partitions original indices by lane, order preserved within each", () => {
+  const jobs = [{ pool: "grok" }, {}, { subscription_worker: "codex" }, {}, { profile: "gpt" }];
+  const { localIndices, remoteIndices } = splitJobsByLane(jobs);
   assert.deepEqual(localIndices, [1, 3, 4]);
-  assert.deepEqual(poolIndices, [0, 2]);
+  assert.deepEqual(remoteIndices, [0, 2]);
 });
 
-test("splitJobsByLane: an all-local batch (today's exact pre-existing shape) puts everything in localIndices", () => {
-  const jobs = [{}, {}, {}];
-  const { localIndices, poolIndices } = splitJobsByLane(jobs);
-  assert.deepEqual(localIndices, [0, 1, 2]);
-  assert.deepEqual(poolIndices, []);
+test("splitJobsByLane: an all-local batch puts everything in localIndices; an all-remote one nothing", () => {
+  assert.deepEqual(splitJobsByLane([{}, {}, {}]), { localIndices: [0, 1, 2], remoteIndices: [] });
+  assert.deepEqual(splitJobsByLane([{ subscription_worker: "a" }, { pool: "b" }]), { localIndices: [], remoteIndices: [0, 1] });
 });
 
-test("splitJobsByLane: an all-pool batch puts everything in poolIndices, none silently in localIndices", () => {
-  const jobs = [{ pool: "cheap" }, { pool: "cheap" }];
-  const { localIndices, poolIndices } = splitJobsByLane(jobs);
-  assert.deepEqual(localIndices, []);
-  assert.deepEqual(poolIndices, [0, 1]);
-});
-
-test("splitJobsByLane: an empty falsy pool string (\"\") counts as local, not pool -- matches jobSchema's own optional-field semantics", () => {
-  const jobs = [{ pool: "" }, { pool: undefined }];
-  const { localIndices, poolIndices } = splitJobsByLane(jobs);
-  assert.deepEqual(localIndices, [0, 1]);
-  assert.deepEqual(poolIndices, []);
-});
-
-test("runningCount(lane): correctly isolates 'local' and 'pool' entries tracked via track(), and no-arg counts both", async () => {
+test("runningCount(lane): isolates 'local' and 'remote' entries tracked via track(), and no-arg counts both", async () => {
   const resolvers = [];
   const pending = () => new Promise((resolve) => resolvers.push(resolve));
   const localEntry = track("lane-test-local", { mode: "implement", workerId: "w1", lane: "local" }, pending());
-  const poolEntry = track("lane-test-pool", { mode: "implement", workerId: "w2", lane: "pool" }, pending());
-  const before = { local: runningCount("local"), pool: runningCount("pool"), all: runningCount() };
-  // Settle both immediately and await settlement before asserting/finishing,
-  // so this test never leaks a permanently "running" entry into any later
-  // test that also calls runningCount().
+  const remoteEntry = track("lane-test-remote", { mode: "implement", workerId: "w2", lane: jobLane({ subscription_worker: "claude" }) }, pending());
+  const before = { local: runningCount("local"), remote: runningCount("remote"), all: runningCount() };
+  // Settle both before asserting, so no permanently "running" entry leaks
+  // into a later test that also calls runningCount().
   resolvers.forEach((r) => r("done"));
-  await Promise.all([localEntry.promise, poolEntry.promise]);
+  await Promise.all([localEntry.promise, remoteEntry.promise]);
   assert.equal(before.local, 1);
-  assert.equal(before.pool, 1);
+  assert.equal(before.remote, 1);
   assert.ok(before.all >= 2, "no-arg counts every lane together");
   assert.equal(runningCount("local"), 0, "settled entries must not still count as running");
-  assert.equal(runningCount("pool"), 0);
+  assert.equal(runningCount("remote"), 0);
 });
 
 // looksLikeTransientInferenceAbort / shouldRetryTransientAbort: closes a

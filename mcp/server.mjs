@@ -583,6 +583,13 @@ function budgetsForPool(poolName, model = null, reportSize = null) {
   return deriveBudgets({ contextPerNom: resolved.contextPerNom, source: resolved.source, env: process.env, tier, reportSize: reportSize ?? "standard" });
 }
 
+/** The budget an (already expanded) job is admitted and briefed against: its own agent's, or the local one. */
+function budgetsForJob(j) {
+  if (j.pool) return budgetsForPool(j.pool, j.model, j.report);
+  if (j.subscription_worker) return budgetsForSubscriptionWorker(j.subscription_worker, j.model, j.report);
+  return budgets;
+}
+
 /**
  * What a job record says about its budget: the one its prompt was really
  * built with (runOpenClaw's budgetsUsed), or the server-wide local one when
@@ -3052,18 +3059,25 @@ export async function mapLimit(items, limit, fn, { staggerMs = 0 } = {}) {
 // memory pressure rather than shrinking the brief and hoping.
 // ---------------------------------------------------------------------------
 const activeJobs = new Map();
-// `lane` is "local" (the single global worker provider, exactly as before
-// pools existed) or "pool" (job.pool set -- see resolvePoolSelection). The
-// local-slot admission check below must only ever count the local lane: a
-// pool-routed job's actual inference runs on someone else's hardware and
-// was never competing for llama-server's own slots in the first place.
+// `lane` is "local" (the local model on llama-server) or "remote" (an api
+// or subscription agent: the inference runs at the vendor). The local-slot
+// admission check must only ever count the local lane. A subscription job
+// used to land in "local" (the lane was decided by `pool` alone), so a
+// Claude or Codex job took llama-server's only slot and blocked local work
+// it never competed with -- reported from a real Senti run.
+export function jobLane(job) {
+  return job.pool || job.subscription_worker ? "remote" : "local";
+}
 export function runningCount(lane = null) {
   const entries = [...activeJobs.values()].filter(j => !j.settled);
   return lane ? entries.filter(j => j.lane === lane).length : entries.length;
 }
-// A static, operator-declared ceiling on how many pool-routed jobs may run
-// at once, independent of and additive to currentMaxWorkers()'s local
-// ceiling -- exactly the "more real concurrency, not just diversity"
+// A static, operator-declared ceiling on how many remote jobs (api and
+// subscription agents) may run at once, independent of and additive to
+// currentMaxWorkers()'s local ceiling. Each still runs a sandbox and a
+// worktree on this machine, which is what this bounds; each agent's own
+// max_concurrent bounds its vendor. The env name predates agents.yml
+// (remote jobs were all "pool" jobs then) -- exactly the "more real concurrency, not just diversity"
 // benefit of spreading load across providers with their own separate rate
 // limits. Not rate-limit-aware (see config/providers.yml.example); read
 // fresh each call, matching currentMaxWorkers()'s own env-read pattern.
@@ -3078,9 +3092,9 @@ export function currentMaxPoolWorkers() {
 // shared one `parallel` slot count derived only from the local ceiling,
 // which let an all-pool batch ignore NOMARMY_MAX_POOL_WORKERS entirely.
 export function splitJobsByLane(jobs) {
-  const localIndices = [], poolIndices = [];
-  jobs.forEach((j, i) => (j.pool ? poolIndices : localIndices).push(i));
-  return { localIndices, poolIndices };
+  const localIndices = [], remoteIndices = [];
+  jobs.forEach((j, i) => (jobLane(j) === "remote" ? remoteIndices : localIndices).push(i));
+  return { localIndices, remoteIndices };
 }
 export function track(jobId, meta, promise) {
   const entry = { ...meta, jobId, startedAt: new Date().toISOString(), settled: false, result: null, error: null, promise: null };
@@ -3093,13 +3107,15 @@ function toolText(text, isError = false) { return { content: [{ type: "text", te
 function capacitySnapshot() {
   const admission = assessAdmission({ hardware: hardwareSnapshot, runningJobs: runningCount("local"), slots: contextInfo.slots, maxWorkers: currentMaxWorkers() });
   return {
+    // The local model's budget. An api or subscription job's scales with
+    // its own model; local_worker_start reports that job's.
     budgets: { ...budgets, describe: describeBudgets(budgets) },
     context: contextInfo,
     admission,
     memory: hardwareSnapshot?.memory ?? null,
     running: [...activeJobs.values()].filter(j => !j.settled).map(j => ({ jobId: j.jobId, workerId: j.workerId, mode: j.mode, lane: j.lane, startedAt: j.startedAt, phase: readJson(path.join(jobsRoot, j.jobId, "status.json"))?.phase ?? "starting" })),
     maxWorkers: currentMaxWorkers(),
-    pool: { running: runningCount("pool"), maxWorkers: currentMaxPoolWorkers() }
+    remote: { running: runningCount("remote"), maxWorkers: currentMaxPoolWorkers(), note: "api and subscription agents; each agent's own max_concurrent also applies" }
   };
 }
 async function admit(jobs) {
@@ -3114,9 +3130,7 @@ async function admit(jobs) {
   // (see budgetsForSubscriptionWorker) -- there's no "which entry" unknown
   // the way a weighted pool has, since the name given IS the entry.
   jobs.forEach((j, i) => {
-    const jobBudgets = j.pool ? budgetsForPool(j.pool, j.model, j.report)
-      : j.subscription_worker ? budgetsForSubscriptionWorker(j.subscription_worker, j.model, j.report)
-      : budgets;
+    const jobBudgets = budgetsForJob(j);
     for (const p of checkBrief(j, jobBudgets)) problems.push(jobs.length > 1 ? `job ${i + 1}: ${p}` : p);
   });
   // verify_regression re-runs `verification`; with no profile set there is
@@ -3142,16 +3156,20 @@ async function admit(jobs) {
       } catch (error) { problems.push(jobs.length > 1 ? `job ${i + 1}: ${error.message}` : error.message); }
     }
   });
-  // Local-slot capacity only ever concerns the local lane -- a pool-routed
-  // job's own inference runs elsewhere and was never counted against
-  // llama-server's slots. Mirrors that same check's shape for the pool
-  // lane, against a separate, additive ceiling (see currentMaxPoolWorkers).
-  const admission = assessAdmission({ hardware: hardwareSnapshot, runningJobs: runningCount("local"), slots: contextInfo.slots, maxWorkers: currentMaxWorkers() });
+  // Slot capacity only concerns local jobs: a remote job's inference runs
+  // at its vendor and never competes for llama-server's slots. Free memory
+  // still applies to every job (each one runs a local sandbox), so a
+  // remote-only batch is checked for memory alone. Remote jobs have their
+  // own, additive ceiling (currentMaxPoolWorkers).
+  const anyLocal = jobs.some((j) => jobLane(j) === "local");
+  const admission = anyLocal
+    ? assessAdmission({ hardware: hardwareSnapshot, runningJobs: runningCount("local"), slots: contextInfo.slots, maxWorkers: currentMaxWorkers() })
+    : assessAdmission({ hardware: hardwareSnapshot, runningJobs: 0, slots: null, maxWorkers: Infinity });
   if (!admission.admit) problems.push(...admission.reasons.map(r => `not admitted (${admission.level}): ${r}`));
-  if (jobs.some(j => j.pool)) {
-    const poolCeiling = currentMaxPoolWorkers(), runningPool = runningCount("pool");
-    if (runningPool >= poolCeiling) {
-      problems.push(`not admitted (capacity): ${runningPool} pool job(s) already running, at NOMARMY_MAX_POOL_WORKERS=${poolCeiling}`);
+  if (jobs.some((j) => jobLane(j) === "remote")) {
+    const remoteCeiling = currentMaxPoolWorkers(), runningRemote = runningCount("remote");
+    if (runningRemote >= remoteCeiling) {
+      problems.push(`not admitted (capacity): ${runningRemote} remote job(s) (api or subscription agents) already running, at NOMARMY_MAX_POOL_WORKERS=${remoteCeiling}`);
     }
   }
   return { problems, admission };
@@ -3162,8 +3180,7 @@ function refusal(problems) {
 function launch(args) {
   const workerId = args.worker_id || null;
   const jobId = slug(workerId || (args.mode === "scout" ? "scout" : "worker"));
-  const lane = args.pool ? "pool" : "local";
-  return track(jobId, { mode: args.mode, workerId: workerId || jobId, lane }, executeJob({ ...jobArgs(args, workerId), jobId }));
+  return track(jobId, { mode: args.mode, workerId: workerId || jobId, lane: jobLane(args) }, executeJob({ ...jobArgs(args, workerId), jobId }));
 }
 // Best-effort progress signal for a job still mid-run: a plain "phase: worker,
 // elapsed: Ns" told a caller nothing about whether the worker was still
@@ -3295,7 +3312,10 @@ server.tool("local_worker_start", "Start one worker or scout in the background a
     return toolText(JSON.stringify({ started: true, jobId: entry.jobId, workerId: entry.workerId, mode: entry.mode, state: "running",
       jobDir: path.join(jobsRoot, entry.jobId), timeoutSeconds: args.timeout_seconds,
       poll: { tool: "local_worker_status", job_id: entry.jobId, wait_seconds: MAX_STATUS_WAIT_SECONDS },
-      admission: { level: admission.level, notes: admission.reasons }, budgets: describeBudgets(budgets) }, null, 2));
+      // This job's own lane and budget: a subscription job used to be
+      // reported with the local model's figures.
+      lane: jobLane(args), agent: args.agentName ?? "local", model: args.model ?? null,
+      admission: { level: admission.level, notes: admission.reasons }, budgets: describeBudgets(budgetsForJob(args)) }, null, 2));
   });
 // A long poll must return inside the MCP client's own idle-timeout: it aborts
 // a tool call after N seconds with no response or progress notification,
@@ -3414,14 +3434,16 @@ server.tool("local_workers", "Run independent jobs (implement or scout) with bou
       const i = indices[laneI];
       const workerId = j.worker_id || `${batchId}-w${i + 1}`, jobId = slug(workerId);
       const effectiveJob = auto_union ? { ...j, base_ref: forcedBase.sha } : j;
-      return track(jobId, { mode: j.mode, workerId }, executeJob({ ...jobArgs(effectiveJob, workerId), jobId })).promise;
+      // The lane is what admission counts; a batch job used to carry none,
+      // so it was invisible to both ceilings while it ran.
+      return track(jobId, { mode: j.mode, workerId, lane: jobLane(j) }, executeJob({ ...jobArgs(effectiveJob, workerId), jobId })).promise;
     }, { staggerMs: WORKER_START_STAGGER_MS });
     indices.forEach((i, laneI) => { results[i] = laneResults[laneI]; });
   };
-  const { localIndices, poolIndices } = splitJobsByLane(jobs);
+  const { localIndices, remoteIndices } = splitJobsByLane(jobs);
   const localParallel = Math.max(1, Math.min(max_parallel, currentMaxWorkers() - runningCount("local")));
-  const poolParallel = Math.max(1, Math.min(max_parallel, currentMaxPoolWorkers() - runningCount("pool")));
-  await Promise.all([dispatchLane(localIndices, localParallel), dispatchLane(poolIndices, poolParallel)]);
+  const remoteParallel = Math.max(1, Math.min(max_parallel, currentMaxPoolWorkers() - runningCount("remote")));
+  await Promise.all([dispatchLane(localIndices, localParallel), dispatchLane(remoteIndices, remoteParallel)]);
 
   // Auto_union is entirely additive and must never suppress or corrupt the
   // real, already-completed per-job results below -- a broken union reports

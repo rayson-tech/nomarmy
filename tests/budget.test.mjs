@@ -83,7 +83,9 @@ test("deriveBudgets: explicit environment overrides win and are named", () => {
 
 test("describeBudgets: readable lines name the source and warn below the floor", () => {
   const lines = describeBudgets(deriveBudgets({ contextPerNom: 4096, source: "llama-server /props", env: NO_ENV }));
-  assert.match(lines[0], /4096 tokens \(llama-server \/props\)/);
+  assert.match(lines[0], /^local model: 4096-token context \(llama-server \/props\)/);
+  const frontier = describeBudgets(deriveBudgets({ contextPerNom: 272000, source: "openclaw model catalog (openai/gpt-6-astra)", tier: "frontier", reportSize: "full" }));
+  assert.match(frontier[0], /^frontier agent: 272000-token context \(openclaw model catalog \(openai\/gpt-6-astra\)\), full report/);
   assert.ok(lines.some(l => /WARNING/.test(l)));
 });
 
