@@ -2360,9 +2360,9 @@ function fakeSubscriptionConfig(workers) {
 }
 
 test("resolveSubscriptionSelection: a matching on_behalf_of resolves cleanly, shaped exactly like resolvePoolSelection's return", () => {
-  const selection = resolveSubscriptionSelection("jason-claude", "jason.pugh@rayson-tech.com", "medium", {
+  const selection = resolveSubscriptionSelection("jason-claude", "you@example.com", "medium", {
     getSubscriptionConfig: () => fakeSubscriptionConfig({
-      "jason-claude": { provider: "claude-cli", model: "claude-sonnet-5", owner: "jason.pugh@rayson-tech.com", thinking: true },
+      "jason-claude": { provider: "claude-cli", model: "claude-sonnet-5", owner: "you@example.com", thinking: true },
     }),
   });
   assert.equal(selection.model, "claude-cli/claude-sonnet-5");
@@ -2387,7 +2387,7 @@ test("resolveSubscriptionSelection: a specific thinking level is this entry's ow
 test("resolveSubscriptionSelection: missing on_behalf_of refuses -- never runs anonymously under someone's credential", () => {
   assert.throws(
     () => resolveSubscriptionSelection("jason-claude", null, "medium", {
-      getSubscriptionConfig: () => fakeSubscriptionConfig({ "jason-claude": { provider: "claude-cli", model: "x", owner: "jason.pugh@rayson-tech.com" } }),
+      getSubscriptionConfig: () => fakeSubscriptionConfig({ "jason-claude": { provider: "claude-cli", model: "x", owner: "you@example.com" } }),
     }),
     /requires on_behalf_of/,
   );
@@ -2395,12 +2395,12 @@ test("resolveSubscriptionSelection: missing on_behalf_of refuses -- never runs a
 
 test("resolveSubscriptionSelection: mismatched on_behalf_of refuses and names the real owner -- never silently substitutes", () => {
   assert.throws(
-    () => resolveSubscriptionSelection("jason-claude", "someone.else@rayson-tech.com", "medium", {
-      getSubscriptionConfig: () => fakeSubscriptionConfig({ "jason-claude": { provider: "claude-cli", model: "x", owner: "jason.pugh@rayson-tech.com" } }),
+    () => resolveSubscriptionSelection("jason-claude", "someone.else@example.com", "medium", {
+      getSubscriptionConfig: () => fakeSubscriptionConfig({ "jason-claude": { provider: "claude-cli", model: "x", owner: "you@example.com" } }),
     }),
     (error) => {
-      assert.match(error.message, /belongs to "jason\.pugh@rayson-tech\.com"/);
-      assert.match(error.message, /someone\.else@rayson-tech\.com/);
+      assert.match(error.message, /belongs to "you@example\.com"/);
+      assert.match(error.message, /someone\.else@example\.com/);
       return true;
     },
   );

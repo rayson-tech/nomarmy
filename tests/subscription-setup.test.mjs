@@ -24,7 +24,7 @@ const REAL_CATALOG = [
 ].join("\n");
 
 const REAL_CLAUDE_STATUS = JSON.stringify({
-  loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty", email: "jason.pugh@rayson-tech.com",
+  loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty", email: "you@example.com",
   orgName: "Rayson Technologies", subscriptionType: "team",
 });
 
@@ -81,7 +81,7 @@ test("parseCatalogModels: pulls just one provider's model ids from the real cata
 });
 
 test("parseCliLoginStatus: real Claude JSON status -> logged in, with the email to default the owner from", () => {
-  assert.deepEqual(parseCliLoginStatus("claude", REAL_CLAUDE_STATUS), { loggedIn: true, email: "jason.pugh@rayson-tech.com", subscriptionType: "team" });
+  assert.deepEqual(parseCliLoginStatus("claude", REAL_CLAUDE_STATUS), { loggedIn: true, email: "you@example.com", subscriptionType: "team" });
 });
 
 test("parseCliLoginStatus: Claude's JSON still parses with a stray stderr line merged in", () => {
