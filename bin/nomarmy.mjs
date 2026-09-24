@@ -1403,7 +1403,7 @@ function openclawCmd() { return process.env.NOMARMY_OPENCLAW_CMD || "openclaw"; 
 function runQuiet(cmd, args) {
   const result = spawnSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-  return { ok: !result.error && result.status === 0, out, status: result.status };
+  return { ok: !result.error && result.status === 0, out, stdout: result.stdout ?? "", status: result.status };
 }
 
 function runInteractive(cmd, args) {
@@ -1529,7 +1529,10 @@ function catalogModelsFor(provider) {
 function probeWorker(provider, model) {
   const result = runQuiet(openclawCmd(), ["agent", "exec", "--model", `${provider}/${model}`, "--no-auth-env-only",
     "--json", "--cwd", os.tmpdir(), "--isolated", "--timeout", "60", "Reply with exactly: ok"]);
-  return probeSucceeded(result.out);
+  // stdout only: OpenClaw logs a "run ... ended" line to stderr AFTER the
+  // JSON envelope (confirmed live), and the merged text doesn't parse --
+  // which reported a working Codex login as a failed test call.
+  return probeSucceeded(result.stdout);
 }
 
 /**

@@ -99,6 +99,13 @@ test("parseCliLoginStatus: unparseable output is 'not logged in' -- re-running a
   assert.equal(parseCliLoginStatus("codex", "").loggedIn, false);
 });
 
+test("probeSucceeded: the real Codex probe, with OpenClaw's stderr run log merged in after the envelope", () => {
+  const stderrLog = "\u001b[33m[agents/agent-command]\u001b[39m \u001b[36m[agent] run 4a4dbf5f ended with stopReason=stop\u001b[39m\n";
+  const envelope = JSON.stringify({ ok: true, status: "ok", final: "ok", model: "gpt-6-astra", provider: "openai" }, null, 2);
+  assert.equal(probeSucceeded(`${envelope}\n${stderrLog}`), true, "this exact shape reported a working login as a failed test call");
+  assert.equal(probeSucceeded(`${stderrLog}${envelope}\n`), true);
+});
+
 test("probeSucceeded: true only for a real completion envelope", () => {
   assert.equal(probeSucceeded(REAL_PROBE_OK), true);
   assert.equal(probeSucceeded(REAL_PROBE_FAIL), false);
