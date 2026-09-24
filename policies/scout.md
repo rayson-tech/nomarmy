@@ -1,4 +1,4 @@
-# Scout Policy — v1.3
+# Scout Policy (v1.3)
 
 A scout is a nom that reads and never writes. Its job is to spend a cheap model's context instead of the frontier's: read forty files, hand back a handful of findings, keep the coordinator's context for the work that needs it.
 
@@ -46,11 +46,11 @@ The invariant does not change: a scout's report is a claim. What changes is what
 - nomArmy resolves every citation against the exact commit the scout read, through Git, never through the worktree. A scout that edits its snapshot cannot forge a citation.
 - A citation to a missing file, a line past the end of the file, or a path outside the repository fails. The lines it points to are attached to the finding, so the coordinator reads claim and evidence together without opening the file.
 - A finding with no resolvable citation is not passed through as a fact. It is listed under `UNSUPPORTED FINDINGS` as hearsay.
-- `CONFIDENCE` is recorded as the scout's own estimate and labelled that way. It is not evidence.
+- `CONFIDENCE` is recorded as the scout's own estimate and labeled that way. It is not evidence.
 
 Outcomes: `SCOUT_DONE` (at least one finding supported by cited lines), `SCOUT_WEAK` (every supported finding names a file but no readable lines, so nothing is attached; needs review), `SCOUT_UNSUPPORTED` (none supported; incomplete), `SCOUT_REPORT_INVALID` (no usable report), `SCOUT_TAINTED` (the snapshot changed; needs review). A `SCOUT_DONE` with unsupported findings or a truncated report is complete but marked for review.
 
-A citation whose line part is garbled but whose file exists, such as a template copied literally as `[path:AGENTS.md:start-55]`, is salvaged to a file-level citation and labelled as such. It counts as weak evidence, never as lines read. This was observed verbatim from a 4B model on the first live scout run; the brief now shows concrete example citations and says not to copy them.
+A citation whose line part is garbled but whose file exists, such as a template copied literally as `[path:AGENTS.md:start-55]`, is salvaged to a file-level citation and labeled as such. It counts as weak evidence, never as lines read. This was observed verbatim from a 4B model on the first live scout run; the brief now shows concrete example citations and says not to copy them.
 
 ## Evidence before reading
 
@@ -58,7 +58,7 @@ nomArmy places a deterministic evidence tool inside the scout's sandbox at `.ope
 
 ## Resolution is not support
 
-A citation that resolves proves the lines exist, not that they say what the finding claims. Observed on the second live run: three findings about commit gates, all citing five real lines about delegation. The verifier therefore also checks that the cited range mentions at least one of the finding's distinctive terms. A line citation that shares no term with its finding is labelled `no shared terms`, the finding is weak, and a report made only of such findings is `SCOUT_WEAK`. This is a lexical heuristic and is labelled as one; it catches the careless case, not the subtle one. Reading the excerpt is still the coordinator's job.
+A citation that resolves proves the lines exist, not that they say what the finding claims. Observed on the second live run: three findings about commit gates, all citing five real lines about delegation. The verifier therefore also checks that the cited range mentions at least one of the finding's distinctive terms. A line citation that shares no term with its finding is labeled `no shared terms`, the finding is weak, and a report made only of such findings is `SCOUT_WEAK`. This is a lexical heuristic and is labeled as one; it catches the careless case, not the subtle one. Reading the excerpt is still the coordinator's job.
 
 ## What the coordinator still owns
 

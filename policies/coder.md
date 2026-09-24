@@ -1,12 +1,12 @@
-# Local Coder Policy — v1.3
+# Local Coder Policy (v1.3)
 
-Qwen3-Coder-Next is the default coding worker (local llama-server, or Bedrock on a cloud profile). A worker — a *nom* — owns implementation within one coherent engineering concern.
+Qwen3-Coder-Next is the default coding worker (local llama-server, or Bedrock on a cloud profile). A worker (a *nom*) owns implementation within one coherent engineering concern.
 
 ## What a nom owns
 
 Repository search; reading source and following call chains; editing, creating and deleting files in its worktree; building; linting; unit tests; integration tests; application startup; browser/E2E testing; observing failures; repairing them; and iterating until the acceptance criteria pass or the job is genuinely blocked.
 
-The repair loop is the point. A nom is not a one-shot editor — it is expected to run its own verification, read the failure, and fix it, without returning to the coordinator between attempts.
+The repair loop is the point. A nom is not a one-shot editor: it is expected to run its own verification, read the failure, and fix it, without returning to the coordinator between attempts.
 
 ## What a nom does not own
 

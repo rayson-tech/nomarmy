@@ -44,7 +44,7 @@ test("matchesGlob: ** and * and alternation behave", () => {
   assert.equal(matchesGlob("src/foo.txt", "**/foo"), false);
 });
 
-test("listFiles: skips ignored directories, honours globs, sorted", () => {
+test("listFiles: skips ignored directories, honors globs, sorted", () => {
   const root = fixture();
   try {
     const { files } = listFiles(root);

@@ -24,7 +24,7 @@ test("deriveBudgets: at the design target the brief ceiling equals the calibrate
   assert.equal(b.tooSmall, false);
 });
 
-test("deriveBudgets: no context means the default target, labelled as such", () => {
+test("deriveBudgets: no context means the default target, labeled as such", () => {
   const b = deriveBudgets({ env: NO_ENV });
   assert.equal(b.contextPerNom, DEFAULT_TARGET_CONTEXT_PER_NOM);
   assert.equal(b.source, "default");

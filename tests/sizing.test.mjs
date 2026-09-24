@@ -2,7 +2,7 @@
 //
 // Everything here uses hand-constructed fact objects: `recommend()` and
 // `evaluateConfig()` are pure, so no real hardware and no real model file are
-// needed to pin the behaviour that matters.
+// needed to pin the behavior that matters.
 
 import test from "node:test";
 import assert from "node:assert/strict";

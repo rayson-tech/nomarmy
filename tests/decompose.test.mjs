@@ -232,7 +232,7 @@ test("resolveDecomposeOutcome: truncated-but-supported completes with review", a
 });
 
 // --- rendering ------------------------------------------------------------
-test("renderDecomposeReport: claim and evidence side by side, overlap surfaced, confidence labelled", async () => {
+test("renderDecomposeReport: claim and evidence side by side, overlap surfaced, confidence labeled", async () => {
   const r = parseDecomposeReport("DECOMPOSE REPORT\nOBJECTIVE: split the auth work\nCONFIDENCE: medium\nSUBTASK: wire auth into the users router\nACCEPTANCE: every route requires auth\nFILES: src/routes/users.js [src/routes/users.js:1-2]\nSUBTASK: also touch the same file again\nFILES: src/routes/users.js [src/routes/users.js:3]\nNOT_SPLITTABLE: none\nEND");
   const v = await verifyCitations(buildDecomposeFindings(r.subtasks), { readFile });
   const overlaps = checkDecompositionOverlap(r.subtasks, v);

@@ -7,7 +7,7 @@ check(){ if "$@" >/dev/null 2>&1; then echo "PASS $*"; else echo "FAIL $*"; fail
 check git --version; check podman info; check openclaw --version
 
 if nomarmy_is_cloud; then
-  echo "INFO cloud profile '$NOMARMY_PROFILE' (region $NOMARMY_BEDROCK_REGION) — no local inference expected"
+  echo "INFO cloud profile '$NOMARMY_PROFILE' (region $NOMARMY_BEDROCK_REGION): no local inference expected"
   check aws --version
   if [[ -n "${NOMARMY_BEDROCK_API_KEY:-${AWS_BEARER_TOKEN_BEDROCK:-}}" ]]; then
     echo 'PASS Bedrock API key present in environment'
@@ -59,7 +59,7 @@ fi
 node --check "$ROOT/mcp/server.mjs" && echo 'PASS MCP syntax'
 
 if [[ "${NOMARMY_ORCHESTRATOR_TRUST:-frontier}" == "degraded" ]]; then
-  echo "WARN Orchestrator trust is DEGRADED (${NOMARMY_ORCHESTRATOR_MODEL:-unset}) — acceptance is not an independent check"
+  echo "WARN Orchestrator trust is DEGRADED (${NOMARMY_ORCHESTRATOR_MODEL:-unset}): acceptance is not an independent check"
 else
   echo "PASS Orchestrator trust is frontier (${NOMARMY_ORCHESTRATOR_MODEL:-local coordinator})"
 fi

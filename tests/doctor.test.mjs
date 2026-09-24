@@ -219,7 +219,7 @@ test("checkEndpoint (bedrock) ok with a valid region and credentials", () => {
   assert.equal(result.ok, true);
 });
 
-test("checkEndpoint rejects an unrecognised NOMARMY_EXECUTION value", () => {
+test("checkEndpoint rejects an unrecognized NOMARMY_EXECUTION value", () => {
   const result = checkEndpoint({ execution: "carrier-pigeon", endpoint: {} });
   assert.equal(result.ok, false);
   assert.match(result.fix, /local' or 'bedrock'/);
@@ -258,7 +258,7 @@ test("checkGitLongPaths on Windows passes only when core.longpaths is true, with
   }
 });
 
-// --- evaluateChecks / runDoctor: whole-report behaviour ---------------------
+// --- evaluateChecks / runDoctor: whole-report behavior ---------------------
 
 function passingFacts() {
   return {

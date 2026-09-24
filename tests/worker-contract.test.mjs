@@ -156,7 +156,7 @@ test("gate: a done/pass report never commits without a passing independent check
   assert.equal(outcome.retainWorktree, true);
 });
 
-test("gate: a clean done/pass report with no runner registered still commits (v1.2 behaviour preserved)", () => {
+test("gate: a clean done/pass report with no runner registered still commits (v1.2 behavior preserved)", () => {
   const outcome = resolveOutcome({ report: parseWorkerReport(report()), repositoryChanged: true, independentVerification: NOT_RUN });
   assert.equal(outcome.outcome, OUTCOMES.WORKER_DONE);
   assert.equal(outcome.commitAllowed, true);

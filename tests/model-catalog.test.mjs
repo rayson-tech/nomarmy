@@ -15,7 +15,7 @@ const REAL_SHAPED_OUTPUT = JSON.stringify({
     { key: "xai/grok-4.6", name: "Grok 4.6", input: "text+image", contextWindow: 500000, local: false, available: null, tags: [] },
     { key: "openai/gpt-4o-mini", name: "GPT-4o mini", input: "text+image", contextWindow: 128000, local: false, available: null, tags: [] },
     // A real entry from the same live capture: contextWindow can genuinely
-    // be null (not yet catalogued by OpenClaw's own discovery) -- must be
+    // be null (not yet cataloged by OpenClaw's own discovery) -- must be
     // skipped, not coerced into 0 or NaN.
     { key: "openai/gpt-5.3-codex-spark", name: "GPT-5.3 Codex Spark", input: "text", contextWindow: null, local: false, available: null, tags: [] },
   ],

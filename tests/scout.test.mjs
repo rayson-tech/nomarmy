@@ -78,7 +78,7 @@ test("extractCitations: every bracketed token is an attempt; garbled ones are re
   assert.equal(cs[2].granularity, "invalid"); assert.equal(cs[2].raw, "[no idea]");
 });
 
-test("verifyCitations: a salvaged file-level citation is weak; an unparseable one is labelled as such", async () => {
+test("verifyCitations: a salvaged file-level citation is weak; an unparseable one is labeled as such", async () => {
   const r = parseScoutReport("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: low\nFINDING: a [path:README.md:start-55]\nFINDING: b [see above]\nNOT_FOUND: none\nEND");
   const v = await verifyCitations(r.findings, { readFile });
   assert.equal(v.findings[0].supported, true); assert.equal(v.findings[0].weak, true);
@@ -197,7 +197,7 @@ test("verifyCitations: a throwing reader is a missing file, not a crash", async 
   assert.equal(v.findings[0].citations[0].status, "missing_file");
 });
 
-test("verifyCitations: a real range that never mentions the finding's terms is weak and labelled unrelated", async () => {
+test("verifyCitations: a real range that never mentions the finding's terms is weak and labeled unrelated", async () => {
   // The second live run verbatim in shape: three claims about commit gates, all citing five delegation lines.
   const r = parseScoutReport("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: medium\nFINDING: A commit is blocked unless STATUS is done and VERIFICATION passes. [src/routes/users.js:1-3]\nFINDING: The users router applies requireAuth to every route. [src/routes/users.js:1-2]\nNOT_FOUND: none\nEND");
   const v = await verifyCitations(r.findings, { readFile });
@@ -307,7 +307,7 @@ test("resolveScoutOutcome: file-level-only support is SCOUT_WEAK and needs revie
 });
 
 // --- rendering --------------------------------------------------------------
-test("renderScoutReport: claim and evidence side by side, hearsay fenced off, confidence labelled", async () => {
+test("renderScoutReport: claim and evidence side by side, hearsay fenced off, confidence labeled", async () => {
   const r = parseScoutReport("SCOUT REPORT\nQUESTION: q\nCONFIDENCE: medium\nFINDING: users router applies auth [src/routes/users.js:1-2]\nFINDING: caching is off\nNOT_FOUND: no rate limiter\nEND");
   const v = await verifyCitations(r.findings, { readFile });
   const text = renderScoutReport({ report: r, verified: v, outcome: resolveScoutOutcome({ report: r, verified: v }), baseSha: "0123456789abcdef" });
@@ -353,7 +353,7 @@ test("resolveScoutOutcome: a well-formed zero-findings report is SCOUT_NOT_FOUND
 // identifiers. Reported live: cleanValue stripped every underscore, so
 // "row_key" became "row key" and "_validate_tabular_mapping" became
 // "validate tabular mapping" -- exactly the tokens distinctiveTerms()'s
-// `/_|\./.test(t)` check exists to recognise, gutted before it ever ran.
+// `/_|\./.test(t)` check exists to recognize, gutted before it ever ran.
 // ---------------------------------------------------------------------------
 
 test("parseScoutReport: a snake_case identifier in a finding survives cleanValue intact", () => {

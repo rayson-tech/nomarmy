@@ -384,7 +384,7 @@ async function cmdInit() {
   const rl = createInterface({ input, output });
   try {
     const answer = (await rl.question(c.bold(`Write this to ${path.basename(targetPath)}? [y/N] `))).trim().toLowerCase();
-    if (answer !== "y") { console.log(c.dim("Cancelled; nothing written.")); return; }
+    if (answer !== "y") { console.log(c.dim("Canceled; nothing written.")); return; }
     fs.writeFileSync(targetPath, stringifyConfig(proposal));
     console.log(c.green(`✓ Wrote ${targetPath}.`) + " Run 'nomarmy validate' any time to re-check it.");
   } finally {
@@ -606,7 +606,7 @@ async function cmdSetup() {
       }
       if (!nonInteractive) {
         const answer = (await rl.question(c.bold("\nWrite this configuration? [y/N] "))).trim().toLowerCase();
-        if (answer !== "y") { console.log(c.dim("Cancelled; nothing written.")); return; }
+        if (answer !== "y") { console.log(c.dim("Canceled; nothing written.")); return; }
       }
     }
 
@@ -693,7 +693,7 @@ async function cmdModel() {
       console.log(c.bold(`\nAbout to write ${path.relative(nomarmyRoot, commonPath)}:`));
       console.log(c.dim(`  NOMARMY_MODEL_REPO=${model.repo}\n  NOMARMY_MODEL_QUANT=${model.quant}\n  NOMARMY_MODEL_ALIAS=${model.alias}`));
       const answer = (await rl.question(c.bold("\nApply this model configuration? [y/N] "))).trim().toLowerCase();
-      if (answer !== "y") { console.log(c.dim("Cancelled; nothing changed.")); return; }
+      if (answer !== "y") { console.log(c.dim("Canceled; nothing changed.")); return; }
       writeEnvLine(commonPath, "NOMARMY_MODEL_REPO", model.repo);
       writeEnvLine(commonPath, "NOMARMY_MODEL_QUANT", model.quant);
       writeEnvLine(commonPath, "NOMARMY_MODEL_ALIAS", model.alias);
@@ -1129,7 +1129,7 @@ async function cmdAgentsRemove() {
   if (!json) {
     if (usedBy.length) console.log(c.yellow(`Roles using "${name}" in this repo: ${usedBy.join(", ")}. They'll be refused until you reassign them.`));
     const rl = createInterface({ input, output });
-    try { if (!(await confirm(rl, `Remove agent "${name}"?`, { defaultYes: false }))) { console.log(c.dim("Cancelled; nothing changed.")); return; } }
+    try { if (!(await confirm(rl, `Remove agent "${name}"?`, { defaultYes: false }))) { console.log(c.dim("Canceled; nothing changed.")); return; } }
     finally { rl.close(); }
   }
   const next = { ...agents };

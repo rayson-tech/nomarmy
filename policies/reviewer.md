@@ -1,4 +1,4 @@
-# Reviewer Policy — v1.2
+# Reviewer Policy (v1.2)
 
 Reviewer capability remains coordinator/frontier-model controlled by default. A future local read-only reviewer may be added, but a worker must never review/approve its own work as final authority.
 
@@ -16,7 +16,7 @@ Coordinator outranks the workers it reviews. Everything in this file and in `pol
 
 Coordinator and workers are the same capability class. Profile: `bedrock-cheap`.
 
-Under this setting the acceptance gate is a consistency check, not an independent one. It will still catch a malformed report, a missing commit, a failed worktree pointer, and a `STATUS: done` without `VERIFICATION: pass` — those are mechanical and the MCP coordinator verifies them against Git regardless of model. It will *not* reliably catch a plausible-looking diff that is wrong, a test that passes for the wrong reason, or a named regression test that does not actually pin the behaviour it claims to.
+Under this setting the acceptance gate is a consistency check, not an independent one. It will still catch a malformed report, a missing commit, a failed worktree pointer, and a `STATUS: done` without `VERIFICATION: pass`: those are mechanical and the MCP coordinator verifies them against Git regardless of model. It will *not* reliably catch a plausible-looking diff that is wrong, a test that passes for the wrong reason, or a named regression test that does not actually pin the behavior it claims to.
 
 Every job record produced under this setting carries `execution.orchestratorTrust: "degraded"` and a banner on its formatted result. Do not remove either.
 
@@ -32,4 +32,4 @@ Not permitted under `degraded`:
 
 ## Measuring before trusting
 
-Before treating `degraded` as viable for a class of work, measure first-pass accept rate on that class against `bedrock`. `local_worker_jobs` exposes the inputs: `coordinatorStatus`, `reportValidation`, and `execution` per job. A cheaper worker that needs more rounds is not cheaper — the coordinator's review tokens dominate the worker's.
+Before treating `degraded` as viable for a class of work, measure first-pass accept rate on that class against `bedrock`. `local_worker_jobs` exposes the inputs: `coordinatorStatus`, `reportValidation`, and `execution` per job. A cheaper worker that needs more rounds is not cheaper: the coordinator's review tokens dominate the worker's.

@@ -1,4 +1,4 @@
-# nomArmy by Rayson Technologies — local worker instructions
+# nomArmy by Rayson Technologies: local worker instructions
 
 Use `nomarmy-local-worker` for bounded engineering work that is cheap to verify. Qwen3-Coder-Next is the default local coder; GPT-OSS 20B is a fallback/control.
 
@@ -24,7 +24,7 @@ Do not delegate deployments, production access, AWS credentials, SSH credentials
 
 Profiles select where inference runs: the local profiles (`macbook-pro`, `dgx-spark`, `nvidia-linux`, `cpu-linux`) serve workers from this machine's llama-server, `bedrock` serves them from Amazon Bedrock with a Claude Opus 5 coordinator, and `bedrock-cheap` serves both from the same open-weight model.
 
-Local profiles cost nothing per token and are capped by VRAM. Bedrock profiles are capped by quota and budget, so parallelism above 1 is reachable — measure first-pass accept rate before raising it. Cost per accepted task is the number that matters; coordinator review tokens dominate worker tokens.
+Local profiles cost nothing per token and are capped by VRAM. Bedrock profiles are capped by quota and budget, so parallelism above 1 is reachable; measure first-pass accept rate before raising it. Cost per accepted task is the number that matters; coordinator review tokens dominate worker tokens.
 
 Cloud profiles send repository content off the machine.
 

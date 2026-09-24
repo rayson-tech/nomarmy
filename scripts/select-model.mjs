@@ -42,7 +42,7 @@ try {
     console.log(`\nGGUF repositories matching "${query}":`);
     models.forEach((model, index) => console.log(`  ${index + 1}. ${model.id} (${model.downloads ?? 0} downloads)`));
     const choice = Number.parseInt(await rl.question("Choose a repository number (or press Enter to cancel): "), 10);
-    if (!Number.isInteger(choice) || choice < 1 || choice > models.length) throw new Error("Cancelled; no model configuration changed.");
+    if (!Number.isInteger(choice) || choice < 1 || choice > models.length) throw new Error("Canceled; no model configuration changed.");
     repo = models[choice - 1].id;
   }
 
@@ -75,7 +75,7 @@ try {
   console.log(`  NOMARMY_MODEL_QUANT=${requestedQuant}`);
   console.log(`  NOMARMY_MODEL_ALIAS=${alias}`);
   if ((await rl.question("Apply this model configuration? [y/N] ")).trim().toLowerCase() !== "y") {
-    console.log("Cancelled; no model configuration changed.");
+    console.log("Canceled; no model configuration changed.");
     process.exit(0);
   }
 
