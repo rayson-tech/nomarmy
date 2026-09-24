@@ -177,10 +177,16 @@ Usage: nomarmy <command> [options]
                             which agent the General is, in --global
                             (default) or --local
   config paths    where agents.yml and the three army layers live
-  jobs [--watch] [--interval N]
+  jobs [--watch|--events] [--interval N]
                   what's running across every session (agent, model, phase,
                   last tool call, files changed, heartbeat) and what just
-                  finished; --watch redraws every N seconds (default 3)
+                  finished; --watch redraws every N seconds (default 3);
+                  --events prints one line per start, phase change and
+                  finish (for Claude Code's background monitor; --json for
+                  JSON lines)
+  statusline      the one-line summary Claude Code's status line shows
+                  (installed by \`nomarmy connect claude\` when no status
+                  line is set); reads the session JSON on stdin
   connect [claude] [codex] [cursor]
                   (Re-)register the MCP server with one or more coordinators.
                   With no target and not --json, prompts an interactive
@@ -1536,6 +1542,8 @@ async function cmdConnect() {
       results.push({ target, connected: true, ...result });
       if (!json) console.log(c.green(`✓ Registered nomarmy-local-worker with ${target}.`));
       if (!json && result?.commands?.installed?.length) console.log(c.green(`✓ Playbooks: ${result.commands.installed.join(", ")}`) + c.dim(` in ${result.commands.dir} (restart ${target} to pick up a new one)`));
+      if (!json && result?.statusLine === "installed") console.log(c.green("✓ Claude Code status line: nomArmy's") + c.dim(" (shows running jobs and the active run; restart Claude Code to see it)"));
+      if (!json && result?.statusLine === "kept-yours") console.log(c.dim("Kept your own Claude Code status line. To add nomArmy's to it, have your command also run `nomarmy statusline`."));
       if (!json && result?.commands?.skipped?.length) console.log(c.yellow(`⚠ Left your own ${result.commands.skipped.join(", ")} in ${result.commands.dir} alone (not nomArmy's); nomArmy's version is in playbooks/.`));
     } catch (error) {
       results.push({ target, connected: false, error: error.message });
@@ -2061,7 +2069,43 @@ function renderJobs({ running, recent }) {
   return lines.join("\n");
 }
 
+/**
+ * `nomarmy jobs --events`: one line per change -- a job started, changed
+ * phase, or finished -- and nothing in between. Made for Claude Code's
+ * background monitor: the General watches this stream and is woken on
+ * each line, instead of polling local_worker_status (each poll costs its
+ * seat usage). With --json, one JSON object per line.
+ */
+async function streamJobEvents() {
+  const interval = Math.max(1, Number(value("interval", "3")) || 3) * 1000;
+  const seen = new Map();
+  const emit = (event, job, detail = "") => {
+    if (json) console.log(JSON.stringify({ at: new Date().toISOString(), event, jobId: job.jobId, agent: job.agent, model: job.model, phase: job.phase, detail }));
+    else console.log(`${new Date().toLocaleTimeString()}  ${event.padEnd(9)} ${job.jobId}  ${job.agent ?? "local"}${job.model ? `/${job.model}` : ""}${detail ? `  ${detail}` : ""}`);
+  };
+  process.on("SIGINT", () => process.exit(0));
+  let first = true;
+  for (;;) {
+    const { running, recent } = collectJobs({ recent: 20 });
+    const now = new Map([...running, ...recent].map((j) => [j.jobId, j]));
+    for (const j of running) {
+      const prev = seen.get(j.jobId);
+      if (!prev) { if (!first) emit("started", j, j.phase); else emit("running", j, j.phase); }
+      else if (prev.phase !== j.phase) emit("phase", j, `${prev.phase} -> ${j.phase}`);
+    }
+    for (const [id, prev] of seen) {
+      const j = now.get(id);
+      if (prev.running && j && !j.running) emit("finished", j, `${j.phase} after ${fmtSeconds(j.elapsedSeconds)}`);
+    }
+    seen.clear();
+    for (const [id, j] of now) seen.set(id, j);
+    first = false;
+    await new Promise((r) => setTimeout(r, interval));
+  }
+}
+
 async function cmdJobs() {
+  if (flag("events")) return streamJobEvents();
   if (json) return out(collectJobs());
   if (!flag("watch")) return console.log(renderJobs(collectJobs()));
   // No `watch` on macOS, and a shell loop can't run through Claude Code's `!`.
@@ -2073,7 +2117,14 @@ async function cmdJobs() {
   }
 }
 
-const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
+async function cmdStatusline() {
+  const { statusLineText } = await import("../lib/statusline.mjs");
+  let session = {};
+  if (!process.stdin.isTTY) { try { session = JSON.parse(fs.readFileSync(0, "utf8") || "{}"); } catch { /* no session JSON */ } }
+  process.stdout.write(`${statusLineText({ session })}\n`);
+}
+
+const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
   // Import lazily to avoid circular dependencies

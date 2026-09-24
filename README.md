@@ -241,6 +241,13 @@ army:
 
 The General can lower these for one run, never raise them. When a vendor answers with a usage-limit error, that agent is paused for the rest of the run and the General stops and tells you; it never moves the role to another vendor to get around it. The one thing no tool can see is your coordinator's own seat: if it runs out mid-feature, the run log (kept current after every phase) lets `/feature resume <run-id>` in a fresh session continue instead of starting over.
 
+## Watching what nomArmy is doing
+
+- **Claude Code's status line** shows, on every redraw, what's running across all your sessions and the repo's open run: `Opus 5.5 · rayson-senti │ 🍪 2 running: sr-dev codex/gpt-6-astra 9m 10f · scout grok/grok-4.7 1m │ run safe-rescan 3/14 jobs $0.41`. `nomarmy connect claude` installs it if you don't have a status line; if you do, yours is kept and `nomarmy statusline` prints nomArmy's part for you to add to it.
+- **Desktop notifications** (macOS and Linux) come from nomArmy itself whenever a job finishes and whenever a run crosses a limit or pauses an agent, so they work with Claude Code, Codex and Cursor alike. `NOMARMY_NOTIFY=0` turns them off.
+- **`nomarmy jobs --watch`** is a live table in a terminal (macOS has no `watch`); **`nomarmy jobs --events`** prints one line per job start, phase change and finish, which the General watches with Claude Code's background monitor instead of polling.
+- **`run_status`** lists a `/feature` run's running jobs as well as finished ones, with each one's phase, last tool call and files changed so far.
+
 ## The `nomarmy` CLI
 
 Not published to npm (`"private": true`): clone and `npm install && npm link` (done for you by `install.sh`), or run commands directly: `node bin/nomarmy.mjs doctor`.
@@ -256,7 +263,8 @@ Every command proposes before writing anything: explicit `[y/N]` confirmation, o
 | `nomarmy agents list/add/update/remove` | Every model a job can run on. See [above](#agents-every-model-a-job-can-run-on). |
 | `nomarmy army show/init/assign/general` | The General, the role roster and its layers. See [above](#the-army-who-does-what). |
 | `nomarmy config paths` | Where each config file lives. |
-| `nomarmy jobs [--watch]` | What's running across every session (agent, model, phase, last tool call, files changed, heartbeat) and what just finished. `--watch` redraws live; macOS has no `watch`. |
+| `nomarmy jobs [--watch\|--events]` | What's running across every session and what just finished. `--watch` redraws live; `--events` prints one line per change. |
+| `nomarmy statusline` | nomArmy's one-line summary for Claude Code's status line. |
 | `nomarmy update` | Pull latest (fast-forward only) and resync the installed MCP copy. |
 | `nomarmy connect [claude] [cursor] [codex]` | (Re-)register the MCP server. No target: interactive multi-select. |
 | `nomarmy start` / `stop` | Start/stop local inference. |

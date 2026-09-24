@@ -24,6 +24,10 @@ When you hit a choice you'd normally ask the operator about, don't stop: pick th
 
 Stop and ask only for something irreversible or outside this repository: merging or pushing, deploying, anything needing cloud or production credentials, deleting data, or changing another repository.
 
+## Watching jobs
+
+Don't poll in a loop: each status call costs your own usage. Where your coordinator can watch a background command (Claude Code's monitor), watch `nomarmy jobs --events` -- one line per job start, phase change and finish -- and act when a line arrives. Otherwise use `local_worker_status` with the longest `wait_seconds` it allows. `run_status` lists the run's running jobs as well as finished ones. The operator gets a desktop notification whenever a job finishes and whenever the run crosses a limit, so you don't need to relay each one.
+
 ## Limits
 
 - Every job's start response and `run_status` carry the run's warnings. At a warning (80% of jobs, api spend or hours), tell the operator in one line and keep going; say what's left.

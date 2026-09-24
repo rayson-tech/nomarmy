@@ -19,6 +19,7 @@ import { resolvePool, pickProvider, poolContextPerNom, entryContextPerNom } from
 import { openclawProviderId } from "../lib/dispatch-schema.mjs";
 import { loadArmy, expandArmyRole, describeArmy, globalConfigDir } from "../lib/army.mjs";
 import { readClaudeSessionTranscript } from "../lib/claude-transcript.mjs";
+import { notify } from "../lib/notify.mjs";
 import { detectTestSabotage, addedLinesOf, loadDependencyNames } from "../lib/sabotage.mjs";
 import { writeLease, removeLease, liveLeases, liveSlots, acquireSlot } from "../lib/slots.mjs";
 import { createRun, loadRun, runTotals, runAdmissionProblems, recordRunJob, finishRun, resolveRunLimits, describeLoweredLimits, detectUsageLimit } from "../lib/runs.mjs";
@@ -3300,12 +3301,27 @@ export function track(jobId, meta, promise) {
   const entry = { ...meta, jobId, startedAt: new Date().toISOString(), settled: false, result: null, error: null, promise: null };
   // A machine-wide lease for as long as the job runs, so every session's
   // admission counts it (runningCount); released however the job ends.
-  if (meta.lane) writeLease(leasesRoot, jobId, { lane: meta.lane, agent: meta.agent ?? null });
+  if (meta.lane) writeLease(leasesRoot, jobId, { lane: meta.lane, agent: meta.agent ?? null, runId: meta.runId ?? null, role: meta.role ?? null, model: meta.model ?? null });
   const release = () => removeLease(leasesRoot, jobId);
-  entry.promise = promise.then(r => { entry.settled = true; entry.result = r; release(); return r; }, e => { entry.settled = true; entry.error = e; release(); throw e; });
+  entry.promise = promise.then(
+    r => { entry.settled = true; entry.result = r; release(); notifyJobFinished(entry, r, null); return r; },
+    e => { entry.settled = true; entry.error = e; release(); notifyJobFinished(entry, null, e); throw e; });
   entry.promise.catch(() => {});
   activeJobs.set(jobId, entry);
   return entry;
+}
+/**
+ * A desktop notification when a job ends (lib/notify.mjs), so the person
+ * watching hears about it from any coordinator without polling.
+ */
+function notifyJobFinished(entry, result, error) {
+  if (!entry.lane) return; // only tracked jobs, never internal helpers
+  const m = result?.manifest ?? {};
+  const outcome = error ? "failed" : String(m.outcome ?? (result?.ok ? "done" : "finished")).toLowerCase().replace(/_/g, " ");
+  const who = entry.agent ? `${entry.agent}${entry.model ? `/${entry.model}` : ""}` : "local model";
+  const took = Math.round((Date.now() - Date.parse(entry.startedAt)) / 60000);
+  const ok = !error && (result?.ok || m.coordinatorStatus === "complete");
+  notify(`nomArmy: ${entry.role ?? entry.mode ?? "job"} ${ok ? "done" : outcome}`, `${entry.workerId ?? entry.jobId} on ${who}: ${outcome} after ${took}m. ${ok ? "Ready for the General's review." : "Needs a look."}`);
 }
 function toolText(text, isError = false) { return { content: [{ type: "text", text }], isError }; }
 function capacitySnapshot() {
@@ -3375,7 +3391,8 @@ async function admit(jobs) {
     try {
       const run = loadRun(runsRoot, j.run_id);
       if (run.repo !== projectDir) problems.push(`${jobs.length > 1 ? `job ${i + 1}: ` : ""}run "${run.id}" belongs to ${run.repo}, not this repository`);
-      for (const p of runAdmissionProblems(run, { agentName: j.agentName ?? "local" })) problems.push(jobs.length > 1 ? `job ${i + 1}: ${p}` : p);
+      const running = liveLeases(leasesRoot, { runId: run.id }).length + jobs.slice(0, i).filter((o) => o.run_id === run.id).length;
+      for (const p of runAdmissionProblems(run, { agentName: j.agentName ?? "local", running })) problems.push(jobs.length > 1 ? `job ${i + 1}: ${p}` : p);
     } catch (error) { problems.push(jobs.length > 1 ? `job ${i + 1}: ${error.message}` : error.message); }
   });
   // Slot capacity only concerns local jobs: a remote job's inference runs
@@ -3422,11 +3439,15 @@ function recordJobInRun(args, jobId, result, error = null) {
     ...String(m.workerError ?? "").split(/\r?\n/).filter((l) => /error|limit|429/i.test(l))].filter(Boolean).join("\n");
   const usageLimit = kind === "local" ? null : detectUsageLimit(errorLines);
   try {
-    recordRunJob(runsRoot, args.run_id, {
+    const before = runTotals(loadRun(runsRoot, args.run_id)).warnings;
+    const updated = recordRunJob(runsRoot, args.run_id, {
       jobId, agent: args.agentName ?? "local", kind, model: args.model ?? null, role: args.armyRole ?? null, mode: args.mode,
       outcome: m.outcome ?? (error ? "ERROR" : null), costUsd: m.metrics?.worker_cost_usd ?? null,
       tokens: m.metrics?.worker_tokens_total ?? null, usageLimit,
     });
+    // A limit crossed or an agent paused by this job is worth interrupting for.
+    const fresh = runTotals(updated).warnings.filter((w) => !before.includes(w) && /OVER|paused/.test(w));
+    if (fresh.length) notify(`nomArmy run ${updated.name}: stopped short`, fresh.join("; "));
   } catch (recordError) {
     fs.appendFileSync(path.join(jobsRoot, jobId, "coordinator.log"), `${new Date().toISOString()} could not record into run ${args.run_id}: ${recordError.message}\n`);
   }
@@ -3438,7 +3459,7 @@ function trackInRun(args, entry) {
 function launch(args) {
   const workerId = args.worker_id || null;
   const jobId = slug(workerId || (args.mode === "scout" ? "scout" : "worker"));
-  return trackInRun(args, track(jobId, { mode: args.mode, workerId: workerId || jobId, lane: jobLane(args), agent: args.agentName ?? null },
+  return trackInRun(args, track(jobId, { mode: args.mode, workerId: workerId || jobId, lane: jobLane(args), agent: args.agentName ?? null, runId: args.run_id ?? null, role: args.armyRole ?? null, model: args.model ?? null },
     withAgentSlot(args, jobId, () => executeJob({ ...jobArgs(args, workerId), jobId }))));
 }
 // Best-effort progress signal for a job still mid-run: a plain "phase: worker,
@@ -3683,7 +3704,14 @@ server.tool("run_status", "A /feature run's limits, what it has used (jobs, api 
   try {
     const run = loadRun(runsRoot, run_id);
     const totals = runTotals(run);
-    return toolText(JSON.stringify({ id: run.id, name: run.name, status: run.status, repo: run.repo, createdAt: run.createdAt, limits: run.limits, ...totals, pausedAgents: run.pausedAgents, jobs: run.jobs, logPath: run.logPath, summary: run.summary }, null, 2));
+    // In-flight jobs, from the machine-wide leases: finished jobs are all
+    // `jobs` shows, so a run with work in progress used to report 0.
+    const running = liveLeases(leasesRoot, { runId: run.id }).map((l) => {
+      const status = readJson(path.join(jobsRoot, l.jobId, "status.json")) ?? {};
+      return { jobId: l.jobId, agent: l.agent, model: l.model, role: l.role, phase: status.phase ?? null, startedAt: l.startedAt,
+        lastTool: status.lastTool ?? null, filesChangedLive: status.filesChangedLive ?? null, heartbeatAt: status.heartbeatAt ?? null };
+    });
+    return toolText(JSON.stringify({ id: run.id, name: run.name, status: run.status, repo: run.repo, createdAt: run.createdAt, limits: run.limits, ...totals, running, pausedAgents: run.pausedAgents, jobs: run.jobs, logPath: run.logPath, summary: run.summary }, null, 2));
   } catch (error) { return toolText(error.message, true); }
 });
 server.tool("run_finish", "Close a /feature run as complete or stopped, with a one-paragraph summary. A closed run admits no more jobs. Nothing is merged: the run's branch still waits for the operator.", {
@@ -3771,7 +3799,7 @@ server.tool("local_workers", "Run independent jobs (implement or scout) with bou
       // so it was invisible to both ceilings while it ran.
       // A batch job waits for its agent's slot (up to its own timeout) rather
       // than failing because an earlier job in the same batch holds it.
-      return trackInRun(j, track(jobId, { mode: j.mode, workerId, lane: jobLane(j), agent: j.agentName ?? null },
+      return trackInRun(j, track(jobId, { mode: j.mode, workerId, lane: jobLane(j), agent: j.agentName ?? null, runId: j.run_id ?? null, role: j.armyRole ?? null, model: j.model ?? null },
         withAgentSlot(j, jobId, () => executeJob({ ...jobArgs(effectiveJob, workerId), jobId }), { waitMs: (j.timeout_seconds ?? 600) * 1000 }))).promise;
     }, { staggerMs: WORKER_START_STAGGER_MS });
     indices.forEach((i, laneI) => { results[i] = laneResults[laneI]; });

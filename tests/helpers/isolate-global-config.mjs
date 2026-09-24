@@ -16,3 +16,7 @@ for (const name of ["NOMARMY_CLAUDE_COMMANDS_DIR", "NOMARMY_CODEX_SKILLS_DIR", "
 // Job leases and agent slots are machine-wide, under nomArmy's state
 // directory; tests get their own, never the developer's live one.
 process.env.NOMARMY_AGENT_STATE = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-test-state-"));
+// No desktop notifications from a test run.
+process.env.NOMARMY_NOTIFY = "0";
+// ...and never touch the developer's real Claude Code settings.
+process.env.NOMARMY_CLAUDE_SETTINGS_PATH = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-test-claude-")), "settings.json");
