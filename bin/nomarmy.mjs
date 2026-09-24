@@ -24,6 +24,7 @@ import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgent
 import { loadArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
 import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
 import { recordProbeSuccess } from "../lib/health.mjs";
+import { pruneJobRuntime } from "../lib/prune.mjs";
 import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
 
 // Add a new coordinator: add its name here, teach commandExists/connectTarget
@@ -2171,32 +2172,16 @@ async function streamJobEvents() {
  * report and any retained worktree stay. Job storage reached 1.9 GB and
  * then 2.4 GB again within a day of real runs, mostly this.
  */
-function pruneJobRuntime() {
+function pruneJobRuntimeCli() {
   const days = Math.max(0, Number(value("older-than", "2")) || 0);
-  const cutoff = Date.now() - days * 86400000;
-  let pruned = 0, bytes = 0;
-  const sizeOf = (dir) => { let n = 0; const stack = [dir]; while (stack.length) { const d = stack.pop(); let es = []; try { es = fs.readdirSync(d, { withFileTypes: true }); } catch { continue; } for (const e of es) { const p = path.join(d, e.name); if (e.isDirectory()) stack.push(p); else { try { n += fs.lstatSync(p).size; } catch { /* gone */ } } } } return n; };
-  for (const job of collectJobs({ recent: Infinity }).recent) {
-    const runtime = path.join(job.dir, "runtime");
-    if (!fs.existsSync(runtime)) continue;
-    // Finished means a final record. A running job's status.json heartbeat
-    // is always in the past too, so with --older-than 0 falling back to it
-    // deleted a live job's OpenClaw state mid-run. An orphaned job (its
-    // server gone, no record) isn't touched either: it may be recoverable.
-    const finishedAt = readJsonSafe(path.join(job.dir, "metadata.json"))?.finishedAt;
-    if (!finishedAt || Date.parse(finishedAt) > cutoff) continue;
-    if (fs.existsSync(path.join(agentStateRoot(), "leases", `${path.basename(job.dir)}.json`))) continue;
-    bytes += sizeOf(runtime);
-    fs.rmSync(runtime, { recursive: true, force: true });
-    pruned++;
-  }
+  const { pruned, freedBytes: bytes } = pruneJobRuntime({ stateRoot: agentStateRoot(), olderThanMs: days * 86400000 });
   if (json) return out({ pruned, freedBytes: bytes, olderThanDays: days });
   console.log(pruned ? c.green(`✓ Removed runtime data from ${pruned} finished job(s) older than ${days} day(s), freeing ${(bytes / 1024 ** 3).toFixed(2)} GB. Their records and reports are kept.`) : c.dim(`Nothing to prune: no finished job older than ${days} day(s) still has runtime data.`));
 }
 
 async function cmdJobs() {
   if (flag("events")) return streamJobEvents();
-  if (flag("prune")) return pruneJobRuntime();
+  if (flag("prune")) return pruneJobRuntimeCli();
   if (json) return out(collectJobs());
   if (!flag("watch")) return console.log(renderJobs(collectJobs()));
   // No `watch` on macOS, and a shell loop can't run through Claude Code's `!`.
@@ -2221,7 +2206,7 @@ async function cmdHealth() {
   for (const i of result.issues) {
     console.log(`\n${mark[i.severity]} ${c.bold(i.title)}`);
     console.log(c.dim(`  ${i.detail}`));
-    console.log(`  fix: ${i.fix}`);
+    if (i.fix) console.log(`  fix: ${i.fix}`);
   }
   if (result.issues.some((i) => i.severity === "error")) process.exitCode = 1;
 }

@@ -247,6 +247,7 @@ The General can lower these for one run, never raise them. When a vendor answers
 - **Desktop notifications** (macOS and Linux) come from nomArmy itself whenever a job finishes and whenever a run crosses a limit or pauses an agent, so they work with Claude Code, Codex and Cursor alike. `NOMARMY_NOTIFY=0` turns them off.
 - **`nomarmy jobs --watch`** is a live table in a terminal (macOS has no `watch`); **`nomarmy jobs --events`** prints one line per job start, phase change and finish, which the General watches with Claude Code's background monitor instead of polling.
 - **`run_status`** lists a `/feature` run's running jobs as well as finished ones, with each one's phase, last tool call and files changed so far.
+- **Health checks** run a minute after each server starts and every 6 hours: logins about to expire, OpenClaw and plugin versions, roles that can't run, models refused on a real job, and storage. `nomarmy health` runs them now. Each check also removes the runtime data (npm cache, harness state, about 100 MB a job) of finished jobs older than a day, keeping their records and reports; `NOMARMY_AUTO_PRUNE_HOURS` sets the age, `0` turns it off. `nomarmy jobs --prune --older-than 0` does it for every finished job right away.
 
 ## The `nomarmy` CLI
 
