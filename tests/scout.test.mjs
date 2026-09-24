@@ -127,7 +127,8 @@ test("parseScoutReport: findings beyond the cap are dropped and counted, never s
   const r = parseScoutReport(`SCOUT REPORT\nQUESTION: q\nCONFIDENCE: low\n${many}\nNOT_FOUND: none\nEND`, { maxFindings: 4 });
   assert.equal(r.findings.length, 4);
   assert.equal(r.droppedFindings, 2);
-  assert.equal(r.strict, false, "a capped report is not a clean one");
+  assert.equal(r.overflowed, true, "a capped report is flagged, never silently clean");
+  assert.equal(r.strict, true, "but its format was right, so it isn't called lenient");
 });
 
 test("parseScoutReport: a finding with no citation is kept so it can be listed as hearsay", () => {
@@ -472,5 +473,6 @@ test("parseScoutReport: 24 findings parse strictly under a frontier full budget,
   const local = parseScoutReport(text, deriveBudgets({ contextPerNom: 65536 }).scout);
   assert.equal(local.findings.length, 12);
   assert.equal(local.droppedFindings, 12);
-  assert.equal(local.strict, false, "exactly the lenient fallback the Senti run hit");
+  assert.equal(local.overflowed, true, "the half that was dropped is flagged");
+  assert.equal(local.strict, true, "a correctly formatted report is not called lenient for going over its budget");
 });

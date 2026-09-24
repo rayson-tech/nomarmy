@@ -18,6 +18,7 @@ import { DEFAULT_AGENT_IMAGE } from "../lib/verify.mjs";
 import { resolvePool, pickProvider, poolContextPerNom, entryContextPerNom } from "../lib/dispatch-config.mjs";
 import { openclawProviderId } from "../lib/dispatch-schema.mjs";
 import { loadArmy, expandArmyRole, describeArmy, globalConfigDir } from "../lib/army.mjs";
+import { readClaudeSessionTranscript } from "../lib/claude-transcript.mjs";
 import { writeLease, removeLease, liveLeases, liveSlots, acquireSlot } from "../lib/slots.mjs";
 import { createRun, loadRun, runTotals, runAdmissionProblems, recordRunJob, finishRun, resolveRunLimits, detectUsageLimit } from "../lib/runs.mjs";
 import { loadAgents, agentsConfigPath, agentsAsDispatchConfig, agentsAsSubscriptionConfig, agentDispatchFields, resolveAgentModel, agentProviderId, describeAgent } from "../lib/agents.mjs";
@@ -624,6 +625,19 @@ export function readsMeasurable(transcript, worker) {
     return { ...transcript, available: false, reason: `the agent ran ${reported} tool call(s) outside OpenClaw's transcript (its own CLI's tools), so reads can't be measured` };
   }
   return transcript;
+}
+
+/**
+ * What the worker read: OpenClaw's transcript, or -- for a claude-cli
+ * worker, whose tools OpenClaw never sees -- Claude Code's own session
+ * transcript for the job's working directory (lib/claude-transcript.mjs).
+ * Falls back to readsMeasurable's honest "can't measure" when neither has it.
+ */
+export async function measureReads(stateDir, worker, { cwd, sinceMs = 0 } = {}) {
+  const openclaw = readsMeasurable(await readOpenClawTranscript(stateDir), worker);
+  if (openclaw.available || worker?.provider !== "claude-cli" || !cwd) return openclaw;
+  const claude = readClaudeSessionTranscript(cwd, { sinceMs });
+  return claude.available ? claude : openclaw;
 }
 
 /** The budget an (already expanded) job is admitted and briefed against: its own agent's, or the local one. */
@@ -2710,7 +2724,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
     // The number this project is for: repository content the scout pulled
     // through its tools (what the coordinator would otherwise have carried)
     // against the size of what the coordinator receives instead.
-    const transcript = readsMeasurable(await readOpenClawTranscript(path.join(runtimeDir, "state")), worker);
+    const transcript = await measureReads(path.join(runtimeDir, "state"), worker, { cwd: worktree, sinceMs: jobStartedMs });
     let rendered = renderScoutReport({ report, verified, outcome, baseSha: base.sha });
     // Only repository reads count. tool_search, sessions_* and other harness
     // chatter is the agent framework talking to itself, and counting it made
@@ -2742,7 +2756,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
       scout: { question: report.question, confidence: report.confidence, notFound: report.notFound,
         findings: verified.findings, supported: verified.supported, unsupported: verified.unsupported, weak: verified.weak,
         excerptLinesUsed: verified.excerptLinesUsed, excerptTruncated: verified.excerptTruncated,
-        reportParse: { present: report.present, strict: report.strict, lenient: report.lenient, truncated: report.truncated, parseMode: report.parseMode, reason: report.reason, droppedFindings: report.droppedFindings } },
+        reportParse: { present: report.present, strict: report.strict, lenient: report.lenient, truncated: report.truncated, parseMode: report.parseMode, reason: report.reason, droppedFindings: report.droppedFindings, overflowed: Boolean(report.overflowed) } },
       transcript: transcript.available
         ? { modelCalls: transcript.modelCalls, toolCalls: transcript.toolCalls, filesRead: transcript.filesRead, commands: transcript.commands, toolResultChars: transcript.toolResultChars, assistantChars: transcript.assistantChars, dbPath: transcript.dbPath }
         : { available: false, reason: transcript.reason },
@@ -2834,7 +2848,7 @@ async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtime
     if (dirty) issues.push(`snapshot changed: ${record.repoStatusFiles.join(", ")}`);
     if (overlaps.length) issues.push(`${overlaps.length} subtask pair(s) claim overlapping files; not safe to dispatch as independent jobs as proposed`);
 
-    const transcript = readsMeasurable(await readOpenClawTranscript(path.join(runtimeDir, "state")), worker);
+    const transcript = await measureReads(path.join(runtimeDir, "state"), worker, { cwd: worktree, sinceMs: jobStartedMs });
     let rendered = renderDecomposeReport({ report, verified, subtasks: report.subtasks, overlaps, outcome, baseSha: base.sha });
     const displacement = estimateDisplacement({ readChars: transcript.available ? transcript.repoReadChars : null, deliveredChars: rendered.length + 400 });
     if (transcript.available) {
@@ -3385,6 +3399,14 @@ async function liveProgress(jobDir) {
     if (transcript.available) {
       const last = transcript.toolCalls.at(-1);
       if (last) out.lastTool = { tool: last.tool, target: last.path ?? last.command ?? null };
+    }
+    // A claude-cli worker's tools only appear in Claude Code's own session
+    // transcript, not OpenClaw's.
+    if (!out.lastTool) {
+      const startedMs = Date.parse(readJson(path.join(jobDir, "status.json"))?.startedAt ?? "") || 0;
+      const claude = readClaudeSessionTranscript(path.join(jobDir, "worktree"), { sinceMs: startedMs });
+      const last = claude.available ? claude.toolCalls.at(-1) : null;
+      if (last) { out.lastTool = { tool: last.tool, target: last.path ?? last.command ?? null }; out.toolCallsLive = claude.toolCalls.length; }
     }
   } catch { /* transcript not created yet, or locked mid-write; omit */ }
   return out;
