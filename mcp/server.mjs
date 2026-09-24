@@ -9,7 +9,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { SCOUT_OUTCOMES, SCOUT_STATUS_BY_OUTCOME, scoutPrompt, parseScoutReport, verifyCitations, resolveScoutOutcome, renderScoutReport, isScoutReportUnusable, scoutReportRecoveryPrompt } from "../lib/scout.mjs";
 import { DECOMPOSE_OUTCOMES, DECOMPOSE_STATUS_BY_OUTCOME, decomposePrompt, parseDecomposeReport, buildDecomposeFindings, resolveDecomposeOutcome, checkDecompositionOverlap, renderDecomposeReport } from "../lib/decompose.mjs";
-import { deriveBudgets, checkBrief, resolveContextPerNom, assessAdmission, describeBudgets, deriveTimeBudget } from "../lib/budget.mjs";
+import { deriveBudgets, checkBrief, resolveContextPerNom, assessAdmission, describeBudgets, deriveTimeBudget, FRONTIER } from "../lib/budget.mjs";
 import { readOpenClawTranscript, estimateDisplacement } from "../lib/transcript.mjs";
 import { runQuery, formatCitations, OPS as EVIDENCE_OPS, outlineFile, findReferences } from "../lib/repo-query.mjs";
 import { loadConfig, ConfigError } from "../lib/config.mjs";
@@ -385,8 +385,14 @@ const contextLimit = Number.isFinite(Number.parseInt(contextLimitRaw, 10)) ? Num
 // output budget). The coordinator enforces a ceiling here so "keep the brief
 // small and single-purpose" is a contract, not a habit the orchestrator has
 // to remember. Configurable per hardware/model, not hardcoded.
-export const maxTaskChars = Number.parseInt(process.env.NOMARMY_MAX_TASK_CHARS ?? "", 10) || 3000;
-export const maxAcceptanceItemChars = Number.parseInt(process.env.NOMARMY_MAX_ACCEPTANCE_ITEM_CHARS ?? "", 10) || 300;
+//
+// Those numbers were calibrated for the local model. A frontier agent (api
+// or subscription) gets far larger ceilings (lib/budget.mjs's FRONTIER), so
+// the schema itself allows the largest of the two, and admission
+// (checkBrief, per job, against that job's own agent) enforces the real
+// limit: a local job is still refused past its calibrated 3000 characters.
+export const maxTaskChars = Math.max(Number.parseInt(process.env.NOMARMY_MAX_TASK_CHARS ?? "", 10) || 3000, FRONTIER.taskChars);
+export const maxAcceptanceItemChars = Math.max(Number.parseInt(process.env.NOMARMY_MAX_ACCEPTANCE_ITEM_CHARS ?? "", 10) || 300, FRONTIER.acceptanceItemChars);
 
 // A worker offered a cheap lookup tool alongside its normal read/ls tools
 // does not reliably reach for the cheap one -- observed directly: a scout
@@ -398,7 +404,7 @@ export const maxAcceptanceItemChars = Number.parseInt(process.env.NOMARMY_MAX_AC
 // directly) and hand the worker the answer already in the brief, so there is
 // nothing left to explore for that specific fact. This is not a substitute
 // for judgment: only put verified, load-bearing facts here, not padding.
-export const maxEvidenceChars = Number.parseInt(process.env.NOMARMY_MAX_EVIDENCE_CHARS ?? "", 10) || 6000;
+export const maxEvidenceChars = Math.max(Number.parseInt(process.env.NOMARMY_MAX_EVIDENCE_CHARS ?? "", 10) || 6000, FRONTIER.evidenceChars);
 
 // Those two are the HARD ceilings the tool schema enforces. The effective
 // budget is derived from the context one nom actually has (profile, or the
@@ -565,7 +571,7 @@ function modelCatalog() {
  * specific dispatch-time error in those cases; this is not the place to
  * duplicate it, only to avoid ever computing budgets from `null`.
  */
-function budgetsForPool(poolName, model = null) {
+function budgetsForPool(poolName, model = null, reportSize = null) {
   const loaded = dispatchConfig();
   if (!loaded?.found) return budgets;
   const configured = Object.prototype.hasOwnProperty.call(loaded.config.pools, poolName) ? loaded.config.pools[poolName] : null;
@@ -573,7 +579,8 @@ function budgetsForPool(poolName, model = null) {
   const pool = model ? configured.map((entry) => ({ ...entry, model })) : configured;
   const resolved = poolContextPerNom(pool, process.env, { catalog: modelCatalog(), localContextPerNom: contextInfo.contextPerNom });
   if (!resolved) return budgets;
-  return deriveBudgets({ contextPerNom: resolved.contextPerNom, source: resolved.source, env: process.env });
+  const tier = pool.some((entry) => entry.provider === "llama-cpp") ? "local" : "frontier";
+  return deriveBudgets({ contextPerNom: resolved.contextPerNom, source: resolved.source, env: process.env, tier, reportSize: reportSize ?? "standard" });
 }
 
 // The subscription-worker sibling of budgetsForPool -- simpler, since a
@@ -582,7 +589,7 @@ function budgetsForPool(poolName, model = null) {
 // budgetsForPool does on anything unresolved (missing config, unknown name,
 // no context known yet); resolveSubscriptionSelection is where the real,
 // specific "unknown subscription_worker" error belongs, not here.
-function budgetsForSubscriptionWorker(name, model = null) {
+function budgetsForSubscriptionWorker(name, model = null, reportSize = null) {
   const loaded = subscriptionConfig();
   if (!loaded?.found) return budgets;
   let entry;
@@ -590,7 +597,7 @@ function budgetsForSubscriptionWorker(name, model = null) {
   if (model) entry = { ...entry, model };
   const resolved = entryContextPerNom(entry, { catalog: modelCatalog(), localContextPerNom: contextInfo.contextPerNom });
   if (!resolved) return budgets;
-  return deriveBudgets({ contextPerNom: resolved.contextPerNom, source: resolved.source, env: process.env });
+  return deriveBudgets({ contextPerNom: resolved.contextPerNom, source: resolved.source, env: process.env, tier: "frontier", reportSize: reportSize ?? "standard" });
 }
 // One in-flight-count per pool entry id, incremented/decremented around the
 // single `openclaw agent exec` call that entry backs (see runOpenClaw's use
@@ -825,7 +832,7 @@ export function parseOpenClawInternalTimeout(stdout) {
   return parsed?.ok === false && (parsed?.status === "timeout" || parsed?.error?.kind === "timeout");
 }
 
-async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef, baseSha, timeoutSeconds, runtimeDir, profile, reasoning, pool = null, subscriptionWorker = null, onBehalfOf = null, model = null, jobDir, workerId, evidence = null, evidenceTool = null, overridePrompt = null, logSuffix = "", idleDiff = null }) {
+async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef, baseSha, timeoutSeconds, runtimeDir, profile, reasoning, pool = null, subscriptionWorker = null, onBehalfOf = null, model = null, reportSize = null, jobDir, workerId, evidence = null, evidenceTool = null, overridePrompt = null, logSuffix = "", idleDiff = null }) {
   // `pool` (config/providers.yml) and `subscriptionWorker` (config/subscriptions.yml)
   // both override `profile` (the single global NOMARMY_WORKER_PROVIDER/MODEL
   // pair, which always carries its own default and so is never truly absent) --
@@ -843,7 +850,9 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
   // `budgets` for a `profile`-routed job (selected.entry is undefined) or a
   // llama-cpp pool entry with no local context resolved.
   const entryContext = selected.entry ? entryContextPerNom(selected.entry, { catalog: modelCatalog(), localContextPerNom: contextInfo.contextPerNom }) : null;
-  const jobBudgets = entryContext ? deriveBudgets({ ...entryContext, env: process.env }) : budgets;
+  const jobBudgets = entryContext
+    ? deriveBudgets({ ...entryContext, env: process.env, tier: selected.entry.provider === "llama-cpp" ? "local" : "frontier", reportSize: reportSize ?? "standard" })
+    : budgets;
   const agentHome = path.join(runtimeDir, "home");
   const npmCache = path.join(runtimeDir, "npm-cache");
   fs.mkdirSync(agentHome, { recursive: true }); fs.mkdirSync(npmCache, { recursive: true });
@@ -2126,7 +2135,7 @@ function writeStatus(jobDir, patch) {
 }
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-export async function executeJob({ task, acceptance, verification, mode = "implement", baseRef, timeoutSeconds = 600, profile = "coder", reasoning = "high", pool = null, subscriptionWorker = null, onBehalfOf = null, model = null, workerId, evidence = null, verifyRegression = false, jobId: presetJobId = null }) {
+export async function executeJob({ task, acceptance, verification, mode = "implement", baseRef, timeoutSeconds = 600, profile = "coder", reasoning = "high", pool = null, subscriptionWorker = null, onBehalfOf = null, model = null, reportSize = null, workerId, evidence = null, verifyRegression = false, jobId: presetJobId = null }) {
   await assertRepo();
   ensureJobsRoot();
   // Fire-and-forget: sweeps whatever this or any other nomArmy install left
@@ -2140,13 +2149,13 @@ export async function executeJob({ task, acceptance, verification, mode = "imple
     serverPid: process.pid, baseSha: base.sha, timeoutSeconds, ...extra
   });
   progress("starting", { startedAt: new Date().toISOString() });
-  const common = { task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool, subscriptionWorker, onBehalfOf, model, workerId, progress, jobStartedMs };
+  const common = { task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool, subscriptionWorker, onBehalfOf, model, reportSize, workerId, progress, jobStartedMs };
   if (mode === "scout") return executeScout(common);
   if (mode === "decompose") return executeDecompose(common);
   return executeImplement({ ...common, verification, evidence, verifyRegression });
 }
 
-async function executeImplement({ task, acceptance, verification, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool = null, subscriptionWorker = null, onBehalfOf = null, model = null, workerId, evidence, verifyRegression = false, progress, jobStartedMs }) {
+async function executeImplement({ task, acceptance, verification, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool = null, subscriptionWorker = null, onBehalfOf = null, model = null, reportSize = null, workerId, evidence, verifyRegression = false, progress, jobStartedMs }) {
   const mode = "implement";
   let branch = `agent/${jobId}`, worktree = path.join(jobDir, "worktree");
   try {
@@ -2169,7 +2178,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
     try {
       result = await runOpenClaw({
         task, acceptance, verification, mode, cwd, baseRef: base.ref, baseSha: base.sha,
-        timeoutSeconds: timeBudget.workTimeoutSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, model, jobDir, workerId: workerId || jobId, evidence,
+        timeoutSeconds: timeBudget.workTimeoutSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, model, reportSize, jobDir, workerId: workerId || jobId, evidence,
         idleDiff: { idleMs: timeBudget.idleBreakSeconds * 1000, minElapsedMs: timeBudget.idleMinElapsedSeconds * 1000, pollSeconds: timeBudget.idlePollSeconds },
       });
     } catch (error) {
@@ -2213,7 +2222,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
       try {
         const retryResult = await runOpenClaw({
           task, acceptance, verification, mode, cwd, baseRef: base.ref, baseSha: base.sha,
-          timeoutSeconds: remainingSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, model, jobDir, workerId: workerId || jobId, evidence,
+          timeoutSeconds: remainingSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, model, reportSize, jobDir, workerId: workerId || jobId, evidence,
           idleDiff: { idleMs: timeBudget.idleBreakSeconds * 1000, minElapsedMs: timeBudget.idleMinElapsedSeconds * 1000, pollSeconds: timeBudget.idlePollSeconds },
           logSuffix: "-transient-retry",
         });
@@ -2261,7 +2270,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
       try {
         const recoveryResult = await runOpenClaw({
           task, acceptance, verification, mode, cwd, baseRef: base.ref, baseSha: base.sha,
-          timeoutSeconds: timeBudget.reportReserveSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, model, jobDir, workerId: workerId || jobId,
+          timeoutSeconds: timeBudget.reportReserveSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, model, reportSize, jobDir, workerId: workerId || jobId,
           overridePrompt: reportRecoveryPrompt({ report: budgets.report.implement, changes }), logSuffix: "-recovery",
         });
         const recoveryText = finalText(recoveryResult);
@@ -2487,7 +2496,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
 // the worktree, so a scout that wrote to its snapshot cannot forge evidence.
 // A clean scout worktree holds no work and is removed; a dirty one is retained
 // because a scout that wrote is a scout that misbehaved, and that is worth a look.
-async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool = null, subscriptionWorker = null, onBehalfOf = null, model = null, workerId, progress, jobStartedMs }) {
+async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool = null, subscriptionWorker = null, onBehalfOf = null, model = null, reportSize = null, workerId, progress, jobStartedMs }) {
   const mode = "scout", worktree = path.join(jobDir, "worktree");
   let worktreeRetained = false;
   try {
@@ -2510,7 +2519,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
     const workerStartedMs = Date.now();
     progress("worker");
     try {
-      result = await runOpenClaw({ task, acceptance, verification: null, mode, cwd: worktree, baseRef: base.ref, baseSha: base.sha, timeoutSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, model, jobDir, workerId: workerId || jobId, evidenceTool: evidencePlaced ? evidenceTool : null });
+      result = await runOpenClaw({ task, acceptance, verification: null, mode, cwd: worktree, baseRef: base.ref, baseSha: base.sha, timeoutSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, model, reportSize, jobDir, workerId: workerId || jobId, evidenceTool: evidencePlaced ? evidenceTool : null });
     } catch (error) {
       workerFailed = true;
       // error.timedOut is set only by our own spawn timer (run(), above) --
@@ -2542,7 +2551,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
       try {
         const recoveryResult = await runOpenClaw({
           task, acceptance, verification: null, mode, cwd: worktree, baseRef: base.ref, baseSha: base.sha,
-          timeoutSeconds: remainingSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, model, jobDir, workerId: workerId || jobId,
+          timeoutSeconds: remainingSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, model, reportSize, jobDir, workerId: workerId || jobId,
           evidenceTool: evidencePlaced ? evidenceTool : null,
           overridePrompt: scoutReportRecoveryPrompt({ report: budgets.report.scout }), logSuffix: "-recovery",
         });
@@ -2657,7 +2666,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
 // commitAllowed/selectUnionCandidates are both hard-gated on mode ===
 // "implement" elsewhere, so a decompose result can never be auto-dispatched
 // or unioned even by accident.
-async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool = null, subscriptionWorker = null, onBehalfOf = null, model = null, workerId, progress, jobStartedMs }) {
+async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool = null, subscriptionWorker = null, onBehalfOf = null, model = null, reportSize = null, workerId, progress, jobStartedMs }) {
   const mode = "decompose", worktree = path.join(jobDir, "worktree");
   let worktreeRetained = false;
   try {
@@ -2676,7 +2685,7 @@ async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtime
     const workerStartedMs = Date.now();
     progress("worker");
     try {
-      result = await runOpenClaw({ task, acceptance, verification: null, mode, cwd: worktree, baseRef: base.ref, baseSha: base.sha, timeoutSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, model, jobDir, workerId: workerId || jobId, evidenceTool: evidencePlaced ? evidenceTool : null });
+      result = await runOpenClaw({ task, acceptance, verification: null, mode, cwd: worktree, baseRef: base.ref, baseSha: base.sha, timeoutSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, model, reportSize, jobDir, workerId: workerId || jobId, evidenceTool: evidencePlaced ? evidenceTool : null });
     } catch (error) {
       workerFailed = true;
       workerTimedOut = Boolean(error.timedOut);
@@ -3085,8 +3094,8 @@ async function admit(jobs) {
   // (see budgetsForSubscriptionWorker) -- there's no "which entry" unknown
   // the way a weighted pool has, since the name given IS the entry.
   jobs.forEach((j, i) => {
-    const jobBudgets = j.pool ? budgetsForPool(j.pool, j.model)
-      : j.subscription_worker ? budgetsForSubscriptionWorker(j.subscription_worker, j.model)
+    const jobBudgets = j.pool ? budgetsForPool(j.pool, j.model, j.report)
+      : j.subscription_worker ? budgetsForSubscriptionWorker(j.subscription_worker, j.model, j.report)
       : budgets;
     for (const p of checkBrief(j, jobBudgets)) problems.push(jobs.length > 1 ? `job ${i + 1}: ${p}` : p);
   });
@@ -3200,6 +3209,7 @@ export const jobSchema = z.object({
   reasoning: z.enum(["low", "medium", "high"]).default("medium").describe("Thinking level passed to the worker model. On the local model it takes effect when that model supports thinking (NOMARMY_MODEL_THINKING); on an api or subscription agent it applies per that agent's own `thinking` setting (false = off, a fixed level = always that level). Default is medium, not high, on real measured evidence: on an identical ticket, gpt-oss-20b at high took 318s with 21 tool calls and 4 failures, and at medium took 62s with 9 calls and 0 failures -- high did not produce a better answer, it thrashed. A separate open-ended task made Qwen3.6-27B time out completely at high (630s, zero output) and succeed at medium. Do not raise this to high by default reasoning that more thinking should help -- it has only ever hurt or timed out in testing so far. Reach for high only after a task has already failed once at medium and the failure looks like an under-thinking problem specifically (wrong root cause, not a formatting or scope issue)."),
   agent: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().describe("Run on this agent from the operator's agents.yml, by name (e.g. \"codex\", \"grok\", \"local\"): the local model, a metered api key, or one person's subscription. Omit agent and army_role to use the local model. Refuses an unknown name, never falls back. Mutually exclusive with army_role. A subscription agent also requires on_behalf_of."),
   model: z.string().regex(/^\S{1,200}$/).optional().describe("The model to run on the job's agent (an api or subscription agent), e.g. \"gpt-6-sol\". Overrides the role's model and the agent's default. Required when the role's model is \"auto\" or the agent has no default. The `army` tool lists each agent's models. Refused on the local agent, whose model `nomarmy model` sets."),
+  report: z.enum(["brief", "standard", "full"]).optional().describe("How much the worker may report back, capped by its agent's tier: brief (today's local-sized report), standard (the default), full (the frontier ceiling: about 2k tokens for implement, 4k for a scout). The report lands in your own context and is re-read every later turn, so ask for full only when the job's findings are the point (a broad review). No effect on the local model, whose caps are calibrated."),
   army_role: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional().describe("Dispatch by army role (e.g. \"sr-dev\", \"security-analyst\"): nomArmy runs it on the agent this repo assigns to that role and puts the role's description at the top of the brief. Call the `army` tool first to see this repo's roles. Mutually exclusive with agent. Add on_behalf_of in case the role's agent is a subscription; it's ignored otherwise."),
   on_behalf_of: z.string().min(1).max(254).optional().describe("Required when the job's agent is a subscription: must exactly match that agent's owner in agents.yml, or nomArmy refuses the job. A self-reported attestation, not an independently verified identity check -- nomArmy has no caller-identity boundary today, so what this guarantees is explicit, auditable intent and hard refusal on mismatch or omission, not cryptographic proof of who issued the call. Ignored for a local or api agent."),
   evidence: z.string().max(maxEvidenceChars,
@@ -3241,7 +3251,7 @@ function jobArgs(args, workerId) {
   const subscriptionWorker = args.subscription_worker;
   return { task: args.task, acceptance: args.acceptance, verification: args.verification, mode: args.mode, baseRef: args.base_ref,
     timeoutSeconds: args.timeout_seconds, profile: args.profile, reasoning: args.reasoning, pool: args.pool,
-    subscriptionWorker, onBehalfOf: args.on_behalf_of, model: args.model ?? null, evidence: args.evidence,
+    subscriptionWorker, onBehalfOf: args.on_behalf_of, model: args.model ?? null, reportSize: args.report ?? null, evidence: args.evidence,
     verifyRegression: resolveVerifyRegression(args), workerId };
 }
 server.tool("local_worker", "Run one isolated local worker and wait for it. mode=implement edits in its own worktree and the coordinator commits only on a valid done report (or a recovered job that passed independent verification); failed or incomplete worktrees are retained. mode=scout answers a question from a read-only snapshot with mandatory [path:line] citations that nomArmy verifies and expands. mode=decompose (also read-only) proposes 2+ independent subtasks for a broad objective instead of one worker turn trying to do too much; the proposal is never auto-dispatched, review it and make a separate call with the subtasks you choose. Refuses under memory pressure or over capacity; use local_worker_start + local_worker_status to avoid blocking.", jobSchema.shape,

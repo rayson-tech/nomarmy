@@ -372,7 +372,7 @@ Every job takes the same shape: a `task`, optional `acceptance`, a `mode`, a tim
 | `local_worker_config` | Surface `.nomarmy.yml`'s verification profiles. |
 | `army` | The General's charter and agent, then this repo's roles: descriptions, phases, each role's agent, which layer set it, and overlaps with the General. |
 
-**Admission**: context-per-nom bounds brief/report size; free memory bounds whether a new job starts at all.
+**Admission**: context-per-nom bounds brief/report size; free memory bounds whether a new job starts at all. The local model keeps its calibrated caps (a 3,000-character brief, 6,000 characters of evidence, a 512-token implement report), measured on a ~20B model where longer briefs made it thrash. An api or subscription agent gets frontier ceilings that scale with its model's context: up to a 16,000-character brief and 24,000 characters of evidence. A job's `report` (`brief`, `standard`, `full`) sets how much comes back, up to about 2k tokens for an implement job and 4k for a scout; the report lands in the coordinator's own context, so it's the coordinator's call per job.
 
 ## Security posture
 

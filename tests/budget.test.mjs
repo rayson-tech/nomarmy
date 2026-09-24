@@ -189,3 +189,53 @@ test("deriveTimeBudget: NOMARMY_IDLE_BREAK_SECONDS overrides the derived idle th
   const b = deriveTimeBudget({ timeoutSeconds: 600, env: { NOMARMY_IDLE_BREAK_SECONDS: "45" } });
   assert.equal(b.idleBreakSeconds, 45);
 });
+
+// ---------------------------------------------------------------------------
+// Tiers: the calibrated caps were measured on a small local model; a
+// frontier agent (api or subscription) gets its own, larger ceilings.
+// ---------------------------------------------------------------------------
+
+test("deriveBudgets: the local tier is exactly today's calibrated caps, at any report size", () => {
+  for (const reportSize of ["brief", "standard", "full"]) {
+    const b = deriveBudgets({ contextPerNom: 65536, reportSize });
+    assert.equal(b.tier, "local");
+    assert.equal(b.brief.maxTaskChars, 3000);
+    assert.equal(b.brief.maxAcceptanceItemChars, 300);
+    assert.equal(b.brief.maxEvidenceChars, 6000);
+    assert.equal(b.report.implement.hardCapTokens, 512);
+    assert.equal(b.report.scout.hardCapTokens, 1536);
+  }
+});
+
+test("deriveBudgets: a frontier agent gets 16k-character briefs, 24k of evidence, and report ceilings by size", () => {
+  const standard = deriveBudgets({ contextPerNom: 272000, tier: "frontier" });
+  assert.deepEqual(standard.brief, { maxTaskChars: 16000, maxAcceptanceItemChars: 600, maxAcceptanceItems: 20, maxEvidenceChars: 24000 });
+  assert.equal(standard.report.implement.hardCapTokens, 1024);
+  assert.equal(standard.report.scout.hardCapTokens, 2048);
+  const full = deriveBudgets({ contextPerNom: 272000, tier: "frontier", reportSize: "full" });
+  assert.equal(full.report.implement.hardCapTokens, 2048);
+  assert.equal(full.report.scout.hardCapTokens, 4096);
+  assert.equal(full.reportSize, "full");
+  const brief = deriveBudgets({ contextPerNom: 272000, tier: "frontier", reportSize: "brief" });
+  assert.equal(brief.report.implement.hardCapTokens, 512, "brief is the local-sized report, for a job the coordinator wants terse");
+});
+
+test("deriveBudgets: a frontier model with a small context still scales down, and the local env overrides don't reach it", () => {
+  const small = deriveBudgets({ contextPerNom: 32000, tier: "frontier" });
+  assert.equal(small.brief.maxTaskChars, 6400, "5% of a 32k context, not the 16k ceiling");
+  const env = { NOMARMY_MAX_TASK_CHARS: "1200", NOMARMY_MAX_EVIDENCE_CHARS: "900" };
+  assert.equal(deriveBudgets({ contextPerNom: 65536, env }).brief.maxTaskChars, 1200);
+  assert.equal(deriveBudgets({ contextPerNom: 65536, env }).brief.maxEvidenceChars, 900);
+  assert.equal(deriveBudgets({ contextPerNom: 272000, tier: "frontier", env }).brief.maxTaskChars, 16000);
+});
+
+test("checkBrief: evidence is checked against the job's own tier, and a local job is still refused past 3000 characters", () => {
+  const local = deriveBudgets({ contextPerNom: 65536 });
+  const frontier = deriveBudgets({ contextPerNom: 272000, tier: "frontier" });
+  const task = "x".repeat(5000);
+  assert.match(checkBrief({ task }, local)[0], /objective is 5000 characters; this nom's 65536-token context .* allows 3000/);
+  assert.deepEqual(checkBrief({ task }, frontier), []);
+  assert.match(checkBrief({ task: "t", evidence: "e".repeat(7000) }, local)[0], /evidence is 7000 characters; this nom allows 6000/);
+  assert.deepEqual(checkBrief({ task: "t", evidence: "e".repeat(7000) }, frontier), []);
+  assert.match(checkBrief({ task: "t", evidence: "e".repeat(25000) }, frontier)[0], /this agent's model allows 24000/);
+});

@@ -3318,3 +3318,10 @@ test("jobSchema: exposes agent/army_role/on_behalf_of, and not the internal pool
   for (const f of ["agent", "army_role", "on_behalf_of"]) assert.ok(fields.includes(f), f);
   for (const f of ["pool", "subscription_worker", "subscription_role", "profile"]) assert.ok(!fields.includes(f), f);
 });
+
+test("jobSchema: task/evidence caps are the frontier ceilings; admission (checkBrief) holds a local job to its calibrated budget", () => {
+  assert.equal(jobSchema.shape.task.safeParse("x".repeat(16000)).success, true);
+  assert.equal(jobSchema.shape.task.safeParse("x".repeat(16001)).success, false);
+  assert.equal(jobSchema.shape.evidence.safeParse("e".repeat(24000)).success, true);
+  assert.deepEqual(jobSchema.shape.report.options, ["brief", "standard", "full"]);
+});
