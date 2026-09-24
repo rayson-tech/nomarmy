@@ -141,6 +141,8 @@ Usage: nomarmy <command> [options]
                             slot, auth_env, base_url, max_concurrent,
                             context_window or thinking. Kind, provider and
                             owner stay fixed: that's a different agent.
+                            --no-model clears the default model, so every
+                            role or job names its own.
                             (--json with the matching flags; --probe to
                             test-call a subscription's new model first)
                   remove <name>
@@ -1302,7 +1304,7 @@ async function cmdAgentsAddJson() {
 // since it spends a real request on the subscription).
 async function cmdAgentsUpdate() {
   const name = argv[2];
-  if (!name) throw new Error("Usage: nomarmy agents update <name> [--model <m>] [--slot coder|gpt] [--auth-env <NAME>] [--base-url <url>] [--max-concurrent <n>] [--context-window <tokens>] [--thinking [low|medium|high]|--no-thinking] [--probe]");
+  if (!name) throw new Error("Usage: nomarmy agents update <name> [--model <m>|--no-model] [--slot coder|gpt] [--auth-env <NAME>] [--base-url <url>] [--max-concurrent <n>] [--context-window <tokens>] [--thinking [low|medium|high]|--no-thinking] [--probe]");
   const agents = fileAgentsOrExit();
   const current = Object.prototype.hasOwnProperty.call(agents, name) ? agents[name] : name === "local" ? { ...BUILTIN_LOCAL_AGENT } : undefined;
   if (!current) throw new Error(`Unknown agent "${name}". Your agents: ${Object.keys(loadAgentsOrExit().agents).join(", ")}`);
@@ -1312,6 +1314,8 @@ async function cmdAgentsUpdate() {
   if (json) {
     const num = (flagName) => (value(flagName) !== null ? Number(value(flagName)) : undefined);
     if (value("model") !== null) changes.model = value("model");
+    // Back to no default model: every role (or job) then names its own.
+    if (flag("no-model")) { if (value("model") !== null) throw new Error("Pass --model or --no-model, not both."); changes.model = undefined; }
     if (value("slot") !== null) changes.slot = value("slot");
     if (value("auth-env") !== null) changes.auth_env = value("auth-env");
     if (value("base-url") !== null) changes.base_url = value("base-url");
@@ -1337,10 +1341,13 @@ async function cmdAgentsUpdate() {
         const provId = current.kind === "subscription" ? current.provider : current.provider === "openclaw" ? current.openclaw_provider : current.provider;
         const models = catalogModelsFor(provId);
         if (models.length) models.forEach((m, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${m}${m === current.model ? c.dim("  (current)") : ""}`));
-        const pick = (await rl.question(c.bold(`Model${models.length ? " -- a number, or type an id" : ""} [${current.model}]: `))).trim();
-        const chosen = /^\d+$/.test(pick) && models.length ? models[Number(pick) - 1] : pick;
-        if (pick && !chosen) throw new Error(`Not a valid choice: "${pick}".`);
-        if (chosen && chosen !== current.model) changes.model = chosen;
+        const pick = (await rl.question(c.bold(`Default model${models.length ? " -- a number, or type an id" : ""} [${current.model ?? "none: each role picks"}] ("-" clears it): `))).trim();
+        if (pick === "-") { if (current.model) changes.model = undefined; }
+        else {
+          const chosen = /^\d+$/.test(pick) && models.length ? models[Number(pick) - 1] : pick;
+          if (pick && !chosen) throw new Error(`Not a valid choice: "${pick}".`);
+          if (chosen && chosen !== current.model) changes.model = chosen;
+        }
         if (current.kind === "api") {
           const env = await askUntilValid(rl, `API key environment variable NAME [${current.auth_env}]: `, {
             allowEmpty: true, fallback: current.auth_env, pattern: AUTH_ENV_NAME_RE, invalidMessage: "must look like an ENVIRONMENT VARIABLE NAME, not the key itself.",
@@ -1371,7 +1378,9 @@ async function cmdAgentsUpdate() {
     out({ error: `a real test prompt to ${current.provider}/${changes.model} didn't come back -- nothing was written` });
     process.exit(1);
   }
-  const written = saveAgents({ ...agents, [name]: { ...current, ...changes } });
+  const next = { ...current, ...changes };
+  for (const [k, v] of Object.entries(next)) if (v === undefined) delete next[k];
+  const written = saveAgents({ ...agents, [name]: next });
   if (json) return out({ updated: true, name, agent: written[name], changed: Object.keys(changes) });
   console.log(c.green(`\n✓ Updated "${name}": ${describeAgentLabel(written[name])}.`));
   if (changes.auth_env) console.log(c.yellow(`The key's variable changed to ${changes.auth_env}: run \`nomarmy connect claude\` so the MCP server sees it.`));

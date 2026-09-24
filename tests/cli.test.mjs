@@ -509,3 +509,17 @@ test("agents list --json shows which roles, and the General, use each agent", ()
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("agents update --json --no-model clears a default model; --model and --no-model together are refused", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    runAgentsCLI(root, ["add", "--json", "--name", "claude", "--kind", "subscription", "--provider", "claude-cli", "--model", "claude-opus-5-5", "--owner", "you@example.com"]);
+    const cleared = runAgentsCLI(root, ["update", "claude", "--json", "--no-model"]);
+    assert.equal(cleared.exitCode, 0, cleared.stdout);
+    assert.equal(JSON.parse(cleared.stdout).agent.model, undefined);
+    assert.doesNotMatch(fs.readFileSync(path.join(root, "config", "agents.yml"), "utf8"), /model:/);
+    assert.notEqual(runAgentsCLI(root, ["update", "claude", "--json", "--no-model", "--model", "x"]).exitCode, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
