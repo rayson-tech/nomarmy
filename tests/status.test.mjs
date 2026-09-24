@@ -47,7 +47,7 @@ test("statusLineText: the session, what's running machine-wide, and this repo's 
   // the lease names the run it belongs to
   fs.writeFileSync(path.join(root, "leases", "sr-dev-x.json"), JSON.stringify({ ...JSON.parse(fs.readFileSync(path.join(root, "leases", "sr-dev-x.json"), "utf8")), runId: run.id }));
   const line = statusLineText({ session: { model: { display_name: "Opus 5.5" }, workspace: { current_dir: "/r/senti" } }, stateRoot: root, now });
-  assert.equal(line, "Opus 5.5 · senti │ 🍪 1 running: sr-dev codex/gpt-6-astra 9m 10f │ run safe-rescan 2/14 jobs $0.41");
+  assert.equal(line, "Opus 5.5 · senti │ 🍪 sr-dev codex/gpt-6-astra 9m 10f │ run 2/14 $0.41");
   assert.equal(statusLineText({ session: {}, stateRoot: tmp() }).endsWith("🍪 idle"), true);
 });
 
@@ -73,4 +73,24 @@ test("runAdmissionProblems: jobs still running count toward the run's job limit"
   recordRunJob(dir, id, { jobId: "a", agent: "local", kind: "local" });
   assert.deepEqual(runAdmissionProblems(loadRun(dir, id), { running: 1 }), []);
   assert.match(runAdmissionProblems(loadRun(dir, id), { running: 2 })[0], /used all 3 of its jobs \(2 still running\)/);
+});
+
+test("statusLineText: stays short -- suffixes dropped, models only for one job, jobs collapse to +N before the run is cut", async () => {
+  const { shortJobName } = await import("../lib/statusline.mjs");
+  assert.equal(shortJobName("scout-20260924-143127-49f447"), "scout");
+  assert.equal(shortJobName("sr-dev-action-write-prune"), "sr-dev-action-wri…");
+  const root = tmp();
+  const now = Date.parse("2026-09-24T14:32:00Z");
+  for (const [id, agent] of [["scout-20260924-143127-49f447", "claude"], ["sr-dev-action-write-prune", "codex"], ["jr-dev-pending-joins", "codex"], ["security-review", "grok"]]) {
+    writeLease(path.join(root, "leases"), id, { lane: "remote", agent, model: "m" });
+    fs.mkdirSync(path.join(root, "jobs", id), { recursive: true });
+    fs.writeFileSync(path.join(root, "jobs", id, "status.json"), JSON.stringify({ startedAt: "2026-09-24T14:31:40Z", workerId: id.replace(/-\d{8}-\d{6}-[0-9a-f]+$/, "") }));
+  }
+  const run = createRun(path.join(root, "runs"), { name: "safe-rescan-removal", repo: "/r/rayson-senti", limits: { max_jobs: 14, max_api_usd: 10, max_hours: 6, warn_at: 0.8 } });
+  recordRunJob(path.join(root, "runs"), run.id, { jobId: "a", agent: "grok", kind: "api", costUsd: 2.16 });
+  const line = statusLineText({ session: { model: { display_name: "Opus 5.5" }, workspace: { current_dir: "/r/rayson-senti" } }, stateRoot: root, now, maxLength: 90 });
+  assert.ok([...line].length <= 90, `${[...line].length}: ${line}`);
+  assert.match(line, /│ run 1\/14 \$2\.16$/, "the run summary survives");
+  assert.match(line, /🍪 4: .*\+\d/, "jobs that don't fit collapse to +N");
+  assert.doesNotMatch(line, /\/m\b/, "no models when several jobs run");
 });
