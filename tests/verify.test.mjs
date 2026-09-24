@@ -311,6 +311,20 @@ test("createVerificationRunner: a matching node_modules is mounted into every co
   assert.ok(executor.calls.run.every((c) => c.nodeModulesSource === path.join(host, "node_modules")));
 });
 
+test("createVerificationRunner: a repo whose npm lockfile the sandbox image installs gets no host mount, and a changed lockfile doesn't block it", async () => {
+  const host = tempRepo({ "package.json": "{}", "package-lock.json": '{"deps":"old"}' });
+  fs.mkdirSync(path.join(host, "node_modules"), { recursive: true });
+  const worktree = tempRepo({ "package.json": "{}", "package-lock.json": '{"deps":"new"}' });
+  const executor = fakeExecutor({ fallback: { started: true, exitCode: 0, stdout: "ok", stderr: "" } });
+  const run = createVerificationRunner({ loadConfig: fixedConfig(STANDARD), executor, hostProjectDir: host });
+
+  const verdict = await run({ ...CONTEXT, cwd: worktree });
+
+  assert.equal(verdict.status, "pass", "the image was built from the worktree's own lockfile, so drift from the host's is irrelevant");
+  assert.ok(executor.calls.run.length > 0);
+  assert.ok(executor.calls.run.every((c) => !c.nodeModulesSource), "the host's (macOS-built) tree would shadow the image's Linux one");
+});
+
 // --------------------------------------------------------------------------
 // runner: happy path
 // --------------------------------------------------------------------------
