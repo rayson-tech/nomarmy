@@ -171,8 +171,8 @@ Usage: nomarmy <command> [options]
                             to run on it ("auto" lets the General pick per
                             job; omitted, the agent's default), in --global
                             (default), --project or --local. A named model
-                            is checked first (OpenClaw's catalog, or one
-                            real test call); --no-check skips that
+                            gets one real test call first (a listed model
+                            isn't proof it runs); --no-check skips that
                   general <agent>
                             which agent the General is, in --global
                             (default) or --local
@@ -1934,7 +1934,7 @@ async function cmdArmyAssign() {
   const { summary } = loadArmyForCli();
   const role = summary.roles[roleName];
   if (json) return out({ written: filePath, layer, role: roleName, effective: role ?? null, modelCheck: check });
-  if (check.status === "listed") console.log(c.dim(`${model} is in OpenClaw's catalog for ${agentName}.`));
+  if (check.status === "listed") console.log(c.dim(`${model} is in OpenClaw's catalog for ${agentName}, and a real test call worked.`));
   else if (check.status === "probed") console.log(c.dim(`${model} isn't in OpenClaw's catalog yet, but a real test call to it worked.`));
   else if (check.status === "unchecked") console.log(c.yellow(`⚠ Couldn't check ${model} (${check.detail}); the first job on this role will find out.`));
   console.log(c.green(`✓ ${roleName} → ${agentName}${model ? ` (${model === "auto" ? "model: the General picks per job" : model})` : ""} in ${filePath} (${layer}).`));
@@ -1965,9 +1965,12 @@ function checkRoleModel(agentName, model) {
   const listing = runQuiet(openclawCmd(), ["models", "list", "--all", "--refresh"]);
   if (!listing.ok && !listing.out.trim()) return { status: "unchecked", detail: "openclaw isn't reachable" };
   const listed = parseCatalogModels(listing.out, provider);
-  if (listed.includes(model)) return { status: "listed", listed };
-  if (probeWorker(provider, model)) return { status: "probed", listed };
-  return { status: "failed", detail: "isn't in OpenClaw's catalog and a real test call to it failed", listed };
+  // Always one real call: a listed model isn't proof it runs. Muse was
+  // listed (catalog refresh lists meta/muse-spark-1.3) while every job on
+  // it failed "Unknown model", and an assignment checked only against the
+  // list let a Senti review fail 10 seconds in.
+  if (probeWorker(provider, model)) return { status: listed.includes(model) ? "listed" : "probed", listed };
+  return { status: "failed", detail: listed.includes(model) ? "is listed in OpenClaw's catalog, but a real test call to it failed" : "isn't in OpenClaw's catalog and a real test call to it failed", listed };
 }
 
 // Which agent the General is. Global or local only: it describes the

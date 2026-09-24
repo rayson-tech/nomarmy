@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
-import { armyIssues, leftoverIssues, loginExpiryIssues, recordHealth, runHealthChecks, versionIssues } from "../lib/health.mjs";
+import { armyIssues, leftoverIssues, unknownModelIssues, loginExpiryIssues, recordHealth, runHealthChecks, versionIssues } from "../lib/health.mjs";
 
 const dirs = [];
 function tmp() { const d = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-health-")); dirs.push(d); return d; }
@@ -77,4 +77,17 @@ test("recordHealth: notifies a warning once a day across every session's server,
   assert.deepEqual(recordHealth(file, { checkedAt: "x", issues }, { now: t0 + 3600000 }), [], "a second session, an hour later: already notified");
   assert.equal(recordHealth(file, { checkedAt: "x", issues }, { now: t0 + 25 * 3600000 }).length, 1, "reminded after a day");
   assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).issues.length, 2, "every issue is saved for the status line and `nomarmy health`");
+});
+
+test("unknownModelIssues: a model that failed \"Unknown model\" on a real job today -- the Muse case", () => {
+  const now = Date.parse("2026-09-24T15:00:00Z");
+  const records = [
+    { finishedAt: "2026-09-24T14:19:16Z", workerError: "Error: openclaw exited 1\nSTDERR:\n[diagnostic] lane task error: error=\"Unknown model: meta/muse-spark-1.3. Run ...\"" },
+    { finishedAt: "2026-09-22T10:00:00Z", workerError: "Unknown model: openai/gpt-6-sol" },
+    { finishedAt: "2026-09-24T14:50:00Z", workerError: null },
+  ];
+  const issues = unknownModelIssues(records, { now });
+  assert.equal(issues.length, 1, "yesterday's is stale; a clean job is nothing");
+  assert.equal(issues[0].id, "unknown-model:meta/muse-spark-1.3");
+  assert.equal(issues[0].short, "muse-spark-1.3 not running");
 });
