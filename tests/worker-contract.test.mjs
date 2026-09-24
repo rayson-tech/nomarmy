@@ -3323,5 +3323,6 @@ test("jobSchema: task/evidence caps are the frontier ceilings; admission (checkB
   assert.equal(jobSchema.shape.task.safeParse("x".repeat(16000)).success, true);
   assert.equal(jobSchema.shape.task.safeParse("x".repeat(16001)).success, false);
   assert.equal(jobSchema.shape.evidence.safeParse("e".repeat(24000)).success, true);
-  assert.deepEqual(jobSchema.shape.report.options, ["brief", "standard", "full"]);
+  for (const size of ["brief", "standard", "full"]) assert.equal(jobSchema.shape.report.safeParse(size).success, true, size);
+  assert.equal(jobSchema.shape.report.safeParse("huge").success, false);
 });
