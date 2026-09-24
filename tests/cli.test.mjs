@@ -1,6 +1,7 @@
 // CLI integration tests for bin/nomarmy.mjs non-interactive (--json) paths.
 // Spawns the real CLI as a subprocess against temporary scratch directories.
 
+import "./helpers/isolate-global-config.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -213,7 +214,8 @@ function scratchNomarmyRoot() {
 function runProvidersCLI(root, args, extraEnv = {}) {
   try {
     const result = execFileSync(process.execPath, [path.join(root, "bin", "nomarmy.mjs"), "providers", ...args], {
-      cwd: root, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...extraEnv },
+      // Each scratch root is its own "global" config dir, so tests never share one.
+      cwd: root, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NOMARMY_CONFIG_DIR: path.join(root, "config"), ...extraEnv },
     });
     return { exitCode: 0, stdout: result, stderr: "" };
   } catch (error) {
@@ -581,7 +583,7 @@ test("providers update --json rejects an invalid resulting entry (e.g. negative 
 function runSubscriptionsCLI(root, args) {
   try {
     const result = execFileSync(process.execPath, [path.join(root, "bin", "nomarmy.mjs"), "subscriptions", ...args], {
-      cwd: root, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], env: process.env,
+      cwd: root, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NOMARMY_CONFIG_DIR: path.join(root, "config") },
     });
     return { exitCode: 0, stdout: result, stderr: "" };
   } catch (error) {
@@ -753,5 +755,52 @@ test("subscriptions update --json refuses an unknown worker, an empty update, an
     assert.equal(after.workers.b.role, undefined, "a refused update leaves the file untouched");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// --------------------------------------------------------------------------
+// nomarmy army <init|assign|show>
+// --------------------------------------------------------------------------
+function runArmyCLI(root, repo, args) {
+  try {
+    const result = execFileSync(process.execPath, [path.join(root, "bin", "nomarmy.mjs"), "army", ...args, "--repo", repo], {
+      cwd: repo, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NOMARMY_CONFIG_DIR: path.join(root, "config") },
+    });
+    return { exitCode: 0, stdout: result };
+  } catch (error) {
+    return { exitCode: error.status ?? 1, stdout: error.stdout ?? "", stderr: error.stderr ?? "" };
+  }
+}
+
+test("army init/assign/show --json: global default roster, a project override, and a gitignored local override", () => {
+  const root = scratchNomarmyRoot();
+  const repo = mkdtempSync(path.join(tmpdir(), "nomarmy-army-repo-"));
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    assert.equal(runArmyCLI(root, repo, ["init", "--json"]).exitCode, 0);
+    assert.notEqual(runArmyCLI(root, repo, ["init", "--json"]).exitCode, 0, "never replaces an existing army without --force");
+    assert.equal(runArmyCLI(root, repo, ["assign", "ui-ux", "pool:cheap", "--project", "--json"]).exitCode, 0);
+    assert.equal(runArmyCLI(root, repo, ["assign", "ui-ux", "local:gpt", "--local", "--json"]).exitCode, 0);
+    const summary = JSON.parse(runArmyCLI(root, repo, ["show", "--json"]).stdout);
+    assert.deepEqual(summary.roles["ui-ux"].agent, { kind: "local", name: "gpt" });
+    assert.equal(summary.roles["ui-ux"].setBy.local, "local");
+    assert.equal(summary.roles["ui-ux"].setBy.description, "global");
+    assert.match(fs.readFileSync(path.join(repo, ".gitignore"), "utf8"), /^\.nomarmy\.local\.yml$/m);
+    assert.match(fs.readFileSync(path.join(repo, ".nomarmy.yml"), "utf8"), /ui-ux:\n\s+pool: cheap/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("army assign refuses a malformed target and a role name with spaces", () => {
+  const root = scratchNomarmyRoot();
+  const repo = mkdtempSync(path.join(tmpdir(), "nomarmy-army-repo-"));
+  try {
+    assert.notEqual(runArmyCLI(root, repo, ["assign", "pm", "jason-codex", "--json"]).exitCode, 0);
+    assert.notEqual(runArmyCLI(root, repo, ["assign", "Project Manager", "local", "--json"]).exitCode, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
   }
 });

@@ -140,7 +140,7 @@ Offers three measured choices (Qwen3-Coder-Next, gpt-oss-20b, Qwen3.6-27B: see `
 
 ## Multi-provider dispatch pools
 
-Optional: `config/providers.yml` adds named, weighted pools of *several* providers a job can dispatch against instead of the single global worker model: routine work stays local and free, harder work opts into a paid frontier one.
+Optional: `~/.config/nomarmy/providers.yml` adds named, weighted pools of *several* providers a job can dispatch against instead of the single global worker model: routine work stays local and free, harder work opts into a paid frontier one.
 
 ```bash
 nomarmy providers add     # interactive wizard
@@ -155,7 +155,7 @@ nomarmy providers list
 | `bedrock` / `azure-openai` / `openai-compatible` | custom endpoint | yes |
 
 ```yaml
-# config/providers.yml
+# ~/.config/nomarmy/providers.yml
 pools:
   cheap:
     - id: local
@@ -179,7 +179,7 @@ Dispatch with `local_worker`'s `pool` field (`pool: "cheap"`); omitting it keeps
 
 ## Subscription-backed individual workers
 
-Optional, and a genuinely different thing from a dispatch pool above: `config/subscriptions.yml` names a worker backed by **one specific person's own already-authenticated subscription** -- a Claude Pro/Max/Team seat, or an OpenAI ChatGPT plan via Codex -- never a shared credential, and never weighted-random capacity the way a pool entry is. A subscription worker is always addressed by name (or a fixed role), always requires an explicit `on_behalf_of` naming the exact person it's for, and nomArmy refuses the job outright -- never substitutes a different worker -- if that's missing or doesn't match.
+Optional, and a genuinely different thing from a dispatch pool above: `~/.config/nomarmy/subscriptions.yml` names a worker backed by **one specific person's own already-authenticated subscription** -- a Claude Pro/Max/Team seat, or an OpenAI ChatGPT plan via Codex -- never a shared credential, and never weighted-random capacity the way a pool entry is. A subscription worker is always addressed by name (or a fixed role), always requires an explicit `on_behalf_of` naming the exact person it's for, and nomArmy refuses the job outright -- never substitutes a different worker -- if that's missing or doesn't match.
 
 ```bash
 nomarmy subscriptions setup claude   # or: codex
@@ -193,7 +193,7 @@ nomarmy subscriptions add     # lower-level: write an entry for a credential you
 ```
 
 ```yaml
-# config/subscriptions.yml
+# ~/.config/nomarmy/subscriptions.yml
 workers:
   you-claude:
     provider: claude-cli
@@ -214,6 +214,34 @@ Dispatch with `local_worker`'s `subscription_worker` field plus `on_behalf_of` (
 
 **Honest gap**: `on_behalf_of` is a self-reported attestation, not an independently verified identity check -- nomArmy has no caller-identity boundary today. What it guarantees is explicit, auditable intent and hard refusal on a mismatch, not cryptographic proof of who issued the call. See [Security posture](#security-posture) / `SECURITY.md`.
 
+## The army: who the General calls for what
+
+The **General** is your coordinator session (Claude Code, Codex): it plans, briefs, dispatches, reviews and accepts, runs outside every sandbox, and is never a worker. Every other role is yours to define: a name, a description of when the General calls it, a phase, and the one agent it runs on (a subscription worker, a pool, or the local model).
+
+```bash
+nomarmy army init                                   # the default roster, globally
+nomarmy army assign ui-ux worker:codex --project    # this repo sends UI work to Codex
+nomarmy army assign sr-dev pool:capable --local     # just you, just this repo
+nomarmy army show                                   # merged roster, and which layer set what
+```
+
+The default roster follows a normal SDLC: the **Sr Dev** does the first cut, handing simple work to **Jr Devs** and keeping the harder implementation; **UI/UX** gets UI work. Once the General hears the build is done, it calls the specialists who apply (**data architect**: star schema / medallion; **security analyst**), then the **PM** reviews against the plan, then the **PO** and **stakeholders** test end to end. Not every role runs every time. Every role starts on the local model; reassign whichever you like.
+
+A job dispatches with `army_role: "security-analyst"`: nomArmy picks that role's agent and heads the brief with its description. The General reads the roster through the read-only `army` MCP tool. Edits apply to the next job, with no reconnect or restart.
+
+**Config layers**, merged like Claude Code's settings (later wins, field by field):
+
+| Layer | File | Committed | Holds |
+|---|---|---|---|
+| subscriptions | `subscriptions.yml` worker `role:` fields | no | legacy roles |
+| global | `~/.config/nomarmy/config.yml` | no | your default army |
+| project | `<repo>/.nomarmy.yml` (`army:` section, beside `verification:`) | yes | the team's roles for this repo |
+| local | `<repo>/.nomarmy.local.yml` | no, and a tracked copy is refused | your overrides for this repo |
+
+Workers, pools and every credential stay global, in `~/.config/nomarmy/providers.yml` and `subscriptions.yml` (or `NOMARMY_CONFIG_DIR`). An army section can only **pick among** agents you defined globally: it has no field for a credential, endpoint, owner or provider, so a hostile `.nomarmy.yml` in a cloned repo can at worst route a job to one of your own agents. That's also why a project file names workers generically (`worker:codex`, not `worker:jason-codex`): each teammate defines a worker by that name in their own global config, on their own login.
+
+**Shared machines (a team DGX Spark)**: give each person their own OS account. Subscription logins live in that account's home directory (`~/.claude`, `~/.codex`, OpenClaw's auth store, the OS keychain), never in any nomArmy file, so each teammate's coordinator session only ever reaches their own subscriptions. nomArmy refuses a global `providers.yml` or `subscriptions.yml` that another account owns or can write. One shared OS account for several people is the pooling this design exists to prevent, and `on_behalf_of` can't detect it. Also note that each session's MCP server counts only its own jobs, so on a shared machine `NOMARMY_MAX_WORKERS` doesn't cap the machine as a whole yet.
+
 ## The `nomarmy` CLI
 
 Not published to npm (`"private": true`): clone and `npm install && npm link` (done for you by `install.sh`), or run commands directly: `node bin/nomarmy.mjs doctor`.
@@ -226,7 +254,10 @@ Every command proposes before writing anything: explicit `[y/N]` confirmation, o
 | `nomarmy setup` | Detect the machine, recommend a profile, choose a model, write config. Prints (never runs) `install.sh`. |
 | `nomarmy init` | Propose `.nomarmy.yml` from scan evidence. |
 | `nomarmy model` | Change the model later. See [Swapping models](#swapping-models). |
-| `nomarmy providers list/add/update/remove/validate` | Manage `config/providers.yml`. See [above](#multi-provider-dispatch-pools). |
+| `nomarmy providers list/add/update/remove/validate` | Manage `providers.yml`. See [above](#multi-provider-dispatch-pools). |
+| `nomarmy subscriptions setup/list/add/update/remove` | Manage `subscriptions.yml`. See [above](#subscription-backed-individual-workers). |
+| `nomarmy army show/init/assign` | The role roster and its layers. See [above](#the-army-who-the-general-calls-for-what). |
+| `nomarmy config paths` | Where each config file lives. |
 | `nomarmy update` | Pull latest (fast-forward only) and resync the installed MCP copy. |
 | `nomarmy connect [claude] [cursor] [codex]` | (Re-)register the MCP server. No target: interactive multi-select. |
 | `nomarmy start` / `stop` | Start/stop local inference. |
@@ -364,6 +395,7 @@ Every job takes the same shape: a `task`, optional `acceptance`, a `mode`, a tim
 | `local_worker_cleanup` | Remove one worktree/branch. Recognizes a cherry-picked branch as integrated by content, not just ancestry. |
 | `local_worker_sweep` | Bulk-reap worktrees that are provably empty (zero commits, nothing uncommitted), any age. `dry_run` previews. |
 | `local_worker_config` | Surface `.nomarmy.yml`'s verification profiles. |
+| `army` | The merged role roster for this repo: descriptions, phases, each role's agent, and which layer set it. |
 
 **Admission**: context-per-nom bounds brief/report size; free memory bounds whether a new job starts at all.
 

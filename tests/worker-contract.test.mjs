@@ -2,6 +2,7 @@
 // Node built-ins only. These cover the pure parts of the trust boundary:
 // the compact report contract, lenient recovery, the outcome state machine,
 // and test-change classification. Nothing here touches Git or a worker.
+import "./helpers/isolate-global-config.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -59,6 +60,7 @@ import {
   resolveSubscriptionSelection,
   resolveSubscriptionRoleSelection,
   subscriptionJobFieldProblems,
+  expandArmyJobs,
   currentMaxPoolWorkers,
   splitJobsByLane,
   runningCount,
@@ -3267,4 +3269,43 @@ test("detectPossibleSecrets: a clean diff and report return null, never a false 
     reportText: "STATUS: done\nTESTS: pass\nNOT_DONE: none\nNOTE: added a helper function",
   });
   assert.equal(result, null);
+});
+
+// --------------------------------------------------------------------------
+// army_role: expanded into a concrete agent before admission.
+// --------------------------------------------------------------------------
+
+const FAKE_ARMY = { army: { roles: {
+  "sr-dev": { description: "First cut.", phase: "build", worker: "you-codex" },
+  pm: { phase: "review", pool: "cheap" },
+  po: {},
+} } };
+
+test("expandArmyJobs: jobs without army_role never even load the army", () => {
+  const jobs = [{ task: "t" }];
+  const result = expandArmyJobs(jobs, { getArmy: () => { throw new Error("must not be called"); } });
+  assert.equal(result.jobs, jobs);
+  assert.deepEqual(result.problems, []);
+});
+
+test("expandArmyJobs: each job resolves to its role's agent, and the brief is headed by the role", () => {
+  const { jobs, problems } = expandArmyJobs([
+    { task: "build it", army_role: "sr-dev", on_behalf_of: "you@example.com" },
+    { task: "review it", army_role: "pm", mode: "scout" },
+  ], { getArmy: () => FAKE_ARMY });
+  assert.deepEqual(problems, []);
+  assert.equal(jobs[0].subscription_worker, "you-codex");
+  assert.match(jobs[0].task, /^\[nomArmy role: sr-dev, build phase\]\nFirst cut\.\n\nbuild it$/);
+  assert.equal(jobs[1].pool, "cheap");
+  assert.deepEqual(subscriptionJobFieldProblems(jobs[0]), [], "the expanded worker job passes the on_behalf_of pairing check");
+  assert.deepEqual(subscriptionJobFieldProblems(jobs[1]), []);
+});
+
+test("expandArmyJobs: refusal lines are numbered per job, and a broken army file refuses the whole call", () => {
+  const { problems } = expandArmyJobs([{ task: "t", army_role: "po" }, { task: "t", army_role: "cto" }], { getArmy: () => FAKE_ARMY });
+  assert.equal(problems.length, 2);
+  assert.match(problems[0], /^job 1: army_role "po" has no agent assigned/);
+  assert.match(problems[1], /^job 2: unknown army_role "cto"/);
+  const broken = expandArmyJobs([{ task: "t", army_role: "pm" }], { getArmy: () => { throw new Error(".nomarmy.local.yml is tracked by git"); } });
+  assert.deepEqual(broken.problems, [".nomarmy.local.yml is tracked by git"]);
 });

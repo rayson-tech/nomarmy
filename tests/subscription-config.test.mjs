@@ -1,6 +1,7 @@
 // Tests for config/subscriptions.yml's schema and loader.
 // Run: node --test tests/subscription-config.test.mjs
 
+import "./helpers/isolate-global-config.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -26,7 +27,8 @@ function tempNomarmyRoot(yamlText) {
   tempDirs.push(dir);
   fs.mkdirSync(path.join(dir, "config"), { recursive: true });
   if (yamlText !== undefined) fs.writeFileSync(path.join(dir, "config", "subscriptions.yml"), yamlText, "utf8");
-  return dir;
+  // The loaders take the config directory itself (normally ~/.config/nomarmy).
+  return path.join(dir, "config");
 }
 
 after(() => {
@@ -131,7 +133,7 @@ test("loadSubscriptionConfig: a reserved worker name is refused before schema va
 test("stringifySubscriptionConfig: round-trips through loadSubscriptionConfig", () => {
   const dir = tempNomarmyRoot();
   const config = { workers: { "jason-claude": { provider: "claude-cli", model: "claude-sonnet-5", owner: "jason.pugh@rayson-tech.com", max_concurrent: 1, thinking: true } } };
-  fs.writeFileSync(path.join(dir, "config", "subscriptions.yml"), stringifySubscriptionConfig(config), "utf8");
+  fs.writeFileSync(path.join(dir, "subscriptions.yml"), stringifySubscriptionConfig(config), "utf8");
   const result = loadSubscriptionConfig(dir);
   assert.equal(result.found, true);
   assert.equal(result.config.workers["jason-claude"].model, "claude-sonnet-5");

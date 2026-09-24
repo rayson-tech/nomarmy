@@ -15,9 +15,10 @@ import { runQuery, formatCitations, OPS as EVIDENCE_OPS, outlineFile, findRefere
 import { loadConfig, ConfigError } from "../lib/config.mjs";
 import { resolveSandboxImage, detectPrimaryLanguage, EXEC_PATH_PREPEND } from "../lib/sandbox-images.mjs";
 import { DEFAULT_AGENT_IMAGE } from "../lib/verify.mjs";
-import { loadDispatchConfig, resolvePool, pickProvider, poolContextPerNom, entryContextPerNom } from "../lib/dispatch-config.mjs";
+import { loadDispatchConfig, dispatchConfigPath, resolvePool, pickProvider, poolContextPerNom, entryContextPerNom } from "../lib/dispatch-config.mjs";
 import { openclawProviderId } from "../lib/dispatch-schema.mjs";
-import { loadSubscriptionConfig, resolveSubscriptionWorker, resolveSubscriptionWorkerByRole, findProviderConflicts, describeProviderConflict } from "../lib/subscription-config.mjs";
+import { loadArmy, expandArmyRole, describeArmy, globalConfigDir } from "../lib/army.mjs";
+import { loadSubscriptionConfig, subscriptionConfigPath, resolveSubscriptionWorker, resolveSubscriptionWorkerByRole, findProviderConflicts, describeProviderConflict } from "../lib/subscription-config.mjs";
 import { queryModelCatalog } from "../lib/model-catalog.mjs";
 
 // Read from package.json rather than a second hardcoded literal -- the two
@@ -457,23 +458,50 @@ export function resolveReasoningApplied({ result, profile, reasoning, workerMode
   return profile === "gpt" || workerModelThinkingSupported ? reasoning : "off";
 }
 
-// mcp/ and config/ are siblings whether running from the dev checkout or the
-// installed copy under ~/.local/share/nomarmy-local-agents (installMcpCopy
-// copies both -- see lib/connect.mjs) -- same resolution lib/sandbox-images.mjs
-// uses for docker/. config/providers.yml is loaded once per process, not
-// re-read per job: same "changes need a restart" contract as every other
-// config/*.env value this server already reads once at module load.
-const nomarmyRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-let cachedDispatchConfig;
-function dispatchConfig() {
-  if (cachedDispatchConfig === undefined) cachedDispatchConfig = loadDispatchConfig(nomarmyRoot);
-  return cachedDispatchConfig;
+// providers.yml and subscriptions.yml live in ~/.config/nomarmy
+// (lib/army.mjs's globalConfigDir), outside both the dev checkout and the
+// installed copy, and are re-read whenever the file changes, so an edit
+// takes effect on the next job with no reconnect or restart. The
+// config/*.env values are still read once at module load.
+function fileKey(filePath) {
+  try { const st = fs.statSync(filePath); return `${filePath}:${st.mtimeMs}:${st.size}`; }
+  catch { return `${filePath}:missing`; }
 }
-// Same cache-once-per-process contract as dispatchConfig above.
-let cachedSubscriptionConfig;
-function subscriptionConfig() {
-  if (cachedSubscriptionConfig === undefined) cachedSubscriptionConfig = loadSubscriptionConfig(nomarmyRoot);
-  return cachedSubscriptionConfig;
+// A load that throws is not cached, so a fixed file is picked up next call.
+function reloadingConfig(pathFn, loadFn) {
+  let key = null, value;
+  return () => {
+    const next = fileKey(pathFn());
+    if (next !== key) { value = loadFn(); key = next; }
+    return value;
+  };
+}
+const dispatchConfig = reloadingConfig(() => dispatchConfigPath(globalConfigDir()), () => loadDispatchConfig(globalConfigDir()));
+const subscriptionConfig = reloadingConfig(() => subscriptionConfigPath(globalConfigDir()), () => loadSubscriptionConfig(globalConfigDir()));
+
+// The army is small and read per call: four tiny YAML files, merged fresh,
+// so an edit to .nomarmy.yml or .nomarmy.local.yml applies to the next job.
+function currentArmy() {
+  return loadArmy({ projectDir, subscriptionLoaded: subscriptionConfig() });
+}
+
+/**
+ * Expand every job's army_role into the concrete pool / subscription_worker
+ * / profile it maps to, before admission -- so budgets, the owner check and
+ * everything downstream see an ordinary job. Problems come back as refusal
+ * lines, never a fallback to some other agent.
+ */
+export function expandArmyJobs(jobs, { getArmy = currentArmy } = {}) {
+  if (!jobs.some((j) => j.army_role)) return { jobs, problems: [] };
+  let army;
+  try { army = getArmy().army; }
+  catch (error) { return { jobs, problems: [error.message] }; }
+  const problems = [];
+  const expanded = jobs.map((job, i) => {
+    try { return expandArmyRole(job, army); }
+    catch (error) { problems.push(jobs.length > 1 ? `job ${i + 1}: ${error.message}` : error.message); return job; }
+  });
+  return { jobs: expanded, problems };
 }
 
 // OpenClaw's own model catalog (queryModelCatalog), cached once per process
@@ -3159,6 +3187,7 @@ export const jobSchema = z.object({
   pool: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().describe("Name of a weighted multi-provider pool from config/providers.yml (e.g. \"cheap\", \"capable\" -- names are whatever that file declares). When set, OVERRIDES `profile`: nomArmy weighted-randomly picks one authenticated, under-capacity provider entry from the named pool for this job instead of using the single global worker provider/model. Omit entirely to keep today's `profile`-only behavior unchanged -- this is fully opt-in and does nothing if config/providers.yml does not exist. Refuses with a clear error (not a silent fallback to local) if the pool name is unknown, or if every entry in it is either missing its credential or already at its max_concurrent. Mutually exclusive with subscription_worker/subscription_role."),
   subscription_worker: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().describe("Name of an entry in config/subscriptions.yml -- a worker backed by one specific person's own already-authenticated subscription (Claude Pro/Max/Team via OpenClaw's claude-cli provider, or an OpenAI ChatGPT plan via its codex provider), never a weighted-random pick the way `pool` is. OVERRIDES `profile`. Requires `on_behalf_of` naming that exact person; nomArmy refuses the job (never substitutes a different worker) if it's missing, doesn't match the entry's declared owner, or the name is unknown. Mutually exclusive with `pool` and `subscription_role`."),
   subscription_role: z.string().min(1).max(254).optional().describe("A DETERMINISTIC alternative to `subscription_worker`: resolves to whichever one worker in config/subscriptions.yml declares this exact role (e.g. \"architect\" always the same entry -- never a pick among several, config refuses to load at all if two workers claim the same role). Same `on_behalf_of` requirement and refusal behavior as `subscription_worker`. Mutually exclusive with `pool` and `subscription_worker`."),
+  army_role: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional().describe("Dispatch by army role (e.g. \"sr-dev\", \"security-analyst\"): nomArmy picks the agent this repo assigns to that role (a subscription worker, a pool, or the local model) and puts the role's description at the top of the brief. Call the `army` tool first to see this repo's roles. Mutually exclusive with pool/subscription_worker/subscription_role. Add on_behalf_of when the role runs on a subscription worker; it's ignored otherwise."),
   on_behalf_of: z.string().min(1).max(254).optional().describe("Required when `subscription_worker` or `subscription_role` is set: must exactly match that entry's declared owner in config/subscriptions.yml. This is a self-reported attestation, not an independently verified identity check -- nomArmy has no caller-identity boundary today, so what this actually guarantees is explicit, auditable intent and hard refusal on mismatch or omission, not cryptographic proof of who issued the call."),
   evidence: z.string().max(maxEvidenceChars,
     `Evidence exceeds the ${maxEvidenceChars}-character budget. This is for facts already resolved (e.g. with repo_evidence), not more description of the task -- if it needs more than this, resolve less per job or put the pointer (a path and line range) here instead of the material itself.`
@@ -3220,14 +3249,20 @@ function jobArgs(args, workerId) {
     verifyRegression: resolveVerifyRegression(args), workerId };
 }
 server.tool("local_worker", "Run one isolated local worker and wait for it. mode=implement edits in its own worktree and the coordinator commits only on a valid done report (or a recovered job that passed independent verification); failed or incomplete worktrees are retained. mode=scout answers a question from a read-only snapshot with mandatory [path:line] citations that nomArmy verifies and expands. mode=decompose (also read-only) proposes 2+ independent subtasks for a broad objective instead of one worker turn trying to do too much; the proposal is never auto-dispatched, review it and make a separate call with the subtasks you choose. Refuses under memory pressure or over capacity; use local_worker_start + local_worker_status to avoid blocking.", jobSchema.shape,
-  async args => {
+  async rawArgs => {
+    const army = expandArmyJobs([rawArgs]);
+    if (army.problems.length) return refusal(army.problems);
+    const [args] = army.jobs;
     const { problems } = await admit([args]);
     if (problems.length) return refusal(problems);
     const r = await launch(args).promise;
     return toolText(formatResult(r), !r.ok);
   });
 server.tool("local_worker_start", "Start one worker or scout in the background and return immediately with a job_id. Poll it with local_worker_status (optionally long-polling with wait_seconds). Same admission rules as local_worker: refuses under memory pressure or when NOMARMY_MAX_WORKERS jobs are already running.", jobSchema.shape,
-  async args => {
+  async rawArgs => {
+    const army = expandArmyJobs([rawArgs]);
+    if (army.problems.length) return refusal(army.problems);
+    const [args] = army.jobs;
     const { problems, admission } = await admit([args]);
     if (problems.length) return refusal(problems);
     const entry = launch(args);
@@ -3291,6 +3326,18 @@ export function buildConfigSummary(repoDir, loadConfigFn = loadConfig) {
   return { found: true, valid: true, path: loaded.path, profiles, elevated: loaded.elevated,
     note: profiles.length ? null : ".nomarmy.yml exists but defines no verification profiles; verification/union_verification/verify_regression will report not_run." };
 }
+server.tool("army", "Who you, the General, call for what in this repository: the army's workflow, then each role's description, phase (build, review, acceptance), suggested mode, and the agent it runs on (a subscription worker, a pool, or the local model), with which config layer set each value (subscriptions, global, project .nomarmy.yml, local .nomarmy.local.yml). Dispatch a role with `army_role` on local_worker / local_worker_start / local_workers. Roles flagged with a problem can't be dispatched yet. Read-only, and re-read on every call.", {}, async () => {
+  try {
+    const loaded = currentArmy();
+    let subscriptionLoaded = null, dispatchLoaded = null;
+    try { subscriptionLoaded = subscriptionConfig(); } catch { /* reported by its own tools */ }
+    try { dispatchLoaded = dispatchConfig(); } catch { /* reported by its own tools */ }
+    const summary = describeArmy(loaded, { subscriptionLoaded, dispatchLoaded });
+    return toolText(JSON.stringify(summary, null, 2));
+  } catch (error) {
+    return toolText(error.message, true);
+  }
+});
 server.tool("local_worker_config", "What .nomarmy.yml (if any) defines for this repository: every verification profile name and its commands/environment, and any elevated (shared/remote) services that need explicit policy approval before a job may use them. Pass a profile name to `verification`/`union_verification`/`verify_regression` only if it appears here. Read-only; never writes or proposes a config (see `nomarmy scan` for that).", {}, async () => {
   const summary = buildConfigSummary(projectDir);
   return toolText(JSON.stringify(summary, null, 2), summary.valid === false);
@@ -3303,7 +3350,10 @@ server.tool("local_workers", "Run independent jobs (implement or scout) with bou
   union_verification: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().describe(
     "Verification profile NAME to run once against the union branch after merging (same semantics as each job's own `verification` field). Only meaningful with auto_union: true. Omitted: union-level verification is explicitly not_run and reported as such, never silently skipped."
   )
-}, async ({ jobs, max_parallel, auto_union, union_verification }) => {
+}, async ({ jobs: rawJobs, max_parallel, auto_union, union_verification }) => {
+  const army = expandArmyJobs(rawJobs);
+  if (army.problems.length) return refusal(army.problems);
+  const { jobs } = army;
   const { problems } = await admit(jobs);
   let forcedBase = null;
   if (auto_union) {

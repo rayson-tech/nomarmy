@@ -1,3 +1,4 @@
+import "./helpers/isolate-global-config.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -315,7 +316,7 @@ pools:
       auth_env: NOMARMY_ANTHROPIC_API_KEY
 `);
   try {
-    assert.deepEqual(derivePoolAuthEnvPlaceholders(nomarmyRoot), {
+    assert.deepEqual(derivePoolAuthEnvPlaceholders(path.join(nomarmyRoot, "config")), {
       NOMARMY_XAI_API_KEY: "registered",
       NOMARMY_ANTHROPIC_API_KEY: "registered",
     });
@@ -327,10 +328,10 @@ pools:
 test("derivePoolAuthEnvPlaceholders: no config/providers.yml (or an invalid one) contributes nothing, not an error", () => {
   const nomarmyRoot = fakeRoot();
   try {
-    assert.deepEqual(derivePoolAuthEnvPlaceholders(nomarmyRoot), {});
+    assert.deepEqual(derivePoolAuthEnvPlaceholders(path.join(nomarmyRoot, "config")), {});
     fs.mkdirSync(path.join(nomarmyRoot, "config"), { recursive: true });
     fs.writeFileSync(path.join(nomarmyRoot, "config", "providers.yml"), "pools:\n  broken: [this is not: valid: yaml");
-    assert.deepEqual(derivePoolAuthEnvPlaceholders(nomarmyRoot), {});
+    assert.deepEqual(derivePoolAuthEnvPlaceholders(path.join(nomarmyRoot, "config")), {});
   } finally {
     fs.rmSync(nomarmyRoot, { recursive: true, force: true });
   }
@@ -343,7 +344,7 @@ test("connectClaude: a pool entry's auth_env is baked in automatically, with no 
   const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
   const calls = [];
   try {
-    connectClaude({ nomarmyRoot, installDir, run: (cmd, args) => { calls.push([cmd, ...args].join(" ")); return ""; } });
+    connectClaude({ nomarmyRoot, installDir, configDir: path.join(nomarmyRoot, "config"), run: (cmd, args) => { calls.push([cmd, ...args].join(" ")); return ""; } });
     const addCall = calls.find((c) => c.includes("mcp add"));
     assert.match(addCall, /-e NOMARMY_XAI_API_KEY=registered/, "a pool entry added at any point in the past must be picked up on an ordinary connect, not only via --update-mcp at add-time");
   } finally {

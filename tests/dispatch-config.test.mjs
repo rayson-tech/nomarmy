@@ -1,6 +1,7 @@
 // Tests for config/providers.yml's schema, loader, and weighted picker.
 // Run: node --test tests/dispatch-config.test.mjs
 
+import "./helpers/isolate-global-config.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -30,7 +31,8 @@ function tempNomarmyRoot(yamlText) {
   tempDirs.push(dir);
   fs.mkdirSync(path.join(dir, "config"), { recursive: true });
   if (yamlText !== undefined) fs.writeFileSync(path.join(dir, "config", "providers.yml"), yamlText, "utf8");
-  return dir;
+  // The loaders take the config directory itself (normally ~/.config/nomarmy).
+  return path.join(dir, "config");
 }
 
 after(() => {

@@ -1,5 +1,6 @@
 // Transcript summary and displacement estimate. The sqlite reader is thin
 // and exercised live; the reduction and the arithmetic are pinned here.
+import "./helpers/isolate-global-config.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";

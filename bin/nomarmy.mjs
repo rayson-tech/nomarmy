@@ -12,7 +12,7 @@ import path from "node:path";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { loadConfig, validateConfig, stringifyConfig, findConfigFile, CONFIG_FILENAMES } from "../lib/config.mjs";
+import { loadConfig, validateConfig, stringifyConfig, findConfigFile, parseYaml, CONFIG_FILENAMES } from "../lib/config.mjs";
 import { scanRepository, compareEvidence } from "../lib/scan.mjs";
 import { buildConfigProposal } from "../lib/propose.mjs";
 import { detectHardware } from "../lib/hardware.mjs";
@@ -23,6 +23,7 @@ import { loadDispatchConfig, dispatchConfigPath, stringifyDispatchConfig } from 
 import { dispatchConfigSchema, formatDispatchIssues, findReservedPoolName, RESERVED_POOL_NAMES, PROVIDER_TYPES, ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
 import { loadSubscriptionConfig, subscriptionConfigPath, stringifySubscriptionConfig, findProviderConflicts, describeProviderConflict } from "../lib/subscription-config.mjs";
 import { subscriptionConfigSchema, formatSubscriptionIssues, RESERVED_WORKER_NAMES } from "../lib/subscription-schema.mjs";
+import { loadArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
 import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeSucceeded, defaultWorkerName, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
 
 // Add a new coordinator: add its name here, teach commandExists/connectTarget
@@ -199,6 +200,30 @@ Usage: nomarmy <command> [options]
                             [--probe to test-call a new model first])
                   remove <name>
                             remove one worker
+  army <show|init|assign>
+                  Who the General (your coordinator session) calls for
+                  what. Each role has a description, a phase (build,
+                  review, acceptance) and one agent: a subscription worker,
+                  a pool, or the local model. Layers merge like Claude
+                  Code's settings, later wins: subscriptions.yml roles,
+                  global ~/.config/nomarmy/config.yml, the repo's
+                  .nomarmy.yml, then its gitignored .nomarmy.local.yml.
+                  Army sections only pick among agents you defined
+                  globally; they can never hold a credential or endpoint.
+                  Jobs dispatch with \`army_role\`; edits apply to the
+                  next job, no restart.
+                  show      the merged roster and which layer set what
+                            (--json gives what the General's \`army\` tool sees)
+                  init      write the default army (Sr Dev, Jr Dev, UI/UX,
+                            data architect, security analyst, PM, PO,
+                            stakeholder) to --global (default), --project
+                            or --local; --force replaces an existing one
+                  assign <role> <worker:NAME|pool:NAME|local|local:gpt|none>
+                            point a role at an agent in --global (default),
+                            --project or --local
+  config paths    where each config file lives: providers.yml and
+                  subscriptions.yml in ~/.config/nomarmy (or
+                  NOMARMY_CONFIG_DIR), and the three army layers
   connect [claude] [codex] [cursor]
                   (Re-)register the MCP server with one or more coordinators.
                   With no target and not --json, prompts an interactive
@@ -349,6 +374,14 @@ async function cmdInit() {
 
   const evidence = scanRepository(repoDir);
   const { proposal, valid, errors, excludedFixturePaths, notes } = buildConfigProposal(evidence);
+  // --force regenerates what the scan can see; the army section is a human
+  // decision the scan knows nothing about, so it carries over untouched.
+  if (existing) {
+    try {
+      const previousArmy = parseYaml(fs.readFileSync(existing, "utf8"), existing)?.army;
+      if (previousArmy) proposal.army = previousArmy;
+    } catch { /* an unparseable old file has nothing safe to carry over */ }
+  }
   const targetPath = path.join(repoDir, existing ? path.basename(existing) : CONFIG_FILENAMES[0]);
 
   if (json) {
@@ -390,6 +423,12 @@ async function cmdInit() {
 // setup/model need to find THIS package's config/ and scripts/ as siblings
 // of bin/, the same way select-model.mjs resolves its own root.
 const nomarmyRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+
+/** Write a global config file (providers.yml / subscriptions.yml), creating ~/.config/nomarmy on first use. */
+function writeGlobalConfig(filePath, text) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, text);
+}
 
 /** Read one KEY=VALUE line's value, or null if the file or key doesn't exist. */
 function readEnvValue(filePath, key) {
@@ -815,10 +854,10 @@ function registerProviderWithOpenClaw({ id, provider, model, auth_env: authEnv, 
 }
 
 async function cmdProvidersList() {
-  const configPath = dispatchConfigPath(nomarmyRoot);
+  const configPath = dispatchConfigPath(globalConfigDir());
   let loaded;
   try {
-    loaded = loadDispatchConfig(nomarmyRoot);
+    loaded = loadDispatchConfig(globalConfigDir());
   } catch (error) {
     if (json) { out({ error: error.message, errors: error.errors, path: error.path }); process.exit(1); }
     console.error(c.red(`${error.path ?? "config/providers.yml"} is invalid:`));
@@ -854,7 +893,7 @@ async function cmdProvidersList() {
 
 async function cmdProvidersValidate() {
   try {
-    const loaded = loadDispatchConfig(nomarmyRoot);
+    const loaded = loadDispatchConfig(globalConfigDir());
     if (json) return out({ valid: true, found: loaded.found, path: loaded.path });
     console.log(loaded.found ? c.green(`✓ ${loaded.path} is valid.`) : c.dim("No config/providers.yml yet -- nothing to validate."));
   } catch (error) {
@@ -869,7 +908,7 @@ async function cmdProvidersRemove() {
   const poolName = argv[2], id = argv[3];
   if (!poolName || !id) throw new Error("Usage: nomarmy providers remove <pool> <id>");
   if (RESERVED_POOL_NAMES.includes(poolName)) throw new Error(`Unknown pool "${poolName}" (that name is reserved and can never be a real pool).`);
-  const loaded = loadDispatchConfig(nomarmyRoot);
+  const loaded = loadDispatchConfig(globalConfigDir());
   if (!loaded.found) throw new Error("No config/providers.yml exists yet -- nothing to remove.");
   // hasOwnProperty, not a truthy check: `loaded.config.pools["__proto__"]`
   // (a plain object's own real prototype) is truthy even when no such pool
@@ -895,7 +934,7 @@ async function cmdProvidersRemove() {
 
   const nextPools = { ...loaded.config.pools };
   if (remaining.length) nextPools[poolName] = remaining; else delete nextPools[poolName];
-  fs.writeFileSync(dispatchConfigPath(nomarmyRoot), stringifyDispatchConfig({ pools: nextPools }));
+  writeGlobalConfig(dispatchConfigPath(globalConfigDir()), stringifyDispatchConfig({ pools: nextPools }));
   if (json) return out({ removed: true, pool: poolName, id });
   console.log(c.green(`✓ Removed "${id}" from pool "${poolName}".`));
 }
@@ -913,7 +952,7 @@ async function cmdProvidersUpdate() {
   const poolName = argv[2], id = argv[3];
   if (!poolName || !id) throw new Error("Usage: nomarmy providers update <pool> <id> [--model <m>] [--weight <n>] [--max-concurrent <n>] [--auth-env <NAME>] [--base-url <url>] [--context-window <tokens>] [--thinking|--no-thinking]");
   if (RESERVED_POOL_NAMES.includes(poolName)) throw new Error(`Unknown pool "${poolName}" (that name is reserved and can never be a real pool).`);
-  const loaded = loadDispatchConfig(nomarmyRoot);
+  const loaded = loadDispatchConfig(globalConfigDir());
   if (!loaded.found) throw new Error("No config/providers.yml exists yet -- nothing to update.");
   const pool = Object.prototype.hasOwnProperty.call(loaded.config.pools, poolName) ? loaded.config.pools[poolName] : undefined;
   if (!pool) throw new Error(`Unknown pool "${poolName}". Configured pools: ${Object.keys(loaded.config.pools).join(", ") || "(none)"}`);
@@ -993,7 +1032,7 @@ async function cmdProvidersUpdate() {
     process.exit(1);
   }
 
-  fs.writeFileSync(dispatchConfigPath(nomarmyRoot), stringifyDispatchConfig(parsed.data));
+  writeGlobalConfig(dispatchConfigPath(globalConfigDir()), stringifyDispatchConfig(parsed.data));
   const written = parsed.data.pools[poolName][index];
 
   if (json) return out({ updated: true, pool: poolName, id, entry: written, changed: Object.keys(changes) });
@@ -1009,10 +1048,10 @@ async function cmdProvidersUpdate() {
 }
 
 async function cmdProvidersAdd() {
-  const configPath = dispatchConfigPath(nomarmyRoot);
+  const configPath = dispatchConfigPath(globalConfigDir());
   let existingPools = {};
   try {
-    const loaded = loadDispatchConfig(nomarmyRoot);
+    const loaded = loadDispatchConfig(globalConfigDir());
     if (loaded.found) existingPools = loaded.config.pools;
   } catch (error) {
     throw new Error(`config/providers.yml already exists but is invalid -- fix it by hand or delete it before adding: ${error.message}`);
@@ -1178,7 +1217,7 @@ async function cmdProvidersAdd() {
   }
 
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  fs.writeFileSync(configPath, stringifyDispatchConfig(parsed.data));
+  writeGlobalConfig(configPath, stringifyDispatchConfig(parsed.data));
   const written = parsed.data.pools[poolName].at(-1);
 
   if (json) {
@@ -1260,10 +1299,10 @@ async function cmdProviders() {
 // own header comment), and always exactly one entry per name, never a
 // weighted array to pick between.
 async function cmdSubscriptionsList() {
-  const configPath = subscriptionConfigPath(nomarmyRoot);
+  const configPath = subscriptionConfigPath(globalConfigDir());
   let loaded;
   try {
-    loaded = loadSubscriptionConfig(nomarmyRoot);
+    loaded = loadSubscriptionConfig(globalConfigDir());
   } catch (error) {
     if (json) { out({ error: error.message, errors: error.errors, path: error.path }); process.exit(1); }
     console.error(c.red(`${error.path ?? "config/subscriptions.yml"} is invalid:`));
@@ -1292,7 +1331,7 @@ async function cmdSubscriptionsList() {
 /** Pool/subscription provider-id conflicts, the same check dispatch refuses on. An unreadable providers.yml is reported by `providers validate`, not here. */
 function subscriptionProviderConflicts(workers) {
   try {
-    const dispatch = loadDispatchConfig(nomarmyRoot);
+    const dispatch = loadDispatchConfig(globalConfigDir());
     return dispatch.found ? findProviderConflicts(dispatch.config.pools, workers) : [];
   } catch {
     return [];
@@ -1303,7 +1342,7 @@ async function cmdSubscriptionsRemove() {
   const name = argv[2];
   if (!name) throw new Error("Usage: nomarmy subscriptions remove <name>");
   if (RESERVED_WORKER_NAMES.includes(name)) throw new Error(`Unknown worker "${name}" (that name is reserved and can never be a real worker).`);
-  const loaded = loadSubscriptionConfig(nomarmyRoot);
+  const loaded = loadSubscriptionConfig(globalConfigDir());
   if (!loaded.found) throw new Error("No config/subscriptions.yml exists yet -- nothing to remove.");
   if (!Object.prototype.hasOwnProperty.call(loaded.config.workers, name)) {
     throw new Error(`Unknown worker "${name}". Configured workers: ${Object.keys(loaded.config.workers).join(", ") || "(none)"}`);
@@ -1322,7 +1361,7 @@ async function cmdSubscriptionsRemove() {
 
   const nextWorkers = { ...loaded.config.workers };
   delete nextWorkers[name];
-  fs.writeFileSync(subscriptionConfigPath(nomarmyRoot), stringifySubscriptionConfig({ workers: nextWorkers }));
+  writeGlobalConfig(subscriptionConfigPath(globalConfigDir()), stringifySubscriptionConfig({ workers: nextWorkers }));
   if (json) return out({ removed: true, name });
   console.log(c.green(`✓ Removed subscription worker "${name}".`));
 }
@@ -1508,11 +1547,11 @@ function openclawProviderLogin(vendor) {
 }
 
 function writeSubscriptionWorker(name, entry, existingWorkers) {
-  const configPath = subscriptionConfigPath(nomarmyRoot);
+  const configPath = subscriptionConfigPath(globalConfigDir());
   const result = subscriptionConfigSchema.safeParse({ workers: { ...existingWorkers, [name]: entry } });
   if (!result.success) return { ok: false, errors: formatSubscriptionIssues(result.error) };
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  fs.writeFileSync(configPath, stringifySubscriptionConfig(result.data));
+  writeGlobalConfig(configPath, stringifySubscriptionConfig(result.data));
   return { ok: true, path: configPath, entry: result.data.workers[name] };
 }
 
@@ -1522,7 +1561,7 @@ async function cmdSubscriptionsSetup() {
   if (!process.stdin.isTTY) throw new Error("nomarmy subscriptions setup needs an interactive terminal -- the vendor logins open a browser or print a device code.");
 
   let existingWorkers = {};
-  try { const loaded = loadSubscriptionConfig(nomarmyRoot); if (loaded.found) existingWorkers = loaded.config.workers; }
+  try { const loaded = loadSubscriptionConfig(globalConfigDir()); if (loaded.found) existingWorkers = loaded.config.workers; }
   catch (error) { throw new Error(`config/subscriptions.yml exists but is invalid -- fix or delete it first: ${error.message}`); }
 
   const rl = createInterface({ input, output });
@@ -1615,10 +1654,10 @@ async function cmdSubscriptionsSetup() {
 }
 
 async function cmdSubscriptionsAdd() {
-  const configPath = subscriptionConfigPath(nomarmyRoot);
+  const configPath = subscriptionConfigPath(globalConfigDir());
   let existingWorkers = {};
   try {
-    const loaded = loadSubscriptionConfig(nomarmyRoot);
+    const loaded = loadSubscriptionConfig(globalConfigDir());
     if (loaded.found) existingWorkers = loaded.config.workers;
   } catch (error) {
     throw new Error(`config/subscriptions.yml already exists but is invalid -- fix it by hand or delete it before adding: ${error.message}`);
@@ -1698,7 +1737,7 @@ async function cmdSubscriptionsAdd() {
   }
 
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  fs.writeFileSync(configPath, stringifySubscriptionConfig(result.data));
+  writeGlobalConfig(configPath, stringifySubscriptionConfig(result.data));
   if (json) return out({ written: configPath, name, entry: result.data.workers[name] });
   console.log(c.green(`\n✓ Wrote ${path.relative(nomarmyRoot, configPath)}.`));
   const dispatchField = role ? `subscription_role: "${role}"` : `subscription_worker: "${name}"`;
@@ -1714,7 +1753,7 @@ async function cmdSubscriptionsUpdate() {
   const name = argv[2];
   if (!name) throw new Error("Usage: nomarmy subscriptions update <name> [--model <m>] [--role <r>|--no-role] [--max-concurrent <n>] [--context-window <tokens>] [--thinking [low|medium|high]|--no-thinking] [--probe]");
   if (RESERVED_WORKER_NAMES.includes(name)) throw new Error(`Unknown worker "${name}" (that name is reserved and can never be a real worker).`);
-  const loaded = loadSubscriptionConfig(nomarmyRoot);
+  const loaded = loadSubscriptionConfig(globalConfigDir());
   if (!loaded.found) throw new Error("No config/subscriptions.yml exists yet -- run `nomarmy subscriptions setup` first.");
   const workers = loaded.config.workers;
   if (!Object.prototype.hasOwnProperty.call(workers, name)) {
@@ -1797,7 +1836,7 @@ async function cmdSubscriptionsUpdate() {
     for (const line of errors) console.error(`  - ${line}`);
     process.exit(1);
   }
-  fs.writeFileSync(subscriptionConfigPath(nomarmyRoot), stringifySubscriptionConfig(result.data));
+  writeGlobalConfig(subscriptionConfigPath(globalConfigDir()), stringifySubscriptionConfig(result.data));
   const written = result.data.workers[name];
   if (json) return out({ updated: true, name, entry: written, changed: Object.keys(changes) });
   console.log(c.green(`\n✓ Updated "${name}" (${written.provider}/${written.model}).`));
@@ -2227,7 +2266,138 @@ function sizingCheck(hardware, gguf) {
   process.exit((res.warnings ?? []).some((w) => w.severity === "error") ? 1 : 0);
 }
 
-const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, providers: cmdProviders, subscriptions: cmdSubscriptions, update: cmdUpdate, connect: cmdConnect, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
+// --- `nomarmy army` / `nomarmy config` ------------------------------------
+//
+// The army layers (see lib/army.mjs) are global config.yml, the repo's
+// .nomarmy.yml and its gitignored .nomarmy.local.yml. `--repo` picks the
+// repo, same as every other command here; it defaults to the cwd.
+
+function armyLayerFlag(fallback = "global") {
+  const chosen = ["global", "project", "local"].filter((l) => flag(l));
+  if (chosen.length > 1) throw new Error(`Pick one of --global, --project or --local, not ${chosen.map((l) => `--${l}`).join(" and ")}.`);
+  return chosen[0] ?? fallback;
+}
+
+function loadArmyForCli() {
+  let subscriptionLoaded = null, dispatchLoaded = null;
+  try { subscriptionLoaded = loadSubscriptionConfig(globalConfigDir()); } catch { /* `subscriptions list` reports it */ }
+  try { dispatchLoaded = loadDispatchConfig(globalConfigDir()); } catch { /* `providers validate` reports it */ }
+  const loaded = loadArmy({ projectDir: repoDir, subscriptionLoaded });
+  return { loaded, summary: describeArmy(loaded, { subscriptionLoaded, dispatchLoaded }) };
+}
+
+// Claude Code adds settings.local.json to .gitignore for the same reason:
+// the local layer is personal, and a teammate's checkout must never pick it up.
+function ensureLocalLayerIgnored() {
+  if (!fs.existsSync(path.join(repoDir, ".git"))) return;
+  const ignorePath = path.join(repoDir, ".gitignore");
+  const text = fs.existsSync(ignorePath) ? fs.readFileSync(ignorePath, "utf8") : "";
+  if (text.split(/\r?\n/).some((line) => line.trim() === LOCAL_CONFIG_FILENAME || line.trim() === `/${LOCAL_CONFIG_FILENAME}`)) return;
+  fs.writeFileSync(ignorePath, `${text}${text && !text.endsWith("\n") ? "\n" : ""}${LOCAL_CONFIG_FILENAME}\n`);
+  if (!json) console.log(c.dim(`Added ${LOCAL_CONFIG_FILENAME} to .gitignore.`));
+}
+
+function describeAgent(agent) {
+  if (!agent) return c.yellow("(unassigned)");
+  return agent.kind === "local" ? `local:${agent.name}` : `${agent.kind}:${agent.name}`;
+}
+
+async function cmdArmyShow() {
+  const { summary } = loadArmyForCli();
+  if (json) return out(summary);
+  console.log(c.bold("🪖 nomArmy") + c.dim(`  (${repoDir})`));
+  if (summary.general) console.log(`\n${c.bold("General")}  ${c.dim("(your coordinator session)")}\n  ${summary.general}`);
+  if (summary.workflow) console.log(`\n${c.bold("Workflow")}\n${summary.workflow.split("\n").map((l) => `  ${l}`).join("\n")}`);
+  const names = Object.keys(summary.roles);
+  if (!names.length) {
+    console.log(c.dim(`\nNo roles yet. ${summary.howToDispatch}`));
+  } else {
+    const byPhase = new Map();
+    for (const name of names) {
+      const phase = summary.roles[name].phase ?? "unphased";
+      if (!byPhase.has(phase)) byPhase.set(phase, []);
+      byPhase.get(phase).push(name);
+    }
+    for (const phase of [...ARMY_PHASES, "unphased"].filter((p) => byPhase.has(p))) {
+      console.log(`\n${c.bold(phase[0].toUpperCase() + phase.slice(1))}`);
+      for (const name of byPhase.get(phase)) {
+        const role = summary.roles[name];
+        const agentLayer = role.setBy.worker ?? role.setBy.pool ?? role.setBy.local;
+        console.log(`  ${c.cyan(name.padEnd(18))} ${describeAgent(role.agent)}${agentLayer ? c.dim(`  [${agentLayer}]`) : ""}${role.mode ? c.dim(`  ${role.mode}`) : ""}`);
+        if (role.description) console.log(c.dim(`    ${role.description}`));
+        if (role.problem && role.agent) console.log(c.red(`    ✗ ${role.problem}`));
+      }
+    }
+  }
+  console.log(`\n${c.bold("Layers")}  ${c.dim("(lowest first; later ones win)")}`);
+  for (const layer of summary.layers) console.log(`  ${layer.found ? c.green("●") : c.dim("○")} ${layer.layer.padEnd(14)} ${c.dim(layer.path ?? "(no subscriptions.yml)")}`);
+}
+
+async function cmdArmyInit() {
+  const layer = armyLayerFlag("global");
+  const filePath = armyLayerPath(layer, { projectDir: repoDir });
+  const existing = readArmyFile(filePath, { armyOnly: layer !== "project" });
+  if (existing?.roles && Object.keys(existing.roles).length && !flag("force")) {
+    throw new Error(`${filePath} already defines an army (${Object.keys(existing.roles).join(", ")}). Re-run with --force to replace it.`);
+  }
+  updateArmyInFile(filePath, () => structuredClone(DEFAULT_ARMY));
+  if (layer === "local") ensureLocalLayerIgnored();
+  if (json) return out({ written: filePath, layer, roles: Object.keys(DEFAULT_ARMY.roles) });
+  console.log(c.green(`✓ Wrote the default army to ${filePath} (${layer}).`));
+  console.log(c.dim(`Every role starts on the local model. Point one elsewhere with \`nomarmy army assign <role> worker:<name>|pool:<name>\`, then \`nomarmy army show\`.`));
+}
+
+async function cmdArmyAssign() {
+  const [roleName, targetSpec] = [argv[2], argv[3]];
+  if (!roleName || !targetSpec) throw new Error("Usage: nomarmy army assign <role> <worker:NAME|pool:NAME|local|local:gpt|none> [--global|--project|--local]");
+  const layer = armyLayerFlag("global");
+  const filePath = armyLayerPath(layer, { projectDir: repoDir });
+  assignRoleInFile(filePath, roleName, parseTargetSpec(targetSpec));
+  if (layer === "local") ensureLocalLayerIgnored();
+  const { summary } = loadArmyForCli();
+  const role = summary.roles[roleName];
+  if (json) return out({ written: filePath, layer, role: roleName, effective: role ?? null });
+  console.log(c.green(`✓ ${roleName} → ${targetSpec} in ${filePath} (${layer}).`));
+  if (role) {
+    const agentLayer = role.setBy.worker ?? role.setBy.pool ?? role.setBy.local;
+    if (agentLayer && agentLayer !== layer) console.log(c.yellow(`Note: the ${agentLayer} layer overrides this, so ${roleName} still runs on ${describeAgent(role.agent)}.`));
+    if (role.problem && role.agent) console.log(c.yellow(`⚠ ${role.problem}.`));
+    if (!role.description) console.log(c.dim(`${roleName} has no description in any layer; the General will only see its name.`));
+  }
+  if (layer === "project") console.log(c.dim("This is committed with the repo; teammates need a worker or pool with that same name in their own global config."));
+}
+
+async function cmdArmy() {
+  const sub = argv[1] ?? "show";
+  if (sub === "show") return cmdArmyShow();
+  if (sub === "init") return cmdArmyInit();
+  if (sub === "assign") return cmdArmyAssign();
+  throw new Error(`Unknown army subcommand "${sub}". Use: nomarmy army <show|init|assign>`);
+}
+
+async function cmdConfigPaths() {
+  const files = ["providers.yml", "subscriptions.yml"].map((name) => {
+    const p = path.join(globalConfigDir(), name);
+    return { name, path: p, exists: fs.existsSync(p) };
+  });
+  const army = ["global", "project", "local"].map((layer) => {
+    const p = armyLayerPath(layer, { projectDir: repoDir });
+    return { layer, path: p, exists: fs.existsSync(p) };
+  });
+  if (json) return out({ globalDir: globalConfigDir(), files, army });
+  console.log(c.bold("nomArmy config") + c.dim(`  (global dir: ${globalConfigDir()})`));
+  for (const f of files) console.log(`  ${f.exists ? c.green("●") : c.dim("○")} ${f.name.padEnd(18)} ${c.dim(f.path)}`);
+  console.log(c.bold("\nArmy layers"));
+  for (const a of army) console.log(`  ${a.exists ? c.green("●") : c.dim("○")} ${a.layer.padEnd(8)} ${c.dim(a.path)}`);
+}
+
+async function cmdConfig() {
+  const sub = argv[1] ?? "paths";
+  if (sub === "paths") return cmdConfigPaths();
+  throw new Error(`Unknown config subcommand "${sub}". Use: nomarmy config paths`);
+}
+
+const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, providers: cmdProviders, subscriptions: cmdSubscriptions, army: cmdArmy, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
   // Import lazily to avoid circular dependencies

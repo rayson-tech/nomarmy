@@ -35,6 +35,14 @@ Every implement job's added content (the diff's new lines, plus the worker's own
 
 **What this does not solve**: it catches known secret *shapes*, not adversarially steered content with no recognizable shape at all, and a secret in a format none of secretlint's rules recognize can still pass through. The coordinator's own process controls (treating the report as an unverified claim, independently re-running verification, a human reviewing material diffs before they reach a real branch) are what carry that harder half, and they're a different guarantee than "the output channel is inspected." A report on either gap is welcome.
 
+## Project config can select, never define
+
+A repository's `.nomarmy.yml` (and `.nomarmy.local.yml`) can carry an `army:` section that assigns roles to agents. That file is repository content, and a cloned repository is not trusted, so the army schema (`lib/army.mjs`) has no field for a credential, an `auth_env`, a `base_url`, an owner or a provider, and rejects any unknown field. A role can only name a subscription worker, a pool, or the local model already defined in the operator's own global `providers.yml` / `subscriptions.yml`. The worst a hostile army section can do is route a job to one of the operator's own agents; it can never add an endpoint that would receive a key. `.nomarmy.local.yml` is refused outright if git tracks it, since a committed "local" file is shared with everyone who pulls.
+
+## Shared machines
+
+On a machine several people use (a team DGX Spark), isolation comes from separate OS accounts. Every subscription credential lives in the account's home directory or keychain, outside every nomArmy file, and each person's coordinator session runs as that person. nomArmy refuses to load a global `providers.yml` or `subscriptions.yml` owned by a different account or writable by group or others (`privateConfigProblem`), since anyone who could edit another person's `providers.yml` could point that person's key at their own `base_url`. What nomArmy cannot detect is several people sharing one OS account: that pools every login in one home directory, and `on_behalf_of` is self-reported. Don't run it that way.
+
 ## Subscription-backed workers: attestation is not authentication
 
 A `subscription_worker` job (`config/subscriptions.yml`) runs against one specific person's own already-authenticated Claude, OpenAI (ChatGPT plan) or Meta Muse Code subscription, never a shared or pooled credential. For Claude and Codex, nomArmy never stores, reads, or forwards that credential; OpenClaw uses the local CLI's own logged-in session, or its own login, entirely outside nomArmy's control.
