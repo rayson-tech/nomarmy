@@ -12,3 +12,7 @@ process.env.NOMARMY_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-
 for (const name of ["NOMARMY_CLAUDE_COMMANDS_DIR", "NOMARMY_CODEX_SKILLS_DIR", "NOMARMY_CURSOR_COMMANDS_DIR"]) {
   process.env[name] = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-test-playbooks-"));
 }
+
+// Job leases and agent slots are machine-wide, under nomArmy's state
+// directory; tests get their own, never the developer's live one.
+process.env.NOMARMY_AGENT_STATE = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-test-state-"));

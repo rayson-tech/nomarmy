@@ -18,6 +18,7 @@ import { DEFAULT_AGENT_IMAGE } from "../lib/verify.mjs";
 import { resolvePool, pickProvider, poolContextPerNom, entryContextPerNom } from "../lib/dispatch-config.mjs";
 import { openclawProviderId } from "../lib/dispatch-schema.mjs";
 import { loadArmy, expandArmyRole, describeArmy, globalConfigDir } from "../lib/army.mjs";
+import { writeLease, removeLease, liveLeases, liveSlots, acquireSlot } from "../lib/slots.mjs";
 import { createRun, loadRun, runTotals, runAdmissionProblems, recordRunJob, finishRun, resolveRunLimits, detectUsageLimit } from "../lib/runs.mjs";
 import { loadAgents, agentsConfigPath, agentsAsDispatchConfig, agentsAsSubscriptionConfig, agentDispatchFields, resolveAgentModel, agentProviderId, describeAgent } from "../lib/agents.mjs";
 import { resolveSubscriptionWorker, findProviderConflicts, describeProviderConflict } from "../lib/subscription-config.mjs";
@@ -36,6 +37,9 @@ const projectDir = path.resolve(process.env.CLAUDE_PROJECT_DIR || process.cwd())
 const stateRoot = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
 const jobsRoot = path.join(stateRoot, "jobs");
 const runsRoot = path.join(stateRoot, "runs");
+// Shared by every session's server on this machine (lib/slots.mjs).
+const leasesRoot = path.join(stateRoot, "leases");
+const slotsRoot = path.join(stateRoot, "slots");
 // NOMARMY_MAX_WORKERS, when set, is the operator's own declared ceiling.
 // Left unset, the natural default is however many inference slots
 // llama-server actually reports right now (contextInfo.slots, refreshed
@@ -3132,9 +3136,37 @@ const activeJobs = new Map();
 export function jobLane(job) {
   return job.pool || job.subscription_worker ? "remote" : "local";
 }
+// Counted across every session on this machine, not just this server's own
+// jobs: each coordinator session runs its own server, and per-process
+// counts let six sessions each run their "one" local job at once. Idle
+// sessions hold no leases and count for nothing.
 export function runningCount(lane = null) {
-  const entries = [...activeJobs.values()].filter(j => !j.settled);
-  return lane ? entries.filter(j => j.lane === lane).length : entries.length;
+  return liveLeases(leasesRoot, lane ? { lane } : {}).length;
+}
+
+/** An api or subscription agent's max_concurrent (1 for a subscription, 2 for api by default); null for local. */
+function agentMaxConcurrent(agentName) {
+  try {
+    const agent = agentsConfig().agents[agentName];
+    return agent && agent.kind !== "local" ? agent.max_concurrent ?? (agent.kind === "subscription" ? 1 : 2) : null;
+  } catch { return null; }
+}
+
+/**
+ * Run a job holding one of its agent's max_concurrent slots, machine-wide
+ * (lib/slots.mjs), so `max_concurrent: 1` on a subscription means one job
+ * on it across every session -- per-session counting never enforced that,
+ * and for subscriptions the count was never checked at all. `waitMs` lets a
+ * batch queue for a slot instead of failing.
+ */
+function withAgentSlot(args, jobId, fn, { waitMs = 0 } = {}) {
+  const max = args.agentName ? agentMaxConcurrent(args.agentName) : null;
+  if (!max) return fn();
+  return (async () => {
+    const slot = await acquireSlot(slotsRoot, args.agentName, max, { jobId, waitMs });
+    if (!slot) throw new Error(`agent "${args.agentName}" is at its max_concurrent (${max}) across every nomArmy session on this machine; try again when one of its jobs finishes`);
+    try { return await fn(); } finally { slot.release(); }
+  })();
 }
 // A static, operator-declared ceiling on how many remote jobs (api and
 // subscription agents) may run at once, independent of and additive to
@@ -3162,7 +3194,11 @@ export function splitJobsByLane(jobs) {
 }
 export function track(jobId, meta, promise) {
   const entry = { ...meta, jobId, startedAt: new Date().toISOString(), settled: false, result: null, error: null, promise: null };
-  entry.promise = promise.then(r => { entry.settled = true; entry.result = r; return r; }, e => { entry.settled = true; entry.error = e; throw e; });
+  // A machine-wide lease for as long as the job runs, so every session's
+  // admission counts it (runningCount); released however the job ends.
+  if (meta.lane) writeLease(leasesRoot, jobId, { lane: meta.lane, agent: meta.agent ?? null });
+  const release = () => removeLease(leasesRoot, jobId);
+  entry.promise = promise.then(r => { entry.settled = true; entry.result = r; release(); return r; }, e => { entry.settled = true; entry.error = e; release(); throw e; });
   entry.promise.catch(() => {});
   activeJobs.set(jobId, entry);
   return entry;
@@ -3220,6 +3256,14 @@ async function admit(jobs) {
       } catch (error) { problems.push(jobs.length > 1 ? `job ${i + 1}: ${error.message}` : error.message); }
     }
   });
+  // An agent's max_concurrent, machine-wide. Batch jobs on the same agent
+  // queue for its slot at launch instead (withAgentSlot's waitMs).
+  if (jobs.length === 1) {
+    const [j] = jobs;
+    const max = j.agentName ? agentMaxConcurrent(j.agentName) : null;
+    const held = max ? liveSlots(slotsRoot, j.agentName) : 0;
+    if (max && held >= max) problems.push(`not admitted (capacity): agent "${j.agentName}" already has ${held} job(s) running across this machine's nomArmy sessions, at its max_concurrent of ${max}`);
+  }
   // A job in a /feature run: the run's own limits and paused agents.
   jobs.forEach((j, i) => {
     if (!j.run_id) return;
@@ -3289,7 +3333,8 @@ function trackInRun(args, entry) {
 function launch(args) {
   const workerId = args.worker_id || null;
   const jobId = slug(workerId || (args.mode === "scout" ? "scout" : "worker"));
-  return trackInRun(args, track(jobId, { mode: args.mode, workerId: workerId || jobId, lane: jobLane(args) }, executeJob({ ...jobArgs(args, workerId), jobId })));
+  return trackInRun(args, track(jobId, { mode: args.mode, workerId: workerId || jobId, lane: jobLane(args), agent: args.agentName ?? null },
+    withAgentSlot(args, jobId, () => executeJob({ ...jobArgs(args, workerId), jobId }))));
 }
 // Best-effort progress signal for a job still mid-run: a plain "phase: worker,
 // elapsed: Ns" told a caller nothing about whether the worker was still
@@ -3576,7 +3621,10 @@ server.tool("local_workers", "Run independent jobs (implement or scout) with bou
       const effectiveJob = auto_union ? { ...j, base_ref: forcedBase.sha } : j;
       // The lane is what admission counts; a batch job used to carry none,
       // so it was invisible to both ceilings while it ran.
-      return trackInRun(j, track(jobId, { mode: j.mode, workerId, lane: jobLane(j) }, executeJob({ ...jobArgs(effectiveJob, workerId), jobId }))).promise;
+      // A batch job waits for its agent's slot (up to its own timeout) rather
+      // than failing because an earlier job in the same batch holds it.
+      return trackInRun(j, track(jobId, { mode: j.mode, workerId, lane: jobLane(j), agent: j.agentName ?? null },
+        withAgentSlot(j, jobId, () => executeJob({ ...jobArgs(effectiveJob, workerId), jobId }), { waitMs: (j.timeout_seconds ?? 600) * 1000 }))).promise;
     }, { staggerMs: WORKER_START_STAGGER_MS });
     indices.forEach((i, laneI) => { results[i] = laneResults[laneI]; });
   };
