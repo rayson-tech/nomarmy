@@ -10,11 +10,15 @@ import {
   LANGUAGE_IMAGES, detectPrimaryLanguage, ensureLanguageImageBuilt, resolveSandboxImage,
   pythonRequirementsFor, pythonImageTag, ensurePythonImageBuilt,
   nodeDependencyFiles, ensureDependencyImageBuilt, dependencyImageTag, EXEC_PATH_PREPEND, NODE_DEPS_BIN,
+  dependencyDockerfile, linkNodePackages,
 } from "../lib/sandbox-images.mjs";
 
 function fakeRepo(files) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-sandbox-images-"));
-  for (const [name, content] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), content);
+  for (const [name, content] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+    fs.writeFileSync(path.join(dir, name), content);
+  }
   return dir;
 }
 
@@ -282,7 +286,10 @@ test("nodeDependencyFiles: package.json plus an npm lockfile installs; other loc
   ];
   for (const [files, config, expected, reason] of cases) {
     const dir = fakeRepo(files);
-    try { assert.deepEqual(nodeDependencyFiles(dir, config), { files: expected, reason }, JSON.stringify(files)); }
+    try {
+      const got = nodeDependencyFiles(dir, config);
+      assert.deepEqual({ files: got.files, reason: got.reason }, { files: expected, reason }, JSON.stringify(files));
+    }
     finally { fs.rmSync(dir, { recursive: true, force: true }); }
   }
 });
@@ -314,5 +321,51 @@ test("ensureDependencyImageBuilt: builds from a context of only the dependency f
     assert.deepEqual(context, ["Dockerfile", "node", "py"], "never the repo itself");
     assert.equal(ensureDependencyImageBuilt(dir, null, { run }), image);
     assert.equal(calls.filter((c) => c[1] === "build").length, 1, "cached after the first build");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test("nodeDependencyFiles: every package with its own npm lockfile installs, not just the root (the Senti ui/ + lambda/ layout)", () => {
+  const dir = fakeRepo({
+    "package.json": "{}", "package-lock.json": "{}",
+    "ui/package.json": "{}", "ui/package-lock.json": "{}",
+    "lambda/mcp_server/package.json": "{}", "lambda/mcp_server/package-lock.json": "{}",
+    "lambda/mcp_server/widgets/package.json": "{}", "lambda/mcp_server/widgets/package-lock.json": "{}",
+    "web/package.json": "{}", "web/yarn.lock": "",
+    "ws/package.json": JSON.stringify({ workspaces: ["a"] }), "ws/package-lock.json": "{}",
+    "node_modules/dep/package.json": "{}", "node_modules/dep/package-lock.json": "{}",
+  });
+  try {
+    const got = nodeDependencyFiles(dir, null);
+    assert.deepEqual(got.packages, [".", "lambda/mcp_server", "lambda/mcp_server/widgets", "ui"]);
+    assert.ok(got.files.includes("ui/package-lock.json") && got.files.includes("lambda/mcp_server/widgets/package.json"));
+    assert.deepEqual(got.skipped, [{ dir: "ws", reason: "npm workspaces aren't supported yet" }], "a lockfile-less yarn package isn't a lockfile dir at all; node_modules is never searched");
+    // No root package at all: the others still install.
+    const noRoot = fakeRepo({ "ui/package.json": "{}", "ui/package-lock.json": "{}" });
+    try { assert.deepEqual(nodeDependencyFiles(noRoot, null).packages, ["ui"]); } finally { fs.rmSync(noRoot, { recursive: true, force: true }); }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("dependencyDockerfile: each package installs at its repo path under /deps as the sandbox user; a failed install leaves a marker, not a failed image", () => {
+  const df = dependencyDockerfile({ nodeFiles: ["package.json", "package-lock.json", "ui/package.json", "ui/package-lock.json"], nodePackages: [".", "ui"] });
+  assert.match(df, /COPY --chown=node:node node\/ui\/package-lock\.json \/deps\/ui\/package-lock\.json/);
+  assert.match(df, /RUN cd \/deps && \(npm ci --no-audit --no-fund \|\| touch \.nomarmy-npm-ci-failed\)/);
+  assert.match(df, /RUN cd \/deps\/ui && \(npm ci/);
+  assert.ok(df.indexOf("USER node") < df.indexOf("npm ci"), "installed as the sandbox user");
+  assert.match(df, /ln -s \/deps\/node_modules \/node_modules/);
+  assert.doesNotMatch(df, /chown -R/, "no chown layer doubling the image");
+  assert.doesNotMatch(dependencyDockerfile({ nodeFiles: ["ui/package.json", "ui/package-lock.json"], nodePackages: ["ui"] }), /ln -s/, "no root package, no /node_modules link");
+});
+
+test("linkNodePackages: each non-root package gets a node_modules link into the image, never over an existing one, and not with a custom image", () => {
+  const dir = fakeRepo({ "package.json": "{}", "package-lock.json": "{}", "ui/package.json": "{}", "ui/package-lock.json": "{}", "api/package.json": "{}", "api/package-lock.json": "{}", "api/node_modules/.keep": "" });
+  try {
+    assert.deepEqual(linkNodePackages(dir, null, { env: {} }), ["ui/node_modules"]);
+    assert.equal(fs.readlinkSync(path.join(dir, "ui", "node_modules")), "/deps/ui/node_modules");
+    assert.ok(fs.lstatSync(path.join(dir, "api", "node_modules")).isDirectory(), "an existing node_modules is left alone");
+    assert.equal(fs.existsSync(path.join(dir, "node_modules")), false, "the root uses /node_modules, so the worktree root is untouched");
+    assert.deepEqual(linkNodePackages(dir, null, { env: {} }), [], "idempotent");
+    const custom = fakeRepo({ "ui/package.json": "{}", "ui/package-lock.json": "{}" });
+    try { assert.deepEqual(linkNodePackages(custom, null, { env: { NOMARMY_AGENT_IMAGE: "mine:latest" } }), []); } finally { fs.rmSync(custom, { recursive: true, force: true }); }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

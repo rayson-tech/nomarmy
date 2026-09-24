@@ -15,7 +15,7 @@ import { modelRejection, modelRejectionLine } from "../lib/openclaw-errors.mjs";
 import { COORDINATOR_INSTRUCTIONS } from "../lib/coordinator-instructions.mjs";
 import { runQuery, formatCitations, OPS as EVIDENCE_OPS, outlineFile, findReferences } from "../lib/repo-query.mjs";
 import { loadConfig, ConfigError } from "../lib/config.mjs";
-import { resolveSandboxImage, detectPrimaryLanguage, EXEC_PATH_PREPEND } from "../lib/sandbox-images.mjs";
+import { resolveSandboxImage, detectPrimaryLanguage, EXEC_PATH_PREPEND, linkNodePackages } from "../lib/sandbox-images.mjs";
 import { DEFAULT_AGENT_IMAGE } from "../lib/verify.mjs";
 import { resolvePool, pickProvider, poolContextPerNom, entryContextPerNom } from "../lib/dispatch-config.mjs";
 import { openclawProviderId } from "../lib/dispatch-schema.mjs";
@@ -1821,7 +1821,10 @@ export async function runRegressionCheck({ cwd, jobId, productionFiles, nameStat
 // otherwise commit.
 function isRuntimeJunk(file) {
   return file === ".npm" || file.startsWith(".npm/") || file === ".openclaw" || file.startsWith(".openclaw/")
-    || file.startsWith("node_modules/.vite/") || file.startsWith("node_modules/.cache/");
+    || file.startsWith("node_modules/.vite/") || file.startsWith("node_modules/.cache/")
+    // A package's node_modules link into the dependency image
+    // (linkNodePackages): git lists a symlink as one entry, never its contents.
+    || /(^|\/)node_modules$/.test(file) || /\/node_modules\/\.(vite|cache)\//.test(file);
 }
 async function collectGitRecord({ cwd, baseSha, branch, baseRef, jobId }) {
   const head = await git(["rev-parse", "HEAD"], cwd);
@@ -2410,6 +2413,8 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
     progress("worktree");
     await run("git", ["worktree", "add", "-b", branch, worktree, base.sha], { cwd: projectDir });
     const cwd = worktree;
+    // Each npm package below the root reaches its install in the sandbox image.
+    try { linkNodePackages(worktree, loadConfig(projectDir)?.config ?? null); } catch { /* verification reports what's missing */ }
     const beforePointer = worktreePointerState(worktree), startedAt = new Date().toISOString();
 
     // The caller's timeout is split up front into a work phase and a
@@ -3512,8 +3517,15 @@ async function admit(jobs) {
   }
   return { problems, admission };
 }
+// The capacity snapshot only when a problem is about capacity: a
+// model_not_found or bad-field refusal came with ~60 lines of local-model
+// capacity JSON that had nothing to do with it (a Senti review).
+export function refusalText(problems, snapshot) {
+  const aboutCapacity = problems.some((p) => /capacity|memory|context|slot|MAX_(POOL_)?WORKERS|max_concurrent/i.test(p));
+  return `REFUSED - nothing was started.\n${problems.map(p => `- ${p}`).join("\n")}${aboutCapacity ? `\n\nCapacity right now:\n${JSON.stringify(snapshot(), null, 2)}` : ""}`;
+}
 function refusal(problems) {
-  return toolText(`REFUSED - nothing was started.\n${problems.map(p => `- ${p}`).join("\n")}\n\nCapacity right now:\n${JSON.stringify(capacitySnapshot(), null, 2)}`, true);
+  return toolText(refusalText(problems, capacitySnapshot), true);
 }
 /** A run's totals and warnings, for a tool response. */
 function runBrief(runId) {

@@ -85,6 +85,7 @@ import {
   extractAddedLinesBlob,
   detectPossibleSecrets,
   coordinatorCommitMessage,
+  refusalText,
 } from "../mcp/server.mjs";
 
 const report = ({ status = "done", tests = "pass", notDone = "none", note = "n/a" } = {}) =>
@@ -3432,4 +3433,11 @@ test("coordinatorCommitMessage: the General's commit_subject wins; recovered is 
   assert.equal(coordinatorCommitMessage({ task: "Fix it.", subject: "Keep held-back tables in the list_tables cache", jobId: "j1" }).split("\n")[0], "Keep held-back tables in the list_tables cache");
   assert.match(coordinatorCommitMessage({ task: "Add a retry to fetch.", jobId: "j1", recovered: true }).split("\n")[0], /^Add a retry to fetch \[recovered\]$/);
   assert.equal(coordinatorCommitMessage({ jobId: "j1" }), "nomArmy job j1\n\nnomArmy-Job: j1");
+});
+
+
+test("refusalText: capacity JSON only when a problem is about capacity", () => {
+  const snap = () => ({ local: { running: 0 } });
+  assert.doesNotMatch(refusalText(["model_not_found: openai/gpt-6-sol was refused on an earlier job today"], snap), /Capacity right now/);
+  assert.match(refusalText(['not admitted (capacity): agent "codex" already has 3 job(s) running'], snap), /Capacity right now:\n\{/);
 });

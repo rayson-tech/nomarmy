@@ -278,7 +278,7 @@ The sandbox has no network, so dependencies are installed when its image is buil
 
 | Repo | Detected by | Sandbox |
 |---|---|---|
-| Node | `package.json` plus `package-lock.json` or `npm-shrinkwrap.json` | `npm ci` at build time. Packages sit at `/node_modules`, outside the worktree, where Node, TypeScript and `npm run` find them |
+| Node | every package with its own `package-lock.json` or `npm-shrinkwrap.json`: the root, and any others (a `ui/`, a `lambda/api/`) | `npm ci` for each at build time, under `/deps` at the same path. The root's packages are at `/node_modules`; each other package gets a `node_modules` link into the image, which nomArmy never commits |
 | Python | `requirements.txt`, or `environment.python.requirements` | `pip install` at build time |
 | Both | both of the above | one image with both |
 | Go, Rust | `go.mod`, `Cargo.toml` | the toolchain, built once and cached |
@@ -294,7 +294,7 @@ environment:
       - lambda/requirements.txt
 ```
 
-npm workspaces, yarn, pnpm and bun aren't installed yet. For those repos, verification borrows your own checkout's `node_modules` read-only, which works for plain JavaScript packages but not for ones with native binaries built for your host.
+A package whose install fails (a private registry, say) is marked and skipped; the rest still install. npm workspaces, yarn, pnpm and bun aren't installed yet. For those repos, verification borrows your own checkout's `node_modules` read-only, which works for plain JavaScript packages but not for ones with native binaries built for your host.
 
 ### Scoping verification to the diff
 
@@ -446,7 +446,7 @@ What we've learned from real runs, including where delegating pays and where it 
 - **Claude subscription token counts** come from the Claude CLI's own session log, since OpenClaw sees only the final reply. Totals include cache reads and writes, which make up most of an agent's prompt; each part is also kept separately.
 - **Test-workaround detection is a flag, not a verdict**: a legitimate new skip still gets flagged.
 - **Deploy-time failures need your own check.** See [Add a check for what unit tests can't see](#nomarmyyml).
-- **Node dependencies install only from an npm lockfile** (no workspaces, yarn, pnpm or bun yet).
+- **Node dependencies install only from npm lockfiles**, one per package (no workspaces, yarn, pnpm or bun yet), and only from the public registry: the image build has no credentials for a private one.
 - **Verification needing services** (a database, a mock server) reports `not_run` instead of running without them. The compose parser doesn't resolve YAML anchors.
 - **Same-host only**: the MCP server and OpenClaw run on the machine with the coordinator. There's no remote-worker mode yet.
 
@@ -457,7 +457,7 @@ What we've learned from real runs, including where delegating pays and where it 
 | Anything unclear about the machine | `nomarmy doctor`, then `nomarmy health` |
 | `No API key found for provider "llama-cpp"` during `e2e.sh` | `./scripts/configure-openclaw.sh <profile>`, then rerun |
 | A job fails with `model_not_found` | Your plan or OpenClaw can't run that model. `nomarmy agents list` shows which roles use it; `nomarmy army assign <role> <agent> <model>` moves the role and tests the new model |
-| Verification fails on a missing package | Node: commit a `package-lock.json` (yarn, pnpm and workspaces aren't installed yet). Python: list your requirements files under `environment.python.requirements` |
+| Verification fails on a missing package | Node: commit each package's `package-lock.json` (yarn, pnpm and workspaces aren't installed yet). Python: list your requirements files under `environment.python.requirements` |
 | A config change didn't take effect | `nomarmy stop && nomarmy start` for inference; restart your coordinator after `nomarmy connect` or an update |
 | `git worktree add` fails with `Filename too long` (Windows/WSL2) | `git config --global core.longpaths true` |
 | Not sure a setting fits your hardware | `nomarmy sizing`, or `nomarmy sizing --check` |
