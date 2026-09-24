@@ -83,7 +83,8 @@ import {
   detectMislabeledTestNames,
   scanTextForSecrets,
   extractAddedLinesBlob,
-  detectPossibleSecrets
+  detectPossibleSecrets,
+  coordinatorCommitMessage,
 } from "../mcp/server.mjs";
 
 const report = ({ status = "done", tests = "pass", notDone = "none", note = "n/a" } = {}) =>
@@ -3405,4 +3406,29 @@ test("expandJobs: every job joins the session's active run unless it names anoth
   assert.equal(jobs[0].run_id, "run-scan-hygiene-bb66d4");
   assert.equal(jobs[1].run_id, "run-other-abc123");
   assert.equal(expandJobs([{ task: "t" }], { getActiveRun: () => null }).jobs[0].run_id, undefined, "no active run, no run_id");
+});
+
+test("metrics: OpenClaw's { input, output, cacheRead, total } usage shape -- total is input + output, cache reads apart", () => {
+  const m = buildMetrics({
+    result: { usage: { input: 83546, output: 10548, cacheRead: 1323698, cacheWrite: 0, total: 1417792, cost: { total: 0 } } },
+    record: null, reportValidation: null, outcome: null, workerElapsedMs: 1000, totalElapsedMs: 2000
+  });
+  assert.equal(m.worker_tokens_in, 83546);
+  assert.equal(m.worker_tokens_out, 10548);
+  assert.equal(m.worker_tokens_total, 94094);
+  assert.equal(m.worker_tokens_cache_read, 1323698);
+});
+
+test("coordinatorCommitMessage: a reviewer-readable commit from the task and the worker's note, never just the job id", () => {
+  const task = "[nomArmy role: sr-dev, build phase]\nSenior developer. Does the first cut.\n\nOBJECTIVE: make the committed, currently FAILING acceptance test pass by fixing production code, not the test.\n\nIt fails because ...";
+  const msg = coordinatorCommitMessage({ task, note: "Metadata preserves held-back tables, including planner failures.", jobId: "sr-dev-x-20260924-145612-b0837d", provider: "openai", model: "gpt-6-astra" });
+  assert.equal(msg, "Make the committed, currently FAILING acceptance test pass by fixing…\n\nMetadata preserves held-back tables, including planner failures.\n\nnomArmy-Job: sr-dev-x-20260924-145612-b0837d\nnomArmy-Worker: openai/gpt-6-astra");
+  assert.ok(msg.split("\n")[0].length <= 72);
+  assert.doesNotMatch(msg, /chore\(local-agent\)/);
+});
+
+test("coordinatorCommitMessage: the General's commit_subject wins; recovered is marked; nothing at all still names the job", () => {
+  assert.equal(coordinatorCommitMessage({ task: "Fix it.", subject: "Keep held-back tables in the list_tables cache", jobId: "j1" }).split("\n")[0], "Keep held-back tables in the list_tables cache");
+  assert.match(coordinatorCommitMessage({ task: "Add a retry to fetch.", jobId: "j1", recovered: true }).split("\n")[0], /^Add a retry to fetch \[recovered\]$/);
+  assert.equal(coordinatorCommitMessage({ jobId: "j1" }), "nomArmy job j1\n\nnomArmy-Job: j1");
 });

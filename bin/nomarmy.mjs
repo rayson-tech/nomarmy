@@ -22,7 +22,7 @@ import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected } fr
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
 import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
 import { loadArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
-import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeSucceeded, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
+import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
 
 // Add a new coordinator: add its name here, teach commandExists/connectTarget
 // about it below (a JSON-file target like Cursor has no PATH binary to check
@@ -960,13 +960,49 @@ function catalogModelsFor(provider) {
 }
 
 /** One real, one-token completion through OpenClaw -- the only proof a credential actually works. */
+// Why the last probeWorker() call failed, in the vendor's words when it said.
+let lastProbeFailure = null;
 function probeWorker(provider, model) {
-  const result = runQuiet(openclawCmd(), ["agent", "exec", "--model", `${provider}/${model}`, "--no-auth-env-only",
-    "--json", "--cwd", os.tmpdir(), "--isolated", "--timeout", "60", "Reply with exactly: ok"]);
-  // stdout only: OpenClaw logs a "run ... ended" line to stderr AFTER the
-  // JSON envelope (confirmed live), and the merged text doesn't parse --
-  // which reported a working Codex login as a failed test call.
-  return probeSucceeded(result.stdout);
+  // The route a job takes: the ambient OpenClaw config and a state dir of
+  // its own, never --isolated. --isolated skips that config, and with it the
+  // Codex runtime ChatGPT-plan jobs run through: gpt-6-sol answered "ok"
+  // under --isolated while every job on it failed "not supported when using
+  // Codex with a ChatGPT account" (a real Senti run). Under the home
+  // directory, since the Podman sandbox only binds paths there.
+  const dir = fs.mkdtempSync(path.join(agentStateRoot(), "probe-"));
+  const stateDir = path.join(dir, "state"), cwd = path.join(dir, "ws");
+  fs.mkdirSync(stateDir); fs.mkdirSync(cwd);
+  try {
+    const result = spawnSync(openclawCmd(), ["agent", "exec", "Reply with exactly: ok", "--model", `${provider}/${model}`, "--no-auth-env-only",
+      "--json", "--cwd", cwd, "--state-dir", stateDir, "--timeout", "90"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], cwd });
+    // Streams kept apart: OpenClaw logs a "run ... ended" line to stderr
+    // AFTER the JSON envelope, and the merged text doesn't parse.
+    const outcome = probeOutcome({ stdout: result.stdout ?? "", stderr: result.stderr ?? "" });
+    lastProbeFailure = outcome.ok ? null : outcome.reason;
+    return outcome.ok;
+  } finally {
+    reapProbeSandbox(stateDir);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+function agentStateRoot() {
+  const root = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
+  fs.mkdirSync(root, { recursive: true });
+  return root;
+}
+// The sandbox container OpenClaw starts for the call is never stopped when
+// it returns (mcp/server.mjs reaps each job's the same way, by the hash in
+// its state dir).
+function reapProbeSandbox(stateDir) {
+  let hashes = [];
+  try {
+    hashes = fs.readdirSync(path.join(stateDir, "sandbox", "skills-workspaces"), { withFileTypes: true })
+      .filter((d) => d.isDirectory() && /^workspace-[0-9a-f]{16,}$/.test(d.name)).map((d) => d.name.slice("workspace-".length));
+  } catch { return; }
+  for (const hash of hashes) {
+    const names = runQuiet("podman", ["ps", "-a", "--filter", `name=${hash}`, "--format", "{{.Names}}"]).stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+    for (const name of names) runQuiet("podman", ["rm", "-f", "-v", name]);
+  }
 }
 
 /**
@@ -1970,7 +2006,8 @@ function checkRoleModel(agentName, model) {
   // it failed "Unknown model", and an assignment checked only against the
   // list let a Senti review fail 10 seconds in.
   if (probeWorker(provider, model)) return { status: listed.includes(model) ? "listed" : "probed", listed };
-  return { status: "failed", detail: listed.includes(model) ? "is listed in OpenClaw's catalog, but a real test call to it failed" : "isn't in OpenClaw's catalog and a real test call to it failed", listed };
+  const why = lastProbeFailure ? ` (${lastProbeFailure})` : "";
+  return { status: "failed", detail: `${listed.includes(model) ? "is listed in OpenClaw's catalog, but a real test call to it failed" : "isn't in OpenClaw's catalog and a real test call to it failed"}${why}`, listed };
 }
 
 // Which agent the General is. Global or local only: it describes the

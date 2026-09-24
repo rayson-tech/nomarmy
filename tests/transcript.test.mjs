@@ -124,3 +124,10 @@ test("readOpenClawTranscriptTail: the last N events or everything after event N,
     assert.equal((await readOpenClawTranscriptTail(dir, { limit: 0 })).events, 4, "count only");
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("summarizeTranscriptEvents: sums usage across assistant messages, null when none carry it", () => {
+  const msg = (usage) => ({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "x" }], ...(usage ? { usage } : {}) } });
+  assert.deepEqual(summarizeTranscriptEvents([msg({ input: 449, output: 81, cacheRead: 33000 }), msg({ input: 170, output: 124 }), msg(null)]).usage,
+    { input: 619, output: 205, cacheRead: 33000 });
+  assert.equal(summarizeTranscriptEvents([msg(null)]).usage, null);
+});

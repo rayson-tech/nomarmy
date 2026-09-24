@@ -11,6 +11,7 @@ import { SCOUT_OUTCOMES, SCOUT_STATUS_BY_OUTCOME, scoutPrompt, parseScoutReport,
 import { DECOMPOSE_OUTCOMES, DECOMPOSE_STATUS_BY_OUTCOME, decomposePrompt, parseDecomposeReport, buildDecomposeFindings, resolveDecomposeOutcome, checkDecompositionOverlap, renderDecomposeReport } from "../lib/decompose.mjs";
 import { deriveBudgets, checkBrief, resolveContextPerNom, assessAdmission, describeBudgets, deriveTimeBudget, FRONTIER } from "../lib/budget.mjs";
 import { readOpenClawTranscript, readOpenClawTranscriptTail, estimateDisplacement } from "../lib/transcript.mjs";
+import { modelRejection, modelRejectionLine } from "../lib/openclaw-errors.mjs";
 import { runQuery, formatCitations, OPS as EVIDENCE_OPS, outlineFile, findReferences } from "../lib/repo-query.mjs";
 import { loadConfig, ConfigError } from "../lib/config.mjs";
 import { resolveSandboxImage, detectPrimaryLanguage, EXEC_PATH_PREPEND } from "../lib/sandbox-images.mjs";
@@ -1097,6 +1098,15 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
         return { ...salvaged, model: bareModel, provider: selected.entry?.provider ?? workerProvider, thinkingApplied: selected.thinking, budgetsUsed: jobBudgets };
       }
       fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} OpenClaw failure${logSuffix}\n${error.stack || error.message}\n`);
+      // A refused model reads as "openclaw exited 1" unless its reason is
+      // lifted out of the run log (lib/openclaw-errors.mjs).
+      const rejected = modelRejection(`${error.stderr ?? ""}\n${error.stdout ?? ""}`, selected.model);
+      if (rejected) {
+        const line = modelRejectionLine(rejected);
+        error.modelNotFound = rejected;
+        error.stack = `${line}\n${error.stack ?? error.message}`;
+        error.message = line;
+      }
       // What was attempted, for the job record: a failed job used to be
       // labeled with the local default model, whatever it really ran on.
       error.partialResult = { model: bareModel, provider: selected.entry?.provider ?? workerProvider, budgetsUsed: jobBudgets };
@@ -1131,7 +1141,10 @@ export async function salvageFinishedRun(error, stateDir, { sinceEvent = 0 } = {
   const final = transcript?.available ? String(transcript.lastAssistantText ?? "").trim() : "";
   if (!final) return null;
   const why = /cleanup/i.test(stderr) ? "OpenClaw's cleanup failed after the run" : "a nonzero exit after the run";
-  return { ok: true, status: "ok", final, salvaged: true, salvagedFrom: why, usage: null, toolSummary: null };
+  // The envelope that carried usage never arrived; the transcript's
+  // assistant messages still record it (a Codex job's one terminal message,
+  // or every call of a multi-call run).
+  return { ok: true, status: "ok", final, salvaged: true, salvagedFrom: why, usage: transcript.usage ?? null, toolSummary: null };
 }
 
 // OpenClaw names each job's sandbox container after the hash of its skills
@@ -2194,13 +2207,18 @@ function finalText(result) { return result?.final ?? result?.payloads?.[0]?.text
 // errors can arrive); without it a run couldn't tell a usage limit apart.
 function workerMetadata(result) { return { model: result?.model ?? null, provider: result?.provider ?? null, sessionId: result?.sessionId ?? null, status: result?.status ?? null, usage: result?.usage ?? null, toolSummary: result?.toolSummary ?? null, error: result?.ok === false ? String(result?.error?.message ?? "").slice(0, 1000) || null : null }; }
 function intOrNull(value) { const n = Number(value); return Number.isFinite(n) ? n : null; }
-function usageMetrics(result) {
+// OpenClaw's envelope reports { input, output, cacheRead, total }, where
+// `total` counts cache reads too (a 94k-token Codex job read 1.3M from
+// cache); only the older { inputTokens, ... } shape was read, so every
+// job's tokens showed 0. Total is input + output whenever both are known:
+// cached prompt re-reads are a different, much cheaper thing.
+export function usageMetrics(result) {
   const u = result?.usage;
-  if (!u || typeof u !== "object") return { worker_tokens_in: null, worker_tokens_out: null, worker_tokens_total: null };
-  const input = intOrNull(u.inputTokens ?? u.input_tokens ?? u.promptTokens ?? u.prompt_tokens);
-  const output = intOrNull(u.outputTokens ?? u.output_tokens ?? u.completionTokens ?? u.completion_tokens);
-  const total = intOrNull(u.totalTokens ?? u.total_tokens) ?? (input !== null && output !== null ? input + output : null);
-  return { worker_tokens_in: input, worker_tokens_out: output, worker_tokens_total: total };
+  if (!u || typeof u !== "object") return { worker_tokens_in: null, worker_tokens_out: null, worker_tokens_total: null, worker_tokens_cache_read: null };
+  const input = intOrNull(u.inputTokens ?? u.input_tokens ?? u.promptTokens ?? u.prompt_tokens ?? u.input);
+  const output = intOrNull(u.outputTokens ?? u.output_tokens ?? u.completionTokens ?? u.completion_tokens ?? u.output);
+  const total = input !== null && output !== null ? input + output : intOrNull(u.totalTokens ?? u.total_tokens ?? u.total);
+  return { worker_tokens_in: input, worker_tokens_out: output, worker_tokens_total: total, worker_tokens_cache_read: intOrNull(u.cacheRead ?? u.cache_read_input_tokens) };
 }
 // Only fields nomArmy can actually observe are populated. Anything it cannot
 // see stays null: a fabricated metric is worse than a missing one.
@@ -2254,7 +2272,40 @@ export function buildMetrics({ result, record, reportValidation, outcome, worker
   };
 }
 
-async function createCoordinatorCommit({ cwd, jobId, outcome }) {
+/**
+ * The worker branch's commit message, for whoever reviews the PR: what the
+ * job set out to do and what the worker says it did. It used to be
+ * `chore(local-agent): <job id>`, which a Senti reviewer reworded by hand on
+ * every commit. The subject is the General's own `commit_subject` when it
+ * gave one, else the task's first sentence (the army role header and an
+ * "OBJECTIVE:" label dropped). The job id stays, as a trailer.
+ */
+export function coordinatorCommitMessage({ task = "", subject = null, note = null, jobId, workerId = null, recovered = false, provider = null, model = null }) {
+  const oneLine = (t) => String(t ?? "").replace(/\s+/g, " ").trim();
+  let body = String(task ?? "");
+  if (/^\[nomArmy role:/.test(body)) body = body.includes("\n\n") ? body.slice(body.indexOf("\n\n") + 2) : "";
+  const firstSentence = oneLine(body.replace(/^\s*(objective|task|goal)\s*:\s*/i, "")).split(/(?<=[.!?])\s|:\s(?=[A-Z])/)[0].replace(/[.:;,]+$/, "");
+  const clip = (t, max) => (t.length <= max ? t : `${t.slice(0, max).replace(/\s+\S*$/, "")}…`);
+  const derived = firstSentence && firstSentence.charAt(0).toUpperCase() + firstSentence.slice(1);
+  let head = clip(oneLine(subject) || derived || `nomArmy job ${workerId ?? jobId}`, 72);
+  if (recovered) head = clip(`${head}`, 60) + " [recovered]";
+  const lines = [head];
+  const cleanNote = oneLine(note);
+  if (cleanNote) lines.push("", ...wrapText(cleanNote, 72));
+  lines.push("", `nomArmy-Job: ${jobId}`);
+  if (provider || model) lines.push(`nomArmy-Worker: ${[provider, model].filter(Boolean).join("/")}`);
+  return lines.join("\n");
+}
+function wrapText(text, width) {
+  const out = []; let line = "";
+  for (const word of text.split(" ")) {
+    if (line && `${line} ${word}`.length > width) { out.push(line); line = word; } else line = line ? `${line} ${word}` : word;
+  }
+  if (line) out.push(line);
+  return out;
+}
+
+async function createCoordinatorCommit({ cwd, jobId, outcome, message = null }) {
   if (!outcome.commitAllowed) return { created: false, sha: null, reason: outcome.commitBlockedReason || `outcome ${outcome.outcome} does not permit a commit` };
   const status = await gitRaw(["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd);
   const entries = parseStatusPorcelainZ(status);
@@ -2264,7 +2315,7 @@ async function createCoordinatorCommit({ cwd, jobId, outcome }) {
   await run("git", ["add", "--", ...files], { cwd });
   const stagedFiles = (await git(["diff", "--cached", "--name-only"], cwd)).split("\n").filter(Boolean);
   if (!stagedFiles.length) return { created: false, sha: null, reason: "nothing staged after explicit-path staging", stagedFiles: [], ignoredRuntimeJunk: junk };
-  const subject = outcome.recovered ? `chore(local-agent): ${jobId} [RECOVERED]` : `chore(local-agent): ${jobId}`;
+  const subject = message ?? coordinatorCommitMessage({ jobId, recovered: Boolean(outcome.recovered) });
   try { await run("git", ["commit", "-m", subject], { cwd }); }
   catch (error) { await run("git", ["reset"], { cwd }).catch(() => {}); return { created: false, sha: null, reason: `coordinator commit failed: ${error.message}`, stagedFiles, ignoredRuntimeJunk: junk }; }
   return { created: true, sha: await git(["rev-parse", "HEAD"], cwd), reason: null, recovered: Boolean(outcome.recovered), stagedFiles, ignoredRuntimeJunk: junk };
@@ -2302,7 +2353,7 @@ function writeStatus(jobDir, patch) {
 }
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-export async function executeJob({ task, acceptance, verification, mode = "implement", baseRef, timeoutSeconds = 600, profile = "coder", reasoning = "high", pool = null, subscriptionWorker = null, onBehalfOf = null, model = null, reportSize = null, workerId, evidence = null, verifyRegression = false, jobId: presetJobId = null }) {
+export async function executeJob({ task, acceptance, verification, mode = "implement", baseRef, timeoutSeconds = 600, profile = "coder", reasoning = "high", pool = null, subscriptionWorker = null, onBehalfOf = null, model = null, reportSize = null, workerId, evidence = null, verifyRegression = false, commitSubject = null, jobId: presetJobId = null }) {
   await assertRepo();
   ensureJobsRoot();
   // Fire-and-forget: sweeps whatever this or any other nomArmy install left
@@ -2319,10 +2370,10 @@ export async function executeJob({ task, acceptance, verification, mode = "imple
   const common = { task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool, subscriptionWorker, onBehalfOf, model, reportSize, workerId, progress, jobStartedMs };
   if (mode === "scout") return executeScout(common);
   if (mode === "decompose") return executeDecompose(common);
-  return executeImplement({ ...common, verification, evidence, verifyRegression });
+  return executeImplement({ ...common, verification, evidence, verifyRegression, commitSubject });
 }
 
-async function executeImplement({ task, acceptance, verification, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool = null, subscriptionWorker = null, onBehalfOf = null, model = null, reportSize = null, workerId, evidence, verifyRegression = false, progress, jobStartedMs }) {
+async function executeImplement({ task, acceptance, verification, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool = null, subscriptionWorker = null, onBehalfOf = null, model = null, reportSize = null, workerId, evidence, verifyRegression = false, commitSubject = null, progress, jobStartedMs }) {
   const mode = "implement";
   let branch = `agent/${jobId}`, worktree = path.join(jobDir, "worktree");
   try {
@@ -2465,7 +2516,12 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
 
     progress("verification");
     let independentVerification = normalizeVerification({ status: "not_run", basis: "not-applicable", reason: "no verification runner registered" }, verification ?? null);
-    if (verificationRunner || !reportValidation.valid) {
+    if (!repositoryChanged) {
+      // Verifying an untouched worktree is verifying the base commit: a
+      // failed job that changed nothing was recorded "pass" (a Senti run),
+      // which reads as evidence about work that never happened.
+      independentVerification = normalizeVerification({ status: "not_run", basis: "not-applicable", reason: "the worker changed nothing, so there was none of its work to verify" }, verification ?? null);
+    } else if (verificationRunner || !reportValidation.valid) {
       independentVerification = await runIndependentVerification({ profile: verification ?? null, cwd, jobId, baseSha: base.sha, branch, mode, record: preCommit });
     }
 
@@ -2611,7 +2667,8 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
       : afterMislabeledTests;
 
     progress("commit");
-    const commit = await createCoordinatorCommit({ cwd, jobId, outcome: finalOutcome });
+    const commit = await createCoordinatorCommit({ cwd, jobId, outcome: finalOutcome,
+      message: coordinatorCommitMessage({ task, subject: commitSubject, note: reportValidation?.note ?? null, jobId, workerId, recovered: Boolean(finalOutcome.recovered), provider: (result ?? attempted)?.provider ?? null, model: (result ?? attempted)?.model ?? null }) });
     progress("record");
     const record = await collectGitRecord({ cwd, baseSha: base.sha, branch, baseRef: base.ref, jobId }), worker = workerMetadata(result ?? attempted);
 
@@ -3541,6 +3598,7 @@ export const jobSchema = z.object({
   model: z.string().regex(/^\S{1,200}$/).optional().describe("The model to run on the job's agent (an api or subscription agent), e.g. \"gpt-6-sol\". Overrides the role's model and the agent's default. Required when the role's model is \"auto\" or the agent has no default. The `army` tool lists each agent's models. Refused on the local agent, whose model `nomarmy model` sets."),
   run_id: z.string().regex(/^run-[a-z0-9-]{1,80}$/).optional().describe("The /feature run this job belongs to (from run_start). Admission then enforces the run's limits (jobs, api spend, hours) and refuses an agent the run has paused after a vendor usage-limit error; the finished job is recorded into the run."),
   report: z.enum(["brief", "standard", "full"]).optional().describe("How much the worker may report back, capped by its agent's tier: brief (today's local-sized report), standard (the default), full (the frontier ceiling: about 2k tokens for implement, 4k for a scout). The report lands in your own context and is re-read every later turn, so ask for full only when the job's findings are the point (a broad review). No effect on the local model, whose caps are calibrated."),
+  commit_subject: z.string().max(200).optional().describe("implement: the subject line of the commit nomArmy makes on the worker branch, e.g. \"Keep held-back tables in the list_tables cache\". Defaults to the task's first sentence; the body is the worker's NOTE, and the job id is a trailer."),
   army_role: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional().describe("Dispatch by army role (e.g. \"sr-dev\", \"security-analyst\"): nomArmy runs it on the agent this repo assigns to that role and puts the role's description at the top of the brief. Call the `army` tool first to see this repo's roles. Mutually exclusive with agent. Add on_behalf_of in case the role's agent is a subscription; it's ignored otherwise."),
   on_behalf_of: z.string().min(1).max(254).optional().describe("Required when the job's agent is a subscription: must exactly match that agent's owner in agents.yml, or nomArmy refuses the job. A self-reported attestation, not an independently verified identity check -- nomArmy has no caller-identity boundary today, so what this guarantees is explicit, auditable intent and hard refusal on mismatch or omission, not cryptographic proof of who issued the call. Ignored for a local or api agent."),
   evidence: z.string().max(maxEvidenceChars,
@@ -3583,7 +3641,7 @@ function jobArgs(args, workerId) {
   return { task: args.task, acceptance: args.acceptance, verification: args.verification, mode: args.mode, baseRef: args.base_ref,
     timeoutSeconds: args.timeout_seconds, profile: args.profile, reasoning: args.reasoning, pool: args.pool,
     subscriptionWorker, onBehalfOf: args.on_behalf_of, model: args.model ?? null, reportSize: args.report ?? null, evidence: args.evidence,
-    verifyRegression: resolveVerifyRegression(args), workerId };
+    verifyRegression: resolveVerifyRegression(args), commitSubject: args.commit_subject ?? null, workerId };
 }
 server.tool("local_worker", "Run one isolated local worker and wait for it. mode=implement edits in its own worktree and the coordinator commits only on a valid done report (or a recovered job that passed independent verification); failed or incomplete worktrees are retained. mode=scout answers a question from a read-only snapshot with mandatory [path:line] citations that nomArmy verifies and expands. mode=decompose (also read-only) proposes 2+ independent subtasks for a broad objective instead of one worker turn trying to do too much; the proposal is never auto-dispatched, review it and make a separate call with the subtasks you choose. Refuses under memory pressure or over capacity; use local_worker_start + local_worker_status to avoid blocking.", jobSchema.shape,
   async rawArgs => {
@@ -3757,7 +3815,7 @@ server.tool("local_worker_config", "What this checkout's .nomarmy.yml defines --
   return toolText(JSON.stringify(summary, null, 2), summary.valid === false);
 });
 server.tool("local_workers", "Run independent jobs (implement or scout) with bounded parallelism and wait for all of them. Every implement job receives its own branch, worktree, sandbox session, logs, validation, and coordinator-owned commit. This tool never merges any branch into the developer's branch. With auto_union: true, implement jobs that reach a valid outcome and touch non-overlapping files are additionally merged (git merge --no-ff) into ONE new integration branch -- a review artifact alongside the untouched per-job branches, still not the developer's branch, still reviewed and integrated explicitly. Jobs that overlap or did not finish validly are excluded from the union and reported individually exactly as without auto_union. For long batches prefer local_worker_start per job and poll.", {
-  jobs: z.array(jobSchema).min(1).max(8), max_parallel: z.number().int().min(1).max(8).default(() => currentMaxWorkers()),
+  jobs: z.array(jobSchema).min(1).max(8), max_parallel: z.number().int().min(1).max(8).optional().describe("A cap on how many of this batch run at once. Omit it: local jobs then use the local ceiling and api/subscription jobs theirs (NOMARMY_MAX_POOL_WORKERS), with each agent's own max_concurrent on top. It used to default to the local ceiling, which ran an all-remote batch one job at a time."),
   auto_union: z.boolean().default(false).describe(
     "After all jobs finish, mechanically merge (git merge --no-ff) implement jobs that reached a valid outcome and touched non-overlapping files into ONE new integration branch for review -- never into the developer's branch. Overlapping or invalid-outcome jobs are excluded and still reported individually, unchanged. All jobs must share one base_ref (or omit it); it is resolved once, before any job starts, and forced onto every job so the union is provably rooted at a single base."
   ),
@@ -3807,8 +3865,8 @@ server.tool("local_workers", "Run independent jobs (implement or scout) with bou
     indices.forEach((i, laneI) => { results[i] = laneResults[laneI]; });
   };
   const { localIndices, remoteIndices } = splitJobsByLane(jobs);
-  const localParallel = Math.max(1, Math.min(max_parallel, currentMaxWorkers() - runningCount("local")));
-  const remoteParallel = Math.max(1, Math.min(max_parallel, currentMaxPoolWorkers() - runningCount("remote")));
+  const localParallel = Math.max(1, Math.min(max_parallel ?? Infinity, currentMaxWorkers() - runningCount("local")));
+  const remoteParallel = Math.max(1, Math.min(max_parallel ?? Infinity, currentMaxPoolWorkers() - runningCount("remote")));
   await Promise.all([dispatchLane(localIndices, localParallel), dispatchLane(remoteIndices, remoteParallel)]);
 
   // Auto_union is entirely additive and must never suppress or corrupt the
@@ -3826,7 +3884,7 @@ server.tool("local_workers", "Run independent jobs (implement or scout) with bou
     }
   }
 
-  const summary = { version: VERSION, batchId, startedAt, finishedAt: new Date().toISOString(), maxParallel: parallel, requestedParallel: max_parallel,
+  const summary = { version: VERSION, batchId, startedAt, finishedAt: new Date().toISOString(), maxParallel: parallel, requestedParallel: max_parallel ?? null,
     total: results.length, complete: results.filter(r => r.ok).length, incomplete: results.filter(r => !r.ok).length,
     recovered: results.filter(r => r.manifest?.recovered).length,
     reviewRequired: results.filter(r => r.manifest?.reviewRequired).length,

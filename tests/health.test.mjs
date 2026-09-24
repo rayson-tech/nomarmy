@@ -91,3 +91,15 @@ test("unknownModelIssues: a model that failed \"Unknown model\" on a real job to
   assert.equal(issues[0].id, "unknown-model:meta/muse-spark-1.3");
   assert.equal(issues[0].short, "muse-spark-1.3 not running");
 });
+
+test("unknownModelIssues: the Codex ChatGPT-plan refusal (model_not_found), old raw record and new tagged line alike", () => {
+  const now = Date.parse("2026-09-24T15:00:00Z");
+  const raw = "Error: openclaw exited 1\nSTDERR:\n\u001b[33m[agent/embedded]\u001b[39m embedded run failover decision: runId=c3 stage=prompt decision=surface_error reason=model_not_found attempt=1 from=openai/gpt-6-sol profile=sha256:10 rawError={\"type\":\"error\",\"status\":400,\"error\":{\"message\":\"The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account.\"}}";
+  const issues = unknownModelIssues([
+    { finishedAt: "2026-09-24T14:17:38Z", workerError: raw },
+    { finishedAt: "2026-09-24T14:30:00Z", workerError: "model_not_found: openai/gpt-6-sol: The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account. It may..." },
+  ], { now });
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0].id, "unknown-model:openai/gpt-6-sol");
+  assert.match(issues[0].title, /refused by its provider on 2 jobs today/);
+});

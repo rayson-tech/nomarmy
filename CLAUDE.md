@@ -14,7 +14,7 @@ Use `repo_evidence` first for where-is, who-calls, what-declares and grep questi
 
 Prefer `local_worker_start` plus `local_worker_status` (with `wait_seconds`) for anything expected to run more than a few minutes, so the session is not blocked. Check `local_worker_capacity` before a batch: brief and report budgets are derived from the context one nom actually has, and admission is refused under memory pressure or at `NOMARMY_MAX_WORKERS`. A refusal starts nothing; split the brief or wait.
 
-Start `local_workers` with `max_parallel: 1` on current workstation hardware. Increase only after measuring reliability and throughput. The architecture supports up to 8 bounded workers; hardware/model capacity determines the practical number.
+For local-model jobs, start `local_workers` with `max_parallel: 1` on current workstation hardware; increase only after measuring reliability and throughput. Api and subscription jobs don't need it: leave `max_parallel` out and each agent's `max_concurrent` (in agents.yml) sets how many run at once. The architecture supports up to 8 bounded workers; hardware/model capacity determines the practical number.
 
 ## Required trust boundary
 The worker's four-line report is a claim. The MCP coordinator's verified Git record is evidence. Independently review material diffs and verification before integration.

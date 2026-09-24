@@ -71,3 +71,17 @@ test("loadDependencyNames: requirements files, pyproject and package.json, at th
   const names = loadDependencyNames(dir);
   for (const n of ["pytest", "ruff", "sqlglot", "boto3", "pydantic", "client_s3", "vitest"]) assert.ok(names.has(n), n);
 });
+
+test("detectTestSabotage: a lazy import inside a try that also does the work is not a stub (the Senti false positive)", () => {
+  assert.equal(detectTestSabotage({ isTestPathFn: isTest, changes: [
+    { status: "M", path: "lambda/discovery_complete.py", addedLines: [
+      "    # Restore returning tables even when locked enrichment skips their upsert.",
+      "    try:",
+      "        from table_catalog_embed import clear_missing_marks",
+      "",
+      "        clear_missing_marks(org_id, warehouse_id, current_qualified)",
+      "    except Exception as e:",
+      "        print(f\"[complete] clear missing marks failed (non-fatal): {e}\")",
+    ] },
+  ] }), null);
+});

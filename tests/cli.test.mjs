@@ -461,7 +461,7 @@ function withCatalogOpenclaw(root) {
   fs.writeFileSync(scriptPath, `#!/usr/bin/env node
 const args = process.argv.slice(2);
 if (args[0] === "models" && args[1] === "list") { console.log("openai/gpt-6-astra   text+image 272k   no   yes"); process.exit(0); }
-if (args[0] === "agent") { const ok = args.includes("openai/gpt-6-astra"); console.log(JSON.stringify(ok ? { ok: true, status: "ok", final: "ok" } : { ok: false, status: "error", final: "", error: { message: "Unknown model" } })); process.exit(0); }
+if (args[0] === "agent") { const ok = args.includes("openai/gpt-6-astra") && !args.includes("--isolated") && args.includes("--state-dir"); /* a job's route: --isolated skips the Codex runtime jobs use */ console.log(JSON.stringify(ok ? { ok: true, status: "ok", final: "ok" } : { ok: false, status: "error", final: "", error: { message: "Unknown model" } })); process.exit(0); }
 process.exit(0);
 `);
   fs.chmodSync(scriptPath, 0o755);
@@ -479,7 +479,7 @@ test("army assign checks a named model: listed is accepted, unlisted-and-failing
     assert.equal(JSON.parse(ok.stdout).modelCheck.status, "listed");
     const bad = runArmyCLI(root, repo, ["assign", "po", "codex", "gpt-6-sol", "--json"], fake);
     assert.notEqual(bad.exitCode, 0);
-    assert.match(JSON.parse(bad.stdout).error, /codex\/gpt-6-sol isn't in OpenClaw's catalog and a real test call to it failed -- nothing was written\. Pick a model from: gpt-6-astra/);
+    assert.match(JSON.parse(bad.stdout).error, /codex\/gpt-6-sol isn't in OpenClaw's catalog and a real test call to it failed \(Unknown model\) -- nothing was written\. Pick a model from: gpt-6-astra/);
     // The Muse case: listed, but it doesn't run.
     fs.writeFileSync(fake.NOMARMY_OPENCLAW_CMD, fs.readFileSync(fake.NOMARMY_OPENCLAW_CMD, "utf8").replace('"openai/gpt-6-astra   text+image 272k   no   yes"', '"openai/gpt-6-astra   text+image 272k   no   yes\\nopenai/gpt-6-broken   text 272k   no   yes"'));
     const listedButBroken = runArmyCLI(root, repo, ["assign", "pm", "codex", "gpt-6-broken", "--json"], fake);
