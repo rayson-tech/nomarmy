@@ -10,7 +10,7 @@ import {
   LANGUAGE_IMAGES, detectPrimaryLanguage, ensureLanguageImageBuilt, resolveSandboxImage,
   pythonRequirementsFor, pythonImageTag, ensurePythonImageBuilt,
   nodeDependencyFiles, ensureDependencyImageBuilt, dependencyImageTag, EXEC_PATH_PREPEND, NODE_DEPS_BIN,
-  dependencyDockerfile, linkNodePackages,
+  dependencyDockerfile, linkNodePackages, nodeModulesState, repairHostInstalls,
 } from "../lib/sandbox-images.mjs";
 
 function fakeRepo(files) {
@@ -367,5 +367,24 @@ test("linkNodePackages: each non-root package gets a node_modules link into the 
     assert.deepEqual(linkNodePackages(dir, null, { env: {} }), [], "idempotent");
     const custom = fakeRepo({ "ui/package.json": "{}", "ui/package-lock.json": "{}" });
     try { assert.deepEqual(linkNodePackages(custom, null, { env: { NOMARMY_AGENT_IMAGE: "mine:latest" } }), []); } finally { fs.rmSync(custom, { recursive: true, force: true }); }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("repairHostInstalls: a node_modules that became a real directory during the job is removed and relinked; one that was already real is left alone", () => {
+  const dir = fakeRepo({ "package.json": "{}", "package-lock.json": "{}", "ui/package.json": "{}", "ui/package-lock.json": "{}", "api/package.json": "{}", "api/package-lock.json": "{}", "api/node_modules/own/index.js": "" });
+  try {
+    linkNodePackages(dir, null, { env: {} });
+    const before = nodeModulesState(dir, null);
+    assert.deepEqual(before, { ".": "none", api: "dir", ui: "link" });
+    // What the Claude CLI did on the host: npm install replaced the link with macOS binaries, and made a root one.
+    fs.rmSync(path.join(dir, "ui", "node_modules"));
+    fs.mkdirSync(path.join(dir, "ui", "node_modules", "@rollup", "rollup-darwin-arm64"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "node_modules", "left-pad"), { recursive: true });
+    const replaced = repairHostInstalls(dir, null, before);
+    assert.deepEqual(replaced.sort(), ["node_modules", "ui/node_modules"]);
+    assert.equal(fs.readlinkSync(path.join(dir, "ui", "node_modules")), "/deps/ui/node_modules", "the link is back");
+    assert.equal(fs.existsSync(path.join(dir, "node_modules")), false, "the root's host install is gone; /node_modules serves the root");
+    assert.ok(fs.existsSync(path.join(dir, "api", "node_modules", "own", "index.js")), "a node_modules that was there before the job is never touched");
+    assert.deepEqual(repairHostInstalls(dir, null, nodeModulesState(dir, null)), [], "nothing to do the second time");
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

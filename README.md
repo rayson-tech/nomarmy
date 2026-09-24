@@ -17,7 +17,7 @@ Developed and maintained by Rayson Technologies. This is an alpha (`0.1.0-alpha`
 ## How it works
 
 1. The General briefs a job: a task, acceptance criteria, the tests that prove it.
-2. nomArmy creates a worktree from your branch and runs the worker in a Podman sandbox with no network and no host credentials.
+2. nomArmy creates a worktree from your branch and runs the worker in a Podman sandbox with no network and no host credentials. (One exception, the Claude subscription: see [Security posture](#security-posture).)
 3. The worker edits, runs tests, and ends with a four-line report: `STATUS`, `TESTS`, `NOT_DONE`, `NOTE`.
 4. nomArmy treats that report as a claim. It reads the real diff from git, runs your verification profile itself in a fresh sandbox, reverts the production change to check the tests actually fail without it, and scans for secrets.
 5. Only then does it commit, on the worker's own branch. It never merges into yours: reviewing and integrating stay with the General, and with you.
@@ -141,7 +141,7 @@ Enable the models you intend to use in the Bedrock console first. `bedrock-cheap
 |---|---|---|
 | `local` | Your local llama-server model. `local` is built in; define another with `slot: gpt` for a second loaded model (see `config/agents.yml.example`) | nothing |
 | `api` | A metered API key: `xai`, `openai`, `anthropic`, `deepinfra`, `bedrock`, `azure-openai`, `openai-compatible` (with `base_url`), or `openclaw` for any other OpenClaw provider by id | `nomarmy agents add api` |
-| `subscription` | **One person's own** Claude, ChatGPT or Muse Code plan. Never pooled; every job on it names its owner | `nomarmy agents add subscription claude\|codex\|meta` |
+| `subscription` | **One person's own** Claude, ChatGPT or Muse Code plan. Never pooled; every job on it names its owner. A Claude subscription's tools run on your machine, so it's for scouts and reviews unless you allow more (see [Security posture](#security-posture)) | `nomarmy agents add subscription claude\|codex\|meta` |
 
 ```bash
 nomarmy agents add                  # asks which kind, then walks through it
@@ -179,7 +179,7 @@ Changes apply to the next job with no restart. The exception is a **new** api ag
 
 **Your plan decides which models run.** A model can be listed and still refused: on a ChatGPT plan, the Codex route runs gpt-6-astra and the gpt-5.6 models but refuses gpt-6-sol and gpt-6-luna. `army assign` and `agents update --probe` test the exact route a job takes, so they catch this before a job does.
 
-**Picking an agent.** `local` for a bounded change against a written spec with a test; your code never leaves your machine. An api or subscription agent when the work needs more than the local model, knowing it sends code to that vendor. That's a decision about where your source travels, separate from the trust boundary, which is the same for every agent. The General itself when the answer isn't known yet.
+**Picking an agent.** Build work goes to a sandboxed agent: `local`, an api key, Codex or Muse. `local` for a bounded change against a written spec with a test; your code never leaves your machine. An api or subscription agent when the work needs more than the local model, knowing it sends code to that vendor. That's a decision about where your source travels, separate from the trust boundary, which is the same for every agent. The General itself when the answer isn't known yet.
 
 ## The army: who does what
 
@@ -416,9 +416,18 @@ A job's `mode` is `implement` (edits, then nomArmy verifies and commits), `scout
 
 The worker gets a writable worktree inside Podman and nothing else: no Podman socket, no host credentials, no network. Repository content is untrusted input, and `.nomarmy.yml` is data to validate, never authority.
 
+**The exception: a Claude subscription runs its tools on your machine.** OpenClaw reaches a Claude plan by running the real `claude` command on the host, and Claude Code's own tools (Bash, Edit, Write) run there, with your files and the network, not in the sandbox. We checked each route by having a worker report where its shell ran:
+
+| Agent | Its tools run |
+|---|---|
+| `local`, api keys (xAI, OpenAI, Anthropic, ...), ChatGPT via Codex, Muse Code | in the sandbox: Linux, `/workspace`, no network |
+| Claude subscription (`claude-cli`) | **on this machine**: your real paths, with network |
+
+So nomArmy refuses **implement** jobs on a Claude subscription unless that agent says `allow_host_tools: true` in `agents.yml`; scouts and reviews still run, labeled. `nomarmy health` and the `army` tool flag any build role on it, and `agents list` says so. If a job's worktree comes back with a real `node_modules` where nomArmy's dependency link was (packages installed where the sandbox couldn't have), nomArmy flags the job for review and verifies against the sandbox's own dependencies. Sandboxing the Claude route properly needs OpenClaw to run it with only OpenClaw's own (sandboxed) tools, which it supports internally but doesn't expose yet. An Anthropic **api key** runs through OpenClaw's own loop and is sandboxed like the rest.
+
 **Never hand a worker** AWS or production credentials, deployment access, SSH keys, Kubernetes contexts or Terraform state.
 
-Every model call, local, api or subscription, is made by OpenClaw on the host, never from inside the sandbox. A subscription is reached through the vendor CLI's own logged-in session; nomArmy never reads or stores the token. What changes with a hosted agent or a Bedrock profile is where your code goes (to that vendor), not what the sandbox can reach.
+Every model call, local, api or subscription, is made by OpenClaw on the host, never from inside the sandbox. A subscription is reached through the vendor's own logged-in session; nomArmy never reads or stores the token. What changes with a hosted agent or a Bedrock profile is where your code goes (to that vendor), not what the sandbox can reach.
 
 `on_behalf_of` is a self-reported attestation, not a verified identity: nomArmy has no caller-identity boundary. The secret scan catches known secret shapes, not steered content with no recognizable shape. Both are covered in [SECURITY.md](SECURITY.md), which is also where to report a vulnerability.
 
@@ -432,7 +441,7 @@ Every model call, local, api or subscription, is made by OpenClaw on the host, n
 | `auto_union`, `verify_regression`, test-selection and unwired-code checks | Unit and live tested; the heuristics are review flags |
 | Secret scanning (secretlint, hard block) | Unit tested against the real dependency |
 | Agents: api keys | Live-verified with xAI; other providers built to OpenClaw's documented interface |
-| Agents: subscriptions | Claude and ChatGPT (Codex) live-verified across real multi-job runs; Muse Code live-verified with a test call |
+| Agents: subscriptions | ChatGPT (Codex) and Muse Code sandboxed and live-verified; Claude live-verified, but its tools run on the host (scout and review by default) |
 | The army and `/feature` | Driven by a real Claude Code General across three runs, about 18 implement jobs |
 | Go, Rust, Python and Node repos | Dependency images live-verified for Python and Node (npm); Go and Rust toolchains live-verified |
 | Disposable per-job services (Postgres, mocks) | Not built |
@@ -442,6 +451,7 @@ What we've learned from real runs, including where delegating pays and where it 
 
 ### Known limitations
 
+- **A Claude subscription isn't sandboxed.** Its tools run on your machine, so implement jobs on it are refused unless you set `allow_host_tools: true`. See [Security posture](#security-posture).
 - **A refused model costs one job.** When a vendor refuses a model at run time that OpenClaw lists (gpt-6-sol on a ChatGPT plan), the first job on it fails with `model_not_found`. After that nomArmy refuses to dispatch it until a job or test call on it works. `army assign` tests the job's route and catches this before any job.
 - **Claude subscription token counts** come from the Claude CLI's own session log, since OpenClaw sees only the final reply. Totals include cache reads and writes, which make up most of an agent's prompt; each part is also kept separately.
 - **Test-workaround detection is a flag, not a verdict**: a legitimate new skip still gets flagged.

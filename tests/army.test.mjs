@@ -279,3 +279,21 @@ test("loadArmy: a .nomarmy.yml with no army section exists, it just has nothing 
   const project = loadArmy({ projectDir: repo, env: { NOMARMY_CONFIG_DIR: tmp() } }).layers.find((l) => l.layer === "project");
   assert.deepEqual({ exists: project.exists, hasArmy: project.hasArmy }, { exists: true, hasArmy: false });
 });
+
+
+test("describeArmy: a role on an agent whose tools run on this machine carries hostTools; health warns only for an implement role that isn't allowed", async () => {
+  const { armyIssues } = await import("../lib/health.mjs");
+  const summary = describeArmy({
+    army: { general: "codex", workflow: "w", roles: {
+      "sr-dev": { phase: "build", mode: "implement", agent: "sonnet" },
+      "pm": { phase: "review", mode: "scout", agent: "sonnet" },
+      "jr-dev": { phase: "build", mode: "implement", agent: "codex" },
+    } },
+    sources: { roles: {} }, layers: [],
+  }, { agents: AGENTS, describeAgent: (a) => a.kind });
+  assert.deepEqual(summary.roles["sr-dev"].hostTools, { allowed: false, implementRole: true });
+  assert.deepEqual(summary.roles.pm.hostTools, { allowed: false, implementRole: false });
+  assert.equal(summary.roles["jr-dev"].hostTools, null);
+  const issues = armyIssues(summary).filter((i) => i.id.startsWith("army:host-tools:"));
+  assert.deepEqual(issues.map((i) => i.id), ["army:host-tools:sr-dev:sonnet"], "a scout role on it is fine; a sandboxed agent is fine");
+});

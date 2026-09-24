@@ -15,7 +15,7 @@ import { modelRejection, modelRejectionLine } from "../lib/openclaw-errors.mjs";
 import { COORDINATOR_INSTRUCTIONS } from "../lib/coordinator-instructions.mjs";
 import { runQuery, formatCitations, OPS as EVIDENCE_OPS, outlineFile, findReferences } from "../lib/repo-query.mjs";
 import { loadConfig, ConfigError } from "../lib/config.mjs";
-import { resolveSandboxImage, detectPrimaryLanguage, EXEC_PATH_PREPEND, linkNodePackages } from "../lib/sandbox-images.mjs";
+import { resolveSandboxImage, detectPrimaryLanguage, EXEC_PATH_PREPEND, linkNodePackages, nodeModulesState, repairHostInstalls } from "../lib/sandbox-images.mjs";
 import { DEFAULT_AGENT_IMAGE } from "../lib/verify.mjs";
 import { resolvePool, pickProvider, poolContextPerNom, entryContextPerNom } from "../lib/dispatch-config.mjs";
 import { openclawProviderId } from "../lib/dispatch-schema.mjs";
@@ -26,7 +26,7 @@ import { checkAndRecordHealth, recentModelRefusal } from "../lib/health.mjs";
 import { detectTestSabotage, addedLinesOf, loadDependencyNames } from "../lib/sabotage.mjs";
 import { writeLease, removeLease, liveLeases, liveSlots, acquireSlot } from "../lib/slots.mjs";
 import { createRun, loadRun, runTotals, runAdmissionProblems, recordRunJob, finishRun, resolveRunLimits, describeLoweredLimits, detectUsageLimit } from "../lib/runs.mjs";
-import { loadAgents, agentsConfigPath, agentsAsDispatchConfig, agentsAsSubscriptionConfig, agentDispatchFields, resolveAgentModel, agentProviderId, describeAgent } from "../lib/agents.mjs";
+import { loadAgents, agentsConfigPath, agentsAsDispatchConfig, agentsAsSubscriptionConfig, agentDispatchFields, resolveAgentModel, agentProviderId, describeAgent, hostToolsImplementProblem } from "../lib/agents.mjs";
 import { resolveSubscriptionWorker, findProviderConflicts, describeProviderConflict } from "../lib/subscription-config.mjs";
 import { queryModelCatalog, queryModelCatalogAsync } from "../lib/model-catalog.mjs";
 
@@ -2414,7 +2414,10 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
     await run("git", ["worktree", "add", "-b", branch, worktree, base.sha], { cwd: projectDir });
     const cwd = worktree;
     // Each npm package below the root reaches its install in the sandbox image.
-    try { linkNodePackages(worktree, loadConfig(projectDir)?.config ?? null); } catch { /* verification reports what's missing */ }
+    const nodeConfig = (() => { try { return loadConfig(projectDir)?.config ?? null; } catch { return null; } })();
+    try { linkNodePackages(worktree, nodeConfig); } catch { /* verification reports what's missing */ }
+    let nodeModulesBefore = {};
+    try { nodeModulesBefore = nodeModulesState(worktree, nodeConfig); } catch { /* no Node packages */ }
     const beforePointer = worktreePointerState(worktree), startedAt = new Date().toISOString();
 
     // The caller's timeout is split up front into a work phase and a
@@ -2548,6 +2551,12 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
     if (!afterPointer.exists || afterPointer.kind !== "file") throw new Error(`worktree Git pointer integrity failure after worker: ${JSON.stringify(afterPointer)}`);
     const preCommit = await collectGitRecord({ cwd, baseSha: base.sha, branch, baseRef: base.ref, jobId });
     const repositoryChanged = preCommit.repoStatusFiles.length > 0;
+
+    // A worker whose tools ran outside the sandbox can leave a host-built
+    // node_modules behind; verification must not run against it.
+    let hostInstalls = [];
+    try { hostInstalls = repairHostInstalls(cwd, nodeConfig, nodeModulesBefore); } catch { /* best-effort */ }
+    if (hostInstalls.length) fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} worker left a real ${hostInstalls.join(", ")} (packages installed outside the sandbox); removed and relinked to the dependency image before verification\n`);
 
     progress("verification");
     let independentVerification = normalizeVerification({ status: "not_run", basis: "not-applicable", reason: "no verification runner registered" }, verification ?? null);
@@ -2695,11 +2704,14 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
         });
       } catch { /* best-effort; never blocks a commit on the scan's OWN failure -- the absence of a signal is not evidence of safety, but a hard block on a scanner crash would be a self-inflicted denial of service */ }
     }
-    const finalOutcome = possibleSecrets
-      ? { ...afterMislabeledTests, reviewRequired: true, commitAllowed: false,
-          commitBlockedReason: `possible secret detected: ${possibleSecrets.reason}`,
-          reasons: [...afterMislabeledTests.reasons, `POSSIBLE SECRET DETECTED: ${possibleSecrets.reason}`] }
+    const afterHostInstalls = hostInstalls.length
+      ? { ...afterMislabeledTests, reviewRequired: true, reasons: [...afterMislabeledTests.reasons, `TOOLS OUTSIDE THE SANDBOX: the worker left a real ${hostInstalls.join(", ")}, so packages were installed where the sandbox (no network) couldn't have: its tool calls ran on this machine. nomArmy removed them and verified against the sandbox's own dependencies.`] }
       : afterMislabeledTests;
+    const finalOutcome = possibleSecrets
+      ? { ...afterHostInstalls, reviewRequired: true, commitAllowed: false,
+          commitBlockedReason: `possible secret detected: ${possibleSecrets.reason}`,
+          reasons: [...afterHostInstalls.reasons, `POSSIBLE SECRET DETECTED: ${possibleSecrets.reason}`] }
+      : afterHostInstalls;
 
     progress("commit");
     const commit = await createCoordinatorCommit({ cwd, jobId, outcome: finalOutcome,
@@ -3470,6 +3482,15 @@ async function admit(jobs) {
         if (j.subscription_worker) resolveSubscriptionSelection(j.subscription_worker, j.on_behalf_of, j.reasoning, { model: j.model });
       } catch (error) { problems.push(jobs.length > 1 ? `job ${i + 1}: ${error.message}` : error.message); }
     }
+  });
+  // An implement job on an agent whose own tools run on this machine (the
+  // Claude CLI) isn't bounded by the sandbox, so it's refused unless that
+  // agent says allow_host_tools (lib/agents.mjs). Scouts and reviews still run.
+  jobs.forEach((j, i) => {
+    if (!j.agentName || (j.mode ?? "implement") !== "implement") return;
+    let problem = null;
+    try { problem = hostToolsImplementProblem(j.agentName, agentsConfig().agents[j.agentName]); } catch { return; }
+    if (problem) problems.push(`${jobs.length > 1 ? `job ${i + 1}: ` : ""}${problem}`);
   });
   // A model its vendor refused on a job today, with nothing working on it
   // since, isn't sent another job (lib/health.mjs recentModelRefusal).

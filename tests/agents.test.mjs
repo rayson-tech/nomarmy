@@ -20,6 +20,8 @@ import {
   readAgentsFile,
   validateAgents,
   writeAgentsFile,
+  agentRunsToolsOnHost,
+  hostToolsImplementProblem,
 } from "../lib/agents.mjs";
 
 const dirs = [];
@@ -179,4 +181,19 @@ test("resolveAgentModel: the local agent's model comes from `nomarmy model`, so 
 test("describeAgent: an agent with no default model says the model is picked per role", () => {
   assert.equal(describeAgent(ACCOUNTS.codex), "subscription openai (o), model per role");
   assert.equal(describeAgent({ kind: "api", provider: "xai", auth_env: "K" }), "api xai (model per role)");
+});
+
+
+test("agentRunsToolsOnHost / hostToolsImplementProblem: only the Claude CLI subscription runs its tools on this machine, and implement jobs on it need allow_host_tools", () => {
+  const claude = { kind: "subscription", provider: "claude-cli", owner: "you@example.com" };
+  assert.equal(agentRunsToolsOnHost(claude), true);
+  for (const sandboxed of [{ kind: "subscription", provider: "openai", owner: "x" }, { kind: "subscription", provider: "meta", owner: "x" }, { kind: "api", provider: "anthropic", auth_env: "K" }, { kind: "local", slot: "coder" }]) {
+    assert.equal(agentRunsToolsOnHost(sandboxed), false, JSON.stringify(sandboxed));
+    assert.equal(hostToolsImplementProblem("a", sandboxed), null);
+  }
+  assert.match(hostToolsImplementProblem("claude", claude), /runs its own tools on this machine, outside nomArmy's sandbox.*allow_host_tools: true/s);
+  assert.equal(hostToolsImplementProblem("claude", { ...claude, allow_host_tools: true }), null);
+  assert.match(describeAgent(claude), /tools run on this machine$/);
+  assert.match(describeAgent({ ...claude, allow_host_tools: true }), /tools run on this machine \(allowed\)$/);
+  assert.equal(validateAgents({ agents: { claude: { ...claude, allow_host_tools: true } } }).ok ?? true, true);
 });
