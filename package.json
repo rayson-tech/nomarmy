@@ -39,6 +39,7 @@
     "mcp",
     "config",
     "playbooks",
+    "notifier",
     "scripts",
     "policies",
     "docker",

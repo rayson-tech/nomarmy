@@ -1599,6 +1599,8 @@ async function cmdConnect() {
       results.push({ target, connected: true, ...result });
       if (!json) console.log(c.green(`✓ Registered nomarmy-local-worker with ${target}.`));
       if (!json && result?.commands?.installed?.length) console.log(c.green(`✓ Playbooks: ${result.commands.installed.join(", ")}`) + c.dim(` in ${result.commands.dir} (restart ${target} to pick up a new one)`));
+      if (!json && result?.notifier?.status === "built") console.log(c.green("✓ Notifications: nomArmy.app, with nomArmy's icon") + c.dim(" (macOS asks once whether to allow it)"));
+      if (!json && result?.notifier?.status === "failed") console.log(c.yellow(`⚠ Couldn't build nomArmy.app (${result.notifier.reason}); notifications still work, with Script Editor's icon. Xcode's command-line tools provide swiftc: xcode-select --install`));
       if (!json && result?.statusLine === "installed") console.log(c.green("✓ Claude Code status line: nomArmy's") + c.dim(" (shows running jobs and the active run; restart Claude Code to see it)"));
       if (!json && result?.statusLine === "kept-yours") console.log(c.dim("Kept your own Claude Code status line. To add nomArmy's to it, have your command also run `nomarmy statusline`."));
       if (!json && result?.commands?.skipped?.length) console.log(c.yellow(`⚠ Left your own ${result.commands.skipped.join(", ")} in ${result.commands.dir} alone (not nomArmy's); nomArmy's version is in playbooks/.`));

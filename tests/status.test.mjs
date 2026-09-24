@@ -9,7 +9,8 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
-import { appleScriptString, notificationCommand, notify } from "../lib/notify.mjs";
+import { appleScriptString, notificationCommand, notify, spoolNotification } from "../lib/notify.mjs";
+import { buildNotifierApp, notifierPaths, NOTIFIER_BUNDLE_ID } from "../lib/notifier-app.mjs";
 import { statusLineText } from "../lib/statusline.mjs";
 import { installClaudeStatusLine } from "../lib/connect.mjs";
 import { writeLease } from "../lib/slots.mjs";
@@ -31,9 +32,45 @@ test("notificationCommand: osascript on macOS, notify-send on Linux, nothing els
 
 test("notify: fire-and-forget, and a spawn failure never throws", () => {
   const calls = [];
-  assert.equal(notify("t", "m", { platform: "darwin", env: {}, run: (c, a) => { calls.push(c); return { on() {}, unref() {} }; } }), true);
+  const noApp = tmp();
+  assert.equal(notify("t", "m", { platform: "darwin", env: {}, root: noApp, run: (c, a) => { calls.push(c); return { on() {}, unref() {} }; } }), true);
   assert.deepEqual(calls, ["osascript"]);
-  assert.equal(notify("t", "m", { platform: "darwin", env: {}, run: () => { throw new Error("no osascript"); } }), false);
+  assert.equal(notify("t", "m", { platform: "darwin", env: {}, root: noApp, run: () => { throw new Error("no osascript"); } }), false);
+});
+
+test("notify: with nomArmy.app built, the notification is spooled for it and the app opened in the background", () => {
+  const root = tmp();
+  const p = notifierPaths(root);
+  fs.mkdirSync(path.dirname(p.binary), { recursive: true }); fs.writeFileSync(p.binary, "");
+  const calls = [];
+  assert.equal(notify("nomArmy: scout done", "line one\nline two", { platform: "darwin", env: {}, root, run: (c, a) => { calls.push([c, a]); return { on() {}, unref() {} }; } }), true);
+  assert.deepEqual(calls, [["open", ["-g", p.app, "--args", p.spool]]]);
+  const files = fs.readdirSync(p.spool);
+  assert.equal(files.length, 1);
+  assert.match(files[0], /\.txt$/);
+  assert.equal(fs.readFileSync(path.join(p.spool, files[0]), "utf8"), "nomArmy: scout done\nline one line two\n", "one title line, one message line");
+  for (let i = 0; i < 60; i++) spoolNotification(p.spool, "t", "m");
+  assert.ok(fs.readdirSync(p.spool).length <= 52, "a notifier that never drains can't grow the folder without bound");
+});
+
+test("buildNotifierApp: builds once with the fixed bundle id, then stays current; skipped off macOS or with notifications off", () => {
+  const root = tmp();
+  const ran = [];
+  const run = (cmd, args) => {
+    ran.push(cmd);
+    if (cmd === "swiftc") fs.writeFileSync(args[args.indexOf("-o") + 1], "bin");
+    if (cmd === "iconutil") fs.writeFileSync(args[args.indexOf("-o") + 1], "icns");
+    return Buffer.from("");
+  };
+  const nomarmyRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+  assert.equal(buildNotifierApp({ nomarmyRoot, root, platform: "darwin", env: {}, run }).status, "built");
+  const plist = fs.readFileSync(path.join(notifierPaths(root).app, "Contents", "Info.plist"), "utf8");
+  assert.match(plist, new RegExp(`<string>${NOTIFIER_BUNDLE_ID.replace(/\./g, "\\.")}</string>`));
+  assert.ok(ran.includes("codesign"));
+  assert.equal(buildNotifierApp({ nomarmyRoot, root, platform: "darwin", env: {}, run }).status, "current");
+  assert.equal(buildNotifierApp({ nomarmyRoot, root, platform: "linux", env: {}, run }).status, "skipped");
+  assert.equal(buildNotifierApp({ nomarmyRoot, root, platform: "darwin", env: { NOMARMY_NOTIFY: "0" }, run }).status, "skipped");
+  assert.equal(buildNotifierApp({ nomarmyRoot, root: tmp(), platform: "darwin", env: {}, run: () => { throw Object.assign(new Error("x"), { stderr: "swiftc: command not found" }); } }).status, "failed");
 });
 
 test("statusLineText: the session, what's running machine-wide, and this repo's open run", () => {
