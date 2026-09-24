@@ -38,7 +38,7 @@ test("notify: fire-and-forget, and a spawn failure never throws", () => {
 
 test("statusLineText: the session, what's running machine-wide, and this repo's open run", () => {
   const root = tmp();
-  writeLease(path.join(root, "leases"), "sr-dev-x", { lane: "remote", agent: "codex", model: "gpt-6-astra", role: "sr-dev", runId: "run-r-1" });
+  writeLease(path.join(root, "leases"), "sr-dev-x", { lane: "remote", agent: "codex", model: "gpt-6-astra", role: "sr-dev", runId: "run-r-1", repo: "/r/senti" });
   fs.mkdirSync(path.join(root, "jobs", "sr-dev-x"), { recursive: true });
   const now = Date.parse("2026-09-24T14:20:00Z");
   fs.writeFileSync(path.join(root, "jobs", "sr-dev-x", "status.json"), JSON.stringify({ startedAt: "2026-09-24T14:11:00Z", phase: "worker", filesChangedLive: 10 }));
@@ -57,6 +57,7 @@ test("installClaudeStatusLine: installs when none is set, refreshes its own, nev
   assert.equal(installClaudeStatusLine({ installDir: "/opt/nomarmy", settingsPath }), "installed");
   const s = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
   assert.equal(s.statusLine.command, 'node "/opt/nomarmy/lib/statusline.mjs"');
+  assert.equal(s.statusLine.refreshInterval, 5, "re-runs while the session is idle");
   assert.deepEqual(s.permissions, { allow: ["Bash(ls)"] }, "every other setting is kept");
   assert.equal(installClaudeStatusLine({ installDir: "/opt/nomarmy", settingsPath }), "unchanged");
   assert.equal(installClaudeStatusLine({ installDir: "/new/place", settingsPath }), "updated");
@@ -82,7 +83,7 @@ test("statusLineText: stays short -- suffixes dropped, models only for one job, 
   const root = tmp();
   const now = Date.parse("2026-09-24T14:32:00Z");
   for (const [id, agent] of [["scout-20260924-143127-49f447", "claude"], ["sr-dev-action-write-prune", "codex"], ["jr-dev-pending-joins", "codex"], ["security-review", "grok"]]) {
-    writeLease(path.join(root, "leases"), id, { lane: "remote", agent, model: "m" });
+    writeLease(path.join(root, "leases"), id, { lane: "remote", agent, model: "m", repo: "/r/rayson-senti" });
     fs.mkdirSync(path.join(root, "jobs", id), { recursive: true });
     fs.writeFileSync(path.join(root, "jobs", id, "status.json"), JSON.stringify({ startedAt: "2026-09-24T14:31:40Z", workerId: id.replace(/-\d{8}-\d{6}-[0-9a-f]+$/, "") }));
   }
@@ -93,4 +94,24 @@ test("statusLineText: stays short -- suffixes dropped, models only for one job, 
   assert.match(line, /│ run 1\/14 \$2\.16$/, "the run summary survives");
   assert.match(line, /🍪 4: .*\+\d/, "jobs that don't fit collapse to +N");
   assert.doesNotMatch(line, /\/m\b/, "no models when several jobs run");
+});
+
+test("statusLineText: this repo's jobs in detail, other repos' only as a count", () => {
+  const root = tmp();
+  writeLease(path.join(root, "leases"), "senti-job", { lane: "remote", agent: "codex", role: "sr-dev", repo: "/r/rayson-senti" });
+  writeLease(path.join(root, "leases"), "other-job", { lane: "local", repo: "/r/stable-dry" });
+  writeLease(path.join(root, "leases"), "old-lease", { lane: "local" });
+  const nomarmy = statusLineText({ session: { workspace: { current_dir: "/r/nomarmy" } }, stateRoot: root });
+  assert.equal(nomarmy, "nomarmy │ 🍪 idle · 3 in other repos");
+  const senti = statusLineText({ session: { workspace: { current_dir: "/r/rayson-senti/lambda" } }, stateRoot: root });
+  assert.match(senti, /🍪 sr-dev codex \S+ · 2 in other repos$/, "a session in a subdirectory still counts as the repo");
+});
+
+test("statusLineText: a lease without a repo is attributed from its worktree's .git file; project_dir wins over current_dir", () => {
+  const root = tmp();
+  writeLease(path.join(root, "leases"), "old-job", { lane: "remote", agent: "codex" });
+  fs.mkdirSync(path.join(root, "jobs", "old-job", "worktree"), { recursive: true });
+  fs.writeFileSync(path.join(root, "jobs", "old-job", "worktree", ".git"), "gitdir: /r/rayson-senti/.git/worktrees/worktree8\n");
+  const line = statusLineText({ session: { workspace: { project_dir: "/r/rayson-senti", current_dir: "/r/rayson-senti/lambda/sub" } }, stateRoot: root });
+  assert.match(line, /^rayson-senti │ 🍪 old-job codex /);
 });

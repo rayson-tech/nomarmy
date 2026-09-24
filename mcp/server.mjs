@@ -3301,7 +3301,8 @@ export function track(jobId, meta, promise) {
   const entry = { ...meta, jobId, startedAt: new Date().toISOString(), settled: false, result: null, error: null, promise: null };
   // A machine-wide lease for as long as the job runs, so every session's
   // admission counts it (runningCount); released however the job ends.
-  if (meta.lane) writeLease(leasesRoot, jobId, { lane: meta.lane, agent: meta.agent ?? null, runId: meta.runId ?? null, role: meta.role ?? null, model: meta.model ?? null });
+  // `repo` lets each session's status line show its own repo's jobs.
+  if (meta.lane) writeLease(leasesRoot, jobId, { lane: meta.lane, agent: meta.agent ?? null, runId: meta.runId ?? null, role: meta.role ?? null, model: meta.model ?? null, repo: projectDir });
   const release = () => removeLease(leasesRoot, jobId);
   entry.promise = promise.then(
     r => { entry.settled = true; entry.result = r; release(); notifyJobFinished(entry, r, null); return r; },
