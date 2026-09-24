@@ -340,6 +340,20 @@ test("providers add --json twice accumulates entries in the same pool, then list
   }
 });
 
+test("providers add --json writes a generic openclaw entry with its provider id and plugin", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { exitCode, stdout } = runProvidersCLI(root, ["add", "--json", "--pool", "cheap", "--provider", "openclaw", "--openclaw-provider", "deepseek",
+      "--plugin", "clawhub:@openclaw/deepseek-provider", "--id", "ds", "--model", "deepseek-chat", "--auth-env", "NOMARMY_DEEPSEEK_API_KEY"]);
+    assert.equal(exitCode, 0, stdout);
+    const listed = JSON.parse(runProvidersCLI(root, ["list", "--json"]).stdout);
+    assert.equal(listed.pools.cheap[0].openclaw_provider, "deepseek");
+    assert.equal(listed.pools.cheap[0].plugin, "clawhub:@openclaw/deepseek-provider");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("providers add --json refuses a duplicate id across pools, and does not corrupt the existing file", () => {
   const root = scratchNomarmyRoot();
   try {
@@ -558,6 +572,138 @@ test("providers update --json rejects an invalid resulting entry (e.g. negative 
   }
 });
 
+// --------------------------------------------------------------------------
+// nomarmy subscriptions <list|add|remove>: individually-owned, never-pooled
+// workers backed by one person's own already-authenticated subscription.
+// Reuses the same scratchNomarmyRoot() isolation providers' own tests use --
+// it already copies lib/ wholesale, which includes lib/subscription-*.mjs.
+// --------------------------------------------------------------------------
+function runSubscriptionsCLI(root, args) {
+  try {
+    const result = execFileSync(process.execPath, [path.join(root, "bin", "nomarmy.mjs"), "subscriptions", ...args], {
+      cwd: root, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], env: process.env,
+    });
+    return { exitCode: 0, stdout: result, stderr: "" };
+  } catch (error) {
+    return { exitCode: error.status ?? 1, stdout: error.stdout ?? "", stderr: error.stderr ?? "" };
+  }
+}
+
+test("subscriptions list --json with no config/subscriptions.yml reports found:false", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { exitCode, stdout } = runSubscriptionsCLI(root, ["list", "--json"]);
+    assert.equal(exitCode, 0, stdout);
+    const output = JSON.parse(stdout);
+    assert.equal(output.found, false);
+    assert.deepEqual(output.workers, {});
+    // /var is a symlink to /private/var on macOS -- os.tmpdir() and the
+    // CLI's own path resolution can spell the same real location two
+    // different ways, so compare the meaningful suffix, not the raw string.
+    assert.match(output.path, /config[/\\]subscriptions\.yml$/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("subscriptions add --json writes a valid config/subscriptions.yml, defaulting max_concurrent to 1 (not providers' 2)", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { exitCode, stdout } = runSubscriptionsCLI(root, ["add", "--json", "--name", "jason-claude", "--provider", "claude-cli", "--model", "claude-sonnet-5", "--owner", "jason.pugh@rayson-tech.com"]);
+    assert.equal(exitCode, 0, stdout);
+    const written = JSON.parse(stdout);
+    assert.equal(written.entry.owner, "jason.pugh@rayson-tech.com");
+    assert.equal(written.entry.max_concurrent, 1);
+    assert.ok(fs.existsSync(path.join(root, "config", "subscriptions.yml")));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("subscriptions add --json requires name/provider/model/owner -- refuses cleanly without them", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { exitCode, stdout } = runSubscriptionsCLI(root, ["add", "--json", "--name", "jason-claude", "--provider", "claude-cli"]);
+    assert.notEqual(exitCode, 0);
+    assert.match(stdout, /--model.*--owner|--owner.*--model|requires/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("subscriptions add --json --role writes a role, and two workers claiming the same role are refused without corrupting the file", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const first = runSubscriptionsCLI(root, ["add", "--json", "--name", "opus", "--provider", "claude-cli", "--model", "claude-opus-5", "--owner", "j@example.com", "--role", "architect"]);
+    assert.equal(first.exitCode, 0, first.stdout);
+    assert.equal(JSON.parse(first.stdout).entry.role, "architect");
+
+    const dupe = runSubscriptionsCLI(root, ["add", "--json", "--name", "gpt5", "--provider", "codex-cli", "--model", "gpt-5.6", "--owner", "j@example.com", "--role", "architect"]);
+    assert.notEqual(dupe.exitCode, 0);
+    const after = fs.readFileSync(path.join(root, "config", "subscriptions.yml"), "utf8");
+    assert.match(after, /opus:/);
+    assert.doesNotMatch(after, /gpt5:/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("subscriptions add --json twice accumulates workers, then list --json shows both", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    runSubscriptionsCLI(root, ["add", "--json", "--name", "jason-claude", "--provider", "claude-cli", "--model", "claude-sonnet-5", "--owner", "jason.pugh@rayson-tech.com"]);
+    runSubscriptionsCLI(root, ["add", "--json", "--name", "jason-muse", "--provider", "muse-code", "--model", "muse-spark-1.3", "--owner", "jason.pugh@rayson-tech.com"]);
+    const { exitCode, stdout } = runSubscriptionsCLI(root, ["list", "--json"]);
+    assert.equal(exitCode, 0, stdout);
+    const output = JSON.parse(stdout);
+    assert.equal(Object.keys(output.workers).length, 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("subscriptions add --json refuses \"__proto__\" as a worker name with a clear error, not a silently empty workers file", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { exitCode, stdout } = runSubscriptionsCLI(root, ["add", "--json", "--name", "__proto__", "--provider", "claude-cli", "--model", "x", "--owner", "y@example.com"]);
+    assert.notEqual(exitCode, 0);
+    assert.match(stdout, /reserved/);
+    assert.equal(fs.existsSync(path.join(root, "config", "subscriptions.yml")), false, "a refused write must not create a partial file");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("subscriptions remove --json removes one worker without disturbing the other", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    runSubscriptionsCLI(root, ["add", "--json", "--name", "jason-claude", "--provider", "claude-cli", "--model", "claude-sonnet-5", "--owner", "jason.pugh@rayson-tech.com"]);
+    runSubscriptionsCLI(root, ["add", "--json", "--name", "jason-muse", "--provider", "muse-code", "--model", "muse-spark-1.3", "--owner", "jason.pugh@rayson-tech.com"]);
+    const { exitCode, stdout } = runSubscriptionsCLI(root, ["remove", "jason-muse", "--json"]);
+    assert.equal(exitCode, 0, stdout);
+    assert.deepEqual(JSON.parse(stdout), { removed: true, name: "jason-muse" });
+    const after = fs.readFileSync(path.join(root, "config", "subscriptions.yml"), "utf8");
+    assert.match(after, /jason-claude:/);
+    assert.doesNotMatch(after, /jason-muse:/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("subscriptions remove --json on an unknown name refuses cleanly, naming what DOES exist", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    runSubscriptionsCLI(root, ["add", "--json", "--name", "jason-claude", "--provider", "claude-cli", "--model", "claude-sonnet-5", "--owner", "jason.pugh@rayson-tech.com"]);
+    const { exitCode, stdout } = runSubscriptionsCLI(root, ["remove", "typo-name", "--json"]);
+    assert.notEqual(exitCode, 0);
+    const error = JSON.parse(stdout).error;
+    assert.match(error, /Unknown worker "typo-name"/);
+    assert.match(error, /jason-claude/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("scan --json against empty temp directory returns evidence with zero counts", () => {
   const tmpDir = mkdtempSync(path.join(tmpdir(), "nomarmy-scan-empty-test-"));
   try {
@@ -571,5 +717,41 @@ test("scan --json against empty temp directory returns evidence with zero counts
     }
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("subscriptions update --json changes model/role/thinking but never owner or provider", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    runSubscriptionsCLI(root, ["add", "--json", "--name", "you-codex", "--provider", "openai", "--model", "gpt-6-astra", "--owner", "you@example.com", "--role", "ui-ux"]);
+    const { exitCode, stdout } = runSubscriptionsCLI(root, ["update", "you-codex", "--json", "--model", "gpt-6-sol", "--no-role", "--thinking", "high", "--owner", "someone-else@example.com"]);
+    assert.equal(exitCode, 0, stdout);
+    const { entry, changed } = JSON.parse(stdout);
+    assert.equal(entry.model, "gpt-6-sol");
+    assert.equal(entry.role, undefined);
+    assert.equal(entry.thinking, "high");
+    assert.equal(entry.owner, "you@example.com", "--owner is not an update flag -- a different owner is a new setup");
+    assert.equal(entry.provider, "openai");
+    assert.deepEqual(changed.sort(), ["model", "role", "thinking"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("subscriptions update --json refuses an unknown worker, an empty update, and a role another worker holds", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    runSubscriptionsCLI(root, ["add", "--json", "--name", "a", "--provider", "claude-cli", "--model", "claude-opus-5", "--owner", "o", "--role", "architect"]);
+    runSubscriptionsCLI(root, ["add", "--json", "--name", "b", "--provider", "openai", "--model", "gpt-6-astra", "--owner", "o"]);
+    const unknown = runSubscriptionsCLI(root, ["update", "nope", "--json", "--model", "x"]);
+    assert.notEqual(unknown.exitCode, 0);
+    assert.match(JSON.parse(unknown.stdout).error, /Unknown worker "nope"/);
+    assert.notEqual(runSubscriptionsCLI(root, ["update", "b", "--json"]).exitCode, 0);
+    const clash = runSubscriptionsCLI(root, ["update", "b", "--json", "--role", "architect"]);
+    assert.notEqual(clash.exitCode, 0);
+    const after = JSON.parse(runSubscriptionsCLI(root, ["list", "--json"]).stdout);
+    assert.equal(after.workers.b.role, undefined, "a refused update leaves the file untouched");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

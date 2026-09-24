@@ -56,6 +56,9 @@ import {
   stripRuntimeJunk,
   resolveWorkerSandboxOverride,
   resolvePoolSelection,
+  resolveSubscriptionSelection,
+  resolveSubscriptionRoleSelection,
+  subscriptionJobFieldProblems,
   currentMaxPoolWorkers,
   splitJobsByLane,
   runningCount,
@@ -66,6 +69,7 @@ import {
   resolveVerifyRegression,
   detectScopedTestSelectionRisk,
   parseUnsupportedThinkingError,
+  parseOpenClawInternalTimeout,
   resolveReasoningApplied,
   isBranchContentIntegrated,
   isProvablyEmptyJob,
@@ -1511,6 +1515,13 @@ test("run: with no onTick, hitting the hard deadline still labels the stop reaso
   );
 });
 
+test("run: a nonzero exit attaches the real captured stdout/stderr as structured fields, not just baked into .message", async () => {
+  await assert.rejects(
+    run(process.execPath, ["-e", "process.stdout.write('real output'); process.stderr.write('real stderr'); process.exit(2)"]),
+    error => { assert.equal(error.stdout, "real output"); assert.equal(error.stderr, "real stderr"); return true; }
+  );
+});
+
 // ---------------------------------------------------------------------------
 // makeIdleDiffTick(): the pure decision behind the idle-diff circuit breaker,
 // exercised against a real (temporary, disposable) git worktree.
@@ -2281,6 +2292,16 @@ test("resolvePoolSelection: a hosted entry composes <provider>/<model> and appli
   assert.equal(selection.thinking, "high");
 });
 
+test("resolvePoolSelection: a generic openclaw entry composes <openclaw_provider>/<model>", () => {
+  const selection = resolvePoolSelection("cheap", "medium", {
+    getDispatchConfig: () => fakeDispatchConfig({
+      cheap: [{ id: "ds", provider: "openclaw", openclaw_provider: "deepseek", model: "deepseek-chat", weight: 1, auth_env: "X" }],
+    }),
+    pickProviderFn: (pool) => pool[0],
+  });
+  assert.equal(selection.model, "deepseek/deepseek-chat");
+});
+
 test("resolvePoolSelection: thinking:false on a hosted entry forces thinking off regardless of the requested reasoning", () => {
   const selection = resolvePoolSelection("capable", "high", {
     getDispatchConfig: () => fakeDispatchConfig({
@@ -2316,6 +2337,182 @@ test("resolvePoolSelection: passes the live poolEntryRunningCounts snapshot thro
     pickProviderFn: (pool, opts) => { assert.deepEqual(opts.runningById, {}); return pool[0]; },
   });
   assert.equal(selection.entry.id, "local");
+});
+
+// ---------------------------------------------------------------------------
+// resolveSubscriptionSelection / subscriptionJobFieldProblems: the isolated,
+// named, attested worker mode -- never a weighted pick, always one exact
+// person's own already-authenticated subscription. See
+// resolveSubscriptionSelection's own doc comment for why the owner-match
+// check happens here, first.
+// ---------------------------------------------------------------------------
+function fakeSubscriptionConfig(workers) {
+  return { found: true, config: { workers } };
+}
+
+test("resolveSubscriptionSelection: a matching on_behalf_of resolves cleanly, shaped exactly like resolvePoolSelection's return", () => {
+  const selection = resolveSubscriptionSelection("jason-claude", "jason.pugh@rayson-tech.com", "medium", {
+    getSubscriptionConfig: () => fakeSubscriptionConfig({
+      "jason-claude": { provider: "claude-cli", model: "claude-sonnet-5", owner: "jason.pugh@rayson-tech.com", thinking: true },
+    }),
+  });
+  assert.equal(selection.model, "claude-cli/claude-sonnet-5");
+  assert.equal(selection.thinking, "medium");
+  assert.equal(selection.entry.id, "jason-claude");
+});
+
+test("resolveSubscriptionSelection: thinking:false forces off regardless of requested reasoning, same as a hosted pool entry", () => {
+  const selection = resolveSubscriptionSelection("w", "owner@example.com", "high", {
+    getSubscriptionConfig: () => fakeSubscriptionConfig({ w: { provider: "claude-cli", model: "x", owner: "owner@example.com", thinking: false } }),
+  });
+  assert.equal(selection.thinking, "off");
+});
+
+test("resolveSubscriptionSelection: a specific thinking level is this entry's own floor, same as a hosted pool entry", () => {
+  const selection = resolveSubscriptionSelection("w", "owner@example.com", "low", {
+    getSubscriptionConfig: () => fakeSubscriptionConfig({ w: { provider: "claude-cli", model: "x", owner: "owner@example.com", thinking: "high" } }),
+  });
+  assert.equal(selection.thinking, "high");
+});
+
+test("resolveSubscriptionSelection: missing on_behalf_of refuses -- never runs anonymously under someone's credential", () => {
+  assert.throws(
+    () => resolveSubscriptionSelection("jason-claude", null, "medium", {
+      getSubscriptionConfig: () => fakeSubscriptionConfig({ "jason-claude": { provider: "claude-cli", model: "x", owner: "jason.pugh@rayson-tech.com" } }),
+    }),
+    /requires on_behalf_of/,
+  );
+});
+
+test("resolveSubscriptionSelection: mismatched on_behalf_of refuses and names the real owner -- never silently substitutes", () => {
+  assert.throws(
+    () => resolveSubscriptionSelection("jason-claude", "someone.else@rayson-tech.com", "medium", {
+      getSubscriptionConfig: () => fakeSubscriptionConfig({ "jason-claude": { provider: "claude-cli", model: "x", owner: "jason.pugh@rayson-tech.com" } }),
+    }),
+    (error) => {
+      assert.match(error.message, /belongs to "jason\.pugh@rayson-tech\.com"/);
+      assert.match(error.message, /someone\.else@rayson-tech\.com/);
+      return true;
+    },
+  );
+});
+
+test("resolveSubscriptionSelection: an unknown worker name throws, never silently falling back to profile/pool/local", () => {
+  assert.throws(
+    () => resolveSubscriptionSelection("typo", "j@example.com", "medium", { getSubscriptionConfig: () => fakeSubscriptionConfig({}) }),
+    /unknown subscription_worker "typo"/,
+  );
+});
+
+test("resolveSubscriptionSelection: refuses when its provider is also a pool entry's provider -- never runs on an ambiguous credential", () => {
+  assert.throws(
+    () => resolveSubscriptionSelection("you-grok", "you@example.com", "medium", {
+      getSubscriptionConfig: () => fakeSubscriptionConfig({ "you-grok": { provider: "xai", model: "grok-4.6", owner: "you@example.com" } }),
+      getDispatchConfig: () => fakeDispatchConfig({ capable: [{ id: "grok", provider: "xai", model: "grok-4.6", weight: 1, auth_env: "X" }] }),
+    }),
+    /used by both pool entry capable\/grok/,
+  );
+});
+
+test("resolvePoolSelection: refuses the same conflict from the pool side -- a pool job never silently spends a subscription", () => {
+  assert.throws(
+    () => resolvePoolSelection("capable", "medium", {
+      getDispatchConfig: () => fakeDispatchConfig({ capable: [{ id: "grok", provider: "xai", model: "grok-4.6", weight: 1, auth_env: "X" }] }),
+      getSubscriptionConfig: () => fakeSubscriptionConfig({ "you-grok": { provider: "xai", model: "grok-4.6", owner: "you@example.com" } }),
+      pickProviderFn: (pool) => pool[0],
+    }),
+    /used by both pool entry capable\/grok/,
+  );
+});
+
+test("resolvePoolSelection: no subscriptions file means no conflict check at all -- unchanged behavior", () => {
+  const selection = resolvePoolSelection("capable", "medium", {
+    getDispatchConfig: () => fakeDispatchConfig({ capable: [{ id: "grok", provider: "xai", model: "grok-4.6", weight: 1, auth_env: "X" }] }),
+    getSubscriptionConfig: () => ({ found: false, config: null }),
+    pickProviderFn: (pool) => pool[0],
+  });
+  assert.equal(selection.model, "xai/grok-4.6");
+});
+
+test("subscriptionJobFieldProblems: clean when neither field is set, or both are set together", () => {
+  assert.deepEqual(subscriptionJobFieldProblems({}), []);
+  assert.deepEqual(subscriptionJobFieldProblems({ subscription_worker: "w", on_behalf_of: "o@example.com" }), []);
+});
+
+test("subscriptionJobFieldProblems: subscription_worker without on_behalf_of is a problem", () => {
+  const problems = subscriptionJobFieldProblems({ subscription_worker: "w" });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /requires on_behalf_of/);
+});
+
+test("subscriptionJobFieldProblems: on_behalf_of without subscription_worker is a problem -- never silently ignored", () => {
+  const problems = subscriptionJobFieldProblems({ on_behalf_of: "o@example.com" });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /has no effect without subscription_worker/);
+});
+
+test("subscriptionJobFieldProblems: pool and subscription_worker together is a problem -- mutually exclusive selectors", () => {
+  const problems = subscriptionJobFieldProblems({ pool: "cheap", subscription_worker: "w", on_behalf_of: "o@example.com" });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /mutually exclusive/);
+});
+
+// ---------------------------------------------------------------------------
+// resolveSubscriptionRoleSelection / subscription_role: a DETERMINISTIC
+// alternative to naming a worker directly ("architect" always the same
+// entry) -- never a weighted pick across several. See
+// lib/subscription-schema.mjs's roleSchema comment for why that distinction
+// is the whole point.
+// ---------------------------------------------------------------------------
+
+test("resolveSubscriptionRoleSelection: resolves the one entry declaring a role, same owner-match attestation as resolveSubscriptionSelection", () => {
+  const selection = resolveSubscriptionRoleSelection("architect", "jason.pugh@rayson-tech.com", "medium", {
+    getSubscriptionConfig: () => fakeSubscriptionConfig({
+      opus: { provider: "claude-cli", model: "claude-opus-5", owner: "jason.pugh@rayson-tech.com", role: "architect", thinking: true },
+    }),
+  });
+  assert.equal(selection.model, "claude-cli/claude-opus-5");
+  assert.equal(selection.entry.id, "opus");
+});
+
+test("resolveSubscriptionRoleSelection: a mismatched on_behalf_of refuses, same as resolveSubscriptionSelection -- the attestation check is not bypassed by going through a role", () => {
+  assert.throws(
+    () => resolveSubscriptionRoleSelection("architect", "someone.else@rayson-tech.com", "medium", {
+      getSubscriptionConfig: () => fakeSubscriptionConfig({ opus: { provider: "claude-cli", model: "claude-opus-5", owner: "jason.pugh@rayson-tech.com", role: "architect" } }),
+    }),
+    /belongs to "jason\.pugh@rayson-tech\.com"/,
+  );
+});
+
+test("resolveSubscriptionRoleSelection: an unknown role throws, never silently falling back to a different role/worker", () => {
+  assert.throws(
+    () => resolveSubscriptionRoleSelection("typo-role", "j@example.com", "medium", {
+      getSubscriptionConfig: () => fakeSubscriptionConfig({ opus: { provider: "claude-cli", model: "x", owner: "j@example.com", role: "architect" } }),
+    }),
+    /unknown role "typo-role"/,
+  );
+});
+
+test("subscriptionJobFieldProblems: subscription_role without on_behalf_of is a problem, same as subscription_worker", () => {
+  const problems = subscriptionJobFieldProblems({ subscription_role: "architect" });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /subscription_role requires on_behalf_of/);
+});
+
+test("subscriptionJobFieldProblems: subscription_worker and subscription_role together is a problem -- pick one selector, never both", () => {
+  const problems = subscriptionJobFieldProblems({ subscription_worker: "w", subscription_role: "architect", on_behalf_of: "o@example.com" });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /mutually exclusive/);
+});
+
+test("subscriptionJobFieldProblems: pool and subscription_role together is a problem", () => {
+  const problems = subscriptionJobFieldProblems({ pool: "cheap", subscription_role: "architect", on_behalf_of: "o@example.com" });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /mutually exclusive/);
+});
+
+test("subscriptionJobFieldProblems: on_behalf_of with subscription_role set is clean -- the role path counts as a valid selector, not \"has no effect\"", () => {
+  assert.deepEqual(subscriptionJobFieldProblems({ subscription_role: "architect", on_behalf_of: "o@example.com" }), []);
 });
 
 test("currentMaxPoolWorkers: defaults to 4 with no override, matching the cloud-execution default elsewhere", () => {
@@ -2640,6 +2837,41 @@ test("parseUnsupportedThinkingError: an unrelated error returns null, never a fa
   assert.equal(parseUnsupportedThinkingError("openclaw exited 1\nSTDERR:\nsome other real failure\n"), null);
   assert.equal(parseUnsupportedThinkingError(""), null);
   assert.equal(parseUnsupportedThinkingError(undefined), null);
+});
+
+// ---------------------------------------------------------------------------
+// parseOpenClawInternalTimeout: the real incident this closes -- a scout run
+// on muse-glimmer-30b hit OpenClaw's own internal turn watchdog (300s) before
+// nomArmy's outer run() deadline (330s), printed a well-formed timeout
+// envelope to stdout, then exited nonzero anyway -- mislabeling a graceful,
+// resumable timeout as an opaque crash and silently skipping report recovery.
+// ---------------------------------------------------------------------------
+const REAL_OPENCLAW_TIMEOUT_STDOUT = JSON.stringify({
+  ok: false, status: "timeout", final: "",
+  payloads: [{ text: "Request timed out before a response was generated. Please try again, or increase `agents.defaults.timeoutSeconds` in your config.", mediaUrl: null, isError: true }],
+  usage: { input: 20934, output: 1917, cacheRead: 163208, cacheWrite: 0, total: 186059, cost: { total: 0 } },
+  costUsd: 0, model: "muse-glimmer-30b", provider: "llama-cpp",
+  error: { message: "Request timed out before a response was generated. Please try again, or increase `agents.defaults.timeoutSeconds` in your config.", kind: "timeout" },
+});
+
+test("parseOpenClawInternalTimeout: recognizes the real envelope captured from the live incident", () => {
+  assert.equal(parseOpenClawInternalTimeout(REAL_OPENCLAW_TIMEOUT_STDOUT), true);
+});
+
+test("parseOpenClawInternalTimeout: recognizes the shape via status alone, or error.kind alone", () => {
+  assert.equal(parseOpenClawInternalTimeout(JSON.stringify({ ok: false, status: "timeout" })), true);
+  assert.equal(parseOpenClawInternalTimeout(JSON.stringify({ ok: false, error: { kind: "timeout" } })), true);
+});
+
+test("parseOpenClawInternalTimeout: a real, unrelated crash is never mistaken for a timeout", () => {
+  assert.equal(parseOpenClawInternalTimeout(JSON.stringify({ ok: false, status: "error", error: { kind: "exception" } })), false);
+  assert.equal(parseOpenClawInternalTimeout(JSON.stringify({ ok: true, status: "done" })), false);
+});
+
+test("parseOpenClawInternalTimeout: unparseable or missing stdout never throws, just returns false", () => {
+  assert.equal(parseOpenClawInternalTimeout(""), false);
+  assert.equal(parseOpenClawInternalTimeout(undefined), false);
+  assert.equal(parseOpenClawInternalTimeout("not json at all"), false);
 });
 
 test("resolveReasoningApplied: prefers result.thinkingApplied (the real, pool-aware value) over the profile-only formula", () => {

@@ -41,6 +41,11 @@ llama.cpp/
 # something to ship or commit. config/providers.yml.example is the
 # tracked template.
 config/providers.yml
+# Same reasoning as config/providers.yml above: no raw credential (OpenClaw
+# owns that entirely), but real personal identity (owner) and one operator's
+# own worker names -- local-only. config/subscriptions.yml.example is the
+# tracked template.
+config/subscriptions.yml
 *.p12
 *.pfx
 id_rsa*

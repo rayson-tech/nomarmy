@@ -1,0 +1,71 @@
+# nomArmy subscription-backed individual workers -- OPTIONAL.
+#
+# The easy path is `nomarmy subscriptions setup` -- it installs the vendor
+# CLI if needed, runs its login, handles OpenClaw's plugin, lists the real
+# models to choose from, and proves the credential with a real test call
+# before writing this file for you. Copying this file by hand is the
+# lower-level route for a credential you've already set up yourself.
+# Absent entirely, nothing changes -- this feature is fully additive.
+#
+# A worker here is backed by ONE SPECIFIC PERSON'S OWN already-authenticated
+# subscription (a Claude Pro/Max/Team seat, or an OpenAI ChatGPT plan via
+# Codex) -- never a shared credential, never pooled/interchangeable capacity
+# the way config/providers.yml's weighted pools are. Dispatched with
+# `subscription_worker: "<name>"` (or `subscription_role: "<role>"`) plus a
+# REQUIRED `on_behalf_of` naming the exact person this job is for. nomArmy
+# refuses the job -- never substitutes a different worker -- if on_behalf_of
+# is missing or doesn't match this entry's own declared `owner`.
+#
+# nomArmy never touches a token for these. If you set one up by hand:
+#
+#   Claude (Pro, Max, or a Team-plan seat -- the Agent SDK credit this uses
+#   is per-user/per-seat and non-transferable across all of them):
+#     claude auth login                # OpenClaw reuses this session directly
+#     openclaw models list --refresh   # real model ids, e.g. claude-cli/claude-sonnet-5
+#
+#   OpenAI (ChatGPT plan, via Codex):
+#     nomarmy subscriptions setup codex
+#   which does: npm install -g @openai/codex && codex login, installs
+#   clawhub:@openclaw/codex (needs OpenClaw >= 2026.9.5), and runs
+#   `openclaw models auth login --provider codex`. That imports the login as
+#   an openai/oauth profile, so the worker's provider is "openai", not "codex".
+#
+#   Meta (Muse Code subscription):
+#     muse login
+#     nomarmy subscriptions setup meta
+#   Meta's plugin (@openclaw/meta-provider) only takes an API key, but Muse
+#   Code's own login mints a subscription-covered one into the macOS
+#   keychain; setup copies that key into OpenClaw over stdin. A key you
+#   create by hand on Meta's site bills pay-as-you-go instead.
+#
+# One OpenClaw provider id holds one credential. OpenAI ("openai"), Meta
+# ("meta") and xAI ("xai") use the same id for the subscription and the API key, so a
+# config/providers.yml pool entry on the same provider makes nomArmy refuse
+# to dispatch either side until one is removed.
+#
+# Every entry needs: provider (the OpenClaw provider id -- "claude-cli",
+# "openai" or "meta"), model (an id from `openclaw models list --refresh` for that
+# provider), and owner (exactly who this credential belongs to -- checked
+# against every dispatched job's on_behalf_of). Optional: role (unique
+# across entries; a fixed name a job can dispatch by instead of the worker
+# name), max_concurrent (default 1, not config/providers.yml's 2 -- a
+# personal session was never rate-provisioned for concurrent automated
+# jobs), thinking (default true; a specific level -- low/medium/high -- is
+# this entry's own fixed floor regardless of what a job requests; false
+# disables it), and context_window (only if OpenClaw's catalog doesn't know
+# the model's window yet).
+
+workers:
+  you-claude:
+    provider: claude-cli
+    model: claude-sonnet-5
+    owner: "you@example.com"
+    role: senior-dev
+    max_concurrent: 1
+    thinking: true
+
+  # you-codex:
+  #   provider: openai
+  #   model: gpt-6-astra
+  #   owner: "you@example.com"
+  #   role: ui-ux

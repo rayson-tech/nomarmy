@@ -151,6 +151,7 @@ nomarmy providers list
 |---|---|---|
 | `llama-cpp` | none (local server) | no |
 | `anthropic` / `openai` / `xai` / `deepinfra` | native OpenClaw onboarding | no |
+| `openclaw` | any other OpenClaw provider, named by `openclaw_provider` (e.g. `deepseek`); optional `plugin` is installed first when it isn't stock | no |
 | `bedrock` / `azure-openai` / `openai-compatible` | custom endpoint | yes |
 
 ```yaml
@@ -172,9 +173,46 @@ A pool entry never carries a raw credential, only `auth_env` (the name of an env
 
 Dispatch with `local_worker`'s `pool` field (`pool: "cheap"`); omitting it keeps today's `profile`-only behavior unchanged.
 
-**Honest gaps**: `worker_cost_usd` in job metrics is best-effort, not authoritative. `anthropic`/`openai`/`xai`/`deepinfra`'s native onboarding is built from documented `--help` output and isn't verified against a real credential for every one: `nomarmy providers add` says so and points at `openclaw models list` to confirm.
+**Honest gaps**: `worker_cost_usd` in job metrics is best-effort, not authoritative. `anthropic`/`openai`/`xai`/`deepinfra`/`openclaw`'s native onboarding is built from documented `--help` output and isn't verified against a real credential for every one: `nomarmy providers add` says so and points at `openclaw models list` to confirm.
 
 **Picking a tier**: `cheap` (local) for a bounded change against a written spec with a test. `capable` (hosted) when the design is settled but needs real comprehension the brief doesn't quote. No pool, frontier coordinator, when the answer isn't known yet or spans several files. `cheap` never leaves your machine; `capable` sends code to a third party: that's a decision about where source travels, separate from the trust boundary.
+
+## Subscription-backed individual workers
+
+Optional, and a genuinely different thing from a dispatch pool above: `config/subscriptions.yml` names a worker backed by **one specific person's own already-authenticated subscription** -- a Claude Pro/Max/Team seat, or an OpenAI ChatGPT plan via Codex -- never a shared credential, and never weighted-random capacity the way a pool entry is. A subscription worker is always addressed by name (or a fixed role), always requires an explicit `on_behalf_of` naming the exact person it's for, and nomArmy refuses the job outright -- never substitutes a different worker -- if that's missing or doesn't match.
+
+```bash
+nomarmy subscriptions setup claude   # or: codex
+```
+
+That one command does the whole chain, asking only when something actually needs doing: installs the vendor's own CLI if it's missing (`@openai/codex`; Claude Code has its own installer), runs that CLI's login, updates OpenClaw and installs its plugin when the vendor needs one, lists the real models to pick from, defaults the owner to the account you just logged in as, and makes a real one-token test call before it saves anything. Logins open a browser or print a device code, so it needs a real terminal. nomArmy starts each login; the vendor CLI and OpenClaw do the authenticating, and nomArmy never sees a token.
+
+```bash
+nomarmy subscriptions list
+nomarmy subscriptions add     # lower-level: write an entry for a credential you set up yourself
+```
+
+```yaml
+# config/subscriptions.yml
+workers:
+  you-claude:
+    provider: claude-cli
+    model: claude-sonnet-5
+    owner: "you@example.com"
+    role: senior-dev
+```
+
+Dispatch with `local_worker`'s `subscription_worker` field plus `on_behalf_of` (`subscription_worker: "you-claude", on_behalf_of: "you@example.com"`) -- mutually exclusive with `pool`.
+
+**Roles**: an entry can also declare a `role` (e.g. `role: "architect"`), letting a job dispatch with `subscription_role: "architect"` instead of naming the worker directly -- always the *same* entry for that role, never a pick among several (two entries claiming the same role is a config error, refused at load time). This is a fixed assignment, not a weighted one: "architecture always goes to Opus, UI work always goes to Codex" is one person choosing the right dedicated tool per kind of task -- the same choice they'd make by hand, automated for convenience -- not load-balanced capacity across interchangeable subscriptions.
+
+**Why this exists as a separate mechanism, not another pool provider type**: Anthropic's own terms distinguish "individual experimentation and automation" (sanctioned, including third-party apps authenticating through the Agent SDK -- per-user/per-seat and non-transferable across Pro, Max, Team, and Enterprise alike) from "teams running shared production automation" (should use the metered API instead). A pool's weighted-random selection is fundamentally an interchangeability engine; folding a personal subscription into it would put it one config change away from becoming exactly the pooled-team-capacity pattern that distinction exists to keep separate.
+
+**Vendor status**: Claude is live-verified end to end. OpenAI (ChatGPT plan via Codex) is wired: a real completion through `openai/gpt-6-astra` on the Codex-imported OAuth profile is confirmed, but a full nomArmy dispatch and OpenAI's own primary usage-policy text are both still unverified. Meta Muse Code is wired: its OpenClaw plugin only takes an API key, but Muse Code's own login mints a subscription-covered key into the macOS keychain, and `nomarmy subscriptions setup meta` copies that key into OpenClaw over stdin (Meta's docs say only that auto-connected key is flat-rate; hand-made keys bill pay-as-you-go). Not yet live-verified, and macOS only for now. DeepSeek has no subscription plan; add it as a pool entry with the generic `openclaw` type. xAI is out of scope until its terms are resolved.
+
+**One credential per provider id**: OpenAI, Meta and xAI use the same OpenClaw provider id for the subscription and the API key, so a pool entry and a subscription worker on the same provider would be ambiguous about which credential runs. nomArmy refuses to dispatch either side of that conflict, `subscriptions list` flags it, and `subscriptions setup` stops before any login. Only Claude (`claude-cli` vs `anthropic`) uses distinct ids and never collides. A ChatGPT plan runs as `openai/<model>` on the OAuth profile the Codex login imports, so it conflicts with an `openai` API-key pool entry.
+
+**Honest gap**: `on_behalf_of` is a self-reported attestation, not an independently verified identity check -- nomArmy has no caller-identity boundary today. What it guarantees is explicit, auditable intent and hard refusal on a mismatch, not cryptographic proof of who issued the call. See [Security posture](#security-posture) / `SECURITY.md`.
 
 ## The `nomarmy` CLI
 
@@ -307,6 +345,7 @@ Bounded-delegation core is proven: coordinator-owned Git, isolated worktrees, re
 | Swapping the active local model | Working |
 | Go/Rust target repos | Verification live-verified; worker's own tool execution uses one global sandbox config |
 | Multi-provider dispatch pools | Live-verified for `llama-cpp` and `xai`; other native providers unverified against real credentials |
+| Subscription-backed individual workers (`subscriptions setup`, roles) | Claude live-verified end to end (real dispatch by name and by role); OpenAI Codex and Meta Muse Code wired, not yet live-verified |
 
 Known limitations: verification profiles needing services beyond `environment: none` report `not_run` rather than executing without them; the environment scanner's Compose parser doesn't resolve YAML anchors/aliases.
 
@@ -334,7 +373,7 @@ The worker gets a writable worktree inside Podman and nothing else: no socket, n
 
 **Never hand the coder** AWS/production credentials, deployment access, SSH keys, Kubernetes contexts, or Terraform state.
 
-On Bedrock profiles, the model call is made by the host-side OpenClaw process, never from inside the sandbox, which stays `network: none` regardless. What changes on a cloud profile is data flow (repository content leaves the machine), not sandbox reach.
+On Bedrock profiles, the model call is made by the host-side OpenClaw process, never from inside the sandbox, which stays `network: none` regardless. What changes on a cloud profile is data flow (repository content leaves the machine), not sandbox reach. A subscription-backed worker (Claude, OpenAI Codex) is the same split -- OpenClaw calls the model host-side, reading a local CLI's own already-authenticated session, never inside the sandbox -- with one addition: `on_behalf_of` is a self-reported attestation, not an independently verified identity check (see `SECURITY.md`).
 
 Every diff and worker report is scanned for known secret shapes (secretlint's recommended preset: AWS, GitHub, Slack, Stripe, OpenAI/Anthropic, npm, private keys, and more) before a commit is allowed; a match blocks it. This catches known shapes, not adversarially steered content with no recognizable shape: see `SECURITY.md`.
 

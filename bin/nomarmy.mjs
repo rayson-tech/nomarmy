@@ -7,8 +7,9 @@
 // llama.cpp, installs OpenClaw, configures the sandbox) stays a separate,
 // manual step in every case, printed but never run.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { loadConfig, validateConfig, stringifyConfig, findConfigFile, CONFIG_FILENAMES } from "../lib/config.mjs";
@@ -19,7 +20,10 @@ import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
 import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected } from "../lib/connect.mjs";
 import { loadDispatchConfig, dispatchConfigPath, stringifyDispatchConfig } from "../lib/dispatch-config.mjs";
-import { dispatchConfigSchema, formatDispatchIssues, findReservedPoolName, RESERVED_POOL_NAMES, PROVIDER_TYPES, NATIVE_PROVIDER_TYPES, ID_RE, AUTH_ENV_NAME_RE } from "../lib/dispatch-schema.mjs";
+import { dispatchConfigSchema, formatDispatchIssues, findReservedPoolName, RESERVED_POOL_NAMES, PROVIDER_TYPES, ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
+import { loadSubscriptionConfig, subscriptionConfigPath, stringifySubscriptionConfig, findProviderConflicts, describeProviderConflict } from "../lib/subscription-config.mjs";
+import { subscriptionConfigSchema, formatSubscriptionIssues, RESERVED_WORKER_NAMES } from "../lib/subscription-schema.mjs";
+import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeSucceeded, defaultWorkerName, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
 
 // Add a new coordinator: add its name here, teach commandExists/connectTarget
 // about it below (a JSON-file target like Cursor has no PATH binary to check
@@ -109,9 +113,13 @@ Usage: nomarmy <command> [options]
                   worker model. Absent entirely, nothing changes.
                   list      show configured pools and which entries have
                             their credential set right now
-                  add       interactive wizard to add one entry to a pool
+                  add       interactive wizard to add one entry to a pool.
+                            Provider "openclaw" covers any provider OpenClaw
+                            supports that isn't listed (DeepSeek, Mistral,
+                            Groq, ...), by its OpenClaw id.
                             (or --json --pool --provider --id [--model]
                             [--auth-env] [--base-url] [--weight]
+                            [--openclaw-provider <id> [--plugin <spec>]]
                             [--max-concurrent] [--context-window]
                             [--thinking [low|medium|high]] [--no-thinking]
                             [--register] [--update-mcp])
@@ -142,12 +150,55 @@ Usage: nomarmy <command> [options]
                             max_concurrent, auth_env, base_url,
                             context_window or thinking flag (or --json with
                             the matching flags). A model swap on a native
-                            provider (anthropic/openai/xai/deepinfra) needs
+                            provider (anthropic/openai/xai/deepinfra/openclaw) needs
                             no re-registration -- the model is composed
                             fresh at dispatch time.
                   remove <pool> <id>
                             remove one entry (or the whole pool if now empty)
                   validate  check config/providers.yml against the schema
+  subscriptions <setup|list|add|update|remove>
+                  Manage config/subscriptions.yml -- optional, individually-
+                  owned workers backed by ONE PERSON'S OWN already-
+                  authenticated subscription (Claude Pro/Max/Team via
+                  OpenClaw's claude-cli provider, OpenAI Codex, or Meta
+                  Muse Code), never
+                  a weighted pick the way \`providers\` pools are. Dispatch
+                  with local_worker's \`subscription_worker\` field (or the
+                  deterministic \`subscription_role\`, e.g. "architect" --
+                  always the same entry, never a pick among several) plus a
+                  required \`on_behalf_of\` naming that exact person --
+                  nomArmy refuses the job (never substitutes a different
+                  worker) if it's missing or doesn't match. Credential setup
+                  is wrapped by \`setup\` below -- nomArmy never touches a
+                  token by hand. Absent entirely, nothing changes.
+                  setup [claude|codex|meta]
+                            the easy path: installs the vendor CLI if
+                            missing, runs its login, updates OpenClaw and
+                            installs its plugin if needed, lists the real
+                            models to pick from, defaults the owner from
+                            your login, and proves it with a real test call
+                            before saving. For Meta it also copies the key
+                            Muse Code's own login minted (macOS keychain)
+                            into OpenClaw over stdin -- re-run it if that key
+                            rotates. Interactive only (logins need a
+                            browser or device code).
+                  list      show configured workers
+                  add       lower-level: write one worker entry for a
+                            credential you've already set up yourself
+                            (or --json --name --provider --model --owner
+                            [--role] [--max-concurrent]
+                            [--thinking [low|medium|high]] [--no-thinking])
+                  update <name>
+                            change a worker's model (picked from what
+                            OpenClaw lists, then proven with a real test
+                            call), role, max_concurrent or thinking. Owner
+                            and provider stay fixed: those are a new setup.
+                            (or --json [--model] [--role|--no-role]
+                            [--max-concurrent] [--context-window]
+                            [--thinking [low|medium|high]] [--no-thinking]
+                            [--probe to test-call a new model first])
+                  remove <name>
+                            remove one worker
   connect [claude] [codex] [cursor]
                   (Re-)register the MCP server with one or more coordinators.
                   With no target and not --json, prompts an interactive
@@ -688,6 +739,7 @@ const KNOWN_PROVIDERS = {
   openai: { label: "OpenAI", defaultModel: "gpt-5.6-terra", authEnvSuggestion: "NOMARMY_OPENAI_API_KEY", native: true },
   xai: { label: "xAI (Grok)", defaultModel: "grok-build-0.1", authEnvSuggestion: "NOMARMY_XAI_API_KEY", native: true },
   deepinfra: { label: "DeepInfra", defaultModel: "meta-llama/Llama-3.3-70B-Instruct-Turbo", authEnvSuggestion: "NOMARMY_DEEPINFRA_API_KEY", native: true },
+  openclaw: { label: "Any other OpenClaw provider (DeepSeek, Mistral, Groq, ... -- by its OpenClaw id)", native: true },
   bedrock: { label: "AWS Bedrock (custom OpenAI-compatible endpoint)", defaultModel: "amazon.nova-micro-v1:0", authEnvSuggestion: "NOMARMY_BEDROCK_API_KEY", native: false, baseUrlHint: "https://bedrock-runtime.<region>.amazonaws.com/openai/v1" },
   "azure-openai": { label: "Azure OpenAI", defaultModel: "gpt-4o-mini", authEnvSuggestion: "NOMARMY_AZURE_OPENAI_API_KEY", native: false, baseUrlHint: "https://YOUR-RESOURCE.openai.azure.com" },
   "openai-compatible": { label: "Custom OpenAI-compatible endpoint", defaultModel: "", authEnvSuggestion: "NOMARMY_CUSTOM_API_KEY", native: false, baseUrlHint: "https://example.com/v1" },
@@ -707,8 +759,9 @@ const KNOWN_PROVIDERS = {
  * Custom endpoints (bedrock/azure-openai/openai-compatible) additionally
  * need `openclaw onboard --custom-*` first to define the provider's shape
  * (base URL, model id) before a credential can attach to it; native
- * providers (anthropic/openai/xai/deepinfra) are already known to OpenClaw
- * and skip straight to the credential step. On failure, the raw exec error
+ * providers (anthropic/openai/xai/deepinfra, or any id via the generic
+ * `openclaw` type) are already known to OpenClaw, or become known once the
+ * entry's `plugin` is installed, and skip straight to the credential step. On failure, the raw exec error
  * is deliberately never printed -- Node's own error message embeds the
  * full child command line, which for a failed `paste-api-key` call would
  * otherwise still be safe (the key was on stdin, not argv) but is not worth
@@ -720,7 +773,7 @@ const KNOWN_PROVIDERS = {
 // destructured `authEnv`/`baseUrl` while every real entry object actually
 // carries `auth_env`/`base_url`, so both were silently always undefined at
 // every call site and the piped credential was the literal string "null".
-function registerProviderWithOpenClaw({ id, provider, model, auth_env: authEnv, base_url: baseUrl, apiKeyOverride }) {
+function registerProviderWithOpenClaw({ id, provider, model, auth_env: authEnv, base_url: baseUrl, openclaw_provider: genericId, plugin, apiKeyOverride }) {
   // apiKeyOverride is the value from askSecret's "enter it now instead"
   // path -- checked first so a key typed directly into the wizard is used
   // immediately, without also requiring it be exported first.
@@ -731,13 +784,21 @@ function registerProviderWithOpenClaw({ id, provider, model, auth_env: authEnv, 
       : "✗ No credential available to register (no auth_env on this entry and none entered)."));
     return false;
   }
-  const isNative = NATIVE_PROVIDER_TYPES.includes(provider);
-  const authProviderId = isNative ? provider : id;
+  const isNative = isNativeProviderType(provider);
+  const authProviderId = isNative ? openclawProviderId({ provider, openclaw_provider: genericId }) : id;
   const skipFlags = ["--skip-daemon", "--skip-channels", "--skip-skills", "--skip-search", "--skip-hooks", "--skip-ui"];
   // Override point for tests (and for an operator pointing at a specific
   // openclaw binary/path rather than relying on PATH resolution).
   const openclawCmd = process.env.NOMARMY_OPENCLAW_CMD || "openclaw";
   try {
+    // Official plugins register under their provider's id (meta, codex,
+    // deepseek -- confirmed live), so inspecting by that id is the
+    // already-installed check; installing an installed plugin errors out.
+    if (plugin && spawnSync(openclawCmd, ["plugins", "inspect", authProviderId], { stdio: "ignore" }).status !== 0) {
+      console.log(c.dim(`Installing OpenClaw plugin ${plugin}...`));
+      execFileSync(openclawCmd, ["plugins", "install", plugin], { stdio: "inherit" });
+      spawnSync(openclawCmd, ["plugins", "registry", "--refresh"], { stdio: "ignore" });
+    }
     if (!isNative) {
       execFileSync(openclawCmd, ["onboard", "--non-interactive", "--accept-risk",
         "--custom-base-url", baseUrl, "--custom-model-id", model, "--custom-provider-id", id, "--custom-compatibility", "openai", ...skipFlags], { stdio: "ignore" });
@@ -785,7 +846,7 @@ async function cmdProvidersList() {
       const authNote = entry.auth_env ? `  auth_env=${entry.auth_env} ${authOk ? c.green("✓") : c.red("✗ unset")}` : "";
       const contextNote = entry.context_window ? `  context_window=${entry.context_window}` : "";
       const thinkingNote = entry.thinking === false ? "  thinking=off" : typeof entry.thinking === "string" ? `  thinking=${entry.thinking} (fixed)` : "";
-      console.log(`  - ${c.cyan(entry.id)}  (${entry.provider}${entry.model ? `/${entry.model}` : ""})  weight=${entry.weight}  max_concurrent=${entry.max_concurrent}${contextNote}${thinkingNote}${authNote}`);
+      console.log(`  - ${c.cyan(entry.id)}  (${openclawProviderId(entry)}${entry.model ? `/${entry.model}` : ""})  weight=${entry.weight}  max_concurrent=${entry.max_concurrent}${contextNote}${thinkingNote}${authNote}`);
     }
   }
   console.log(c.dim(`\nDispatch a job against one of these with local_worker's \`pool\` field, e.g. pool: "${Object.keys(loaded.config.pools)[0] ?? "cheap"}".`));
@@ -938,8 +999,8 @@ async function cmdProvidersUpdate() {
   if (json) return out({ updated: true, pool: poolName, id, entry: written, changed: Object.keys(changes) });
 
   console.log(c.green(`\n✓ Updated "${id}" in pool "${poolName}".`));
-  if (changes.model && NATIVE_PROVIDER_TYPES.includes(current.provider)) {
-    console.log(c.dim(`No OpenClaw re-registration needed for a model swap on a native provider -- "${current.provider}/${written.model}" is composed fresh at dispatch time.`));
+  if (changes.model && isNativeProviderType(current.provider)) {
+    console.log(c.dim(`No OpenClaw re-registration needed for a model swap on a native provider -- "${openclawProviderId(current)}/${written.model}" is composed fresh at dispatch time.`));
   }
   if (changes.auth_env) {
     console.log(c.yellow(`auth_env changed to ${changes.auth_env} -- run \`nomarmy connect claude\` (or reconnect) so the MCP registration picks up the new name.`));
@@ -957,7 +1018,7 @@ async function cmdProvidersAdd() {
     throw new Error(`config/providers.yml already exists but is invalid -- fix it by hand or delete it before adding: ${error.message}`);
   }
 
-  let poolName, providerType, id, model, weight, authEnv, baseUrl, maxConcurrent, thinking, contextWindow, providedApiKey;
+  let poolName, providerType, id, model, weight, authEnv, baseUrl, maxConcurrent, thinking, contextWindow, providedApiKey, genericId, plugin;
 
   if (json) {
     poolName = value("pool");
@@ -970,8 +1031,10 @@ async function cmdProvidersAdd() {
     maxConcurrent = value("max-concurrent") ? Number(value("max-concurrent")) : undefined;
     thinking = resolveThinkingFlag();
     contextWindow = value("context-window") ? Number(value("context-window")) : undefined;
+    genericId = value("openclaw-provider");
+    plugin = value("plugin");
     if (!poolName || !providerType || !id) {
-      throw new Error(`--json requires --pool <name> --provider <${PROVIDER_TYPES.join("|")}> --id <id>, plus --model/--auth-env/--base-url as that provider type needs.`);
+      throw new Error(`--json requires --pool <name> --provider <${PROVIDER_TYPES.join("|")}> --id <id>, plus --model/--auth-env/--base-url (or --openclaw-provider [--plugin] for "openclaw") as that provider type needs.`);
     }
   } else {
     if (!process.stdin.isTTY) throw new Error("nomarmy providers add needs an interactive terminal, or --json with explicit flags (see `nomarmy help`).");
@@ -992,6 +1055,16 @@ async function cmdProvidersAdd() {
       if (!providerType) throw new Error(`Not a valid choice: "${typeChoice}".`);
       const info = KNOWN_PROVIDERS[providerType] ?? {};
 
+      if (providerType === "openclaw") {
+        console.log(c.dim("Any provider OpenClaw can talk to. Find its id with `openclaw models list --all`, or `openclaw plugins search <name>` if it needs a plugin."));
+        genericId = await askUntilValid(rl, "OpenClaw provider id (e.g. deepseek, mistral, groq): ", {
+          allowEmpty: false, pattern: OPENCLAW_PROVIDER_ID_RE,
+          invalidMessage: "must be an OpenClaw provider id (lowercase letters, digits, dot, underscore, hyphen).",
+        });
+        const pluginAnswer = (await rl.question(c.bold("Plugin to install first, if it isn't stock (e.g. clawhub:@openclaw/deepseek-provider; blank = none): "))).trim();
+        if (pluginAnswer) plugin = pluginAnswer;
+      }
+
       // A SHORT LABEL, never the API key -- validated and re-prompted on the
       // spot (ID_RE, the same rule config/providers.yml itself enforces),
       // not left to fail only at the very end via schema validation. This
@@ -999,16 +1072,17 @@ async function cmdProvidersAdd() {
       // here (the first free-text question after picking a provider) and
       // only surfaced as an opaque validation error after every other
       // question had already been answered.
-      id = await askUntilValid(rl, `Entry id -- a short label, NOT the API key [${providerType}]: `, {
-        allowEmpty: true, fallback: providerType, pattern: ID_RE,
+      id = await askUntilValid(rl, `Entry id -- a short label, NOT the API key [${genericId ?? providerType}]: `, {
+        allowEmpty: true, fallback: genericId ?? providerType, pattern: ID_RE,
         invalidMessage: "must be 1-64 characters of letters, numbers, dot, underscore or hyphen -- that looks too long/complex to be a label. Did you mean to paste your API key here? Don't -- that's asked for separately, and only ever read from an environment variable, never typed into this wizard.",
       });
 
       if (providerType !== "llama-cpp") {
         model = (await rl.question(c.bold(`Model${info.defaultModel ? ` [${info.defaultModel}]` : ""}: `))).trim() || info.defaultModel;
         if (!model) throw new Error("A model id is required for this provider type.");
-        authEnv = await askUntilValid(rl, `Environment variable NAME holding the API key (not the key itself) [${info.authEnvSuggestion}]: `, {
-          allowEmpty: true, fallback: info.authEnvSuggestion, pattern: AUTH_ENV_NAME_RE,
+        const authEnvSuggestion = info.authEnvSuggestion ?? `NOMARMY_${genericId.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
+        authEnv = await askUntilValid(rl, `Environment variable NAME holding the API key (not the key itself) [${authEnvSuggestion}]: `, {
+          allowEmpty: true, fallback: authEnvSuggestion, pattern: AUTH_ENV_NAME_RE,
           invalidMessage: "must look like an ENVIRONMENT VARIABLE NAME (uppercase letters, digits, underscores, e.g. NOMARMY_XAI_API_KEY) -- not the credential itself.",
         });
       } else {
@@ -1080,6 +1154,8 @@ async function cmdProvidersAdd() {
   if (model) entry.model = model;
   if (authEnv) entry.auth_env = authEnv;
   if (baseUrl) entry.base_url = baseUrl;
+  if (genericId) entry.openclaw_provider = genericId;
+  if (plugin) entry.plugin = plugin;
   if (maxConcurrent !== undefined) entry.max_concurrent = maxConcurrent;
   if (thinking !== undefined) entry.thinking = thinking;
   if (contextWindow !== undefined) entry.context_window = contextWindow;
@@ -1176,6 +1252,566 @@ async function cmdProviders() {
   if (sub === "remove") return cmdProvidersRemove();
   if (sub === "validate") return cmdProvidersValidate();
   throw new Error(`Unknown providers subcommand "${sub ?? ""}". Use: nomarmy providers <list|add|update|remove|validate>`);
+}
+
+// config/subscriptions.yml's own CLI family -- deliberately smaller than
+// `providers`: no weight, no auth_env/API-key dance (OpenClaw owns
+// credential storage entirely for these, see lib/subscription-schema.mjs's
+// own header comment), and always exactly one entry per name, never a
+// weighted array to pick between.
+async function cmdSubscriptionsList() {
+  const configPath = subscriptionConfigPath(nomarmyRoot);
+  let loaded;
+  try {
+    loaded = loadSubscriptionConfig(nomarmyRoot);
+  } catch (error) {
+    if (json) { out({ error: error.message, errors: error.errors, path: error.path }); process.exit(1); }
+    console.error(c.red(`${error.path ?? "config/subscriptions.yml"} is invalid:`));
+    for (const line of error.errors) console.error(`  - ${line}`);
+    process.exit(1);
+  }
+  if (!loaded.found) {
+    if (json) return out({ found: false, path: configPath, workers: {} });
+    console.log(c.dim(`No config/subscriptions.yml yet (would live at ${configPath}).`));
+    console.log(`Run ${c.bold("nomarmy subscriptions setup")} to create one, or copy config/subscriptions.yml.example.`);
+    return;
+  }
+  if (json) return out({ found: true, path: loaded.path, workers: loaded.config.workers });
+  console.log(c.bold(`🍪 nomArmy subscriptions`) + c.dim(`  (${loaded.path})`));
+  for (const [name, entry] of Object.entries(loaded.config.workers)) {
+    const thinkingNote = entry.thinking === false ? "  thinking=off" : typeof entry.thinking === "string" ? `  thinking=${entry.thinking} (fixed)` : "";
+    const roleNote = entry.role ? `  role=${entry.role}` : "";
+    console.log(`  - ${c.cyan(name)}  (${entry.provider}/${entry.model})  owner=${entry.owner}${roleNote}  max_concurrent=${entry.max_concurrent}${thinkingNote}`);
+  }
+  for (const conflict of subscriptionProviderConflicts(loaded.config.workers)) {
+    console.log(c.red(`\n✗ ${describeProviderConflict(conflict)}`));
+  }
+  console.log(c.dim(`\nDispatch a job against one of these with local_worker's \`subscription_worker\` (or \`subscription_role\`) field, plus \`on_behalf_of\` naming that exact owner.`));
+}
+
+/** Pool/subscription provider-id conflicts, the same check dispatch refuses on. An unreadable providers.yml is reported by `providers validate`, not here. */
+function subscriptionProviderConflicts(workers) {
+  try {
+    const dispatch = loadDispatchConfig(nomarmyRoot);
+    return dispatch.found ? findProviderConflicts(dispatch.config.pools, workers) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function cmdSubscriptionsRemove() {
+  const name = argv[2];
+  if (!name) throw new Error("Usage: nomarmy subscriptions remove <name>");
+  if (RESERVED_WORKER_NAMES.includes(name)) throw new Error(`Unknown worker "${name}" (that name is reserved and can never be a real worker).`);
+  const loaded = loadSubscriptionConfig(nomarmyRoot);
+  if (!loaded.found) throw new Error("No config/subscriptions.yml exists yet -- nothing to remove.");
+  if (!Object.prototype.hasOwnProperty.call(loaded.config.workers, name)) {
+    throw new Error(`Unknown worker "${name}". Configured workers: ${Object.keys(loaded.config.workers).join(", ") || "(none)"}`);
+  }
+
+  if (!json) {
+    const rl = createInterface({ input, output });
+    let answer;
+    try {
+      answer = (await rl.question(c.bold(`Remove subscription worker "${name}"? [y/N] `))).trim().toLowerCase();
+    } finally {
+      rl.close();
+    }
+    if (answer !== "y" && answer !== "yes") { console.log(c.dim("Cancelled; nothing changed.")); return; }
+  }
+
+  const nextWorkers = { ...loaded.config.workers };
+  delete nextWorkers[name];
+  fs.writeFileSync(subscriptionConfigPath(nomarmyRoot), stringifySubscriptionConfig({ workers: nextWorkers }));
+  if (json) return out({ removed: true, name });
+  console.log(c.green(`✓ Removed subscription worker "${name}".`));
+}
+
+/**
+ * Cross-checks a chosen provider/model against OpenClaw's own live model
+ * catalog (`openclaw models list --refresh`) before writing the entry -- the
+ * one useful, real check available for this provider type: `openclaw models
+ * auth list` (what `providers add` checks for an API-key entry) does NOT
+ * cover claude-cli at all, confirmed live -- its credential is discovered
+ * dynamically from the local CLI's own session, not a persisted OpenClaw
+ * auth profile. Catalog presence confirms the plugin knows this
+ * provider/model combination; it cannot confirm the session is actually
+ * logged in -- `subscriptions setup`'s real test call is what proves that.
+ */
+function catalogHasModel(provider, model) {
+  const listed = runQuiet(openclawCmd(), ["models", "list", "--refresh"]);
+  if (!listed.ok) return null; // openclaw unreachable -- not a reason to block writing the entry, just nothing to check against
+  return listed.out.includes(`${provider}/${model}`);
+}
+
+// --- `nomarmy subscriptions setup <vendor>`: wrap every OpenClaw step -------
+//
+// The operator shouldn't need to know OpenClaw exists for the common case.
+// Each helper below runs one real command, reports what it found in plain
+// terms, and only prompts when something actually needs doing. Logins use
+// stdio: "inherit" deliberately: they are device-auth/OAuth flows a human
+// completes in a browser (`openclaw models auth login` refuses outright
+// without a TTY, confirmed live) -- nomArmy starts the flow, the vendor CLI
+// and OpenClaw do the authenticating, and nomArmy never sees a token.
+
+function openclawCmd() { return process.env.NOMARMY_OPENCLAW_CMD || "openclaw"; }
+
+// stdout AND stderr, on success too: `codex login status` prints its
+// "Logged in using ChatGPT" line to stderr (confirmed live), and an earlier
+// version that kept only stdout on a zero exit read that as "not logged
+// in" -- then told a user who had just logged in successfully that they
+// still weren't.
+function runQuiet(cmd, args) {
+  const result = spawnSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const out = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+  return { ok: !result.error && result.status === 0, out, status: result.status };
+}
+
+function runInteractive(cmd, args) {
+  try { execFileSync(cmd, args, { stdio: "inherit" }); return true; }
+  catch { return false; }
+}
+
+async function confirm(rl, question, { defaultYes = true } = {}) {
+  const answer = (await rl.question(c.bold(`${question} ${defaultYes ? "[Y/n]" : "[y/N]"} `))).trim().toLowerCase();
+  if (!answer) return defaultYes;
+  return answer === "y" || answer === "yes";
+}
+
+/** The vendor CLI's own login state: its status command, or (Muse Code, which has none) its non-secret descriptor file. */
+function readLoginStatus(vendorKey) {
+  const cli = SUBSCRIPTION_VENDORS[vendorKey].cli;
+  if (cli.statusArgs) return parseCliLoginStatus(vendorKey, runQuiet(cli.bin, cli.statusArgs).out);
+  let text = "";
+  try { text = fs.readFileSync(cli.statusFile.replace(/^~(?=\/)/, os.homedir()), "utf8"); } catch { /* missing = not logged in */ }
+  return parseMuseAuthDescriptor(text);
+}
+
+/**
+ * credential.kind "minted-key": copies the key the vendor CLI's own login
+ * minted into the OS keychain over to OpenClaw, keychain -> this process ->
+ * `paste-api-key` stdin. Never printed, never on argv, never written to a
+ * file nomArmy owns; child stdio is discarded so no error path can echo it.
+ * Run on every setup, not just the first: the vendor may rotate the key,
+ * and a stale copy in OpenClaw fails exactly like a missing one.
+ */
+function syncMintedKey(vendor) {
+  const { keychain, profileId } = vendor.credential;
+  if (process.platform !== "darwin") {
+    console.log(c.red(`✗ Reading ${vendor.cli.bin}'s stored key is only wired up for the macOS keychain so far. On this OS, link it yourself: \`openclaw models auth paste-api-key --provider ${vendor.provider} --profile-id ${profileId}\` and paste the key it minted.`));
+    return false;
+  }
+  // macOS may show its own keychain prompt here, asking whether to let
+  // `security` read this item -- that's the OS asking the operator, as it should.
+  const read = spawnSync("security", ["find-generic-password", "-s", keychain.service, "-a", keychain.account, "-w"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  const key = read.status === 0 ? extractMintedKey(read.stdout.trim(), keychain.field) : null;
+  if (!key) {
+    console.log(c.red(`✗ Couldn't find a usable ${vendor.cli.bin} key in the keychain (or access was declined). Run \`${vendor.cli.bin} ${vendor.cli.loginArgs.join(" ")}\` again, then re-run this.`));
+    return false;
+  }
+  const pasted = spawnSync(openclawCmd(), ["models", "auth", "paste-api-key", "--provider", vendor.provider, "--profile-id", profileId], { input: `${key}\n`, stdio: ["pipe", "ignore", "ignore"] });
+  if (pasted.status !== 0) {
+    console.log(c.red(`✗ OpenClaw didn't accept the key (exit ${pasted.status ?? "?"}). Run \`openclaw models auth paste-api-key --provider ${vendor.provider} --profile-id ${profileId}\` by hand to see why.`));
+    return false;
+  }
+  runQuiet(openclawCmd(), ["plugins", "registry", "--refresh"]);
+  return true;
+}
+
+/**
+ * Makes one vendor's credential usable by OpenClaw, installing/updating/
+ * logging in only what's actually missing. Returns { ok, email } -- email is
+ * the vendor CLI's own logged-in account when it reports one, used to
+ * default the worker's owner so the operator never retypes who they are.
+ */
+async function ensureVendorAuth(rl, vendorKey) {
+  const vendor = SUBSCRIPTION_VENDORS[vendorKey];
+  const step = (text) => console.log(`\n${c.bold("→")} ${text}`);
+
+  step(`${vendor.cli.bin} CLI`);
+  if (!runQuiet(vendor.cli.bin, ["--version"]).ok) {
+    if (!vendor.cli.npmPackage) {
+      console.log(c.red(`✗ \`${vendor.cli.bin}\` isn't installed. ${vendor.cli.installHint}, then run this again.`));
+      return { ok: false };
+    }
+    if (!(await confirm(rl, `\`${vendor.cli.bin}\` isn't installed. Install ${vendor.cli.npmPackage} now?`))) return { ok: false };
+    if (!runInteractive("npm", ["install", "-g", vendor.cli.npmPackage])) {
+      console.log(c.red(`✗ Install failed. Run \`${vendor.cli.installHint}\` yourself to see why.`));
+      return { ok: false };
+    }
+  }
+  console.log(c.green(`✓ ${vendor.cli.bin} is installed.`));
+
+  let status = readLoginStatus(vendorKey);
+  if (!status.loggedIn) {
+    console.log(c.yellow(`You're not logged in to ${vendor.cli.bin} yet -- this opens its own login (a browser or a device code).`));
+    if (!(await confirm(rl, "Log in now?"))) return { ok: false };
+    runInteractive(vendor.cli.bin, vendor.cli.loginArgs);
+    status = readLoginStatus(vendorKey);
+    if (!status.loggedIn) { console.log(c.red(`✗ Still not logged in to ${vendor.cli.bin}.`)); return { ok: false }; }
+  }
+  console.log(c.green(`✓ Logged in to ${vendor.cli.bin}${status.email ? ` as ${status.email}` : ""}${status.subscriptionType ? ` (${status.subscriptionType})` : ""}.`));
+
+  if (vendor.plugin) {
+    step("OpenClaw plugin");
+    const version = parseOpenclawVersion(runQuiet(openclawCmd(), ["--version"]).out);
+    if (!versionAtLeast(version, vendor.plugin.minOpenclaw)) {
+      console.log(c.yellow(`OpenClaw ${version ? version.join(".") : "(unknown version)"} is older than the ${vendor.plugin.minOpenclaw} this vendor's plugin needs.`));
+      if (!(await confirm(rl, "Update OpenClaw now (npm update -g openclaw)?"))) return { ok: false };
+      if (!runInteractive("npm", ["update", "-g", "openclaw"])) {
+        console.log(c.red("✗ Update failed. If npm reports EACCES, your global npm directory has root-owned files from an old sudo install: `sudo chown -R $(whoami) ~/.npm ~/.npm-global` fixes it."));
+        return { ok: false };
+      }
+    }
+    if (!runQuiet(openclawCmd(), ["plugins", "inspect", vendor.plugin.id]).ok) {
+      console.log(c.dim(`Installing ${vendor.plugin.spec}...`));
+      if (!runInteractive(openclawCmd(), ["plugins", "install", vendor.plugin.spec])) {
+        console.log(c.red(`✗ Plugin install failed. Run \`openclaw plugins install ${vendor.plugin.spec}\` yourself to see why.`));
+        return { ok: false };
+      }
+      runQuiet(openclawCmd(), ["plugins", "registry", "--refresh"]);
+    }
+    console.log(c.green(`✓ OpenClaw's ${vendor.plugin.id} plugin is ready.`));
+  }
+  if (vendor.credential.kind === "minted-key") {
+    step(`Linking your ${vendor.cli.bin} login to OpenClaw`);
+    console.log(c.dim(`Copies the key ${vendor.cli.bin}'s own login stored in your keychain into OpenClaw (over stdin, never shown). macOS may ask you to allow it.`));
+    if (!syncMintedKey(vendor)) return { ok: false };
+    console.log(c.green(`✓ OpenClaw is using your ${vendor.cli.bin} subscription key (profile ${vendor.credential.profileId}).`));
+  }
+  return { ok: true, email: status.email };
+}
+
+function catalogModelsFor(provider) {
+  return parseCatalogModels(runQuiet(openclawCmd(), ["models", "list", "--refresh"]).out, provider);
+}
+
+/** One real, one-token completion through OpenClaw -- the only proof a credential actually works. */
+function probeWorker(provider, model) {
+  const result = runQuiet(openclawCmd(), ["agent", "exec", "--model", `${provider}/${model}`, "--no-auth-env-only",
+    "--json", "--cwd", os.tmpdir(), "--isolated", "--timeout", "60", "Reply with exactly: ok"]);
+  return probeSucceeded(result.out);
+}
+
+/**
+ * OpenClaw's own provider login, for the vendors whose plugin wants one on
+ * top of the vendor CLI's login (Claude doesn't: OpenClaw reuses the CLI
+ * session directly). Only ever run when a probe or catalog lookup has
+ * already shown it's needed -- never preemptively.
+ */
+function openclawProviderLogin(vendor) {
+  const provider = vendor.credential.loginProvider ?? vendor.provider;
+  console.log(c.dim(`Linking OpenClaw to it (\`openclaw models auth login --provider ${provider}\`) -- follow its prompts:`));
+  const ok = runInteractive(openclawCmd(), ["models", "auth", "login", "--provider", provider]);
+  runQuiet(openclawCmd(), ["plugins", "registry", "--refresh"]);
+  return ok;
+}
+
+function writeSubscriptionWorker(name, entry, existingWorkers) {
+  const configPath = subscriptionConfigPath(nomarmyRoot);
+  const result = subscriptionConfigSchema.safeParse({ workers: { ...existingWorkers, [name]: entry } });
+  if (!result.success) return { ok: false, errors: formatSubscriptionIssues(result.error) };
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, stringifySubscriptionConfig(result.data));
+  return { ok: true, path: configPath, entry: result.data.workers[name] };
+}
+
+async function cmdSubscriptionsSetup() {
+  const vendorArg = argv[2];
+  if (json) throw new Error("nomarmy subscriptions setup is interactive-only (its logins need a real terminal). Use `nomarmy subscriptions add --json` to write an entry for a credential you've already set up.");
+  if (!process.stdin.isTTY) throw new Error("nomarmy subscriptions setup needs an interactive terminal -- the vendor logins open a browser or print a device code.");
+
+  let existingWorkers = {};
+  try { const loaded = loadSubscriptionConfig(nomarmyRoot); if (loaded.found) existingWorkers = loaded.config.workers; }
+  catch (error) { throw new Error(`config/subscriptions.yml exists but is invalid -- fix or delete it first: ${error.message}`); }
+
+  const rl = createInterface({ input, output });
+  try {
+    console.log(c.bold("🍪 nomArmy subscriptions setup"));
+    console.log(c.dim("Connects ONE person's own subscription as a named worker. Never pooled, never shared."));
+
+    const vendorKeys = Object.keys(SUBSCRIPTION_VENDORS);
+    let vendorKey = vendorArg;
+    if (!vendorKey) {
+      console.log("\n" + c.bold("Which subscription?"));
+      vendorKeys.forEach((k, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${SUBSCRIPTION_VENDORS[k].label}`));
+      vendorKey = vendorKeys[Number((await rl.question(c.bold("Choice: "))).trim()) - 1];
+    }
+    if (!SUBSCRIPTION_VENDORS[vendorKey]) {
+      throw new Error(`Unknown vendor "${vendorArg ?? ""}". Supported: ${vendorKeys.join(", ")}. (DeepSeek has no subscription plan to connect; add its API key with \`nomarmy providers add\` (provider "openclaw").)`);
+    }
+    const vendor = SUBSCRIPTION_VENDORS[vendorKey];
+
+    // Checked before any login: dispatch would refuse both sides anyway, so
+    // don't walk the operator through a browser flow for a worker that can't run.
+    const [conflict] = subscriptionProviderConflicts({ [`(new ${vendorKey} worker)`]: { provider: vendor.provider } });
+    if (conflict) {
+      console.log(c.red(`\n✗ ${describeProviderConflict(conflict)}`));
+      console.log(c.dim(`Remove it with \`nomarmy providers remove ${conflict.poolEntries[0].replace("/", " ")}\`, then re-run this.`));
+      return;
+    }
+
+    const auth = await ensureVendorAuth(rl, vendorKey);
+    if (!auth.ok) { console.log(c.dim("\nStopped; nothing was written.")); return; }
+
+    console.log(`\n${c.bold("→")} Models`);
+    let linkedOpenclaw = false;
+    let models = catalogModelsFor(vendor.provider);
+    const needsOpenclawLogin = vendor.credential.kind === "openclaw-login";
+    if (!models.length && needsOpenclawLogin) {
+      linkedOpenclaw = openclawProviderLogin(vendor);
+      models = catalogModelsFor(vendor.provider);
+    }
+    let model;
+    if (models.length) {
+      models.forEach((m, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${m}`));
+      const pick = (await rl.question(c.bold("Model [1]: "))).trim();
+      model = models[(pick ? Number(pick) : 1) - 1];
+      if (!model) throw new Error(`Not a valid choice: "${pick}".`);
+    } else {
+      console.log(c.yellow(`OpenClaw isn't listing any ${vendor.provider} models yet.`));
+      model = (await rl.question(c.bold(`Model id to use${vendor.defaultModel ? ` [${vendor.defaultModel}]` : ""}: `))).trim() || vendor.defaultModel;
+      if (!model) throw new Error("A model id is required.");
+    }
+
+    const knownOwners = [...new Set(Object.values(existingWorkers).map((w) => w.owner))];
+    const ownerDefault = auth.email ?? (knownOwners.length === 1 ? knownOwners[0] : "");
+    const owner = (await rl.question(c.bold(`Whose subscription is this${ownerDefault ? ` [${ownerDefault}]` : ""}: `))).trim() || ownerDefault;
+    if (!owner) throw new Error("An owner is required -- every job dispatched to this worker must name them in on_behalf_of.");
+
+    const nameDefault = defaultWorkerName(owner, vendorKey);
+    const name = await askUntilValid(rl, `Worker name [${nameDefault}]: `, {
+      allowEmpty: true, fallback: nameDefault, pattern: ID_RE,
+      invalidMessage: "must be 1-64 characters of letters, numbers, dot, underscore or hyphen.",
+    });
+    if (existingWorkers[name] && !(await confirm(rl, `"${name}" already exists. Replace it?`, { defaultYes: false }))) {
+      console.log(c.dim("Stopped; nothing was written.")); return;
+    }
+    const role = (await rl.question(c.bold("Role, optional (e.g. architect, senior-dev -- a job can dispatch by role instead of name): "))).trim() || undefined;
+
+    console.log(`\n${c.bold("→")} Test call`);
+    let works = probeWorker(vendor.provider, model);
+    if (!works && needsOpenclawLogin && !linkedOpenclaw) {
+      openclawProviderLogin(vendor);
+      works = probeWorker(vendor.provider, model);
+    }
+    if (works) console.log(c.green(`✓ ${vendor.provider}/${model} answered a real test prompt.`));
+    else {
+      console.log(c.red(`✗ A real test prompt to ${vendor.provider}/${model} didn't come back.`));
+      if (!(await confirm(rl, "Save the worker anyway?", { defaultYes: false }))) { console.log(c.dim("Stopped; nothing was written.")); return; }
+    }
+
+    const written = writeSubscriptionWorker(name, { provider: vendor.provider, model, owner, ...(role ? { role } : {}) }, existingWorkers);
+    if (!written.ok) {
+      console.error(c.red("That entry is invalid:"));
+      for (const line of written.errors) console.error(`  - ${line}`);
+      process.exit(1);
+    }
+    console.log(c.green(`\n✓ Saved worker "${name}" (${path.relative(nomarmyRoot, written.path)}).`));
+    console.log(c.dim(`Dispatch with ${role ? `subscription_role: "${role}"` : `subscription_worker: "${name}"`} and on_behalf_of: "${owner}". Then run \`nomarmy connect claude\` and restart your coordinator session so the MCP server picks it up.`));
+  } finally {
+    rl.close();
+  }
+}
+
+async function cmdSubscriptionsAdd() {
+  const configPath = subscriptionConfigPath(nomarmyRoot);
+  let existingWorkers = {};
+  try {
+    const loaded = loadSubscriptionConfig(nomarmyRoot);
+    if (loaded.found) existingWorkers = loaded.config.workers;
+  } catch (error) {
+    throw new Error(`config/subscriptions.yml already exists but is invalid -- fix it by hand or delete it before adding: ${error.message}`);
+  }
+
+  let name, provider, model, owner, role, maxConcurrent, thinking;
+
+  if (json) {
+    name = value("name");
+    provider = value("provider");
+    model = value("model");
+    owner = value("owner");
+    role = value("role");
+    maxConcurrent = value("max-concurrent") ? Number(value("max-concurrent")) : undefined;
+    thinking = resolveThinkingFlag();
+    if (!name || !provider || !model || !owner) {
+      throw new Error("--json requires --name <id> --provider <openclaw-provider-id> --model <id> --owner <person>, plus optional --role <name>.");
+    }
+  } else {
+    if (!process.stdin.isTTY) throw new Error("nomarmy subscriptions add needs an interactive terminal, or --json with explicit flags (see `nomarmy help`).");
+    const rl = createInterface({ input, output });
+    try {
+      console.log(c.bold("🍪 nomArmy subscriptions add"));
+      console.log(c.dim("This is for ONE person's own already-authenticated subscription -- never a shared credential, never pooled capacity."));
+      const existingNames = Object.keys(existingWorkers);
+      const namePrompt = existingNames.length
+        ? `Worker name [existing: ${existingNames.join(", ")}, or type a new one]: `
+        : `Worker name (new -- e.g. "jason-claude"): `;
+      name = await askUntilValid(rl, namePrompt, {
+        allowEmpty: false, pattern: ID_RE,
+        invalidMessage: "must be 1-64 characters of letters, numbers, dot, underscore or hyphen.",
+      });
+
+      console.log(c.dim("\nTip: `nomarmy subscriptions setup` does all of this for you -- installs, logins, model list and a real test call."));
+      provider = (await rl.question(c.bold(`OpenClaw provider id (${Object.values(SUBSCRIPTION_VENDORS).map((v) => v.provider).join(", ")}): `))).trim();
+      if (!provider) throw new Error("A provider id is required.");
+
+      model = (await rl.question(c.bold("Model id (see `openclaw models list --refresh` for what's actually available): "))).trim();
+      if (!model) throw new Error("A model id is required.");
+
+      const known = catalogHasModel(provider, model);
+      if (known === false) {
+        console.log(c.yellow(`\n⚠ "${provider}/${model}" was not found in OpenClaw's own model catalog right now.`));
+        const proceed = (await rl.question(c.bold("Write the entry anyway (e.g. the catalog just hasn't refreshed yet)? [y/N] "))).trim().toLowerCase();
+        if (proceed !== "y" && proceed !== "yes") { console.log(c.dim("Cancelled; nothing changed.")); return; }
+      } else if (known === true) {
+        console.log(c.green(`✓ "${provider}/${model}" is in OpenClaw's model catalog.`));
+      }
+
+      owner = (await rl.question(c.bold("Owner -- exactly who this credential belongs to (e.g. an email): "))).trim();
+      if (!owner) throw new Error("An owner is required -- this is what on_behalf_of is checked against.");
+
+      const roleAnswer = (await rl.question(c.bold("Role, optional -- a fixed name a job can dispatch with instead of this worker's exact name (e.g. \"architect\"; blank = none, dispatch by name only): "))).trim();
+      if (roleAnswer) role = roleAnswer;
+
+      const maxConcurrentAnswer = (await rl.question(c.bold("max_concurrent [1]: "))).trim();
+      if (maxConcurrentAnswer) maxConcurrent = Number(maxConcurrentAnswer);
+
+      const thinkingAnswer = (await rl.question(c.bold("Thinking/reasoning: Y = follow the job's requested level (default), n = off, or type a level (low/medium/high) to always use that regardless of the job: "))).trim().toLowerCase();
+      thinking = THINKING_LEVELS.includes(thinkingAnswer) ? thinkingAnswer : !(thinkingAnswer === "n" || thinkingAnswer === "no");
+    } finally {
+      rl.close();
+    }
+  }
+
+  if (RESERVED_WORKER_NAMES.includes(name)) throw new Error(`"${name}" is a reserved name and cannot be used as a worker name.`);
+
+  const entry = { provider, model, owner, ...(role ? { role } : {}), ...(maxConcurrent !== undefined ? { max_concurrent: maxConcurrent } : {}), ...(thinking !== undefined ? { thinking } : {}) };
+  const candidateConfig = { workers: { ...existingWorkers, [name]: entry } };
+  const result = subscriptionConfigSchema.safeParse(candidateConfig);
+  if (!result.success) {
+    const errors = formatSubscriptionIssues(result.error);
+    if (json) { out({ error: "invalid entry", errors }); process.exit(1); }
+    console.error(c.red("That entry is invalid:"));
+    for (const line of errors) console.error(`  - ${line}`);
+    process.exit(1);
+  }
+
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, stringifySubscriptionConfig(result.data));
+  if (json) return out({ written: configPath, name, entry: result.data.workers[name] });
+  console.log(c.green(`\n✓ Wrote ${path.relative(nomarmyRoot, configPath)}.`));
+  const dispatchField = role ? `subscription_role: "${role}"` : `subscription_worker: "${name}"`;
+  console.log(c.dim(`Dispatch against it with local_worker's \`${dispatchField}\` field, plus \`on_behalf_of: "${owner}"\`.`));
+}
+
+// Owner and provider are deliberately not editable: either one changes
+// whose login, or which vendor's, the worker runs on -- that's a new
+// `setup`, not an edit. A model change gets the same real test call setup
+// makes (interactive always; --json only with --probe, since it spends a
+// real request on the subscription), so a typo never gets saved.
+async function cmdSubscriptionsUpdate() {
+  const name = argv[2];
+  if (!name) throw new Error("Usage: nomarmy subscriptions update <name> [--model <m>] [--role <r>|--no-role] [--max-concurrent <n>] [--context-window <tokens>] [--thinking [low|medium|high]|--no-thinking] [--probe]");
+  if (RESERVED_WORKER_NAMES.includes(name)) throw new Error(`Unknown worker "${name}" (that name is reserved and can never be a real worker).`);
+  const loaded = loadSubscriptionConfig(nomarmyRoot);
+  if (!loaded.found) throw new Error("No config/subscriptions.yml exists yet -- run `nomarmy subscriptions setup` first.");
+  const workers = loaded.config.workers;
+  if (!Object.prototype.hasOwnProperty.call(workers, name)) {
+    throw new Error(`Unknown worker "${name}". Configured workers: ${Object.keys(workers).join(", ") || "(none)"}`);
+  }
+  const current = workers[name];
+
+  const changes = {};
+  let probe = !json;
+  if (json) {
+    if (value("model") !== null) changes.model = value("model");
+    if (value("role") !== null) changes.role = value("role");
+    if (flag("no-role")) changes.role = undefined;
+    if (value("max-concurrent") !== null) changes.max_concurrent = Number(value("max-concurrent"));
+    if (value("context-window") !== null) changes.context_window = Number(value("context-window"));
+    const thinkingFlag = resolveThinkingFlag();
+    if (thinkingFlag !== undefined) changes.thinking = thinkingFlag;
+    probe = flag("probe");
+    if (Object.keys(changes).length === 0) throw new Error("Nothing to update -- pass at least one of --model/--role/--no-role/--max-concurrent/--context-window/--thinking [low|medium|high]/--no-thinking.");
+  } else {
+    if (!process.stdin.isTTY) throw new Error("nomarmy subscriptions update needs an interactive terminal, or --json with explicit flags (see `nomarmy help`).");
+    const rl = createInterface({ input, output });
+    try {
+      console.log(c.bold("🍪 nomArmy subscriptions update") + c.dim(`  (${name}: ${current.provider}/${current.model}, owner ${current.owner})`));
+      console.log(c.dim("Blank keeps the current value.\n"));
+
+      const models = catalogModelsFor(current.provider);
+      if (models.length) {
+        models.forEach((m, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${m}${m === current.model ? c.dim("  (current)") : ""}`));
+        const pick = (await rl.question(c.bold(`Model -- a number, or type an id [${current.model}]: `))).trim();
+        const chosen = /^\d+$/.test(pick) ? models[Number(pick) - 1] : pick;
+        if (pick && !chosen) throw new Error(`Not a valid choice: "${pick}".`);
+        if (chosen && chosen !== current.model) changes.model = chosen;
+      } else {
+        const answer = (await rl.question(c.bold(`Model id [${current.model}]: `))).trim();
+        if (answer && answer !== current.model) changes.model = answer;
+      }
+
+      const roleAnswer = (await rl.question(c.bold(`Role [${current.role ?? "none"}] ("-" clears it): `))).trim();
+      if (roleAnswer === "-") { if (current.role) changes.role = undefined; }
+      else if (roleAnswer && roleAnswer !== current.role) changes.role = roleAnswer;
+
+      const maxConcurrentAnswer = (await rl.question(c.bold(`max_concurrent [${current.max_concurrent}]: `))).trim();
+      if (maxConcurrentAnswer) changes.max_concurrent = Number(maxConcurrentAnswer);
+
+      const currentThinkingLabel = current.thinking === false ? "off" : current.thinking === true ? "on, follows the job" : `fixed at "${current.thinking}"`;
+      const thinkingAnswer = (await rl.question(c.bold(`Thinking/reasoning: y = follow the job's requested level, n = off, or low/medium/high to always use that [current: ${currentThinkingLabel}]: `))).trim().toLowerCase();
+      if (thinkingAnswer === "y" || thinkingAnswer === "yes") changes.thinking = true;
+      else if (thinkingAnswer === "n" || thinkingAnswer === "no") changes.thinking = false;
+      else if (THINKING_LEVELS.includes(thinkingAnswer)) changes.thinking = thinkingAnswer;
+
+      if (changes.model) {
+        console.log(`\n${c.bold("→")} Test call`);
+        if (probeWorker(current.provider, changes.model)) {
+          console.log(c.green(`✓ ${current.provider}/${changes.model} answered a real test prompt.`));
+        } else {
+          console.log(c.red(`✗ A real test prompt to ${current.provider}/${changes.model} didn't come back.`));
+          if (!(await confirm(rl, "Save the change anyway?", { defaultYes: false }))) { console.log(c.dim("Stopped; nothing was written.")); return; }
+        }
+        probe = false;
+      }
+    } finally {
+      rl.close();
+    }
+    if (Object.keys(changes).length === 0) { console.log(c.dim("\nNothing changed.")); return; }
+  }
+
+  if (probe && changes.model && !probeWorker(current.provider, changes.model)) {
+    out({ error: `a real test prompt to ${current.provider}/${changes.model} didn't come back -- nothing was written` });
+    process.exit(1);
+  }
+
+  const updated = { ...current, ...changes };
+  for (const key of Object.keys(updated)) if (updated[key] === undefined) delete updated[key];
+  const result = subscriptionConfigSchema.safeParse({ workers: { ...workers, [name]: updated } });
+  if (!result.success) {
+    const errors = formatSubscriptionIssues(result.error);
+    if (json) { out({ error: "invalid update", errors }); process.exit(1); }
+    console.error(c.red("That update is not valid:"));
+    for (const line of errors) console.error(`  - ${line}`);
+    process.exit(1);
+  }
+  fs.writeFileSync(subscriptionConfigPath(nomarmyRoot), stringifySubscriptionConfig(result.data));
+  const written = result.data.workers[name];
+  if (json) return out({ updated: true, name, entry: written, changed: Object.keys(changes) });
+  console.log(c.green(`\n✓ Updated "${name}" (${written.provider}/${written.model}).`));
+  console.log(c.yellow("Run `nomarmy connect claude` and restart your coordinator session so the MCP server picks it up."));
+}
+
+async function cmdSubscriptions() {
+  const sub = argv[1];
+  if (sub === "update") return cmdSubscriptionsUpdate();
+  if (sub === "list") return cmdSubscriptionsList();
+  if (sub === "add") return cmdSubscriptionsAdd();
+  if (sub === "remove") return cmdSubscriptionsRemove();
+  if (sub === "setup") return cmdSubscriptionsSetup();
+  throw new Error(`Unknown subscriptions subcommand "${sub ?? ""}". Use: nomarmy subscriptions <setup|list|add|update|remove>`);
 }
 
 function git(args) {
@@ -1591,7 +2227,7 @@ function sizingCheck(hardware, gguf) {
   process.exit((res.warnings ?? []).some((w) => w.severity === "error") ? 1 : 0);
 }
 
-const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, providers: cmdProviders, update: cmdUpdate, connect: cmdConnect, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
+const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, providers: cmdProviders, subscriptions: cmdSubscriptions, update: cmdUpdate, connect: cmdConnect, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
   // Import lazily to avoid circular dependencies

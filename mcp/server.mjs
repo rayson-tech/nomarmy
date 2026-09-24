@@ -16,6 +16,8 @@ import { loadConfig, ConfigError } from "../lib/config.mjs";
 import { resolveSandboxImage, detectPrimaryLanguage, EXEC_PATH_PREPEND } from "../lib/sandbox-images.mjs";
 import { DEFAULT_AGENT_IMAGE } from "../lib/verify.mjs";
 import { loadDispatchConfig, resolvePool, pickProvider, poolContextPerNom, entryContextPerNom } from "../lib/dispatch-config.mjs";
+import { openclawProviderId } from "../lib/dispatch-schema.mjs";
+import { loadSubscriptionConfig, resolveSubscriptionWorker, resolveSubscriptionWorkerByRole, findProviderConflicts, describeProviderConflict } from "../lib/subscription-config.mjs";
 import { queryModelCatalog } from "../lib/model-catalog.mjs";
 
 // Read from package.json rather than a second hardcoded literal -- the two
@@ -143,7 +145,15 @@ export function run(command, args, { cwd = projectDir, env = process.env, timeou
     child.on("close", code => {
       if (settled) return;
       settled = true; clearTimeout(timer); if (ticker) clearInterval(ticker);
-      if (code !== 0) reject(new Error(`${command} exited ${code}\nSTDERR:\n${stderr}\nSTDOUT:\n${stdout}`));
+      if (code !== 0) {
+        const error = new Error(`${command} exited ${code}\nSTDERR:\n${stderr}\nSTDOUT:\n${stdout}`);
+        // Structured, not just baked into .message text: a caller that knows
+        // this command's own output shape (e.g. OpenClaw's JSON envelope) can
+        // inspect the real captured stdout/stderr directly instead of
+        // string-scraping the formatted message above.
+        error.stdout = stdout; error.stderr = stderr;
+        reject(error);
+      }
       else resolve({ stdout: trim ? stdout.trim() : stdout, stderr: stderr.trim() });
     });
   });
@@ -459,6 +469,12 @@ function dispatchConfig() {
   if (cachedDispatchConfig === undefined) cachedDispatchConfig = loadDispatchConfig(nomarmyRoot);
   return cachedDispatchConfig;
 }
+// Same cache-once-per-process contract as dispatchConfig above.
+let cachedSubscriptionConfig;
+function subscriptionConfig() {
+  if (cachedSubscriptionConfig === undefined) cachedSubscriptionConfig = loadSubscriptionConfig(nomarmyRoot);
+  return cachedSubscriptionConfig;
+}
 
 // OpenClaw's own model catalog (queryModelCatalog), cached once per process
 // like everything else read-once-at-connect-time here -- a subprocess call
@@ -495,6 +511,33 @@ function budgetsForPool(poolName) {
   return deriveBudgets({ contextPerNom: resolved.contextPerNom, source: resolved.source, env: process.env });
 }
 
+// The subscription-worker sibling of budgetsForPool -- simpler, since a
+// named worker is a single known entry, not a pool of many to take the
+// minimum across. Falls back to the outer `budgets` the same way
+// budgetsForPool does on anything unresolved (missing config, unknown name,
+// no context known yet); resolveSubscriptionSelection is where the real,
+// specific "unknown subscription_worker" error belongs, not here.
+function budgetsForSubscriptionWorker(name) {
+  const loaded = subscriptionConfig();
+  if (!loaded?.found) return budgets;
+  let entry;
+  try { entry = resolveSubscriptionWorker(loaded, name); } catch { return budgets; }
+  const resolved = entryContextPerNom(entry, { catalog: modelCatalog(), localContextPerNom: contextInfo.contextPerNom });
+  if (!resolved) return budgets;
+  return deriveBudgets({ contextPerNom: resolved.contextPerNom, source: resolved.source, env: process.env });
+}
+// The role-based sibling: resolve role -> name first, then the exact same
+// lookup budgetsForSubscriptionWorker does. Falls back to `budgets` on an
+// unknown/duplicate/unresolvable role for the same reason that function
+// does -- resolveSubscriptionRoleSelection is where the real error belongs.
+function budgetsForSubscriptionRole(role) {
+  const loaded = subscriptionConfig();
+  if (!loaded?.found) return budgets;
+  let entry;
+  try { entry = resolveSubscriptionWorkerByRole(loaded, role); } catch { return budgets; }
+  return budgetsForSubscriptionWorker(entry.id);
+}
+
 // One in-flight-count per pool entry id, incremented/decremented around the
 // single `openclaw agent exec` call that entry backs (see runOpenClaw's use
 // below). This is deliberately NOT derived from `activeJobs` -- an implement
@@ -524,16 +567,28 @@ function withPoolEntrySlot(entryId, fn) {
 // under its max_concurrent), since silently substituting a different worker
 // identity than the one requested would be a much worse failure mode than a
 // clear refusal.
+// Refuses when `provider` is used by both a pool entry and a subscription
+// worker -- see findProviderConflicts for why that's never safe to guess
+// through. Only checked when both files actually exist.
+function assertNoProviderConflict(provider, dispatchLoaded, subscriptionLoaded) {
+  if (!dispatchLoaded?.found || !subscriptionLoaded?.found) return;
+  const conflict = findProviderConflicts(dispatchLoaded.config.pools, subscriptionLoaded.config.workers).find((c) => c.provider === provider);
+  if (conflict) throw new Error(describeProviderConflict(conflict));
+}
+
 export function resolvePoolSelection(poolName, reasoning, {
   getDispatchConfig = dispatchConfig,
+  getSubscriptionConfig = subscriptionConfig,
   pickProviderFn = pickProvider,
   runningById = Object.fromEntries(poolEntryRunningCounts),
 } = {}) {
-  const pool = resolvePool(getDispatchConfig(), poolName);
+  const dispatchLoaded = getDispatchConfig();
+  const pool = resolvePool(dispatchLoaded, poolName);
   const entry = pickProviderFn(pool, { runningById });
+  assertNoProviderConflict(openclawProviderId(entry), dispatchLoaded, getSubscriptionConfig());
   const model = entry.provider === "llama-cpp"
     ? `${workerProvider}/${entry.model || workerModel}`
-    : `${entry.provider}/${entry.model}`;
+    : `${openclawProviderId(entry)}/${entry.model}`;
   // llama-cpp defers to the single global NOMARMY_MODEL_THINKING flag, same
   // as a profile-routed job. A hosted entry's own `thinking` decides: false
   // -> off; true -> pass through the job's requested `reasoning`; a specific
@@ -545,6 +600,50 @@ export function resolvePoolSelection(poolName, reasoning, {
     : entry.thinking === true ? reasoning
     : entry.thinking;
   return { model, thinking, entry };
+}
+
+// The subscription-worker sibling of resolvePoolSelection -- shaped
+// identically ({model, thinking, entry}) so it drops into runOpenClaw's
+// existing seam, but with no picker at all: `name` always names one exact
+// entry (resolveSubscriptionWorker throws on an unknown one, never falls
+// back), and the owner-match attestation check happens here, first, before
+// anything else -- called once from admit() at admission time and again
+// naturally when runOpenClaw builds `selected`, since this is the same pure
+// function either way. A missing or mismatched on_behalf_of is refused with
+// the concrete mismatch named plainly, never a silent substitution.
+export function resolveSubscriptionSelection(name, onBehalfOf, reasoning, {
+  getSubscriptionConfig = subscriptionConfig,
+  getDispatchConfig = dispatchConfig,
+} = {}) {
+  const subscriptionLoaded = getSubscriptionConfig();
+  const entry = resolveSubscriptionWorker(subscriptionLoaded, name);
+  if (!onBehalfOf) {
+    throw new Error(`subscription_worker "${name}" requires on_behalf_of naming the specific person this job is for -- it was not supplied`);
+  }
+  if (onBehalfOf !== entry.owner) {
+    throw new Error(`subscription_worker "${name}" belongs to "${entry.owner}"; this job's on_behalf_of ("${onBehalfOf}") does not match -- refusing rather than silently running someone else's work under ${name}'s credential`);
+  }
+  assertNoProviderConflict(entry.provider, getDispatchConfig(), subscriptionLoaded);
+  const model = `${entry.provider}/${entry.model}`;
+  const thinking = entry.thinking === false ? "off" : entry.thinking === true ? reasoning : entry.thinking;
+  return { model, thinking, entry };
+}
+
+// A DETERMINISTIC alternative to resolveSubscriptionSelection's exact-name
+// lookup: "architect" always resolves to whichever one worker declares that
+// role (subscriptionConfigSchema's own superRefine already guarantees at
+// most one can), never a pick among several -- see
+// lib/subscription-schema.mjs's roleSchema comment for why that distinction
+// is the whole point. Delegates straight into resolveSubscriptionSelection
+// once the name is known, so the owner-match attestation logic exists in
+// exactly one place.
+export function resolveSubscriptionRoleSelection(role, onBehalfOf, reasoning, {
+  getSubscriptionConfig = subscriptionConfig,
+  getDispatchConfig = dispatchConfig,
+} = {}) {
+  const config = getSubscriptionConfig();
+  const entry = resolveSubscriptionWorkerByRole(config, role);
+  return resolveSubscriptionSelection(entry.id, onBehalfOf, reasoning, { getSubscriptionConfig: () => config, getDispatchConfig });
 }
 
 let cachedAmbientOpenClawConfigPath;
@@ -663,12 +762,34 @@ export function parseUnsupportedThinkingError(errorMessage) {
   return { requested: match[1], model: match[2].trim(), supported };
 }
 
-async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef, baseSha, timeoutSeconds, runtimeDir, profile, reasoning, pool = null, jobDir, workerId, evidence = null, evidenceTool = null, overridePrompt = null, logSuffix = "", idleDiff = null }) {
-  // `pool` (config/providers.yml) and `profile` (the single global
-  // NOMARMY_WORKER_PROVIDER/MODEL pair) are mutually exclusive selectors for
-  // the same {model, thinking} shape -- omitting `pool` is the exact
-  // pre-existing behavior, unchanged.
-  const selected = pool ? resolvePoolSelection(pool, reasoning) : profileConfig(profile, reasoning);
+// A real, confirmed incident: OpenClaw's OWN internal per-turn watchdog can
+// fire before nomArmy's outer run() deadline does (nomArmy's own timer waits
+// timeoutSeconds+30s specifically to give OpenClaw's shorter internal one
+// room to fire first and report cleanly) -- when it does, OpenClaw prints a
+// well-formed {"ok":false,"status":"timeout",...} envelope to stdout and
+// THEN exits nonzero anyway. run() treats any nonzero exit as an opaque
+// crash, so this genuinely graceful, self-identified timeout was being
+// mislabeled workerFailed instead of workerTimedOut -- which meant a report-
+// recovery attempt never even got a chance to run for the one case (a
+// worker that ran out of room, but has valid session state worth resuming)
+// it exists for. Checked against the real captured envelope from that
+// incident, not a synthesized shape.
+export function parseOpenClawInternalTimeout(stdout) {
+  let parsed;
+  try { parsed = JSON.parse(stdout); } catch { return false; }
+  return parsed?.ok === false && (parsed?.status === "timeout" || parsed?.error?.kind === "timeout");
+}
+
+async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef, baseSha, timeoutSeconds, runtimeDir, profile, reasoning, pool = null, subscriptionWorker = null, onBehalfOf = null, jobDir, workerId, evidence = null, evidenceTool = null, overridePrompt = null, logSuffix = "", idleDiff = null }) {
+  // `pool` (config/providers.yml) and `subscriptionWorker` (config/subscriptions.yml)
+  // both override `profile` (the single global NOMARMY_WORKER_PROVIDER/MODEL
+  // pair, which always carries its own default and so is never truly absent) --
+  // omitting both is the exact pre-existing behavior, unchanged. jobSchema's
+  // own .superRefine refuses a job that sets `pool` and `subscription_worker`
+  // together, so at most one of those two ever reaches here.
+  const selected = pool ? resolvePoolSelection(pool, reasoning)
+    : subscriptionWorker ? resolveSubscriptionSelection(subscriptionWorker, onBehalfOf, reasoning)
+    : profileConfig(profile, reasoning);
   // The specific entry is now known (weighted-random selection already
   // happened), so this job gets a PRECISE budget for that one entry's real
   // context window instead of the pool-wide conservative minimum admission
@@ -702,7 +823,17 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
   const buildArgs = (thinking) => ["agent", "exec", prompt, "--model", selected.model,
     "--cwd", cwd, "--code-mode", "direct", "--local-model-lean", "--thinking", thinking,
     "--timeout", String(timeoutSeconds), "--state-dir", stateDir, "--json",
-    ...(sandboxOverridePath ? ["--config", sandboxOverridePath] : [])];
+    ...(sandboxOverridePath ? ["--config", sandboxOverridePath] : []),
+    // openclaw agent exec defaults to --auth-env-only ("Use provider
+    // credentials from environment variables only"). A subscription
+    // worker's credential is deliberately NOT an env var -- OpenClaw
+    // discovers it by reading the local CLI's own already-logged-in session
+    // instead ("Allow stored and external CLI credential discovery", per
+    // this flag's own --help text) -- confirmed live: a real
+    // `--model claude-cli/claude-sonnet-5 --no-auth-env-only` call
+    // succeeded and returned a real completion. Every existing auth_env-
+    // based pool/profile job keeps today's default, unchanged.
+    ...(subscriptionWorker ? ["--no-auth-env-only"] : [])];
   // Same idleMs/minElapsedMs budget for both: idle-diff means "the worktree
   // stopped changing", this one means "the transcript stopped advancing after
   // the worker walked away from a process it started" -- same "how long is
@@ -718,7 +849,13 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
   // Held for this whole call (including retries) so max_concurrent counts a
   // real in-flight `agent exec`, not just the time between admission and
   // launch. A `profile`-routed call has no entry id and this is a no-op.
-  return withPoolEntrySlot(selected.entry?.id, async () => {
+  // Subscription entry ids are namespaced ("subscription:<id>") before
+  // sharing this same counting map with pool entries -- config/providers.yml
+  // and config/subscriptions.yml are separate files an operator could
+  // plausibly give the same id in, and merging their concurrency counts on
+  // an accidental collision would be a real, if narrow, correctness bug.
+  const poolEntrySlotId = selected.entry?.id ? (subscriptionWorker ? `subscription:${selected.entry.id}` : selected.entry.id) : undefined;
+  return withPoolEntrySlot(poolEntrySlotId, async () => {
     try {
       let stdout, stderr;
       try {
@@ -758,6 +895,15 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
       parsed.thinkingApplied = selected.thinking;
       return parsed;
     } catch (error) {
+      // See parseOpenClawInternalTimeout's own doc comment: a nonzero exit
+      // whose stdout is still OpenClaw's own well-formed timeout envelope is
+      // a graceful internal timeout, not an opaque crash -- relabel it so
+      // executeImplement/executeScout's workerTimedOut check (and therefore
+      // report recovery) sees it correctly.
+      if (!error.timedOut && parseOpenClawInternalTimeout(error.stdout)) {
+        error.timedOut = true;
+        error.stopReason = error.stopReason ?? "openclaw_internal_timeout";
+      }
       fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} OpenClaw failure${logSuffix}\n${error.stack || error.message}\n`);
       throw error;
     } finally {
@@ -1935,7 +2081,7 @@ function writeStatus(jobDir, patch) {
 }
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-export async function executeJob({ task, acceptance, verification, mode = "implement", baseRef, timeoutSeconds = 600, profile = "coder", reasoning = "high", pool = null, workerId, evidence = null, verifyRegression = false, jobId: presetJobId = null }) {
+export async function executeJob({ task, acceptance, verification, mode = "implement", baseRef, timeoutSeconds = 600, profile = "coder", reasoning = "high", pool = null, subscriptionWorker = null, onBehalfOf = null, workerId, evidence = null, verifyRegression = false, jobId: presetJobId = null }) {
   await assertRepo();
   ensureJobsRoot();
   // Fire-and-forget: sweeps whatever this or any other nomArmy install left
@@ -1949,13 +2095,13 @@ export async function executeJob({ task, acceptance, verification, mode = "imple
     serverPid: process.pid, baseSha: base.sha, timeoutSeconds, ...extra
   });
   progress("starting", { startedAt: new Date().toISOString() });
-  const common = { task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool, workerId, progress, jobStartedMs };
+  const common = { task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool, subscriptionWorker, onBehalfOf, workerId, progress, jobStartedMs };
   if (mode === "scout") return executeScout(common);
   if (mode === "decompose") return executeDecompose(common);
   return executeImplement({ ...common, verification, evidence, verifyRegression });
 }
 
-async function executeImplement({ task, acceptance, verification, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool = null, workerId, evidence, verifyRegression = false, progress, jobStartedMs }) {
+async function executeImplement({ task, acceptance, verification, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool = null, subscriptionWorker = null, onBehalfOf = null, workerId, evidence, verifyRegression = false, progress, jobStartedMs }) {
   const mode = "implement";
   let branch = `agent/${jobId}`, worktree = path.join(jobDir, "worktree");
   try {
@@ -1978,7 +2124,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
     try {
       result = await runOpenClaw({
         task, acceptance, verification, mode, cwd, baseRef: base.ref, baseSha: base.sha,
-        timeoutSeconds: timeBudget.workTimeoutSeconds, runtimeDir, profile, reasoning, pool, jobDir, workerId: workerId || jobId, evidence,
+        timeoutSeconds: timeBudget.workTimeoutSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, jobDir, workerId: workerId || jobId, evidence,
         idleDiff: { idleMs: timeBudget.idleBreakSeconds * 1000, minElapsedMs: timeBudget.idleMinElapsedSeconds * 1000, pollSeconds: timeBudget.idlePollSeconds },
       });
     } catch (error) {
@@ -2022,7 +2168,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
       try {
         const retryResult = await runOpenClaw({
           task, acceptance, verification, mode, cwd, baseRef: base.ref, baseSha: base.sha,
-          timeoutSeconds: remainingSeconds, runtimeDir, profile, reasoning, pool, jobDir, workerId: workerId || jobId, evidence,
+          timeoutSeconds: remainingSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, jobDir, workerId: workerId || jobId, evidence,
           idleDiff: { idleMs: timeBudget.idleBreakSeconds * 1000, minElapsedMs: timeBudget.idleMinElapsedSeconds * 1000, pollSeconds: timeBudget.idlePollSeconds },
           logSuffix: "-transient-retry",
         });
@@ -2070,7 +2216,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
       try {
         const recoveryResult = await runOpenClaw({
           task, acceptance, verification, mode, cwd, baseRef: base.ref, baseSha: base.sha,
-          timeoutSeconds: timeBudget.reportReserveSeconds, runtimeDir, profile, reasoning, pool, jobDir, workerId: workerId || jobId,
+          timeoutSeconds: timeBudget.reportReserveSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, jobDir, workerId: workerId || jobId,
           overridePrompt: reportRecoveryPrompt({ report: budgets.report.implement, changes }), logSuffix: "-recovery",
         });
         const recoveryText = finalText(recoveryResult);
@@ -2243,6 +2389,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
     if (reportRecoveryAttempted) {
       const cause = workerStopReason === "idle_diff" ? "the idle-diff circuit breaker ended the work phase early"
         : workerStopReason === "idle_background_process" ? "the worker abandoned a backgrounded process and the session stalled"
+        : workerStopReason === "openclaw_internal_timeout" ? "OpenClaw's own internal turn timeout fired before nomArmy's outer deadline"
         : workerStopReason === "timeout" ? "the work phase reached its reserved-time deadline"
         : "the first reply left no usable report";
       issues.push(reportRecovered
@@ -2295,7 +2442,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
 // the worktree, so a scout that wrote to its snapshot cannot forge evidence.
 // A clean scout worktree holds no work and is removed; a dirty one is retained
 // because a scout that wrote is a scout that misbehaved, and that is worth a look.
-async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool = null, workerId, progress, jobStartedMs }) {
+async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool = null, subscriptionWorker = null, onBehalfOf = null, workerId, progress, jobStartedMs }) {
   const mode = "scout", worktree = path.join(jobDir, "worktree");
   let worktreeRetained = false;
   try {
@@ -2318,7 +2465,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
     const workerStartedMs = Date.now();
     progress("worker");
     try {
-      result = await runOpenClaw({ task, acceptance, verification: null, mode, cwd: worktree, baseRef: base.ref, baseSha: base.sha, timeoutSeconds, runtimeDir, profile, reasoning, pool, jobDir, workerId: workerId || jobId, evidenceTool: evidencePlaced ? evidenceTool : null });
+      result = await runOpenClaw({ task, acceptance, verification: null, mode, cwd: worktree, baseRef: base.ref, baseSha: base.sha, timeoutSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, jobDir, workerId: workerId || jobId, evidenceTool: evidencePlaced ? evidenceTool : null });
     } catch (error) {
       workerFailed = true;
       // error.timedOut is set only by our own spawn timer (run(), above) --
@@ -2350,7 +2497,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
       try {
         const recoveryResult = await runOpenClaw({
           task, acceptance, verification: null, mode, cwd: worktree, baseRef: base.ref, baseSha: base.sha,
-          timeoutSeconds: remainingSeconds, runtimeDir, profile, reasoning, pool, jobDir, workerId: workerId || jobId,
+          timeoutSeconds: remainingSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, jobDir, workerId: workerId || jobId,
           evidenceTool: evidencePlaced ? evidenceTool : null,
           overridePrompt: scoutReportRecoveryPrompt({ report: budgets.report.scout }), logSuffix: "-recovery",
         });
@@ -2465,7 +2612,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
 // commitAllowed/selectUnionCandidates are both hard-gated on mode ===
 // "implement" elsewhere, so a decompose result can never be auto-dispatched
 // or unioned even by accident.
-async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool = null, workerId, progress, jobStartedMs }) {
+async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool = null, subscriptionWorker = null, onBehalfOf = null, workerId, progress, jobStartedMs }) {
   const mode = "decompose", worktree = path.join(jobDir, "worktree");
   let worktreeRetained = false;
   try {
@@ -2484,7 +2631,7 @@ async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtime
     const workerStartedMs = Date.now();
     progress("worker");
     try {
-      result = await runOpenClaw({ task, acceptance, verification: null, mode, cwd: worktree, baseRef: base.ref, baseSha: base.sha, timeoutSeconds, runtimeDir, profile, reasoning, pool, jobDir, workerId: workerId || jobId, evidenceTool: evidencePlaced ? evidenceTool : null });
+      result = await runOpenClaw({ task, acceptance, verification: null, mode, cwd: worktree, baseRef: base.ref, baseSha: base.sha, timeoutSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, jobDir, workerId: workerId || jobId, evidenceTool: evidencePlaced ? evidenceTool : null });
     } catch (error) {
       workerFailed = true;
       workerTimedOut = Boolean(error.timedOut);
@@ -2888,14 +3035,39 @@ async function admit(jobs) {
   // budget, not the local-derived global one -- see budgetsForPool. Which
   // specific entry pickProvider will land on isn't known yet at admission
   // time, so this is the conservative minimum across the pool's currently
-  // available entries, not any one entry's precise number.
-  jobs.forEach((j, i) => { for (const p of checkBrief(j, j.pool ? budgetsForPool(j.pool) : budgets)) problems.push(jobs.length > 1 ? `job ${i + 1}: ${p}` : p); });
+  // available entries, not any one entry's precise number. A
+  // subscription_worker job budgets against that one named entry directly
+  // (see budgetsForSubscriptionWorker) -- there's no "which entry" unknown
+  // the way a weighted pool has, since the name given IS the entry.
+  jobs.forEach((j, i) => {
+    const jobBudgets = j.pool ? budgetsForPool(j.pool)
+      : j.subscription_worker ? budgetsForSubscriptionWorker(j.subscription_worker)
+      : j.subscription_role ? budgetsForSubscriptionRole(j.subscription_role)
+      : budgets;
+    for (const p of checkBrief(j, jobBudgets)) problems.push(jobs.length > 1 ? `job ${i + 1}: ${p}` : p);
+  });
   // verify_regression re-runs `verification`; with no profile set there is
   // nothing to re-run. Refuse before starting anything, matching every other
   // admission check here, rather than silently no-op at runtime.
   jobs.forEach((j, i) => {
     if (j.verify_regression && !j.verification) {
       problems.push(`${jobs.length > 1 ? `job ${i + 1}: ` : ""}verify_regression requires a verification profile; there is nothing to run twice without one`);
+    }
+  });
+  // subscription_worker/on_behalf_of: the owner-match attestation refusal
+  // happens here, before a container is ever provisioned -- matching how a
+  // bad `pool` name is already caught before dispatch, not mid-flight. Only
+  // attempted once the plain field-presence problems above are already
+  // clean, so a missing on_behalf_of is never reported twice in two
+  // different shapes.
+  jobs.forEach((j, i) => {
+    const fieldProblems = subscriptionJobFieldProblems(j);
+    for (const p of fieldProblems) problems.push(jobs.length > 1 ? `job ${i + 1}: ${p}` : p);
+    if (fieldProblems.length === 0 && j.on_behalf_of) {
+      try {
+        if (j.subscription_worker) resolveSubscriptionSelection(j.subscription_worker, j.on_behalf_of, j.reasoning);
+        else if (j.subscription_role) resolveSubscriptionRoleSelection(j.subscription_role, j.on_behalf_of, j.reasoning);
+      } catch (error) { problems.push(jobs.length > 1 ? `job ${i + 1}: ${error.message}` : error.message); }
     }
   });
   // Local-slot capacity only ever concerns the local lane -- a pool-routed
@@ -2984,12 +3156,44 @@ export const jobSchema = z.object({
   timeout_seconds: z.number().int().min(30).max(1800).default(600),
   profile: z.enum(["coder", "gpt"]).default("coder").describe("coder: Qwen3-Coder-Next by default, runs with thinking off regardless of `reasoning` (that model has no thinking mode at all, not a policy choice); if NOMARMY_WORKER_MODEL_THINKING=true (set when a different, reasoning-capable model is configured into this slot), `reasoning` takes effect exactly like on profile gpt. gpt: the gpt-oss-20b fallback, where `reasoning` always sets its thinking level."),
   reasoning: z.enum(["low", "medium", "high"]).default("medium").describe("Thinking level passed to the worker model. Only takes effect on profile: gpt; silently ignored on the default profile: coder. Also applies on a pool-routed job, per that entry's own `thinking` flag. Default is medium, not high, on real measured evidence: on an identical ticket, gpt-oss-20b at high took 318s with 21 tool calls and 4 failures, and at medium took 62s with 9 calls and 0 failures -- high did not produce a better answer, it thrashed. A separate open-ended task made Qwen3.6-27B time out completely at high (630s, zero output) and succeed at medium. Do not raise this to high by default reasoning that more thinking should help -- it has only ever hurt or timed out in testing so far. Reach for high only after a task has already failed once at medium and the failure looks like an under-thinking problem specifically (wrong root cause, not a formatting or scope issue)."),
-  pool: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().describe("Name of a weighted multi-provider pool from config/providers.yml (e.g. \"cheap\", \"capable\" -- names are whatever that file declares). When set, OVERRIDES `profile`: nomArmy weighted-randomly picks one authenticated, under-capacity provider entry from the named pool for this job instead of using the single global worker provider/model. Omit entirely to keep today's `profile`-only behavior unchanged -- this is fully opt-in and does nothing if config/providers.yml does not exist. Refuses with a clear error (not a silent fallback to local) if the pool name is unknown, or if every entry in it is either missing its credential or already at its max_concurrent."),
+  pool: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().describe("Name of a weighted multi-provider pool from config/providers.yml (e.g. \"cheap\", \"capable\" -- names are whatever that file declares). When set, OVERRIDES `profile`: nomArmy weighted-randomly picks one authenticated, under-capacity provider entry from the named pool for this job instead of using the single global worker provider/model. Omit entirely to keep today's `profile`-only behavior unchanged -- this is fully opt-in and does nothing if config/providers.yml does not exist. Refuses with a clear error (not a silent fallback to local) if the pool name is unknown, or if every entry in it is either missing its credential or already at its max_concurrent. Mutually exclusive with subscription_worker/subscription_role."),
+  subscription_worker: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().describe("Name of an entry in config/subscriptions.yml -- a worker backed by one specific person's own already-authenticated subscription (Claude Pro/Max/Team via OpenClaw's claude-cli provider, or an OpenAI ChatGPT plan via its codex provider), never a weighted-random pick the way `pool` is. OVERRIDES `profile`. Requires `on_behalf_of` naming that exact person; nomArmy refuses the job (never substitutes a different worker) if it's missing, doesn't match the entry's declared owner, or the name is unknown. Mutually exclusive with `pool` and `subscription_role`."),
+  subscription_role: z.string().min(1).max(254).optional().describe("A DETERMINISTIC alternative to `subscription_worker`: resolves to whichever one worker in config/subscriptions.yml declares this exact role (e.g. \"architect\" always the same entry -- never a pick among several, config refuses to load at all if two workers claim the same role). Same `on_behalf_of` requirement and refusal behavior as `subscription_worker`. Mutually exclusive with `pool` and `subscription_worker`."),
+  on_behalf_of: z.string().min(1).max(254).optional().describe("Required when `subscription_worker` or `subscription_role` is set: must exactly match that entry's declared owner in config/subscriptions.yml. This is a self-reported attestation, not an independently verified identity check -- nomArmy has no caller-identity boundary today, so what this actually guarantees is explicit, auditable intent and hard refusal on mismatch or omission, not cryptographic proof of who issued the call."),
   evidence: z.string().max(maxEvidenceChars,
     `Evidence exceeds the ${maxEvidenceChars}-character budget. This is for facts already resolved (e.g. with repo_evidence), not more description of the task -- if it needs more than this, resolve less per job or put the pointer (a path and line range) here instead of the material itself.`
   ).optional().describe("implement only: facts YOU already resolved (e.g. via repo_evidence) that the worker should trust and not re-derive -- exact signatures, call sites, line ranges, existing behavior. Cuts exploration that would otherwise burn the worker's own context budget on something you already know. Not a substitute for a clear objective and acceptance criteria."),
   worker_id: z.string().regex(/^[A-Za-z0-9._-]+$/).optional()
 });
+// A plain function, not jobSchema.superRefine: server.tool(...) registers
+// jobSchema.shape directly (see its call sites below), and .superRefine()
+// wraps a schema in a ZodEffects that has no .shape at all -- confirmed
+// live, this would have silently broken BOTH tool registrations. The MCP
+// SDK also validates incoming args against .shape's own per-field schemas,
+// never the whole composed object, so a .superRefine() here would never
+// even run through that path regardless. Cross-field job validation in this
+// codebase already lives in admit() as plain checks instead (see
+// verify_regression's own "requires a verification profile" check just
+// below) -- this follows that exact, already-established pattern.
+export function subscriptionJobFieldProblems(args) {
+  const problems = [];
+  if (args.subscription_worker && !args.on_behalf_of) {
+    problems.push("subscription_worker requires on_behalf_of naming exactly who this job is for -- it was not supplied");
+  }
+  if (args.subscription_role && !args.on_behalf_of) {
+    problems.push("subscription_role requires on_behalf_of naming exactly who this job is for -- it was not supplied");
+  }
+  if (args.on_behalf_of && !args.subscription_worker && !args.subscription_role) {
+    problems.push("on_behalf_of has no effect without subscription_worker or subscription_role -- likely meant to scope a pool/profile job, which it cannot");
+  }
+  if (args.subscription_worker && args.subscription_role) {
+    problems.push("subscription_worker and subscription_role are mutually exclusive -- a job selects a worker one way or the other, never both");
+  }
+  if (args.pool && (args.subscription_worker || args.subscription_role)) {
+    problems.push("pool and subscription_worker/subscription_role are mutually exclusive -- a job selects a provider one way or the other, never both");
+  }
+  return problems;
+}
 // An explicit true/false always wins. Omitted, this defaults to true
 // whenever there's actually a `verification` profile to regression-check
 // against (and this is an implement job -- scouts/decomposes ignore it
@@ -3000,8 +3204,19 @@ export function resolveVerifyRegression(args) {
   return args.mode === "implement" && Boolean(args.verification);
 }
 function jobArgs(args, workerId) {
+  // subscription_role is resolved to a concrete worker name HERE, once, so
+  // everything downstream (executeJob, runOpenClaw, resolveSubscriptionSelection)
+  // only ever deals with subscriptionWorker -- "role" is purely a dispatch-
+  // time convenience for the caller, not a concept the execution path needs
+  // to know about. admit() already proved this resolves cleanly before
+  // launch() is ever reachable; this only re-throws in the rare case
+  // something changed between admission and launch, never silently falls
+  // back to a different worker.
+  const subscriptionWorker = args.subscription_worker
+    ?? (args.subscription_role ? resolveSubscriptionWorkerByRole(subscriptionConfig(), args.subscription_role).id : undefined);
   return { task: args.task, acceptance: args.acceptance, verification: args.verification, mode: args.mode, baseRef: args.base_ref,
-    timeoutSeconds: args.timeout_seconds, profile: args.profile, reasoning: args.reasoning, pool: args.pool, evidence: args.evidence,
+    timeoutSeconds: args.timeout_seconds, profile: args.profile, reasoning: args.reasoning, pool: args.pool,
+    subscriptionWorker, onBehalfOf: args.on_behalf_of, evidence: args.evidence,
     verifyRegression: resolveVerifyRegression(args), workerId };
 }
 server.tool("local_worker", "Run one isolated local worker and wait for it. mode=implement edits in its own worktree and the coordinator commits only on a valid done report (or a recovered job that passed independent verification); failed or incomplete worktrees are retained. mode=scout answers a question from a read-only snapshot with mandatory [path:line] citations that nomArmy verifies and expands. mode=decompose (also read-only) proposes 2+ independent subtasks for a broad objective instead of one worker turn trying to do too much; the proposal is never auto-dispatched, review it and make a separate call with the subtasks you choose. Refuses under memory pressure or over capacity; use local_worker_start + local_worker_status to avoid blocking.", jobSchema.shape,

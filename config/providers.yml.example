@@ -48,6 +48,18 @@
 #   openai             native OpenClaw onboarding (--openai-api-key).
 #   xai                native OpenClaw onboarding (--xai-api-key). Grok.
 #   deepinfra          native OpenClaw onboarding (--deepinfra-api-key).
+#   openclaw           any OTHER provider OpenClaw supports, so nomArmy never
+#                      has to list them all: set openclaw_provider to its
+#                      OpenClaw id (`openclaw models list --all`), plus
+#                      plugin when it isn't stock (`openclaw plugins search
+#                      <name>`); `providers add` installs it first. E.g.:
+#                        - id: deepseek
+#                          provider: openclaw
+#                          openclaw_provider: deepseek
+#                          plugin: clawhub:@openclaw/deepseek-provider
+#                          model: deepseek-chat
+#                          weight: 1
+#                          auth_env: NOMARMY_DEEPSEEK_API_KEY
 #   bedrock            custom endpoint, needs base_url (nomArmy derives a
 #                      default from NOMARMY_BEDROCK_REGION at setup time).
 #   azure-openai       custom endpoint, needs base_url -- every Azure OpenAI

@@ -21,7 +21,7 @@ import {
   resolvePool,
   stringifyDispatchConfig,
 } from "../lib/dispatch-config.mjs";
-import { dispatchConfigSchema, formatDispatchIssues, findReservedPoolName } from "../lib/dispatch-schema.mjs";
+import { dispatchConfigSchema, formatDispatchIssues, findReservedPoolName, openclawProviderId } from "../lib/dispatch-schema.mjs";
 
 const tempDirs = [];
 
@@ -108,7 +108,7 @@ test("dispatchConfigSchema: an unrecognized field is a hard error, never silentl
 test("dispatchConfigSchema: an unknown provider type names the real list, not a generic message", () => {
   const result = dispatchConfigSchema.safeParse({ pools: { cheap: [{ id: "x", provider: "made-up-provider", weight: 1 }] } });
   assert.equal(result.success, false);
-  assert.match(formatDispatchIssues(result.error).join("\n"), /must be one of llama-cpp, bedrock, anthropic, openai, xai, deepinfra, azure-openai, openai-compatible/);
+  assert.match(formatDispatchIssues(result.error).join("\n"), /must be one of llama-cpp, bedrock, anthropic, openai, xai, deepinfra, openclaw, azure-openai, openai-compatible/);
 });
 
 test("dispatchConfigSchema: a duplicate id across pools is a hard error naming both pools", () => {
@@ -410,4 +410,47 @@ test("poolContextPerNom: a mixed pool correctly weighs a llama-cpp entry's UNBUF
   // local: 65536 unbuffered. grok: 80000 * 0.75 = 60000 buffered. grok wins (smaller).
   const result = poolContextPerNom(pool, env, { localContextPerNom: 65536 });
   assert.equal(result.contextPerNom, 60000);
+});
+
+// --------------------------------------------------------------------------
+// provider: openclaw -- any other OpenClaw provider, by id, without nomArmy
+// having to enumerate every vendor OpenClaw supports.
+// --------------------------------------------------------------------------
+
+const GENERIC_ENTRY = { id: "ds", provider: "openclaw", openclaw_provider: "deepseek", plugin: "clawhub:@openclaw/deepseek-provider", model: "deepseek-chat", weight: 1, auth_env: "NOMARMY_DEEPSEEK_API_KEY" };
+
+test("provider openclaw: accepts any OpenClaw provider id, with an optional plugin spec", () => {
+  const result = dispatchConfigSchema.safeParse({ pools: { cheap: [GENERIC_ENTRY] } });
+  assert.equal(result.success, true, JSON.stringify(result.error?.issues));
+  const { plugin, ...noPlugin } = GENERIC_ENTRY;
+  assert.equal(dispatchConfigSchema.safeParse({ pools: { cheap: [noPlugin] } }).success, true);
+});
+
+test("provider openclaw: openclaw_provider is required and must look like a provider id", () => {
+  const { openclaw_provider, ...missing } = GENERIC_ENTRY;
+  assert.match(formatDispatchIssues(dispatchConfigSchema.safeParse({ pools: { p: [missing] } }).error).join("\n"), /openclaw_provider: is required/);
+  assert.equal(dispatchConfigSchema.safeParse({ pools: { p: [{ ...GENERIC_ENTRY, openclaw_provider: "Deep Seek" }] } }).success, false);
+  assert.equal(dispatchConfigSchema.safeParse({ pools: { p: [{ ...GENERIC_ENTRY, plugin: "two words" }] } }).success, false);
+});
+
+test("provider openclaw: refuses a type that has its own setup (bedrock needs base_url, llama-cpp has no key)", () => {
+  for (const id of ["bedrock", "llama-cpp", "openai-compatible", "openclaw"]) {
+    assert.equal(dispatchConfigSchema.safeParse({ pools: { p: [{ ...GENERIC_ENTRY, openclaw_provider: id }] } }).success, false, id);
+  }
+  assert.equal(dispatchConfigSchema.safeParse({ pools: { p: [{ ...GENERIC_ENTRY, openclaw_provider: "xai" }] } }).success, true, "a native id is just a longer way to say it");
+});
+
+test("provider openclaw: other types reject openclaw_provider/plugin as unexpected fields", () => {
+  const entry = { id: "x", provider: "xai", model: "grok", weight: 1, auth_env: "NOMARMY_XAI_API_KEY", openclaw_provider: "xai" };
+  assert.match(formatDispatchIssues(dispatchConfigSchema.safeParse({ pools: { p: [entry] } }).error).join("\n"), /unexpected field/);
+});
+
+test("openclawProviderId: the generic type's own id, every other type's provider as-is", () => {
+  assert.equal(openclawProviderId(GENERIC_ENTRY), "deepseek");
+  assert.equal(openclawProviderId({ provider: "xai" }), "xai");
+});
+
+test("resolveEntryContext: a generic entry is looked up in the catalog under its real OpenClaw id", () => {
+  const resolved = resolveEntryContext(GENERIC_ENTRY, { catalog: new Map([["deepseek/deepseek-chat", 128000]]) });
+  assert.deepEqual(resolved, { raw: 128000, source: "openclaw model catalog (deepseek/deepseek-chat)" });
 });
