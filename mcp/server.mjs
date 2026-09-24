@@ -582,24 +582,39 @@ export function expandJobs(jobs, { getArmy = currentArmy, getAgents = () => agen
 // and every hosted entry still works via its context_window override or the
 // conservative unknown-model fallback either way (see lib/dispatch-config.mjs).
 let cachedModelCatalog;
-let catalogRefreshStarted = false;
-function modelCatalog() {
+let catalogRefresh = null;
+/**
+ * Start the background catalog refresh if an agent's provider is missing
+ * from the cached catalog (OpenClaw's un-refreshed list only holds its
+ * built-in claude-cli models; openai, xai and meta only appear after
+ * --refresh). Once per process. Returns the in-flight refresh, or null.
+ */
+function ensureCatalogRefresh() {
+  if (catalogRefresh) return catalogRefresh;
   if (cachedModelCatalog === undefined) cachedModelCatalog = queryModelCatalog();
-  // The cached catalog can lack a provider entirely, and then every model on
-  // it is budgeted at the unknown-model fallback (32k tokens) instead of its
-  // real window. Refresh once per process -- in the background: the refresh
-  // contacts every provider, and run synchronously it could freeze the
-  // whole server for as long as one provider stalled. Until it lands, a job
-  // simply uses the cached catalog or the fallback.
-  if (!catalogRefreshStarted) {
-    let providers = [];
-    try { providers = [...new Set(Object.values(agentsConfig().agents).map(agentProviderId).filter(Boolean))]; } catch { /* reported elsewhere */ }
-    const keys = cachedModelCatalog ? [...cachedModelCatalog.keys()] : [];
-    if (providers.some((p) => !keys.some((k) => k.startsWith(`${p}/`)))) {
-      catalogRefreshStarted = true;
-      queryModelCatalogAsync({ refresh: true }).then((fresh) => { if (fresh?.size) cachedModelCatalog = fresh; });
-    }
-  }
+  let providers = [];
+  try { providers = [...new Set(Object.values(agentsConfig().agents).map(agentProviderId).filter(Boolean))]; } catch { /* reported elsewhere */ }
+  const keys = cachedModelCatalog ? [...cachedModelCatalog.keys()] : [];
+  if (!providers.some((p) => !keys.some((k) => k.startsWith(`${p}/`)))) return null;
+  catalogRefresh = queryModelCatalogAsync({ refresh: true }).then((fresh) => { if (fresh?.size) cachedModelCatalog = fresh; return cachedModelCatalog; });
+  return catalogRefresh;
+}
+// Synchronous callers get whatever is known right now (the refresh runs in
+// the background: run synchronously, a stalled provider froze the server).
+function modelCatalog() {
+  ensureCatalogRefresh();
+  return cachedModelCatalog;
+}
+/**
+ * The catalog, waiting (asynchronously, never blocking the server) up to
+ * `timeoutMs` for the refresh. Used where the answer matters: admission
+ * sizes budgets from it, and the `army` tool lists each agent's models.
+ * Not waiting is what left the General with empty model lists and first
+ * jobs budgeted at the 32k fallback (a real Senti run).
+ */
+async function modelCatalogReady(timeoutMs = 30000) {
+  const pending = ensureCatalogRefresh();
+  if (pending) await Promise.race([pending, sleep(timeoutMs)]);
   return cachedModelCatalog;
 }
 
@@ -3309,6 +3324,7 @@ function capacitySnapshot() {
 }
 async function admit(jobs) {
   await refreshBudgets();
+  if (jobs.some((j) => jobLane(j) === "remote")) await modelCatalogReady();
   const problems = [];
   // A pool-routed job is checked against that pool's OWN (model-dependent)
   // budget, not the local-derived global one -- see budgetsForPool. Which
@@ -3685,7 +3701,7 @@ server.tool("army", "Who you, the General, are and who you call for what in this
     const summary = describeArmy(currentArmy(), { agents, describeAgent });
     // Each agent's models, from OpenClaw's catalog, so the General can pick
     // one for a role set to "auto". The catalog can lag a brand-new model.
-    const catalog = modelCatalog();
+    const catalog = await modelCatalogReady();
     summary.agents = Object.fromEntries(Object.entries(agents).map(([name, agent]) => {
       const provider = agentProviderId(agent);
       const models = provider && catalog ? [...catalog.keys()].filter((k) => k.startsWith(`${provider}/`)).map((k) => k.slice(provider.length + 1)) : [];
@@ -4003,6 +4019,9 @@ if (isMain) {
   // admission refreshes it anyway, and a slow hardware probe must not delay
   // the MCP handshake.
   refreshBudgets().catch(() => {});
+  // Start the model-catalog refresh now, so it's ready by the first
+  // `army` call or remote job rather than kicked off by it.
+  try { ensureCatalogRefresh(); } catch { /* best-effort */ }
   // Catches accumulation from a session that ended without a job ever
   // running again (a crash, a Podman machine restart) rather than waiting
   // for the next job to trigger the per-job sweep in executeJob.
