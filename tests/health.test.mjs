@@ -101,5 +101,15 @@ test("unknownModelIssues: the Codex ChatGPT-plan refusal (model_not_found), old 
   ], { now });
   assert.equal(issues.length, 1);
   assert.equal(issues[0].id, "unknown-model:openai/gpt-6-sol");
-  assert.match(issues[0].title, /refused by its provider on 2 jobs today/);
+  assert.match(issues[0].title, /failed as an unknown or unsupported model on 2 jobs today/);
+});
+
+test("unknownModelIssues: a failure is cleared by a later successful job or test call, or when no role uses the model", () => {
+  const now = Date.parse("2026-09-24T18:00:00Z");
+  const fail = { finishedAt: "2026-09-24T14:19:16Z", workerError: "Unknown model: meta/muse-spark-1.3." };
+  assert.equal(unknownModelIssues([fail], { now }).length, 1);
+  assert.equal(unknownModelIssues([fail, { finishedAt: "2026-09-24T15:00:00Z", worker: { provider: "meta", model: "muse-spark-1.3" } }], { now }).length, 0, "a later job ran on it");
+  assert.equal(unknownModelIssues([fail, { finishedAt: "2026-09-24T13:00:00Z", worker: { provider: "meta", model: "muse-spark-1.3" } }], { now }).length, 1, "an earlier success doesn't clear a later failure");
+  assert.equal(unknownModelIssues([fail], { now, probedOk: { "meta/muse-spark-1.3": Date.parse("2026-09-24T17:30:00Z") } }).length, 0, "army assign's test call passed since");
+  assert.equal(unknownModelIssues([fail], { now, inUse: new Set(["xai/grok-4.7"]) }).length, 0, "no role uses it any more");
 });

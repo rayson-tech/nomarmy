@@ -20,3 +20,6 @@ process.env.NOMARMY_AGENT_STATE = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy
 process.env.NOMARMY_NOTIFY = "0";
 // ...and never touch the developer's real Claude Code settings.
 process.env.NOMARMY_CLAUDE_SETTINGS_PATH = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-test-claude-")), "settings.json");
+// ...nor the developer's real OpenClaw config (lib/openclaw-config.mjs).
+process.env.OPENCLAW_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-test-openclaw-"));
+delete process.env.OPENCLAW_CONFIG_PATH;

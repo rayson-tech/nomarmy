@@ -22,6 +22,8 @@ import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected } fr
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
 import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
 import { loadArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
+import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
+import { recordProbeSuccess } from "../lib/health.mjs";
 import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
 
 // Add a new coordinator: add its name here, teach commandExists/connectTarget
@@ -952,6 +954,16 @@ async function ensureVendorAuth(rl, vendorKey) {
     if (!syncMintedKey(vendor)) return { ok: false };
     console.log(c.green(`✓ OpenClaw is using your ${vendor.cli.bin} subscription key (profile ${vendor.credential.profileId}).`));
   }
+  if (vendor.plugin?.providerConfig) {
+    // paste-api-key saves the key but not the provider's config entry; the
+    // plugin's own onboarding step writes that (lib/openclaw-config.mjs).
+    const applied = await ensureProviderConfig({ provider: vendor.provider, pluginId: vendor.plugin.id, ...vendor.plugin.providerConfig });
+    if (applied.error) {
+      console.log(c.red(`✗ OpenClaw has no ${vendor.provider} provider entry, and adding it failed: ${applied.error}. Run \`openclaw onboard\` and pick ${vendor.label} to add it.`));
+      return { ok: false };
+    }
+    if (applied.changed) console.log(c.green(`✓ Added the ${vendor.provider} provider to OpenClaw's config with the plugin's own setup step (backup: ${applied.backup}).`));
+  }
   return { ok: true, email: status.email };
 }
 
@@ -979,6 +991,7 @@ function probeWorker(provider, model) {
     // AFTER the JSON envelope, and the merged text doesn't parse.
     const outcome = probeOutcome({ stdout: result.stdout ?? "", stderr: result.stderr ?? "" });
     lastProbeFailure = outcome.ok ? null : outcome.reason;
+    if (outcome.ok) recordProbeSuccess(agentStateRoot(), `${provider}/${model}`);
     return outcome.ok;
   } finally {
     reapProbeSandbox(stateDir);
