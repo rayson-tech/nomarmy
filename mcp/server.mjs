@@ -12,6 +12,7 @@ import { DECOMPOSE_OUTCOMES, DECOMPOSE_STATUS_BY_OUTCOME, decomposePrompt, parse
 import { deriveBudgets, checkBrief, resolveContextPerNom, assessAdmission, describeBudgets, deriveTimeBudget, FRONTIER } from "../lib/budget.mjs";
 import { readOpenClawTranscript, readOpenClawTranscriptTail, estimateDisplacement } from "../lib/transcript.mjs";
 import { modelRejection, modelRejectionLine } from "../lib/openclaw-errors.mjs";
+import { COORDINATOR_INSTRUCTIONS } from "../lib/coordinator-instructions.mjs";
 import { runQuery, formatCitations, OPS as EVIDENCE_OPS, outlineFile, findReferences } from "../lib/repo-query.mjs";
 import { loadConfig, ConfigError } from "../lib/config.mjs";
 import { resolveSandboxImage, detectPrimaryLanguage, EXEC_PATH_PREPEND } from "../lib/sandbox-images.mjs";
@@ -37,7 +38,8 @@ import { queryModelCatalog, queryModelCatalogAsync } from "../lib/model-catalog.
 // mcp/server.mjs, so this resolves identically in a dev checkout or an
 // installed copy.
 const VERSION = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8")).version;
-const server = new McpServer({ name: "nomarmy-local-worker", version: VERSION });
+// Sent to every coordinator on connect, so no project needs a copied CLAUDE.md.
+const server = new McpServer({ name: "nomarmy-local-worker", version: VERSION }, { instructions: COORDINATOR_INSTRUCTIONS });
 const projectDir = path.resolve(process.env.CLAUDE_PROJECT_DIR || process.cwd());
 const stateRoot = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
 const jobsRoot = path.join(stateRoot, "jobs");

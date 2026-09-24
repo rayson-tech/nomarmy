@@ -1475,6 +1475,14 @@ function git(args) {
  */
 async function cmdUpdate() {
   const say = (s) => { if (!json) console.log(s); };
+  // Installed from npm: there's no checkout to pull. npm updates the
+  // package; connect resyncs the copy each coordinator runs.
+  if (!fs.existsSync(path.join(nomarmyRoot, ".git"))) {
+    const how = "npm install -g nomarmy@alpha && nomarmy connect";
+    if (json) return out({ error: "installed from npm, not a git checkout", fix: how });
+    console.log(`This nomArmy was installed from npm, so there's nothing to pull. Update with:\n  ${how}`);
+    return;
+  }
   const status = git(["status", "--porcelain"]);
   if (status) {
     if (json) { out({ error: "working tree is not clean; refusing to pull over local changes", status }); process.exit(1); }

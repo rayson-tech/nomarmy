@@ -1,6 +1,6 @@
 {
   "name": "nomarmy",
-  "description": "nomArmy local AI coding workers by Rayson Technologies",
+  "description": "A harness for AI coding workers whose claims are never trusted: your coding assistant stays in charge while workers implement and test in sandboxes, on local models, API keys or your own subscriptions.",
   "author": "Rayson Technologies",
   "license": "Apache-2.0",
   "version": "0.1.0-alpha.0",
@@ -49,5 +49,19 @@
     "NOTICE",
     "README.md",
     "!config/profiles/*.local.env"
+  ],
+  "keywords": [
+    "ai",
+    "coding-agent",
+    "claude-code",
+    "codex",
+    "cursor",
+    "mcp",
+    "llm",
+    "llama.cpp",
+    "local-llm",
+    "sandbox",
+    "verification",
+    "agents"
   ]
 }
