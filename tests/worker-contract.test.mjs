@@ -86,6 +86,8 @@ import {
   detectPossibleSecrets,
   coordinatorCommitMessage,
   refusalText,
+  createCoordinatorCommit,
+  isRuntimeJunk,
 } from "../mcp/server.mjs";
 
 const report = ({ status = "done", tests = "pass", notDone = "none", note = "n/a" } = {}) =>
@@ -3440,4 +3442,34 @@ test("refusalText: capacity JSON only when a problem is about capacity", () => {
   const snap = () => ({ local: { running: 0 } });
   assert.doesNotMatch(refusalText(["model_not_found: openai/gpt-6-sol was refused on an earlier job today"], snap), /Capacity right now/);
   assert.match(refusalText(['not admitted (capacity): agent "codex" already has 3 job(s) running'], snap), /Capacity right now:\n\{/);
+});
+
+
+test("createCoordinatorCommit: a nested package's npm cache never lands in the commit, only the intended files (the Senti probe)", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-junk-commit-"));
+  try {
+    const git = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+    git("init", "-q"); git("config", "user.email", "t@example.com"); git("config", "user.name", "t");
+    fs.mkdirSync(path.join(dir, "lambda", "orch", "src"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "lambda", "orch", "package.json"), "{}");
+    git("add", "-A"); git("commit", "-qm", "base");
+    // The worker's change, plus what `cd lambda/orch && npx tsc` left behind.
+    fs.writeFileSync(path.join(dir, "lambda", "orch", "src", "clamp.ts"), "export const clamp = 1;\n");
+    fs.writeFileSync(path.join(dir, "lambda", "orch", "src", "clamp.test.ts"), "// test\n");
+    fs.mkdirSync(path.join(dir, "lambda", "orch", ".npm"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "lambda", "orch", ".npm", "_update-notifier-last-checked"), "1");
+    fs.mkdirSync(path.join(dir, ".npm", "_cacache"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".npm", "_cacache", "x"), "1");
+    const commit = await createCoordinatorCommit({ cwd: dir, jobId: "j1", outcome: { commitAllowed: true }, message: "Add clamp" });
+    assert.equal(commit.created, true, commit.reason);
+    const files = git("show", "--name-only", "--pretty=format:", "HEAD").split("\n").filter(Boolean).sort();
+    assert.deepEqual(files, ["lambda/orch/src/clamp.test.ts", "lambda/orch/src/clamp.ts"]);
+    assert.ok(commit.ignoredRuntimeJunk.some((f) => f === "lambda/orch/.npm/_update-notifier-last-checked"), JSON.stringify(commit.ignoredRuntimeJunk));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("isRuntimeJunk: .npm at any depth, the dependency links, never a real source file", () => {
+  for (const junk of [".npm/_update-notifier-last-checked", "lambda/x/.npm/_cacache/y", "ui/node_modules", "node_modules/.vite/vitest/r.json", "ui/node_modules/.cache/babel/x"]) assert.equal(isRuntimeJunk(junk), true, junk);
+  for (const real of ["src/npm.ts", "lambda/x/src/.npmignore-helper.ts", "docs/.npmrc.md", "src/node_modules_util.ts", ".cache/tracked.json"]) assert.equal(isRuntimeJunk(real), false, real);
 });

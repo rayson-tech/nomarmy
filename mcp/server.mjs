@@ -15,7 +15,7 @@ import { modelRejection, modelRejectionLine } from "../lib/openclaw-errors.mjs";
 import { COORDINATOR_INSTRUCTIONS } from "../lib/coordinator-instructions.mjs";
 import { runQuery, formatCitations, OPS as EVIDENCE_OPS, outlineFile, findReferences } from "../lib/repo-query.mjs";
 import { loadConfig, ConfigError } from "../lib/config.mjs";
-import { resolveSandboxImage, detectPrimaryLanguage, EXEC_PATH_PREPEND, linkNodePackages, nodeModulesState, repairHostInstalls } from "../lib/sandbox-images.mjs";
+import { resolveSandboxImage, detectPrimaryLanguage, EXEC_PATH_PREPEND, linkNodePackages, nodeModulesState, repairHostInstalls, SANDBOX_NPM_ENV } from "../lib/sandbox-images.mjs";
 import { DEFAULT_AGENT_IMAGE } from "../lib/verify.mjs";
 import { resolvePool, pickProvider, poolContextPerNom, entryContextPerNom } from "../lib/dispatch-config.mjs";
 import { openclawProviderId } from "../lib/dispatch-schema.mjs";
@@ -894,6 +894,9 @@ export function resolveWorkerSandboxOverride(cwd, runtimeDir, {
   overridden.agents.defaults.sandbox ??= {};
   overridden.agents.defaults.sandbox.docker ??= {};
   overridden.agents.defaults.sandbox.docker.image = image;
+  // npm's cache and update check inside the sandbox, the same as nomArmy's
+  // own verification runs: outside the worktree, and off.
+  overridden.agents.defaults.sandbox.docker.env = { ...(overridden.agents.defaults.sandbox.docker.env ?? {}), ...SANDBOX_NPM_ENV };
 
   const lang = detectPrimaryLanguageFn(cwd, config);
   const pathPrepend = EXEC_PATH_PREPEND[lang] || [];
@@ -1819,8 +1822,11 @@ export async function runRegressionCheck({ cwd, jobId, productionFiles, nameStat
 // node_modules of its own, so vitest (and babel, eslint) create one just
 // for their cache, which a repo that doesn't gitignore node_modules would
 // otherwise commit.
-function isRuntimeJunk(file) {
-  return file === ".npm" || file.startsWith(".npm/") || file === ".openclaw" || file.startsWith(".openclaw/")
+// .npm at any depth: npx run inside a nested package (`cd lambda/x && npx
+// tsc`) wrote lambda/x/.npm/_update-notifier-last-checked, and a root-only
+// match let it into a real Senti commit.
+export function isRuntimeJunk(file) {
+  return /(^|\/)\.npm(\/|$)/.test(file) || file === ".openclaw" || file.startsWith(".openclaw/")
     || file.startsWith("node_modules/.vite/") || file.startsWith("node_modules/.cache/")
     // A package's node_modules link into the dependency image
     // (linkNodePackages): git lists a symlink as one entry, never its contents.
@@ -2338,7 +2344,7 @@ function wrapText(text, width) {
   return out;
 }
 
-async function createCoordinatorCommit({ cwd, jobId, outcome, message = null }) {
+export async function createCoordinatorCommit({ cwd, jobId, outcome, message = null }) {
   if (!outcome.commitAllowed) return { created: false, sha: null, reason: outcome.commitBlockedReason || `outcome ${outcome.outcome} does not permit a commit` };
   const status = await gitRaw(["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd);
   const entries = parseStatusPorcelainZ(status);

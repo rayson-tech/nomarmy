@@ -740,3 +740,12 @@ test("a broken .nomarmy.yml is not_run, not an exception", async () => {
   assert.equal(verdict.basis, "config-error");
   assert.equal(executor.calls.run.length, 0);
 });
+
+
+test("buildPodmanArgs: npm's cache goes to /tmp and its update check is off in every verification run", () => {
+  const args = buildPodmanArgs({ cwd: "/jobs/j1/worktree", command: "cd lambda/x && npx tsc" });
+  for (const kv of ["NPM_CONFIG_CACHE=/tmp/.npm", "npm_config_cache=/tmp/.npm", "NPM_CONFIG_UPDATE_NOTIFIER=false", "npm_config_update_notifier=false"]) {
+    const i = args.indexOf(kv);
+    assert.ok(i > 0 && args[i - 1] === "--env", kv);
+  }
+});
