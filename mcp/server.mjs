@@ -19,9 +19,9 @@ import { DEFAULT_AGENT_IMAGE } from "../lib/verify.mjs";
 import { resolvePool, pickProvider, poolContextPerNom, entryContextPerNom } from "../lib/dispatch-config.mjs";
 import { openclawProviderId } from "../lib/dispatch-schema.mjs";
 import { loadArmy, expandArmyRole, describeArmy, globalConfigDir } from "../lib/army.mjs";
-import { readClaudeSessionTranscript } from "../lib/claude-transcript.mjs";
+import { readClaudeSessionTranscript, readClaudeSessionUsage } from "../lib/claude-transcript.mjs";
 import { notify } from "../lib/notify.mjs";
-import { checkAndRecordHealth } from "../lib/health.mjs";
+import { checkAndRecordHealth, recentModelRefusal } from "../lib/health.mjs";
 import { detectTestSabotage, addedLinesOf, loadDependencyNames } from "../lib/sabotage.mjs";
 import { writeLease, removeLease, liveLeases, liveSlots, acquireSlot } from "../lib/slots.mjs";
 import { createRun, loadRun, runTotals, runAdmissionProblems, recordRunJob, finishRun, resolveRunLimits, describeLoweredLimits, detectUsageLimit } from "../lib/runs.mjs";
@@ -1021,6 +1021,17 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
   // Where this call's own transcript events will start (see salvageFinishedRun).
   const eventsBefore = (await readOpenClawTranscriptTail(stateDir, { limit: 0 }).catch(() => ({ events: 0 }))).events ?? 0;
   for (const f of Object.values(liveLogs)) { try { fs.writeFileSync(f, ""); } catch { /* best-effort */ } }
+  // A claude-cli run's envelope carries only its final reply's usage; the
+  // CLI's own session log has every call (lib/claude-transcript.mjs).
+  const callStartedMs = Date.now();
+  const withClaudeUsage = (result) => {
+    if ((selected.entry?.provider ?? workerProvider) !== "claude-cli") return result;
+    try {
+      const usage = readClaudeSessionUsage(cwd, { sinceMs: callStartedMs - 5000 });
+      if (usage) return { ...result, usage, usageSource: "claude-code-session" };
+    } catch { /* keep the envelope's */ }
+    return result;
+  };
   const execOnce = (thinking) => withSandboxProvisioningRetry(
     () => run("openclaw", buildArgs(thinking), { cwd, env, timeoutMs: (timeoutSeconds + 30) * 1000, onTick, tickMs: (idleDiff?.pollSeconds ?? 15) * 1000, teeTo: liveLogs }),
     { onRetry: (attempt, error) => fs.appendFileSync(path.join(jobDir, "coordinator.log"),
@@ -1077,7 +1088,7 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
       // tier and model), so the job record reports it rather than the
       // server-wide local one.
       parsed.budgetsUsed = jobBudgets;
-      return parsed;
+      return withClaudeUsage(parsed);
     } catch (error) {
       // See parseOpenClawInternalTimeout's own doc comment: a nonzero exit
       // whose stdout is still OpenClaw's own well-formed timeout envelope is
@@ -1095,7 +1106,7 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
       const salvaged = !error.timedOut ? await salvageFinishedRun(error, stateDir, { sinceEvent: eventsBefore }) : null;
       if (salvaged) {
         fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} OpenClaw exited with an error after the run finished (${salvaged.salvagedFrom}); using the report from the run's transcript\n${error.message}\n`);
-        return { ...salvaged, model: bareModel, provider: selected.entry?.provider ?? workerProvider, thinkingApplied: selected.thinking, budgetsUsed: jobBudgets };
+        return withClaudeUsage({ ...salvaged, model: bareModel, provider: selected.entry?.provider ?? workerProvider, thinkingApplied: selected.thinking, budgetsUsed: jobBudgets });
       }
       fs.appendFileSync(path.join(jobDir, "coordinator.log"), `${new Date().toISOString()} OpenClaw failure${logSuffix}\n${error.stack || error.message}\n`);
       // A refused model reads as "openclaw exited 1" unless its reason is
@@ -1801,7 +1812,15 @@ export async function runRegressionCheck({ cwd, jobId, productionFiles, nameStat
   return { status: "not_run", rawRerunStatus: "not_run", basis: rerun.basis, reason: `regression rerun was inconclusive: ${rerun.reason}`, detail: rerun.detail };
 }
 
-function isRuntimeJunk(file) { return file === ".npm" || file.startsWith(".npm/") || file === ".openclaw" || file.startsWith(".openclaw/"); }
+// Tool caches a job leaves behind, never the worker's work. node_modules/
+// .vite and .cache: with a Node dependency image the repo has no
+// node_modules of its own, so vitest (and babel, eslint) create one just
+// for their cache, which a repo that doesn't gitignore node_modules would
+// otherwise commit.
+function isRuntimeJunk(file) {
+  return file === ".npm" || file.startsWith(".npm/") || file === ".openclaw" || file.startsWith(".openclaw/")
+    || file.startsWith("node_modules/.vite/") || file.startsWith("node_modules/.cache/");
+}
 async function collectGitRecord({ cwd, baseSha, branch, baseRef, jobId }) {
   const head = await git(["rev-parse", "HEAD"], cwd);
   const status = await gitRaw(["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd);
@@ -2212,18 +2231,22 @@ function finalText(result) { return result?.final ?? result?.payloads?.[0]?.text
 // errors can arrive); without it a run couldn't tell a usage limit apart.
 function workerMetadata(result) { return { model: result?.model ?? null, provider: result?.provider ?? null, sessionId: result?.sessionId ?? null, status: result?.status ?? null, usage: result?.usage ?? null, toolSummary: result?.toolSummary ?? null, error: result?.ok === false ? String(result?.error?.message ?? "").slice(0, 1000) || null : null }; }
 function intOrNull(value) { const n = Number(value); return Number.isFinite(n) ? n : null; }
-// OpenClaw's envelope reports { input, output, cacheRead, total }, where
-// `total` counts cache reads too (a 94k-token Codex job read 1.3M from
-// cache); only the older { inputTokens, ... } shape was read, so every
-// job's tokens showed 0. Total is input + output whenever both are known:
-// cached prompt re-reads are a different, much cheaper thing.
+// OpenClaw's envelope reports { input, output, cacheRead, cacheWrite };
+// only the older { inputTokens, ... } shape was read, so every job's
+// tokens showed 0.
 export function usageMetrics(result) {
   const u = result?.usage;
-  if (!u || typeof u !== "object") return { worker_tokens_in: null, worker_tokens_out: null, worker_tokens_total: null, worker_tokens_cache_read: null };
+  if (!u || typeof u !== "object") return { worker_tokens_in: null, worker_tokens_out: null, worker_tokens_total: null, worker_tokens_cache_read: null, worker_tokens_cache_write: null };
   const input = intOrNull(u.inputTokens ?? u.input_tokens ?? u.promptTokens ?? u.prompt_tokens ?? u.input);
   const output = intOrNull(u.outputTokens ?? u.output_tokens ?? u.completionTokens ?? u.completion_tokens ?? u.output);
-  const total = input !== null && output !== null ? input + output : intOrNull(u.totalTokens ?? u.total_tokens ?? u.total);
-  return { worker_tokens_in: input, worker_tokens_out: output, worker_tokens_total: total, worker_tokens_cache_read: intOrNull(u.cacheRead ?? u.cache_read_input_tokens) };
+  const cacheRead = intOrNull(u.cacheRead ?? u.cache_read_input_tokens);
+  const cacheWrite = intOrNull(u.cacheWrite ?? u.cache_creation_input_tokens);
+  // Everything the model processed. Every vendor's `input` here leaves out
+  // cached prompt tokens, and an agent's prompt is mostly cache (a Claude
+  // job: 58 input, 2.2M cache reads): input + output alone read as 195
+  // tokens for three Opus jobs. The parts stay separate for cost.
+  const total = input !== null && output !== null ? input + output + (cacheRead ?? 0) + (cacheWrite ?? 0) : intOrNull(u.totalTokens ?? u.total_tokens ?? u.total);
+  return { worker_tokens_in: input, worker_tokens_out: output, worker_tokens_total: total, worker_tokens_cache_read: cacheRead, worker_tokens_cache_write: cacheWrite };
 }
 // Only fields nomArmy can actually observe are populated. Anything it cannot
 // see stays null: a fabricated metric is worse than a missing one.
@@ -3440,6 +3463,16 @@ async function admit(jobs) {
         if (j.subscription_worker) resolveSubscriptionSelection(j.subscription_worker, j.on_behalf_of, j.reasoning, { model: j.model });
       } catch (error) { problems.push(jobs.length > 1 ? `job ${i + 1}: ${error.message}` : error.message); }
     }
+  });
+  // A model its vendor refused on a job today, with nothing working on it
+  // since, isn't sent another job (lib/health.mjs recentModelRefusal).
+  jobs.forEach((j, i) => {
+    if (!j.agentName || !j.model) return;
+    let provider = null;
+    try { provider = agentProviderId(agentsConfig().agents[j.agentName]); } catch { return; }
+    if (!provider) return;
+    const refusal = recentModelRefusal(stateRoot, `${provider}/${j.model}`);
+    if (refusal) problems.push(`${jobs.length > 1 ? `job ${i + 1}: ` : ""}model_not_found: ${provider}/${j.model} was refused on an earlier job today and hasn't worked since, so this job wasn't sent. Use another model (the job's \`model\`, or \`nomarmy army assign\`); \`nomarmy army assign <role> ${j.agentName} ${j.model}\` re-tests it, and a passing test clears this.`);
   });
   // An agent's max_concurrent, machine-wide. Batch jobs on the same agent
   // queue for its slot at launch instead (withAgentSlot's waitMs).

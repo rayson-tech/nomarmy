@@ -3408,15 +3408,16 @@ test("expandJobs: every job joins the session's active run unless it names anoth
   assert.equal(expandJobs([{ task: "t" }], { getActiveRun: () => null }).jobs[0].run_id, undefined, "no active run, no run_id");
 });
 
-test("metrics: OpenClaw's { input, output, cacheRead, total } usage shape -- total is input + output, cache reads apart", () => {
+test("metrics: OpenClaw's { input, output, cacheRead, cacheWrite } usage shape -- total is everything processed, parts kept apart", () => {
   const m = buildMetrics({
-    result: { usage: { input: 83546, output: 10548, cacheRead: 1323698, cacheWrite: 0, total: 1417792, cost: { total: 0 } } },
+    result: { usage: { input: 83546, output: 10548, cacheRead: 1323698, cacheWrite: 120, total: 1417792, cost: { total: 0 } } },
     record: null, reportValidation: null, outcome: null, workerElapsedMs: 1000, totalElapsedMs: 2000
   });
   assert.equal(m.worker_tokens_in, 83546);
   assert.equal(m.worker_tokens_out, 10548);
-  assert.equal(m.worker_tokens_total, 94094);
+  assert.equal(m.worker_tokens_total, 83546 + 10548 + 1323698 + 120);
   assert.equal(m.worker_tokens_cache_read, 1323698);
+  assert.equal(m.worker_tokens_cache_write, 120);
 });
 
 test("coordinatorCommitMessage: a reviewer-readable commit from the task and the worker's note, never just the job id", () => {

@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
-import { claudeProjectDir, readClaudeSessionTranscript, summarizeClaudeEvents } from "../lib/claude-transcript.mjs";
+import { claudeProjectDir, readClaudeSessionTranscript, readClaudeSessionUsage, summarizeClaudeEvents } from "../lib/claude-transcript.mjs";
 
 const dirs = [];
 function tmp() { const d = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-claude-tx-")); dirs.push(d); return d; }
@@ -56,4 +56,22 @@ test("readClaudeSessionTranscript: finds the job's session by its working direct
   assert.equal(t.toolCalls.length, 2, "the newest session, and a torn last line is skipped");
   assert.equal(readClaudeSessionTranscript("/no/such/job", { home }).available, false);
   assert.equal(readClaudeSessionTranscript(cwd, { home, sinceMs: Date.now() + 60_000 }).available, false, "nothing from after the job started");
+});
+
+test("readClaudeSessionUsage: every call in every session file since the start, each message id once", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-cu-"));
+  try {
+    const cwd = "/work/jobs/claude-x/worktree";
+    const dir = claudeProjectDir(cwd, { home });
+    fs.mkdirSync(dir, { recursive: true });
+    const call = (id, u) => JSON.stringify({ type: "assistant", message: { id, usage: u, content: [{ type: "text", text: "x" }] } });
+    const u1 = { input_tokens: 2, output_tokens: 100, cache_read_input_tokens: 50000, cache_creation_input_tokens: 3000 };
+    // One call logged twice (a text block and a tool_use block share the id), one more call, and a user line.
+    fs.writeFileSync(path.join(dir, "a.jsonl"), [call("m1", u1), call("m1", u1), call("m2", { input_tokens: 1, output_tokens: 20, cache_read_input_tokens: 60000 }), JSON.stringify({ type: "user", message: { content: "hi" } })].join("\n"));
+    // The report-recovery call's own session.
+    fs.writeFileSync(path.join(dir, "b.jsonl"), call("m3", { input_tokens: 3, output_tokens: 8, cache_read_input_tokens: 70000 }));
+    assert.deepEqual(readClaudeSessionUsage(cwd, { home }), { input: 6, output: 128, cacheRead: 180000, cacheWrite: 3000, calls: 3 });
+    assert.equal(readClaudeSessionUsage("/somewhere/else", { home }), null);
+    assert.equal(readClaudeSessionUsage(cwd, { home, sinceMs: Date.now() + 60000 }), null, "sessions from before the job don't count");
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });

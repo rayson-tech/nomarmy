@@ -9,6 +9,7 @@ import test from "node:test";
 import {
   LANGUAGE_IMAGES, detectPrimaryLanguage, ensureLanguageImageBuilt, resolveSandboxImage,
   pythonRequirementsFor, pythonImageTag, ensurePythonImageBuilt,
+  nodeDependencyFiles, ensureDependencyImageBuilt, dependencyImageTag, EXEC_PATH_PREPEND, NODE_DEPS_BIN,
 } from "../lib/sandbox-images.mjs";
 
 function fakeRepo(files) {
@@ -268,4 +269,50 @@ test("resolveSandboxImage: a Python repo with nothing to install still gets the 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("nodeDependencyFiles: package.json plus an npm lockfile installs; other lockfiles, workspaces and opt-out say why not", () => {
+  const cases = [
+    [{ "package.json": "{}", "package-lock.json": "{}" }, null, ["package.json", "package-lock.json"], null],
+    [{ "package.json": "{}", "npm-shrinkwrap.json": "{}" }, null, ["package.json", "npm-shrinkwrap.json"], null],
+    [{ "package.json": "{}" }, null, [], "no package-lock.json"],
+    [{ "package.json": "{}", "pnpm-lock.yaml": "" }, null, [], "pnpm-lock.yaml isn't supported yet (npm lockfiles only)"],
+    [{ "package.json": JSON.stringify({ workspaces: ["pkgs/*"] }), "package-lock.json": "{}" }, null, [], "npm workspaces aren't supported yet"],
+    [{ "package.json": "{}", "package-lock.json": "{}" }, { environment: { node: { install: false } } }, [], "environment.node.install is false"],
+  ];
+  for (const [files, config, expected, reason] of cases) {
+    const dir = fakeRepo(files);
+    try { assert.deepEqual(nodeDependencyFiles(dir, config), { files: expected, reason }, JSON.stringify(files)); }
+    finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test("detectPrimaryLanguage: a Node repo with a lockfile is node; with Python requirements too, python+node", () => {
+  const node = fakeRepo({ "package.json": "{}", "package-lock.json": "{}" });
+  const both = fakeRepo({ "package.json": "{}", "package-lock.json": "{}", "requirements.txt": "boto3\n" });
+  try {
+    assert.equal(detectPrimaryLanguage(node, null), "node");
+    assert.equal(detectPrimaryLanguage(both, null), "python+node");
+    assert.deepEqual(EXEC_PATH_PREPEND.node, [NODE_DEPS_BIN]);
+  } finally { for (const d of [node, both]) fs.rmSync(d, { recursive: true, force: true }); }
+});
+
+test("ensureDependencyImageBuilt: builds from a context of only the dependency files, tagged by their hash, once", () => {
+  const dir = fakeRepo({ "package.json": "{}", "package-lock.json": '{"lockfileVersion":3}', "requirements.txt": "boto3\n", "big.js": "x" });
+  const calls = [];
+  let built = false, context = null;
+  const run = (cmd, args) => {
+    calls.push([cmd, ...args]);
+    if (args[0] === "images") return built ? "abc123\n" : "";
+    if (args[0] === "build") { built = true; context = fs.readdirSync(args[args.length - 1]).sort(); const df = fs.readFileSync(args[args.indexOf("-f") + 1], "utf8"); assert.match(df, /npm ci/); assert.match(df, /pip3 install/); assert.match(df, /ln -s \/deps\/node_modules \/node_modules/); }
+    return "";
+  };
+  try {
+    const image = ensureDependencyImageBuilt(dir, null, { run });
+    assert.equal(image, dependencyImageTag(dir, ["requirements.txt", "package.json", "package-lock.json"]));
+    assert.match(image, /^openclaw-nomarmy-coder-deps-[0-9a-f]{8}:bookworm$/);
+    assert.deepEqual(context, ["Dockerfile", "node", "py"], "never the repo itself");
+    assert.equal(ensureDependencyImageBuilt(dir, null, { run }), image);
+    assert.equal(calls.filter((c) => c[1] === "build").length, 1, "cached after the first build");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

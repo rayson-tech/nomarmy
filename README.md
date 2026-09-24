@@ -301,7 +301,8 @@ Logs land under `$HOME/.local/share/nomarmy-local-agents/logs/`.
 
 | Language | Detection | Sandbox toolchain |
 |---|---|---|
-| Node | `package.json` | Built into the base image |
+| Node (runtime only) | `package.json` | Built into the base image |
+| Node (with dependencies) | `package.json` plus `package-lock.json` or `npm-shrinkwrap.json` | Built lazily per repo with `npm ci`, keyed on the lockfile; packages at `/node_modules`, so the worktree stays untouched |
 | Python (runtime only) | `pyproject.toml` | Built into the base image |
 | Go / Rust | `go.mod` / `Cargo.toml` | Built lazily, on first use, cached after |
 | Python (with dependencies) | `requirements.txt`, or `environment.python.requirements` in `.nomarmy.yml` | Built lazily per repo, keyed on dependency content |
@@ -315,6 +316,8 @@ environment:
 ```
 
 A worker's own tool calls (not just nomArmy's verification step) get the same resolved sandbox image automatically. `NOMARMY_AGENT_IMAGE` always overrides auto-detection.
+
+Dependencies install when the image is built, on the host, which has network; the job's sandbox never does. A repo with both Python requirements and an npm lockfile gets one image with both. npm workspaces, yarn, pnpm and bun aren't installed yet: their repos run in the base image, where anything that imports a package fails verification. `environment.node.install: false` turns the Node install off.
 
 ### Scoping verification to the diff
 
@@ -384,10 +387,17 @@ Bounded-delegation core is proven: coordinator-owned Git, isolated worktrees, re
 | Swapping the active local model | Working |
 | Go/Rust target repos | Verification live-verified; worker's own tool execution uses one global sandbox config |
 | Agents (`agents.yml`): api keys | Live-verified for `xai`; other providers unverified against real keys |
-| Agents: individual subscriptions | Claude live-verified end to end; OpenAI (Codex) test call confirmed; Meta Muse Code wired, not yet live-verified |
-| The army (roles, the General, layers) | Unit- and CLI-tested; not yet driven by a real coordinator session |
+| Agents: individual subscriptions | Claude and OpenAI (Codex, ChatGPT plan) live-verified across real multi-job runs; Meta Muse Code test call live-verified |
+| The army (roles, the General, layers) | Driven by a real Claude Code General across three `/feature` runs (about 18 implement jobs) |
 
-Known limitations: verification profiles needing services beyond `environment: none` report `not_run` rather than executing without them; the environment scanner's Compose parser doesn't resolve YAML anchors/aliases.
+Known limitations:
+
+- A model its vendor refuses at run time (gpt-6-sol under Codex on a ChatGPT plan, while OpenClaw lists it) costs one failed job. `army assign`'s test call takes the job's route and catches it up front; a model assigned before that is refused at dispatch only after its first failure (`model_not_found`), until a job or test call on it works.
+- Token counts for Claude subscription jobs come from the Claude CLI's own session log (`~/.claude/projects`), since OpenClaw sees only the final reply. Totals include cache reads and writes, which dominate an agent's prompt; each part is kept separately in the job's metrics.
+- Test-workaround detection (skip markers, stubbed imports, shadow modules) is a review flag, not a verdict: a legitimate new skip still gets flagged.
+- Deploy-time failures are the repo's own to check. A module left out of a Lambda bundle passes every unit test; `nomarmy init` points this out when it sees a bundle step, but the verification profile that runs the bundle and imports each entry point is yours to write.
+- Node dependencies install only from an npm lockfile (see [Target repository languages](#target-repository-languages)).
+- Verification profiles needing services beyond `environment: none` report `not_run` rather than executing without them; the environment scanner's Compose parser doesn't resolve YAML anchors/aliases.
 
 ## The MCP tools
 

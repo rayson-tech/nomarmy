@@ -135,3 +135,18 @@ test("buildConfigProposal: the returned proposal is always independently valid a
   assert.equal(r.valid, false);
   assert.ok(r.errors.length > 0);
 });
+
+test("buildConfigProposal: a bundle step in evidence gets a note suggesting a bundle verification profile; ordinary builds don't", () => {
+  const withBundle = buildConfigProposal({ commands: { items: [
+    { kind: "build", command: "bash scripts/bundle-lambda-assets.sh", source: ".github/workflows/deploy.yml" },
+    { kind: "build", command: "bash scripts/bundle-lambda-assets.sh", source: ".github/workflows/deploy-dev.yml" },
+    { kind: "test", command: "pytest", source: "Makefile" },
+  ] } });
+  const notes = withBundle.notes.filter((n) => /bundle\/packaging step/.test(n));
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /\(bash scripts\/bundle-lambda-assets\.sh\)/, "each command once");
+  for (const command of ["sam build", "npx cdk synth", "sls package"]) {
+    assert.equal(buildConfigProposal({ commands: { items: [{ kind: "build", command, source: "ci.yml" }] } }).notes.filter((n) => /bundle\/packaging/.test(n)).length, 1, command);
+  }
+  assert.equal(buildConfigProposal({ commands: { items: [{ kind: "build", command: "npm run build", source: "ci.yml" }] } }).notes.filter((n) => /bundle\/packaging/.test(n)).length, 0);
+});

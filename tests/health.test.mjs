@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
-import { armyIssues, leftoverIssues, unknownModelIssues, loginExpiryIssues, recordHealth, runHealthChecks, versionIssues } from "../lib/health.mjs";
+import { armyIssues, leftoverIssues, unknownModelIssues, loginExpiryIssues, recordHealth, runHealthChecks, versionIssues, recentModelRefusal, recordProbeSuccess } from "../lib/health.mjs";
 
 const dirs = [];
 function tmp() { const d = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-health-")); dirs.push(d); return d; }
@@ -112,4 +112,18 @@ test("unknownModelIssues: a failure is cleared by a later successful job or test
   assert.equal(unknownModelIssues([fail, { finishedAt: "2026-09-24T13:00:00Z", worker: { provider: "meta", model: "muse-spark-1.3" } }], { now }).length, 1, "an earlier success doesn't clear a later failure");
   assert.equal(unknownModelIssues([fail], { now, probedOk: { "meta/muse-spark-1.3": Date.parse("2026-09-24T17:30:00Z") } }).length, 0, "army assign's test call passed since");
   assert.equal(unknownModelIssues([fail], { now, inUse: new Set(["xai/grok-4.7"]) }).length, 0, "no role uses it any more");
+});
+
+test("recentModelRefusal: a model refused on a job today is refused at admission until something works on it", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-refusal-"));
+  try {
+    const job = (id, record) => { fs.mkdirSync(path.join(root, "jobs", id), { recursive: true }); fs.writeFileSync(path.join(root, "jobs", id, "metadata.json"), JSON.stringify(record)); };
+    const now = Date.now();
+    job("a", { finishedAt: new Date(now - 3600000).toISOString(), workerError: "model_not_found: openai/gpt-6-sol: The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account." });
+    assert.equal(recentModelRefusal(root, "openai/gpt-6-sol", { now }).id, "unknown-model:openai/gpt-6-sol");
+    assert.equal(recentModelRefusal(root, "openai/gpt-6-astra", { now }), null);
+    recordProbeSuccess(root, "openai/gpt-6-sol", { now });
+    assert.equal(recentModelRefusal(root, "openai/gpt-6-sol", { now }), null, "a passing army assign test clears it");
+    assert.equal(recentModelRefusal(path.join(root, "none"), "x/y", { now }), null);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
