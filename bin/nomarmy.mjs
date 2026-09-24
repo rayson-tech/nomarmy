@@ -1878,7 +1878,10 @@ async function cmdArmyShow() {
     }
   }
   console.log(`\n${c.bold("Layers")}  ${c.dim("(later ones win)")}`);
-  for (const layer of summary.layers) console.log(`  ${layer.found ? c.green("●") : c.dim("○")} ${layer.layer.padEnd(8)} ${c.dim(layer.path)}`);
+  for (const layer of summary.layers) {
+    const state = layer.hasArmy ? c.green("● army section") : layer.exists ? c.dim("○ file exists, no army section") : c.dim("○ no file");
+    console.log(`  ${layer.layer.padEnd(8)} ${state.padEnd(40)} ${c.dim(layer.path)}`);
+  }
 }
 
 async function cmdArmyInit() {

@@ -105,7 +105,7 @@ test("loadArmy: reads global config.yml, the repo's .nomarmy.yml army section, a
   write(path.join(repo, ".nomarmy.local.yml"), "army:\n  roles:\n    sr-dev:\n      agent: codex\n");
   const loaded = loadArmy({ projectDir: repo, env });
   assert.deepEqual(loaded.army.roles["sr-dev"], { description: "first cut", agent: "codex" });
-  assert.deepEqual(loaded.layers.map((l) => [l.layer, l.found]), [["global", true], ["project", true], ["local", true]]);
+  assert.deepEqual(loaded.layers.map((l) => [l.layer, l.exists, l.hasArmy]), [["global", true, true], ["project", true, true], ["local", true, true]]);
 });
 
 test("loadArmy: the global and local files are army-only, so a typo'd top-level key is an error, not ignored", () => {
@@ -271,4 +271,11 @@ test("describeArmy: a subscription owned by someone other than the General's own
   const summary = describeArmy({ army: { general: "opus", workflow: null, roles: { "data-architect": { agent: "meta", model: "muse-spark-1.3" }, pm: { agent: "grok" } } }, sources: { roles: { "data-architect": {}, pm: {} } }, layers: [] }, { agents });
   assert.match(summary.roles["data-architect"].ownerNote, /owned by personal@example\.com, not the General's own you@example\.com; jobs on it need on_behalf_of "personal@example\.com"\. If that's the operator's own other account, it's fine/);
   assert.equal(summary.roles.pm.ownerNote, null, "an api agent has no owner to compare");
+});
+
+test("loadArmy: a .nomarmy.yml with no army section exists, it just has nothing for the army -- not \"missing\"", () => {
+  const repo = tmp();
+  write(path.join(repo, ".nomarmy.yml"), "verification:\n  quick:\n    commands: [\"npm test\"]\n");
+  const project = loadArmy({ projectDir: repo, env: { NOMARMY_CONFIG_DIR: tmp() } }).layers.find((l) => l.layer === "project");
+  assert.deepEqual({ exists: project.exists, hasArmy: project.hasArmy }, { exists: true, hasArmy: false });
 });
