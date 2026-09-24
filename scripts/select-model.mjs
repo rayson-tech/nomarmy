@@ -47,7 +47,13 @@ try {
   }
 
   if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) throw new Error("Repository must use the form owner/model.");
-  const details = await hf(`models/${encodeURIComponent(repo)}?blobs=true`);
+  // encodeURIComponent(repo) as one call also escapes the real path-separating
+  // "/" between owner and name into "%2F" -- confirmed live: the HF API
+  // returns 400 for .../models/unsloth%2FMuse-Glimmer-30B-GGUF and 200 for
+  // .../models/unsloth/Muse-Glimmer-30B-GGUF. Encode each segment on its own
+  // and rejoin with a literal "/" so an owner or model name with its own
+  // special characters is still escaped correctly.
+  const details = await hf(`models/${repo.split("/").map(encodeURIComponent).join("/")}?blobs=true`);
   const files = (details.siblings ?? []).map((file) => file.rfilename).filter((name) => /\.gguf$/i.test(name));
   if (files.length === 0) throw new Error(`${repo} has no GGUF files. Choose a GGUF conversion repository for llama.cpp.`);
 
