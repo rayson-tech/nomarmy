@@ -18,7 +18,7 @@ import { buildConfigProposal } from "../lib/propose.mjs";
 import { detectHardware } from "../lib/hardware.mjs";
 import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf.mjs";
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
-import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected } from "../lib/connect.mjs";
+import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv } from "../lib/connect.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
 import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
 import { loadArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
@@ -2206,10 +2206,17 @@ async function cmdJobs() {
 
 // `nomarmy health`: run the checks now (the MCP server also runs them every
 // 6 hours) and record them, which also refreshes the status line's warning.
+// This install's settings from config/common.env (the execution mode and the
+// model server's address, as `nomarmy connect` gives the MCP server), under
+// anything set in the environment.
+function installEnv() {
+  return { ...deriveWorkerModelEnv(nomarmyRoot), ...process.env };
+}
+
 async function cmdHealth() {
   const { checkAndRecordHealth } = await import("../lib/health.mjs");
   const stateRoot = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
-  const { result } = await checkAndRecordHealth({ projectDir: repoDir, stateRoot, configDir: globalConfigDir() });
+  const { result } = await checkAndRecordHealth({ projectDir: repoDir, stateRoot, configDir: globalConfigDir(), env: installEnv() });
   if (json) return out(result);
   console.log(c.bold("🍪 nomArmy health") + c.dim(`  ${new Date(result.checkedAt).toLocaleString()}`));
   if (!result.issues.length) { console.log(c.green("\n✓ Nothing to fix.")); return; }
@@ -2234,7 +2241,7 @@ const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init
 async function cmdDoctor() {
   // Import lazily to avoid circular dependencies
   const { runDoctor } = await import("../lib/doctor.mjs");
-  await runDoctor({ json, exit: true });
+  await runDoctor({ json, exit: true, env: installEnv() });
 }
 commands.doctor = cmdDoctor;
 if (!command || flag("help") || !commands[command]) usage(command && !commands[command] ? 2 : 0);
