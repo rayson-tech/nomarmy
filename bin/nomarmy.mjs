@@ -20,10 +20,11 @@ import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
 import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv } from "../lib/connect.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
-import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
+import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, agentProviderId, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
 import { loadArmy, mergeArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
 import { parseLlamaUrl } from "../lib/execution.mjs";
 import { setupSteps, formatSetupSteps, runSetupPlaybook } from "../lib/setup-steps.mjs";
+import { readUsageSnapshots } from "../lib/usage-limits.mjs";
 import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
 import { recordProbeSuccess } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
@@ -1527,7 +1528,9 @@ async function cmdAgentsUpdate() {
 
   const changes = {};
   let probe = false;
-  if (json) {
+  // Flags alone are enough; without any, it asks field by field.
+  const flagged = ["model", "no-model", "slot", "auth-env", "base-url", "max-concurrent", "context-window", "thinking", "no-thinking", "probe"].some((f) => flag(f));
+  if (json || flagged) {
     const num = (flagName) => (value(flagName) !== null ? Number(value(flagName)) : undefined);
     if (value("model") !== null) changes.model = value("model");
     // Back to no default model: every role (or job) then names its own.
@@ -1545,7 +1548,7 @@ async function cmdAgentsUpdate() {
     probe = flag("probe") && current.kind === "subscription";
     if (!Object.keys(changes).length) throw new Error("Nothing to update -- pass at least one field flag (see `nomarmy agents update` usage).");
   } else {
-    if (!process.stdin.isTTY) throw new Error("nomarmy agents update needs an interactive terminal, or --json with explicit flags.");
+    if (!process.stdin.isTTY) throw new Error("nomarmy agents update needs an interactive terminal, or the flags to change (e.g. --max-concurrent 3).");
     const rl = createInterface({ input, output });
     try {
       console.log(c.bold("🍪 nomArmy agents update") + c.dim(`  (${name}: ${describeAgentLabel(current)})`));
@@ -2054,7 +2057,8 @@ function armyLayerFlag(fallback = "global") {
 function loadArmyForCli() {
   const agents = loadAgentsOrExit().agents;
   const loaded = loadArmy({ projectDir: repoDir });
-  return { loaded, agents, summary: describeArmy(loaded, { agents, describeAgent: describeAgentLabel }) };
+  const usageSnapshots = readUsageSnapshots(process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents"));
+  return { loaded, agents, summary: describeArmy(loaded, { agents, describeAgent: describeAgentLabel, usageSnapshots, agentProviderId }) };
 }
 
 // Claude Code adds settings.local.json to .gitignore for the same reason:
@@ -2074,6 +2078,12 @@ function agentCell(name, runsOn, role = null) {
   return `${name}${model ? ` ${c.bold(model)}` : ""}${runsOn ? c.dim(`  ${runsOn}`) : ""}`;
 }
 
+/** An agent's usage-limit reading (lib/usage-limits.mjs), colored by level. */
+function usageLine(usage, indent) {
+  const text = `${indent}usage: ${usage.text}`;
+  return usage.level === "over" ? c.red(`${text} (at the limit)`) : usage.level === "high" ? c.yellow(text) : c.dim(text);
+}
+
 async function cmdArmyShow() {
   const { summary } = loadArmyForCli();
   if (json) return out(summary);
@@ -2083,6 +2093,7 @@ async function cmdArmyShow() {
   console.log(c.dim(`  ${g.who}`));
   for (const line of g.responsibilities) console.log(c.dim(`  - ${line}`));
   if (g.problem) console.log(c.yellow(`  ⚠ ${g.problem}`));
+  if (g.usage) console.log(usageLine(g.usage, "  "));
   if (summary.workflow) console.log(`\n${c.bold("Workflow")}\n${summary.workflow.split("\n").map((l) => `  ${l}`).join("\n")}`);
   const names = Object.keys(summary.roles);
   if (!names.length) {
@@ -2102,6 +2113,7 @@ async function cmdArmyShow() {
         if (role.description) console.log(c.dim(`    ${role.description}`));
         if (role.problem && role.agent) console.log(c.red(`    ✗ ${role.problem}`));
         if (role.overlapsGeneral) console.log(c.yellow(`    ⚠ ${role.overlapsGeneral}`));
+        if (role.usage) console.log(usageLine(role.usage, "    "));
       }
     }
   }

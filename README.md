@@ -30,6 +30,8 @@
    Run `nomarmy agents add` now? [Y/n]
    ```
    In order: pick where models run (API keys and subscriptions for most people), install OpenClaw and the sandbox, add your agents (an API key, or your ChatGPT or Muse Code subscription), put the roles on them, write this repo's `.nomarmy.yml`, then check it all. Stop anytime; `nomarmy setup` picks up where you left off.
+
+   **Want every step spelled out?** [Example setup: Claude Code, Codex and an API key](https://github.com/rayson-tech/nomarmy/blob/main/docs/setup/example.md) walks through a complete setup, command by command.
 3. **Use it:** restart Claude Code in the project and ask it to use nomArmy for one small bug that has a test. When that works, try `/feature <what you want built>`.
 
 **Have a GPU or a Mac with plenty of memory?** Choose "a local model" in `nomarmy setup` and workers run on llama.cpp on your own machine: no per-token bill and your code stays home, but you pay in hardware, power and speed, and a model too big for your memory crawls. `nomarmy sizing` tells you what fits; see [Install](#install). A team GPU server works too: [a shared model server](#a-shared-model-server). Codex or Cursor as the coordinator: `nomarmy connect codex cursor`.
