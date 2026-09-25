@@ -162,6 +162,16 @@ test("statusLineText: shows the most serious recent health warning, briefly", ()
   assert.equal(statusLineText({ session: { workspace: { project_dir: "/r/x" } }, stateRoot: root }), "x │ 🍪 idle │ ⚠ openai login 5d");
 });
 
+test("statusLineText: a usage warning isn't repeated as the health warning", () => {
+  const root = tmp(), now = Date.parse("2026-09-25T12:00:00Z");
+  recordUsageSnapshot(root, "codex", { source: "codex", plan: null, limitReached: false, observedAt: now,
+    windows: [{ name: "week", usedPercent: 85, windowMinutes: 10080, resetsAt: now + 3600000 }] });
+  fs.writeFileSync(path.join(root, "health.json"), JSON.stringify({ checkedAt: new Date(now).toISOString(), issues: [
+    { severity: "warn", short: "codex 85% wk", id: "usage:codex:high" }, { severity: "warn", short: "openai login 5d", id: "b" },
+  ] }));
+  assert.equal(statusLineText({ session: { workspace: { project_dir: "/r/x" } }, stateRoot: root, now }), "x │ 🍪 idle │ ⚠ openai login 5d │ ⚠ codex 85% wk");
+});
+
 test("statusLineText: records changed Claude rate limits only, without risking the printed line", () => {
   const root = tmp(), now = Date.parse("2026-09-25T12:00:00Z"), reset = Math.floor((now + 3600000) / 1000);
   const session = { workspace: { project_dir: "/r/x" }, rate_limits: { seven_day: { used_percentage: 85, resets_at: reset } } };

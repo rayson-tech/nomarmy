@@ -57,13 +57,13 @@ test("Claude normalization handles absent and unusable windows and spend", t => 
 test("usage status levels, ordered text, expired windows and reached flags", () => {
   const label = new Date(reset).toLocaleString("en-US", { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false });
   for (const [percent, level] of [[15, "ok"], [80, "high"], [100, "over"], [110, "over"]]) {
-    assert.deepEqual(usageStatus(snap([win("week", percent)]), now + 120000), { level, text: `${percent}% of week, resets ${label}`, resetsAt: level === "over" ? reset : null, ageMinutes: 2 });
+    assert.deepEqual(usageStatus(snap([win("week", percent)]), now + 120000), { level, text: `${percent}% of week, resets ${label}`, short: `${percent}% wk`, resetsAt: level === "over" ? reset : null, ageMinutes: 2 });
   }
-  assert.deepEqual(usageStatus(snap([win("5h", 10), win("week", 85)]), now), { level: "high", text: `85% of week, resets ${label}; 10% of 5h, resets ${label}`, resetsAt: null, ageMinutes: 0 });
-  assert.deepEqual(usageStatus(snap([win("week", 100, now)], true), now), { level: "ok", text: "no live usage windows", resetsAt: null, ageMinutes: 0 });
-  assert.deepEqual(usageStatus(snap([win("week", 15)], true), now), { level: "over", text: `15% of week, resets ${label}`, resetsAt: reset, ageMinutes: 0 });
-  assert.deepEqual(usageStatus(snap([], true), now), { level: "over", text: "limit reached, reset unknown", resetsAt: null, ageMinutes: 0 });
-  assert.deepEqual(usageStatus(snap([win("week", 100, now), win("5h", 85, null, 300)]), now), { level: "high", text: "85% of 5h, resets unknown", resetsAt: null, ageMinutes: 0 });
+  assert.deepEqual(usageStatus(snap([win("5h", 10), win("week", 85)]), now), { level: "high", text: `85% of week, resets ${label}; 10% of 5h, resets ${label}`, short: "85% wk", resetsAt: null, ageMinutes: 0 });
+  assert.deepEqual(usageStatus(snap([win("week", 100, now)], true), now), { level: "ok", text: "no live usage windows", short: null, resetsAt: null, ageMinutes: 0 });
+  assert.deepEqual(usageStatus(snap([win("week", 15)], true), now), { level: "over", text: `15% of week, resets ${label}`, short: "15% wk", resetsAt: reset, ageMinutes: 0 });
+  assert.deepEqual(usageStatus(snap([], true), now), { level: "over", text: "limit reached, reset unknown", short: "limit", resetsAt: null, ageMinutes: 0 });
+  assert.deepEqual(usageStatus(snap([win("week", 100, now), win("5h", 85, null, 300)]), now), { level: "high", text: "85% of 5h, resets unknown", short: "85% 5h", resetsAt: null, ageMinutes: 0 });
 });
 
 test("coordinator instructions require operator approval before overriding a usage hold", () => {
@@ -109,7 +109,7 @@ test("admission holds over-limit jobs, allows confirmation and high usage; capac
   const label = new Date(reset).toLocaleString("en-US", { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false });
   assert.deepEqual((await rt.admit([job])).problems, [`agent "coder" is held at its usage limit: 100% of week, resets ${label} (reading 0 minutes old). Ask the operator before resubmitting with confirm_over_limit: true, or send the job to another agent.`]);
   assert.deepEqual((await rt.admit([{ ...job, confirm_over_limit: true }])).problems, []);
-  assert.deepEqual(rt.capacitySnapshot().usageLimits, { openai: { level: "over", text: `100% of week, resets ${label}`, resetsAt: reset, ageMinutes: 0 } });
+  assert.deepEqual(rt.capacitySnapshot().usageLimits, { openai: { level: "over", text: `100% of week, resets ${label}`, short: "100% wk", resetsAt: reset, ageMinutes: 0 } });
   recordUsageSnapshot(root, "openai", snap([win("week", 85)]));
   assert.deepEqual((await rt.admit([job])).problems, []);
   assert.deepEqual((await rt.admit([{ ...job, agentName: "unconfigured" }])).problems, []);

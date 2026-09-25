@@ -83,8 +83,8 @@ test("runHealthChecks emits exact usage warnings for high and over snapshots, bu
     full: { source: "codex", plan: null, limitReached: true, observedAt: now, windows: [] },
   } });
   assert.deepEqual(issues, [
-    { id: "usage:codex:high", severity: "warn", title: "codex usage is 85%", detail: `85% of week, resets ${label} (reading 2 minutes old).`, fix: "plan remaining work or move its roles with nomarmy army assign", short: "codex 85% wk" },
-    { id: "usage:full:over", severity: "warn", title: "full usage is 100%", detail: "limit reached, reset unknown (reading 0 minutes old).", fix: "wait for the reset, or move its roles with nomarmy army assign", short: "full 100%" },
+    { id: "usage:codex:high", severity: "warn", title: "codex usage is 85% wk", detail: `85% of week, resets ${label} (reading 2 minutes old).`, fix: "plan remaining work or move its roles with nomarmy army assign", short: "codex 85% wk" },
+    { id: "usage:full:over", severity: "warn", title: "full is at its usage limit", detail: "limit reached, reset unknown (reading 0 minutes old).", fix: "wait for the reset, or move its roles with nomarmy army assign", short: "full limit" },
   ]);
 });
 
