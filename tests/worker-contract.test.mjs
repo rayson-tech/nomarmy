@@ -91,6 +91,7 @@ import {
   policyAdmissionProblems,
   applyVerificationPolicy,
   repoPolicy,
+  applyRefactorContract,
 } from "../mcp/server.mjs";
 
 const report = ({ status = "done", tests = "pass", notDone = "none", note = "n/a" } = {}) =>
@@ -3493,4 +3494,24 @@ test("policy: require_verification refuses an implement job without a profile an
   assert.equal(applyVerificationPolicy(done, "not_run", {}), done, "without the policy a done job still commits, flagged");
   assert.equal(repoPolicy(() => ({ found: true, config: { policy: strict } })).require_verification, true);
   assert.deepEqual(repoPolicy(() => { throw new Error("bad yaml"); }), {});
+});
+
+
+test("refactor: a declared refactor skips the revert check but commits only with passing verification and untouched tests", () => {
+  const strict = { require_verification: true, require_regression_check: true };
+  assert.equal(resolveVerifyRegression({ mode: "implement", verification: "quick", refactor: true }), false, "reverting a refactor restores working code, so the check would always fail");
+  assert.deepEqual(policyAdmissionProblems({ mode: "implement", verification: "quick", refactor: true, verify_regression: false }, strict), [], "the refactor contract stands in for the revert check");
+  assert.match(policyAdmissionProblems({ mode: "implement", refactor: true }, {})[0], /refactor job needs a `verification` profile/, "even without a policy");
+  assert.match(policyAdmissionProblems({ mode: "implement", verification: "quick", verify_regression: false }, strict)[0], /declare refactor: true instead/);
+
+  const done = { outcome: "WORKER_DONE", commitAllowed: true, reviewRequired: false, reasons: [] };
+  const clean = { new_tests_added: [], existing_tests_modified: [], existing_tests_deleted: [] };
+  assert.equal(applyRefactorContract(done, { refactor: true, verificationStatus: "pass", testChanges: clean }), done, "the move with unchanged tests commits");
+  const sneaky = applyRefactorContract(done, { refactor: true, verificationStatus: "pass", testChanges: { ...clean, existing_tests_modified: ["tests/a.test.mjs"] } });
+  assert.equal(sneaky.commitAllowed, false);
+  assert.equal(sneaky.outcome, "NEEDS_REVIEW", "a blocked job never reads as done");
+  assert.match(sneaky.commitBlockedReason, /test files changed \(tests\/a\.test\.mjs\)/);
+  assert.match(applyRefactorContract(done, { refactor: true, verificationStatus: "fail", testChanges: clean }).commitBlockedReason, /verification was fail/);
+  assert.equal(applyRefactorContract(done, { refactor: false, verificationStatus: "fail", testChanges: clean }), done, "not a refactor: this rule doesn't apply");
+  assert.equal(applyVerificationPolicy(done, "not_run", strict).outcome, "NEEDS_REVIEW");
 });
