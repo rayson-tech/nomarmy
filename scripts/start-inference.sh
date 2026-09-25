@@ -15,8 +15,8 @@ if [[ -f "$PID" ]] && kill -0 "$(cat "$PID")" 2>/dev/null; then echo "llama-serv
 BIN="$NOMARMY_INSTALL_ROOT/llama-server"; [[ -x "$BIN" ]] || { echo "ERROR: $BIN missing"; exit 1; }
 ARGS=(-hf "$NOMARMY_MODEL_REPO:$NOMARMY_MODEL_QUANT" --alias "$NOMARMY_MODEL_ALIAS" --host "$NOMARMY_LLAMA_HOST" --port "$NOMARMY_LLAMA_PORT" -c "$NOMARMY_LLAMA_CONTEXT" -np "$NOMARMY_LLAMA_PARALLEL" -ngl "$NOMARMY_LLAMA_GPU_LAYERS" -t "$NOMARMY_LLAMA_THREADS" --metrics)
 # Everything below is optional advanced tuning, unset by default: nothing
-# here changes behavior for anyone who hasn't set these. See README's
-# "Advanced llama-server tuning" section for what each one is for.
+# here changes behavior for anyone who hasn't set these. See "Advanced
+# llama-server tuning" in docs/configuration.md for what each one is for.
 [[ -n "${NOMARMY_LLAMA_CACHE_TYPE_K:-}" ]] && ARGS+=(--cache-type-k "$NOMARMY_LLAMA_CACHE_TYPE_K")
 [[ -n "${NOMARMY_LLAMA_CACHE_TYPE_V:-}" ]] && ARGS+=(--cache-type-v "$NOMARMY_LLAMA_CACHE_TYPE_V")
 [[ -n "${NOMARMY_LLAMA_FLASH_ATTN:-}" ]] && ARGS+=(--flash-attn "$NOMARMY_LLAMA_FLASH_ATTN")

@@ -18,7 +18,7 @@ We'll acknowledge the report, work with you on a fix, and credit you in the fix'
 
 ## Scope
 
-nomArmy's security model is described in the README's [Security posture](README.md#security-posture) section: a worker gets a writable worktree inside a network-isolated Podman sandbox and nothing else, repository content is treated as untrusted input, and configuration is data to validate, never authority. In scope for a report:
+nomArmy's security model is described in [Security posture](docs/security.md): a worker gets a writable worktree inside a network-isolated Podman sandbox and nothing else, repository content is treated as untrusted input, and configuration is data to validate, never authority. In scope for a report:
 
 - Anything that lets a worker (or repository content a worker reads) escape the sandbox, reach the host filesystem outside its worktree, or reach the coordinator's own credentials or state.
 - Anything that lets a worker's report, or content from a scanned repository, be mistaken for a coordinator-verified fact rather than an unverified claim.
