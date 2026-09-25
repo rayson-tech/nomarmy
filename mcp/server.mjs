@@ -2392,7 +2392,7 @@ function writeStatus(jobDir, patch) {
 }
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-export async function executeJob({ task, acceptance, verification, mode = "implement", baseRef, timeoutSeconds = 600, profile = "coder", reasoning = "high", pool = null, subscriptionWorker = null, onBehalfOf = null, model = null, reportSize = null, workerId, evidence = null, verifyRegression = false, commitSubject = null, jobId: presetJobId = null }) {
+export async function executeJob({ task, acceptance, verification, mode = "implement", baseRef, timeoutSeconds = 600, profile = "coder", reasoning = "high", pool = null, subscriptionWorker = null, onBehalfOf = null, model = null, reportSize = null, workerId, evidence = null, verifyRegression = false, commitSubject = null, refactor = false, jobId: presetJobId = null }) {
   await assertRepo();
   ensureJobsRoot();
   // Fire-and-forget: sweeps whatever this or any other nomArmy install left
@@ -2409,10 +2409,10 @@ export async function executeJob({ task, acceptance, verification, mode = "imple
   const common = { task, acceptance, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool, subscriptionWorker, onBehalfOf, model, reportSize, workerId, progress, jobStartedMs };
   if (mode === "scout") return executeScout(common);
   if (mode === "decompose") return executeDecompose(common);
-  return executeImplement({ ...common, verification, evidence, verifyRegression, commitSubject });
+  return executeImplement({ ...common, verification, evidence, verifyRegression, commitSubject, refactor });
 }
 
-async function executeImplement({ task, acceptance, verification, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool = null, subscriptionWorker = null, onBehalfOf = null, model = null, reportSize = null, workerId, evidence, verifyRegression = false, commitSubject = null, progress, jobStartedMs }) {
+async function executeImplement({ task, acceptance, verification, base, jobId, jobDir, runtimeDir, timeoutSeconds, profile, reasoning, pool = null, subscriptionWorker = null, onBehalfOf = null, model = null, reportSize = null, workerId, evidence, verifyRegression = false, commitSubject = null, refactor = false, progress, jobStartedMs }) {
   const mode = "implement";
   let branch = `agent/${jobId}`, worktree = path.join(jobDir, "worktree");
   try {
@@ -2718,7 +2718,8 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
           commitBlockedReason: `possible secret detected: ${possibleSecrets.reason}`,
           reasons: [...afterHostInstalls.reasons, `POSSIBLE SECRET DETECTED: ${possibleSecrets.reason}`] }
       : afterHostInstalls;
-    const finalOutcome = applyVerificationPolicy(afterSecrets, independentVerification.status, repoPolicy());
+    const finalOutcome = applyRefactorContract(applyVerificationPolicy(afterSecrets, independentVerification.status, repoPolicy()),
+      { refactor, verificationStatus: independentVerification.status, testChanges: preCommit.testChanges });
 
     progress("commit");
     const commit = await createCoordinatorCommit({ cwd, jobId, outcome: finalOutcome,
@@ -3670,6 +3671,7 @@ export const jobSchema = z.object({
     `Acceptance item exceeds ${maxAcceptanceItemChars} characters. Keep each criterion to one concrete, checkable statement.`
   )).max(20).optional().describe("implement: acceptance criteria the worker must satisfy. scout: points a complete answer must cover. decompose: constraints a good split must respect."),
   verification: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().describe("Verification profile NAME (e.g. quick, standard, browser). Semantic; nomArmy owns execution. Ignored by scouts."),
+  refactor: z.boolean().optional().describe("implement: declares a behavior-preserving change (moving or restructuring code). nomArmy then requires a passing verification profile and refuses to commit if any test file was added, changed or deleted: the existing tests passing unchanged is the evidence nothing changed. The revert check is skipped, since reverting a refactor restores working code and always passes. A job that changes behavior has to change tests, so it can't pass as a refactor."),
   verify_regression: z.boolean().optional().describe(
     "implement only: after the diff passes `verification` and touches production files, temporarily revert just those production files, re-run the SAME verification profile (expected to fail without the fix), then restore them. A re-run that still PASSES proves no test would catch this regression, and the outcome is downgraded to NEEDS_REVIEW regardless of the worker's report -- never silently committed as done. This is the ONLY mechanism that catches a verification profile that passes for the wrong reason (a test-selection flag that accidentally excludes the changed file's own tests reports a real, honest, green run that never touched the diff -- exit-code checking alone cannot see the difference). Defaults to true whenever `verification` is set, since that gap is exactly what nomArmy's trust boundary claims to close; pass `false` explicitly to skip the doubled wall-clock cost (can matter on repos with thousands of tests) and accept the risk instead. No effect with no `verification` profile -- there is nothing to re-run. Ignored by scouts."
   ),
@@ -3727,18 +3729,46 @@ export function repoPolicy(loadConfigFn = () => loadConfig(projectDir)) {
 export function policyAdmissionProblems(job, policy) {
   if ((job.mode ?? "implement") !== "implement") return [];
   const problems = [];
-  if (policy.require_verification && !job.verification) problems.push("this repo requires verification (policy.require_verification in .nomarmy.yml): give the job a `verification` profile (local_worker_config lists them)");
-  if (policy.require_regression_check && job.verify_regression === false) problems.push("this repo requires the revert check (policy.require_regression_check in .nomarmy.yml): verify_regression can't be false");
+  if (job.refactor && !job.verification) problems.push("a refactor job needs a `verification` profile: its unchanged tests passing is the only evidence it changed nothing");
+  else if (policy.require_verification && !job.verification) problems.push("this repo requires verification (policy.require_verification in .nomarmy.yml): give the job a `verification` profile (local_worker_config lists them)");
+  // A refactor meets the regression requirement through its own contract
+  // (applyRefactorContract), not the revert check.
+  if (policy.require_regression_check && job.verify_regression === false && !job.refactor) problems.push("this repo requires the revert check (policy.require_regression_check in .nomarmy.yml): verify_regression can't be false (a behavior-preserving change can declare refactor: true instead)");
   return problems;
 }
+/**
+ * A declared refactor commits only when verification passed and no test
+ * file was added, changed or deleted. Mechanical, not the General's call:
+ * a change that alters behavior has to alter tests to show it, which this
+ * refuses. Found splitting server.mjs: the revert check restores the old
+ * code, which works, so it flagged every behavior-preserving move.
+ */
+export function applyRefactorContract(outcome, { refactor, verificationStatus, testChanges }) {
+  if (!refactor) return outcome;
+  const touched = [...(testChanges?.new_tests_added ?? []), ...(testChanges?.existing_tests_modified ?? []), ...(testChanges?.existing_tests_deleted ?? [])];
+  const why = touched.length
+    ? `refactor: test files changed (${touched.slice(0, 5).join(", ")}${touched.length > 5 ? ", ..." : ""}); a refactor must pass the existing tests unchanged`
+    : verificationStatus !== "pass" ? `refactor: verification was ${verificationStatus ?? "not run"}; a refactor commits only when the unchanged tests pass` : null;
+  if (!why) return outcome;
+  return blockedForReview(outcome, why);
+}
+// A job whose commit a rule blocked reads as needing review, never as done.
+function blockedForReview(outcome, why) {
+  const done = outcome.outcome === OUTCOMES.WORKER_DONE || outcome.outcome === OUTCOMES.RECOVERED_SUCCESS;
+  return { ...outcome, ...(done ? { outcome: OUTCOMES.NEEDS_REVIEW } : {}), reviewRequired: true, commitAllowed: false, commitBlockedReason: why, reasons: [...(outcome.reasons ?? []), why] };
+}
+
 /** The outcome with the commit blocked when policy requires verification that didn't pass. */
 export function applyVerificationPolicy(outcome, verificationStatus, policy) {
   if (!policy.require_verification || verificationStatus === "pass" || !outcome.commitAllowed) return outcome;
   const why = `policy.require_verification: verification was ${verificationStatus ?? "not run"}, and this repo commits only work whose verification passed`;
-  return { ...outcome, reviewRequired: true, commitAllowed: false, commitBlockedReason: why, reasons: [...(outcome.reasons ?? []), why] };
+  return blockedForReview(outcome, why);
 }
 
 export function resolveVerifyRegression(args) {
+  // A refactor's evidence is the unchanged tests passing; reverting it
+  // restores working code, so the revert check would always "fail".
+  if (args.refactor) return false;
   if (typeof args.verify_regression === "boolean") return args.verify_regression;
   return args.mode === "implement" && Boolean(args.verification);
 }
@@ -3749,7 +3779,7 @@ function jobArgs(args, workerId) {
   return { task: args.task, acceptance: args.acceptance, verification: args.verification, mode: args.mode, baseRef: args.base_ref,
     timeoutSeconds: args.timeout_seconds, profile: args.profile, reasoning: args.reasoning, pool: args.pool,
     subscriptionWorker, onBehalfOf: args.on_behalf_of, model: args.model ?? null, reportSize: args.report ?? null, evidence: args.evidence,
-    verifyRegression: resolveVerifyRegression(args), commitSubject: args.commit_subject ?? null, workerId };
+    verifyRegression: resolveVerifyRegression(args), commitSubject: args.commit_subject ?? null, refactor: Boolean(args.refactor), workerId };
 }
 server.tool("local_worker", "Run one isolated local worker and wait for it. mode=implement edits in its own worktree and the coordinator commits only on a valid done report (or a recovered job that passed independent verification); failed or incomplete worktrees are retained. mode=scout answers a question from a read-only snapshot with mandatory [path:line] citations that nomArmy verifies and expands. mode=decompose (also read-only) proposes 2+ independent subtasks for a broad objective instead of one worker turn trying to do too much; the proposal is never auto-dispatched, review it and make a separate call with the subtasks you choose. Refuses under memory pressure or over capacity; use local_worker_start + local_worker_status to avoid blocking.", jobSchema.shape,
   async rawArgs => {
