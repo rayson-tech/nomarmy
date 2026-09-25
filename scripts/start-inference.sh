@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; source "$ROOT/scripts/lib.sh"; load_profile "${1:-}"
-if nomarmy_is_cloud; then echo "Profile '$NOMARMY_PROFILE' uses hosted inference at $NOMARMY_BEDROCK_BASE_URL; no local llama-server to start."; exit 0; fi
+if ! nomarmy_manages_model_server; then
+  case "$(nomarmy_execution_mode)" in
+    remote) echo "Profile '$NOMARMY_PROFILE' uses the model server at $NOMARMY_LLAMA_HOST:$NOMARMY_LLAMA_PORT; no llama-server to start." ;;
+    hosted) echo "Profile '$NOMARMY_PROFILE' runs every job on an api or subscription agent; no llama-server to start." ;;
+    *) echo "Profile '$NOMARMY_PROFILE' uses hosted inference at ${NOMARMY_BEDROCK_BASE_URL:-Bedrock}; no llama-server to start." ;;
+  esac
+  exit 0
+fi
 mkdir -p "$NOMARMY_INSTALL_ROOT/run" "$NOMARMY_INSTALL_ROOT/logs"
 PID="$NOMARMY_INSTALL_ROOT/run/llama.pid"; LOG="$NOMARMY_INSTALL_ROOT/logs/llama-server.log"
 if [[ -f "$PID" ]] && kill -0 "$(cat "$PID")" 2>/dev/null; then echo "llama-server already running PID $(cat "$PID")"; exit 0; fi

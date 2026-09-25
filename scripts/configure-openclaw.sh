@@ -2,6 +2,14 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; source "$ROOT/scripts/lib.sh"; load_profile "${1:-}"
 
+if [[ "$(nomarmy_execution_mode)" == hosted ]]; then
+  # No model provider to register: each api or subscription agent is set up
+  # with `nomarmy agents add`, which configures its own OpenClaw provider.
+  echo "Profile '$NOMARMY_PROFILE' runs every job on an api or subscription agent; no local model provider to configure."
+  echo "Add one with: nomarmy agents add"
+  exit 0
+fi
+
 PROVIDER="$NOMARMY_WORKER_PROVIDER"
 PROFILE_ID="$PROVIDER:nomarmy-$NOMARMY_PROFILE"
 
@@ -39,7 +47,34 @@ else
   MODEL_ID="$NOMARMY_MODEL_ALIAS"
   AUTH_CHOICE="llama-cpp-existing-server"
   PROFILE_ID="llama-cpp:nomarmy-local"
-  echo "==> Configuring OpenClaw against local llama-server, model $MODEL_ID"
+  if [[ "$(nomarmy_execution_mode)" == remote ]]; then
+    # Someone else runs this server, so its model name and context come from
+    # the server itself rather than this machine's settings.
+    SERVER="http://$NOMARMY_LLAMA_HOST:$NOMARMY_LLAMA_PORT"
+    curl -fsS --max-time 5 "$SERVER/health" >/dev/null || { echo "ERROR: no llama-server answering at $SERVER/health." >&2; exit 1; }
+    REMOTE_MODEL="$(curl -fsS --max-time 5 "$SERVER/v1/models" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).data?.[0]?.id??"")}catch{}})' || true)"
+    [[ -n "$REMOTE_MODEL" ]] && MODEL_ID="$REMOTE_MODEL"
+    if [[ -n "$REMOTE_MODEL" && "$REMOTE_MODEL" != "${NOMARMY_WORKER_MODEL:-}" ]]; then
+      # Jobs ask for NOMARMY_WORKER_MODEL, so record the name this server
+      # actually serves (`nomarmy connect`, run next by install.sh, reads it).
+      COMMON="$ROOT/config/common.env"
+      for key in NOMARMY_MODEL_ALIAS NOMARMY_WORKER_MODEL; do
+        if grep -q "^$key=" "$COMMON"; then
+          KEY="$key" VALUE="$REMOTE_MODEL" node -e 'const fs=require("fs"),f=process.argv[1];fs.writeFileSync(f,fs.readFileSync(f,"utf8").replace(new RegExp(`^${process.env.KEY}=.*$`,"m"),`${process.env.KEY}=${process.env.VALUE}`))' "$COMMON"
+        else
+          printf '%s=%s\n' "$key" "$REMOTE_MODEL" >>"$COMMON"
+        fi
+      done
+      export NOMARMY_MODEL_ALIAS="$REMOTE_MODEL" NOMARMY_WORKER_MODEL="$REMOTE_MODEL"
+      echo "==> The server serves '$REMOTE_MODEL'; recorded it in config/common.env"
+    fi
+    # llama-server reports the context of one slot, which is one nom's share.
+    REMOTE_CTX="$(curl -fsS --max-time 5 "$SERVER/props" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const n=JSON.parse(s).default_generation_settings?.n_ctx;if(Number.isInteger(n)&&n>0)process.stdout.write(String(n))}catch{}})' || true)"
+    [[ -n "$REMOTE_CTX" ]] && export NOMARMY_CONTEXT_PER_NOM="$REMOTE_CTX"
+    echo "==> Configuring OpenClaw against the llama-server at $SERVER, model $MODEL_ID${REMOTE_CTX:+, context $REMOTE_CTX per nom}"
+  else
+    echo "==> Configuring OpenClaw against local llama-server, model $MODEL_ID"
+  fi
 fi
 
 openclaw onboard --non-interactive --accept-risk \
@@ -61,9 +96,10 @@ if ! nomarmy_is_cloud; then
   # against a freshly-resized 65536-token nom still overflowed at ~20K tokens
   # of prompt, on literally the first turn, because OpenClaw was still
   # enforcing its onboarding-time guess. NOMARMY_CONTEXT_PER_NOM (exported by
-  # nomarmy_validate_local, above, in load_profile) is nomArmy's own already-
-  # computed truth for this exact number; write it back so OpenClaw's model
-  # registration cannot drift from the server it is actually talking to.
+  # nomarmy_validate_local, above, in load_profile, or read from a remote
+  # server's /props) is nomArmy's own already-computed truth for this exact
+  # number; write it back so OpenClaw's model registration cannot drift from
+  # the server it is actually talking to.
   # models[0] assumes exactly the one custom local model this script just
   # onboarded, which is what onboard --custom-model-id always produces here.
   CONTEXT_WINDOW="${NOMARMY_CONTEXT_PER_NOM:-24576}"
