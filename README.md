@@ -8,7 +8,24 @@
 
 <p align="center"><em>Tiny coders, big appetites for bounded tickets.</em> 🍪</p>
 
-**An agent harness where a worker's claims are never trusted, and the environment your tests need is declared, disposable and reproducible.**
+**Your coding assistant plans; sandboxed workers build; nothing counts until nomArmy has checked it.**
+
+## TL;DR
+
+1. **Have** Git, Node 20+ and [Podman](https://podman.io) (on macOS: `brew install podman && podman machine init && podman machine start`).
+2. **Install** (builds the local model server, OpenClaw and the sandbox, and registers nomArmy with Claude Code):
+   ```bash
+   git clone https://github.com/rayson-tech/nomarmy.git && cd nomarmy
+   ./install.sh --profile macbook-pro   # or nvidia-linux, cpu-linux, dgx-spark, bedrock
+   ./e2e.sh --profile macbook-pro       # should end with: === E2E PASS ===
+   ```
+3. **Set up your repo:** in the project, run `nomarmy init`. It proposes a `.nomarmy.yml` with your test command.
+4. **Use it:** restart Claude Code in that project and ask it to use nomArmy for one small bug that has a test. When that works, try `/feature <what you want built>`.
+5. **Optional:** add hosted workers with `nomarmy agents add`, give roles to them with `nomarmy army init`, or connect Codex or Cursor with `nomarmy connect codex cursor`.
+
+Stuck? `nomarmy doctor` checks the machine, and `nomarmy health` checks everything nomArmy runs on.
+
+## What it is
 
 Your coding assistant (Claude Code, Codex or Cursor) stays in charge as the **General**: it decides what gets built and whether the result is acceptable. The work goes to **noms**, workers that implement, test and repair in their own git worktree and sandbox, on a local model, an API key, or your own ChatGPT or Muse Code subscription. nomArmy owns everything in between: worktrees, git, sandboxes, verification, and the evidence that decides whether work is accepted.
 
@@ -28,31 +45,6 @@ A malformed report isn't automatically a failure: if the repository changed, nom
 
 Around that core: **agents** say where a job can run, the **army** says which role runs on which agent, and **`/feature`** runs a whole feature end to end, from plan through build, review and acceptance, handing you a branch to merge.
 
-## Quick start
-
-You need Git, Node 20+, and [Podman](https://podman.io).
-
-```bash
-npm install -g nomarmy@alpha
-nomarmy doctor          # what's missing on this machine, and how to fix it
-nomarmy setup           # pick a profile and model; prints the install.sh command to run
-nomarmy connect claude  # or codex, cursor: registers nomArmy with your coordinator
-```
-
-Installing from a clone is the most tested path, and it's what `install.sh` expects: see [Install](#install). `install.sh` builds llama.cpp for local inference, installs and configures [OpenClaw](https://github.com/openclaw/openclaw) (the host-side broker every model call goes through), builds the sandbox image and registers the MCP server.
-
-`nomarmy connect` also installs the `/feature` command, Claude Code's status line and (on macOS) nomArmy's notifier. The coordinator gets nomArmy's instructions from the MCP server itself, so there's nothing to copy into your projects.
-
-Then, in any git repository:
-
-```bash
-nomarmy init                  # propose a .nomarmy.yml with your test command
-nomarmy agents add            # optional: an API key or a subscription
-nomarmy army init             # optional: the default roster of roles
-```
-
-Ask your coordinator to delegate one small, well-tested ticket before anything bigger. When that works, try `/feature <what you want built>`.
-
 ## Install
 
 | Platform | Guide |
@@ -64,6 +56,10 @@ Ask your coordinator to delegate one small, well-tested ticket before anything b
 | No GPU, or no local inference | [Cloud (Bedrock)](#cloud-bedrock) |
 
 Every platform needs Git and Podman. `nomarmy doctor` checks the host and prints a fix for anything missing.
+
+`install.sh` builds llama.cpp for local inference, installs and configures [OpenClaw](https://github.com/openclaw/openclaw) (the host-side broker every model call goes through), builds the sandbox image, and registers the MCP server if Claude Code is installed. `nomarmy connect` (run by `install.sh`, or by hand for Codex and Cursor) also installs the `/feature` command, Claude Code's status line and, on macOS, nomArmy's notifier. The coordinator gets nomArmy's instructions from the MCP server itself, so there's nothing to copy into your projects.
+
+**From npm:** `npm install -g nomarmy@alpha` gives you the `nomarmy` command; `nomarmy setup` then picks a profile and model and prints the `install.sh` command to run. Installing from a clone, as in the TL;DR, is the most tested path.
 
 ### macOS (Apple Silicon)
 

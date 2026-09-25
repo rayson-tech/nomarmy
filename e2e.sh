@@ -56,18 +56,35 @@ fi
 # bind-mounting paths under the host home directory, and the cleanup step
 # below bind-mounts this directory into a container.
 TMP="$(mktemp -d "$HOME/.nomarmy-e2e.XXXXXX")"
+# OpenClaw's own state for this run, also under $HOME, the way nomArmy's
+# real dispatch keeps it (--state-dir). Left unset, OpenClaw puts its
+# working files in the system temp folder, which the Podman sandbox can't
+# mount on macOS, and it uses the operator's main state, whose memory index
+# holds their past sessions.
+STATE="$(mktemp -d "$HOME/.nomarmy-e2e-state.XXXXXX")"
 
 cleanup() {
   local exit_code=$?
 
-  if [[ -n "${TMP:-}" && -d "$TMP" ]]; then
+  # OpenClaw leaves this run's sandbox container running; its name carries
+  # the hash recorded under the state dir (as nomArmy's job cleanup does).
+  if [[ -n "${STATE:-}" && -d "$STATE/state/sandbox/skills-workspaces" ]] && command -v podman >/dev/null 2>&1; then
+    for ws in "$STATE"/state/sandbox/skills-workspaces/workspace-*; do
+      [[ -d "$ws" ]] || continue
+      podman ps -a --filter "name=${ws##*/workspace-}" --format '{{.Names}}' 2>/dev/null \
+        | xargs -r podman rm -f -v >/dev/null 2>&1 || true
+    done
+  fi
+
+  for dir in "${TMP:-}" "${STATE:-}"; do
+  if [[ -n "$dir" && -d "$dir" ]]; then
 
     # OpenClaw's Podman sandbox may create files that the host user
     # cannot delete directly. Use a disposable container to clean
     # the temporary workspace first.
     if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
       podman run --rm \
-        -v "$TMP:/cleanup" \
+        -v "$dir:/cleanup" \
         alpine:3.20 \
         sh -c '
           find /cleanup -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + \
@@ -76,13 +93,14 @@ cleanup() {
         >/dev/null 2>&1 || true
     fi
 
-    rm -rf "$TMP" 2>/dev/null || true
+    rm -rf "$dir" 2>/dev/null || true
 
-    if [[ -d "$TMP" ]]; then
+    if [[ -d "$dir" ]]; then
       echo "WARN: E2E temporary directory could not be completely removed:"
-      echo "      $TMP"
+      echo "      $dir"
     fi
   fi
+  done
 
   exit "$exit_code"
 }
@@ -126,15 +144,29 @@ PROMPT='Fix the bug so npm test passes. Work only in the workspace. Run npm test
 
 OUT="$TMP/openclaw.json"
 
+# The same privacy settings every nomArmy job gets (lib/openclaw-run.mjs
+# withJobPrivacy): OpenClaw's memory search and session-memory hook off, so
+# nothing is indexed or sent for embedding.
+CONFIG="$STATE/openclaw.job.json"
+mkdir -p "$STATE/state"
+node --input-type=module -e '
+  import fs from "node:fs";
+  import { readOpenclawConfig } from "'"$ROOT"'/lib/openclaw-config.mjs";
+  import { withJobPrivacy } from "'"$ROOT"'/lib/openclaw-run.mjs";
+  fs.writeFileSync(process.argv[1], JSON.stringify(withJobPrivacy(readOpenclawConfig() ?? {})), { mode: 0o600 });
+' "$CONFIG"
+
 openclaw agent exec "$PROMPT" \
   --model "$NOMARMY_WORKER_PROVIDER/$NOMARMY_WORKER_MODEL" \
   --cwd "$TMP" \
+  --state-dir "$STATE/state" \
+  --config "$CONFIG" \
   --code-mode direct \
   --local-model-lean \
   --thinking off \
   --timeout 600 \
   --json \
-  > "$OUT"
+  > "$OUT" 2> "$STATE/openclaw.stderr.log"
 
 # Independent verification. We do not trust the worker's claim
 # that its implementation is correct.
