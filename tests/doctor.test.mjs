@@ -268,7 +268,7 @@ test("checkEndpoint (bedrock) ok with a valid region and credentials", () => {
 test("checkEndpoint rejects an unrecognized NOMARMY_EXECUTION value", () => {
   const result = checkEndpoint({ execution: "carrier-pigeon", endpoint: {} });
   assert.equal(result.ok, false);
-  assert.equal(result.fix, "Set NOMARMY_EXECUTION to 'local', 'hosted', or 'bedrock' (see config/common.env).");
+  assert.equal(result.fix, "Set NOMARMY_EXECUTION to 'local', 'remote', 'hosted', or 'bedrock' (see config/common.env).");
 });
 
 test("checkEndpoint never references NOMARMY_MODEL_ENDPOINT (defect #5 - it does not exist)", () => {

@@ -127,6 +127,13 @@ test("resolveContextPerNom: a cloud execution never probes a local llama-server"
   assert.equal(r.contextPerNom, DEFAULT_TARGET_CONTEXT_PER_NOM);
 });
 
+test("resolveContextPerNom: a remote server's own context beats this machine's llama settings", async () => {
+  const probe = async () => ({ contextPerNom: 16384, slots: 4, modelPath: null });
+  const env = { NOMARMY_EXECUTION: "remote", NOMARMY_LLAMA_CONTEXT: "65536", NOMARMY_LLAMA_PARALLEL: "1" };
+  const r = await resolveContextPerNom({ env, probe });
+  assert.equal(r.contextPerNom, 16384); assert.equal(r.slots, 4); assert.equal(r.source, "llama-server /props");
+});
+
 // --- assessAdmission --------------------------------------------------------
 const hw = (totalGiB, availGiB) => ({ memory: { totalBytes: totalGiB * GIB, availableBytes: availGiB * GIB } });
 

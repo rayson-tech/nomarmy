@@ -51,7 +51,7 @@ else
     # Someone else runs this server, so its model name and context come from
     # the server itself rather than this machine's settings.
     SERVER="http://$NOMARMY_LLAMA_HOST:$NOMARMY_LLAMA_PORT"
-    curl -fsS --max-time 5 "$SERVER/health" >/dev/null || { echo "ERROR: no llama-server answering at $SERVER/health." >&2; exit 1; }
+    curl -fsS --max-time 5 "$SERVER/health" >/dev/null || { echo "ERROR: no llama-server answering at $SERVER/health. Set its address with: nomarmy setup --llama-url http://<host>:8080" >&2; exit 1; }
     REMOTE_MODEL="$(curl -fsS --max-time 5 "$SERVER/v1/models" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).data?.[0]?.id??"")}catch{}})' || true)"
     [[ -n "$REMOTE_MODEL" ]] && MODEL_ID="$REMOTE_MODEL"
     if [[ -n "$REMOTE_MODEL" && "$REMOTE_MODEL" != "${NOMARMY_WORKER_MODEL:-}" ]]; then

@@ -27,8 +27,9 @@ nomarmy_available_profiles(){
 # Where this install's models run (lib/execution.mjs is the same logic for the
 # MCP server). Scripts branch on these instead of on the profile name.
 #   local    a llama-server on this machine, started and sized by nomArmy
-#   remote   a llama-server on another machine (NOMARMY_EXECUTION=local with a
-#            non-loopback NOMARMY_LLAMA_HOST), e.g. a team's GPU server
+#   remote   a llama-server nomArmy doesn't run, e.g. a team's GPU server or an
+#            SSH tunnel to one (NOMARMY_EXECUTION=remote, or local with a
+#            non-loopback NOMARMY_LLAMA_HOST)
 #   hosted   no local model: every job runs on an api or subscription agent
 #   bedrock  the Bedrock cloud profiles
 nomarmy_is_loopback_host(){
@@ -40,6 +41,7 @@ nomarmy_execution_mode(){
   case "${NOMARMY_EXECUTION:-local}" in
     hosted) echo hosted ;;
     bedrock) echo bedrock ;;
+    remote) echo remote ;;
     *) if nomarmy_is_loopback_host "${NOMARMY_LLAMA_HOST:-127.0.0.1}"; then echo local; else echo remote; fi ;;
   esac
 }
@@ -142,10 +144,6 @@ load_profile(){
   export NOMARMY_PROFILE="$profile"
   export NOMARMY_INSTALL_ROOT="${NOMARMY_INSTALL_ROOT/\$HOME/$HOME}"
 
-  if [[ "$profile" == remote ]] && nomarmy_manages_model_server; then
-    echo "ERROR: profile 'remote' needs the model server's address. Run: nomarmy setup --llama-url http://<host>:8080" >&2
-    exit 2
-  fi
   if nomarmy_is_cloud; then
     # Cloud profiles host no local model, so they carry no hardware or OS
     # requirement and are the only profiles usable on a machine without a GPU.

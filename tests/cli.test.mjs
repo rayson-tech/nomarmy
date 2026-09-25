@@ -188,7 +188,9 @@ function runAgentsCLI(root, args, extraEnv = {}) {
 }
 
 function prepareSetupRoot() {
-  const root = scratchNomarmyRoot();
+  // Real path: on macOS the temp folder is a symlink (/var -> /private/var),
+  // and the CLI reports its own resolved location.
+  const root = fs.realpathSync(scratchNomarmyRoot());
   fs.mkdirSync(path.join(root, "config"), { recursive: true });
   fs.writeFileSync(path.join(root, "config", "common.env"), "NOMARMY_EXISTING=kept\n");
   return root;
@@ -245,10 +247,10 @@ test("setup --llama-url --json writes remote llama settings and treats an offlin
     const output = JSON.parse(result.stdout);
     assert.deepEqual(Object.keys(output).sort(), ["execution", "llamaHost", "llamaPort", "next", "reachable", "written"]);
     assert.deepEqual(output, {
-      written: path.join(root, "config", "common.env"), execution: "local", llamaHost: "127.0.0.1", llamaPort: String(port), reachable: false,
+      written: path.join(root, "config", "common.env"), execution: "remote", llamaHost: "127.0.0.1", llamaPort: String(port), reachable: false,
       next: `${path.join(root, "install.sh")} --profile remote`,
     });
-    assert.equal(fs.readFileSync(output.written, "utf8"), `NOMARMY_EXISTING=kept\nNOMARMY_EXECUTION=local\nNOMARMY_LLAMA_HOST=127.0.0.1\nNOMARMY_LLAMA_PORT=${port}\n`);
+    assert.equal(fs.readFileSync(output.written, "utf8"), `NOMARMY_EXISTING=kept\nNOMARMY_EXECUTION=remote\nNOMARMY_LLAMA_HOST=127.0.0.1\nNOMARMY_LLAMA_PORT=${port}\n`);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -556,11 +556,11 @@ async function cmdSetup() {
       // A server may simply be offline during setup; retain its validated address.
     }
     fs.mkdirSync(path.dirname(commonPath), { recursive: true });
-    writeEnvLine(commonPath, "NOMARMY_EXECUTION", "local");
+    writeEnvLine(commonPath, "NOMARMY_EXECUTION", "remote");
     writeEnvLine(commonPath, "NOMARMY_LLAMA_HOST", llamaHost);
     writeEnvLine(commonPath, "NOMARMY_LLAMA_PORT", llamaPort);
     const next = `${path.join(nomarmyRoot, "install.sh")} --profile remote`;
-    if (json) return out({ written: commonPath, execution: "local", llamaHost, llamaPort, reachable, next });
+    if (json) return out({ written: commonPath, execution: "remote", llamaHost, llamaPort, reachable, next });
     console.log(reachable
       ? c.green(`✓ llama-server is reachable at ${healthUrl}.`)
       : c.yellow(`⚠ llama-server is not reachable at ${healthUrl} right now; configuration was still written.`));
