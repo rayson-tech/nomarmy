@@ -18,6 +18,31 @@ npm test
 - Add or update a test for the behavior you changed. `tests/*.test.mjs` is organized roughly one file per `lib/*.mjs` module; put a new test next to the code it covers.
 - If you touched `mcp/server.mjs` and are testing against a real Claude Code or Codex session locally, remember the running MCP process needs `nomarmy connect claude` (or `codex`) rerun and the session restarted to pick up the change: it's a long-running process, not something reloaded per-request.
 
+## Code map
+
+The following table shows where core functionality now lives after splitting `mcp/server.mjs` into individual modules.
+
+| Module | What it holds |
+|--------|---------------|
+| `mcp/server.mjs` | MCP tool definitions, wiring of the modules below, and startup |
+| `lib/server-context.mjs` | Project directory and state paths built per server |
+| `lib/process.mjs` | Running processes, git helpers (run, git, gitRaw), and mapLimit |
+| `lib/agent-config.mjs` | agents.yml parsing, army and model-catalog caches |
+| `lib/selection.mjs` | Picking the pool entry or subscription a job runs on |
+| `lib/budget-state.mjs` | Live context and budget state |
+| `lib/job-budgets.mjs` | Per-job brief and report budgets |
+| `lib/admission.mjs` | Admitting jobs, agent slots, and the running-job tracker |
+| `lib/execute.mjs` | Running implement, scout, and decompose jobs |
+| `lib/openclaw-run.mjs` | Calling OpenClaw, sandbox config, salvage, and container cleanup |
+| `lib/verification-flow.mjs` | Independent verification, revert check, and union branches |
+| `lib/git-record.mjs` | Git record of a job and the coordinator's commit |
+| `lib/outcome.mjs` | Turning a report and evidence into an outcome, policy and refactor rules, metrics |
+| `lib/outcomes.mjs` | Outcome names and coordinator statuses |
+| `lib/report.mjs` | Parsing the worker's four-line report |
+| `lib/worker-prompt.mjs` | The worker's brief |
+| `lib/diff-checks.mjs` | Diff checks (test changes, unwired code, mislabeled tests, secrets) |
+| `lib/job-format.mjs` | Formatting results for the coordinator |
+
 ## Working with local workers on this repo
 
 This repository dogfoods itself: `nomarmy-local-worker` is configured against this same repo (see `.nomarmy.yml`, `CLAUDE.md`, `AGENTS.md`). If you're using Claude Code or Codex with nomArmy set up, the same rules apply to you as to anyone using nomArmy on their own project; see the root `CLAUDE.md`/`AGENTS.md` and `policies/` for the coordinator/worker trust boundary this project itself is built around. The short version: a worker's report is a claim, not evidence; verified Git state is the evidence.
