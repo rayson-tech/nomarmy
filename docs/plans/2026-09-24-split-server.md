@@ -28,15 +28,26 @@ Line numbers are from `mcp/server.mjs` at the time of writing.
 | `lib/admission.mjs` | `admit`, lanes and slots (`jobLane`, `runningCount`, `withAgentSlot`, `splitJobsByLane`), `refusalText`, the capacity snapshot | 3340-3560 |
 | `lib/job-format.mjs` | the banners, compact records, `formatResult`, `formatUnion` | 3087-3260 |
 
-## Progress
+## Progress: done
 
-| Step | Module | PR | Result |
-|---|---|---|---|
-| 1 | `lib/report.mjs`, `lib/worker-prompt.mjs` | #4 | merged |
-| 2 | `lib/outcomes.mjs` (pulled forward), `lib/job-format.mjs` | #5 | merged |
-| 3 | `lib/diff-checks.mjs` | #6 | merged |
+| Step | Module | PR |
+|---|---|---|
+| 1 | `lib/report.mjs`, `lib/worker-prompt.mjs` | #4 |
+| 2 | `lib/outcomes.mjs`, `lib/job-format.mjs` | #5 |
+| 3 | `lib/diff-checks.mjs` | #6 |
+| 4 | `lib/server-context.mjs`, `lib/process.mjs` | #8 |
+| 5 | `lib/git-record.mjs` | #9 |
+| 6 | `lib/outcome.mjs` | #10 |
+| 7 | `lib/agent-config.mjs`, `lib/selection.mjs` | #11 |
+| 8 | `lib/budget-state.mjs`, `lib/job-budgets.mjs` | #12 |
+| 9 | `lib/openclaw-run.mjs` | #13 |
+| 10 | `lib/verification-flow.mjs` | #14 |
+| 11 | `lib/execute.mjs` | #15 |
+| 12 | `lib/admission.mjs` | #17 |
 
-`mcp/server.mjs`: 4,235 lines before, 3,556 after step 3. Each step was a nomArmy job (Jr Dev on Codex gpt-5.6-sol) declared `refactor: true`: nomArmy committed it only because verification passed with no test file touched, and each new module's lines were checked verbatim against the original.
+`mcp/server.mjs`: 4,235 lines before, 813 after (the tool definitions, wiring and startup). All 931 tests unchanged and passing throughout.
+
+Every step was a nomArmy job declared `refactor: true` (Jr Dev on Codex gpt-5.6-sol for verbatim moves, Sr Dev on gpt-6-astra for factories): 14 jobs in 2.3 hours on one ChatGPT subscription, 11 committed first time. nomArmy committed each only because verification passed with no test file touched; each new module was then checked line by line against the original, CI passed on each PR, and the installed server was smoke-tested. One job (step 10) reported partial against an acceptance criterion that was too strict and was accepted on review; the first attempts at step 1 were held back by the two nomArmy gaps below.
 
 What the first steps taught:
 
