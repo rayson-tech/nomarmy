@@ -1,6 +1,7 @@
 import { createJobRuntime, jobLane, currentMaxPoolWorkers, splitJobsByLane, toolText, refusalText } from "../lib/admission.mjs";
 export { jobLane, currentMaxPoolWorkers, splitJobsByLane, refusalText };
 import { createExecutor, sleep } from "../lib/execute.mjs";
+import { executionMode } from "../lib/execution.mjs";
 export { JOB_PHASES } from "../lib/execute.mjs";
 import { createVerificationFlow } from "../lib/verification-flow.mjs";
 export { gitShowBuffer, gitModeAtBase, planProductionRevert, revertToBase, restoreWorkerVersion, blobHash, currentBlobHash } from "../lib/verification-flow.mjs";
@@ -207,7 +208,7 @@ export function makeHeartbeatTick(jobDir) { return heartbeatTick(jobDir, livePro
 // Senti run none were tagged, so a 4-hour run went 8.46 hours unchecked.
 let activeRunId = null;
 
-export function expandJobs(jobs, { getArmy = currentArmy, getAgents = () => agentsConfig().agents, getActiveRun = () => activeRunId } = {}) {
+export function expandJobs(jobs, { getArmy = currentArmy, getAgents = () => agentsConfig().agents, getActiveRun = () => activeRunId, env = process.env } = {}) {
   const problems = [];
   let army = null, agents = null;
   const runId = getActiveRun();
@@ -217,6 +218,7 @@ export function expandJobs(jobs, { getArmy = currentArmy, getAgents = () => agen
       if (j.army_role) { army ??= getArmy().army; j = expandArmyRole(j, army); }
       const { agent, roleModel = null, ...rest } = j;
       if (!agent) {
+        if (executionMode(env).mode === "hosted") throw new Error("this install has no local model (NOMARMY_EXECUTION=hosted): give the job an army_role or an agent (the army tool lists them)");
         if (rest.model) throw new Error(`model "${rest.model}" needs an agent to run on: add agent (or army_role), or drop model to use the local model`);
         return { ...rest, profile: rest.profile ?? "coder" };
       }
@@ -254,7 +256,7 @@ export { executeJob };
 
 const { WORKER_START_STAGGER_MS, activeJobs, runningCount, agentMaxConcurrent, withAgentSlot, track, notifyJobFinished, capacitySnapshot, admit, refusal, runBrief, recordJobInRun, trackInRun, launch, liveProgress, summarize } = createJobRuntime({
   projectDir, stateRoot, jobsRoot, runsRoot, leasesRoot, slotsRoot, run, currentMaxWorkers, slug, agentsConfig, modelCatalogReady, budgetsForJob, resolveSubscriptionSelection, executeJob, subscriptionJobFieldProblems, repoPolicy, jobArgs,
-  budgetState, getActiveRunId: () => activeRunId,
+  env: process.env, budgetState, getActiveRunId: () => activeRunId,
 });
 export { runningCount, track };
 
