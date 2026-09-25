@@ -450,6 +450,20 @@ test("agents update --json changes model/thinking, never kind, provider or owner
   }
 });
 
+test("agents update applies its flags without --json, and prints a plain confirmation", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    runAgentsCLI(root, ["add", "--json", "--name", "codex", "--kind", "subscription", "--provider", "openai", "--owner", "you@example.com"]);
+    const updated = runAgentsCLI(root, ["update", "codex", "--max-concurrent", "3"]);
+    assert.equal(updated.exitCode, 0, updated.stdout);
+    assert.match(updated.stdout, /Updated "codex"/);
+    const listed = JSON.parse(runAgentsCLI(root, ["list", "--json"]).stdout);
+    assert.equal((listed.agents ?? listed).codex.max_concurrent, 3);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("agents update/remove --json refuse an unknown agent and an empty update; the built-in local can't be removed", () => {
   const root = scratchNomarmyRoot();
   try {
@@ -497,6 +511,24 @@ function runArmyCLI(root, repo, args, extraEnv = {}) {
     return { exitCode: error.status ?? 1, stdout: error.stdout ?? "", stderr: error.stderr ?? "" };
   }
 }
+
+test("army show prints each agent's usage reading", () => {
+  const root = scratchNomarmyRoot();
+  const repo = mkdtempSync(path.join(tmpdir(), "nomarmy-army-repo-"));
+  const state = mkdtempSync(path.join(tmpdir(), "nomarmy-army-state-"));
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    runAgentsCLI(root, ["add", "--json", "--name", "codex", "--kind", "subscription", "--provider", "openai", "--owner", "you@example.com"]);
+    assert.equal(runArmyCLI(root, repo, ["init", "--agent", "codex", "--model", "gpt-6-astra", "--json"]).exitCode, 0);
+    fs.writeFileSync(path.join(state, "usage-limits.json"), JSON.stringify({ openai: { source: "codex", plan: null, limitReached: false, observedAt: Date.now(),
+      windows: [{ name: "week", usedPercent: 85, windowMinutes: 10080, resetsAt: Date.now() + 86400000 }] } }));
+    const shown = runArmyCLI(root, repo, ["show"], { NOMARMY_AGENT_STATE: state, NO_COLOR: "1" });
+    assert.equal(shown.exitCode, 0, shown.stderr);
+    assert.match(shown.stdout, /usage: 85% of week, resets/);
+  } finally {
+    for (const dir of [root, repo, state]) rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("army init/assign/general/show --json: global roster, a project override, a gitignored local override, and the General", () => {
   const root = scratchNomarmyRoot();
