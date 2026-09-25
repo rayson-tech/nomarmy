@@ -316,7 +316,10 @@ test("createVerificationRunner: a repo whose npm lockfile the sandbox image inst
   fs.mkdirSync(path.join(host, "node_modules"), { recursive: true });
   const worktree = tempRepo({ "package.json": "{}", "package-lock.json": '{"deps":"new"}' });
   const executor = fakeExecutor({ fallback: { started: true, exitCode: 0, stdout: "ok", stderr: "" } });
-  const run = createVerificationRunner({ loadConfig: fixedConfig(STANDARD), executor, hostProjectDir: host });
+  // The image already "exists": a unit test must never run a real podman
+  // build (this one did, on the host, and failed inside a sandbox).
+  const sandboxImageRun = (cmd, args) => (args[0] === "images" ? "abc123\n" : "");
+  const run = createVerificationRunner({ loadConfig: fixedConfig(STANDARD), executor, hostProjectDir: host, sandboxImageRun });
 
   const verdict = await run({ ...CONTEXT, cwd: worktree });
 
