@@ -6,6 +6,8 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { createBudgetState, clampInt } from "../lib/budget-state.mjs";
+import { createJobBudgets, readsMeasurable, measureReads } from "../lib/job-budgets.mjs";
 import { createAgentConfig } from "../lib/agent-config.mjs";
 import { createSelection } from "../lib/selection.mjs";
 import { createServerContext } from "../lib/server-context.mjs";
@@ -13,15 +15,15 @@ import { createProcess, mapLimit, resolveExecutable } from "../lib/process.mjs";
 import { createGitRecord, parseStatusPorcelainZ, parseNameStatusZ, isRuntimeJunk, coordinatorCommitMessage, worktreePointerState } from "../lib/git-record.mjs";
 import { scoutPrompt, parseScoutReport, verifyCitations, resolveScoutOutcome, renderScoutReport, isScoutReportUnusable, scoutReportRecoveryPrompt } from "../lib/scout.mjs";
 import { decomposePrompt, parseDecomposeReport, buildDecomposeFindings, resolveDecomposeOutcome, checkDecompositionOverlap, renderDecomposeReport } from "../lib/decompose.mjs";
-import { deriveBudgets, checkBrief, resolveContextPerNom, assessAdmission, describeBudgets, deriveTimeBudget, FRONTIER } from "../lib/budget.mjs";
-import { readOpenClawTranscript, readOpenClawTranscriptTail, estimateDisplacement } from "../lib/transcript.mjs";
+import { deriveBudgets, checkBrief, assessAdmission, describeBudgets, deriveTimeBudget, FRONTIER } from "../lib/budget.mjs";
+import { readOpenClawTranscriptTail, estimateDisplacement } from "../lib/transcript.mjs";
 import { modelRejection, modelRejectionLine } from "../lib/openclaw-errors.mjs";
 import { COORDINATOR_INSTRUCTIONS } from "../lib/coordinator-instructions.mjs";
 import { runQuery, formatCitations, OPS as EVIDENCE_OPS, outlineFile, findReferences } from "../lib/repo-query.mjs";
 import { loadConfig, ConfigError } from "../lib/config.mjs";
 import { resolveSandboxImage, detectPrimaryLanguage, EXEC_PATH_PREPEND, linkNodePackages, nodeModulesState, repairHostInstalls, SANDBOX_NPM_ENV } from "../lib/sandbox-images.mjs";
 import { DEFAULT_AGENT_IMAGE } from "../lib/verify.mjs";
-import { poolContextPerNom, entryContextPerNom } from "../lib/dispatch-config.mjs";
+import { entryContextPerNom } from "../lib/dispatch-config.mjs";
 import { expandArmyRole, describeArmy, globalConfigDir } from "../lib/army.mjs";
 import { readClaudeSessionTranscript, readClaudeSessionUsage } from "../lib/claude-transcript.mjs";
 import { notify } from "../lib/notify.mjs";
@@ -30,7 +32,6 @@ import { detectTestSabotage, addedLinesOf, loadDependencyNames } from "../lib/sa
 import { writeLease, removeLease, liveLeases, liveSlots, acquireSlot } from "../lib/slots.mjs";
 import { createRun, loadRun, runTotals, runAdmissionProblems, recordRunJob, finishRun, resolveRunLimits, describeLoweredLimits, detectUsageLimit } from "../lib/runs.mjs";
 import { agentDispatchFields, resolveAgentModel, agentProviderId, describeAgent, hostToolsImplementProblem } from "../lib/agents.mjs";
-import { resolveSubscriptionWorker } from "../lib/subscription-config.mjs";
 import { workerPrompt, describeRecoveryChanges, reportRecoveryPrompt } from "../lib/worker-prompt.mjs";
 import { REPORT_FIELD_NAMES, parseWorkerReport } from "../lib/report.mjs";
 import { OUTCOMES, COORDINATOR_STATUS_BY_OUTCOME } from "../lib/outcomes.mjs";
@@ -39,6 +40,7 @@ import { compactJobRecord, formatResult, formatUnion, testChangeBanner, regressi
 import { isTestPath, detectScopedTestSelectionRisk, detectUnwiredNewDefinitions, detectMislabeledTestNames, extractAddedLinesBlob, detectPossibleSecrets } from "../lib/diff-checks.mjs";
 
 export { run, mapLimit };
+export { readsMeasurable, measureReads };
 export { parseNameStatusZ, isRuntimeJunk, coordinatorCommitMessage, createCoordinatorCommit, makeIdleDiffTick };
 
 export { workerPrompt, describeRecoveryChanges, reportRecoveryPrompt } from "../lib/worker-prompt.mjs";
@@ -62,22 +64,7 @@ const ctx = createServerContext();
 const { projectDir, stateRoot, jobsRoot, runsRoot, leasesRoot, slotsRoot } = ctx;
 const { run, git, gitRaw } = createProcess(ctx);
 const { collectGitRecord, createCoordinatorCommit, makeIdleDiffTick } = createGitRecord({ run, git, gitRaw });
-// NOMARMY_MAX_WORKERS, when set, is the operator's own declared ceiling.
-// Left unset, the natural default is however many inference slots
-// llama-server actually reports right now (contextInfo.slots, refreshed
-// alongside the context budget on every admission check) -- not a value
-// frozen from the environment at server startup. assessAdmission already
-// refuses independently once running jobs reach the real slot count
-// (`slots && runningJobs >= slots`), so a lower, stale default here only
-// ever added a second, needlessly tighter ceiling on top of that real one:
-// restarting llama-server with more slots (e.g. -np 4) had no effect on
-// concurrency until the whole coordinator process was also restarted.
-export function currentMaxWorkers() {
-  const declared = process.env.NOMARMY_MAX_WORKERS;
-  if (declared !== undefined) return clampInt(declared, 1, 8, 1);
-  const slots = contextInfo?.slots;
-  return Number.isFinite(slots) && slots > 0 ? Math.min(slots, 8) : 1;
-}
+export function currentMaxWorkers() { return budgetState.currentMaxWorkers(); }
 
 // Importing this module (the contract tests do) must not touch the filesystem
 // or open a transport. Job state is created lazily; stdio only runs in main.
@@ -87,10 +74,6 @@ function ensureJobsRoot() {
   return jobsRoot;
 }
 
-function clampInt(value, min, max, fallback) {
-  const n = Number.parseInt(value ?? "", 10);
-  return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback;
-}
 // A real, confirmed incident (worker-20260922-045250-c6d147): the worker ran
 // an unscoped `pytest -q`, which OpenClaw could not finish inline and handed
 // back as a backgrounded process ("Command still running (session ...,
@@ -229,21 +212,8 @@ export const maxEvidenceChars = Math.max(Number.parseInt(process.env.NOMARMY_MAX
 // running llama-server's own /props) and can only be lower. It is refreshed
 // when the server starts and again whenever a job is admitted, so a profile
 // change or a restarted llama-server is picked up without restarting Claude.
-let budgets = deriveBudgets({});
-let contextInfo = { contextPerNom: budgets.contextPerNom, slots: null, source: budgets.source };
-let hardwareSnapshot = null;
-export function currentBudgets() { return budgets; }
-async function refreshBudgets() {
-  try {
-    contextInfo = await resolveContextPerNom({ env: process.env });
-    budgets = deriveBudgets({ contextPerNom: contextInfo.contextPerNom, source: contextInfo.source, env: process.env });
-  } catch { /* keep the previous budgets; a failed probe is not a reason to refuse work */ }
-  try {
-    const { detectHardware } = await import("../lib/hardware.mjs");
-    hardwareSnapshot = await detectHardware();
-  } catch { hardwareSnapshot = null; }
-  return budgets;
-}
+const budgetState = createBudgetState();
+export function currentBudgets() { return budgetState.currentBudgets(); }
 // A confirmed real confusion, not just an imprecise name: this is a single
 // module-level snapshot, computed once, identical in EVERY manifest
 // regardless of job -- it is the server's own global default, never what a
@@ -286,6 +256,7 @@ export function resolveReasoningApplied({ result, profile, reasoning, workerMode
 
 const agentConfig = createAgentConfig({ projectDir });
 const { agentsConfig, dispatchConfig, subscriptionConfig, currentArmy, ensureCatalogRefresh, modelCatalog, modelCatalogReady } = agentConfig;
+const { budgetsForPool, budgetsForJob, recordedBudgets, budgetsForSubscriptionWorker } = createJobBudgets({ budgetState, dispatchConfig, subscriptionConfig, modelCatalog });
 const { resolvePoolSelection, resolveSubscriptionSelection, withPoolEntrySlot, assertNoProviderConflict } = createSelection({ dispatchConfig, subscriptionConfig, profileConfig });
 export { resolvePoolSelection, resolveSubscriptionSelection };
 
@@ -334,100 +305,6 @@ export function expandJobs(jobs, { getArmy = currentArmy, getAgents = () => agen
   return { jobs: expanded, problems };
 }
 
-/**
- * The budgets a pool-routed job should be checked/prompted against, instead
- * of the single local-derived global `budgets` every job used before this
- * existed -- a hosted model's real context window is usually nothing like a
- * local llama-server's, and budgeting a Grok/Anthropic/OpenAI job against
- * the local machine's ~64K was an accidental, needless cap, not a deliberate
- * one. Falls back to the outer `budgets`/`contextInfo` when the pool can't
- * be resolved (unknown pool, no available entries, or an all-llama-cpp pool
- * with no local context known yet) -- pickProvider itself raises the real,
- * specific dispatch-time error in those cases; this is not the place to
- * duplicate it, only to avoid ever computing budgets from `null`.
- */
-function budgetsForPool(poolName, model = null, reportSize = null) {
-  const loaded = dispatchConfig();
-  if (!loaded?.found) return budgets;
-  const configured = Object.prototype.hasOwnProperty.call(loaded.config.pools, poolName) ? loaded.config.pools[poolName] : null;
-  if (!configured) return budgets;
-  const pool = model ? configured.map((entry) => ({ ...entry, model })) : configured;
-  const resolved = poolContextPerNom(pool, process.env, { catalog: modelCatalog(), localContextPerNom: contextInfo.contextPerNom });
-  if (!resolved) return budgets;
-  const tier = pool.some((entry) => entry.provider === "llama-cpp") ? "local" : "frontier";
-  return deriveBudgets({ contextPerNom: resolved.contextPerNom, source: resolved.source, env: process.env, tier, reportSize: reportSize ?? "standard" });
-}
-
-/**
- * A transcript can only measure reads when the agent's tools ran through
- * OpenClaw. A CLI-backed agent (claude-cli runs Claude Code's own tools
- * inside Claude Code) leaves OpenClaw's transcript with no tool events even
- * though its result reports the calls -- a real Senti scout reported 51
- * Bash calls while the transcript held none, and was flagged "read ~0
- * tokens, negative displacement". That's "can't measure", not "read
- * nothing", so the transcript is marked unavailable and no displacement
- * verdict is drawn.
- */
-export function readsMeasurable(transcript, worker) {
-  const reported = worker?.toolSummary?.calls ?? 0;
-  if (transcript?.available && transcript.toolCalls.length === 0 && reported > 0) {
-    return { ...transcript, available: false, reason: `the agent ran ${reported} tool call(s) outside OpenClaw's transcript (its own CLI's tools), so reads can't be measured` };
-  }
-  return transcript;
-}
-
-/**
- * What the worker read: OpenClaw's transcript, or -- for a claude-cli
- * worker, whose tools OpenClaw never sees -- Claude Code's own session
- * transcript for the job's working directory (lib/claude-transcript.mjs).
- * Falls back to readsMeasurable's honest "can't measure" when neither has it.
- */
-export async function measureReads(stateDir, worker, { cwd, sinceMs = 0 } = {}) {
-  const openclaw = readsMeasurable(await readOpenClawTranscript(stateDir), worker);
-  if (openclaw.available || worker?.provider !== "claude-cli" || !cwd) return openclaw;
-  const claude = readClaudeSessionTranscript(cwd, { sinceMs });
-  return claude.available ? claude : openclaw;
-}
-
-/** The budget an (already expanded) job is admitted and briefed against: its own agent's, or the local one. */
-function budgetsForJob(j) {
-  if (j.pool) return budgetsForPool(j.pool, j.model, j.report);
-  if (j.subscription_worker) return budgetsForSubscriptionWorker(j.subscription_worker, j.model, j.report);
-  return budgets;
-}
-
-/**
- * What a job record says about its budget: the one its prompt was really
- * built with (runOpenClaw's budgetsUsed), or the server-wide local one when
- * the worker never produced a result. `briefChars` sits next to the brief
- * ceiling so records show how close real briefs come to it.
- */
-function recordedBudgets(result, section, task) {
-  const used = result?.budgetsUsed ?? budgets;
-  return {
-    contextPerNom: used.contextPerNom, source: used.source, tier: used.tier ?? "local", reportSize: used.reportSize ?? "standard",
-    brief: used.brief, briefChars: String(task ?? "").length,
-    ...(section === "implement" ? {} : { [section]: used[section] }),
-    report: used.report[section],
-  };
-}
-
-// The subscription-worker sibling of budgetsForPool -- simpler, since a
-// named worker is a single known entry, not a pool of many to take the
-// minimum across. Falls back to the outer `budgets` the same way
-// budgetsForPool does on anything unresolved (missing config, unknown name,
-// no context known yet); resolveSubscriptionSelection is where the real,
-// specific "unknown subscription_worker" error belongs, not here.
-function budgetsForSubscriptionWorker(name, model = null, reportSize = null) {
-  const loaded = subscriptionConfig();
-  if (!loaded?.found) return budgets;
-  let entry;
-  try { entry = resolveSubscriptionWorker(loaded, name); } catch { return budgets; }
-  if (model) entry = { ...entry, model };
-  const resolved = entryContextPerNom(entry, { catalog: modelCatalog(), localContextPerNom: contextInfo.contextPerNom });
-  if (!resolved) return budgets;
-  return deriveBudgets({ contextPerNom: resolved.contextPerNom, source: resolved.source, env: process.env, tier: "frontier", reportSize: reportSize ?? "standard" });
-}
 let cachedAmbientOpenClawConfigPath;
 function ambientOpenClawConfigPath() {
   if (cachedAmbientOpenClawConfigPath === undefined) {
@@ -585,10 +462,10 @@ async function runOpenClaw({ task, acceptance, verification, mode, cwd, baseRef,
   // across every entry in the pool. Falls back to the outer, local-derived
   // `budgets` for a `profile`-routed job (selected.entry is undefined) or a
   // llama-cpp pool entry with no local context resolved.
-  const entryContext = selected.entry ? entryContextPerNom(selected.entry, { catalog: modelCatalog(), localContextPerNom: contextInfo.contextPerNom }) : null;
+  const entryContext = selected.entry ? entryContextPerNom(selected.entry, { catalog: modelCatalog(), localContextPerNom: budgetState.contextInfo.contextPerNom }) : null;
   const jobBudgets = entryContext
     ? deriveBudgets({ ...entryContext, env: process.env, tier: selected.entry.provider === "llama-cpp" ? "local" : "frontier", reportSize: reportSize ?? "standard" })
-    : budgets;
+    : budgetState.budgets;
   const agentHome = path.join(runtimeDir, "home");
   const npmCache = path.join(runtimeDir, "npm-cache");
   fs.mkdirSync(agentHome, { recursive: true }); fs.mkdirSync(npmCache, { recursive: true });
@@ -1310,7 +1187,7 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
         const recoveryResult = await runOpenClaw({
           task, acceptance, verification, mode, cwd, baseRef: base.ref, baseSha: base.sha,
           timeoutSeconds: timeBudget.reportReserveSeconds, runtimeDir, profile, reasoning, pool, subscriptionWorker, onBehalfOf, model, reportSize, jobDir, workerId: workerId || jobId,
-          overridePrompt: reportRecoveryPrompt({ report: budgets.report.implement, changes }), logSuffix: "-recovery",
+          overridePrompt: reportRecoveryPrompt({ report: budgetState.budgets.report.implement, changes }), logSuffix: "-recovery",
         });
         const recoveryText = finalText(recoveryResult);
         const recoveryValidation = parseWorkerReport(recoveryText);
@@ -1624,7 +1501,7 @@ async function executeScout({ task, acceptance, base, jobId, jobDir, runtimeDir,
     // limits here cut a frontier scout's 24 findings to 12 and, having
     // dropped some, also knocked a correctly formatted report into lenient
     // mode -- both reported from a real Senti run.
-    const used = result?.budgetsUsed ?? budgets;
+    const used = result?.budgetsUsed ?? budgetState.budgets;
     let report = parseScoutReport(reportText, used.scout);
 
     // See shouldAttemptScoutRecovery's own doc comment: this only fires when
@@ -1784,7 +1661,7 @@ async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtime
     const finishedAt = new Date().toISOString(), reportText = workerFailed ? "" : finalText(result);
 
     progress("verification");
-    const used = result?.budgetsUsed ?? budgets; // see executeScout: the job's own budget, not the local one
+    const used = result?.budgetsUsed ?? budgetState.budgets; // see executeScout: the job's own budget, not the local one
     const report = parseDecomposeReport(reportText, used.decompose);
     const record = await collectGitRecord({ cwd: worktree, baseSha: base.sha, branch: null, baseRef: base.ref, jobId });
     const dirty = record.repoStatusFiles.length > 0;
@@ -2084,21 +1961,21 @@ function notifyJobFinished(entry, result, error) {
 }
 function toolText(text, isError = false) { return { content: [{ type: "text", text }], isError }; }
 function capacitySnapshot() {
-  const admission = assessAdmission({ hardware: hardwareSnapshot, runningJobs: runningCount("local"), slots: contextInfo.slots, maxWorkers: currentMaxWorkers() });
+  const admission = assessAdmission({ hardware: budgetState.hardwareSnapshot, runningJobs: runningCount("local"), slots: budgetState.contextInfo.slots, maxWorkers: currentMaxWorkers() });
   return {
     // The local model's budget. An api or subscription job's scales with
     // its own model; local_worker_start reports that job's.
-    budgets: { ...budgets, describe: describeBudgets(budgets) },
-    context: contextInfo,
+    budgets: { ...budgetState.budgets, describe: describeBudgets(budgetState.budgets) },
+    context: budgetState.contextInfo,
     admission,
-    memory: hardwareSnapshot?.memory ?? null,
+    memory: budgetState.hardwareSnapshot?.memory ?? null,
     running: [...activeJobs.values()].filter(j => !j.settled).map(j => ({ jobId: j.jobId, workerId: j.workerId, mode: j.mode, lane: j.lane, startedAt: j.startedAt, phase: readJson(path.join(jobsRoot, j.jobId, "status.json"))?.phase ?? "starting" })),
     maxWorkers: currentMaxWorkers(),
     remote: { running: runningCount("remote"), maxWorkers: currentMaxPoolWorkers(), note: "api and subscription agents; each agent's own max_concurrent also applies" }
   };
 }
 async function admit(jobs) {
-  await refreshBudgets();
+  await budgetState.refresh();
   if (jobs.some((j) => jobLane(j) === "remote")) await modelCatalogReady();
   const problems = [];
   // A pool-routed job is checked against that pool's OWN (model-dependent)
@@ -2183,8 +2060,8 @@ async function admit(jobs) {
   // own, additive ceiling (currentMaxPoolWorkers).
   const anyLocal = jobs.some((j) => jobLane(j) === "local");
   const admission = anyLocal
-    ? assessAdmission({ hardware: hardwareSnapshot, runningJobs: runningCount("local"), slots: contextInfo.slots, maxWorkers: currentMaxWorkers() })
-    : assessAdmission({ hardware: hardwareSnapshot, runningJobs: 0, slots: null, maxWorkers: Infinity });
+    ? assessAdmission({ hardware: budgetState.hardwareSnapshot, runningJobs: runningCount("local"), slots: budgetState.contextInfo.slots, maxWorkers: currentMaxWorkers() })
+    : assessAdmission({ hardware: budgetState.hardwareSnapshot, runningJobs: 0, slots: null, maxWorkers: Infinity });
   if (!admission.admit) problems.push(...admission.reasons.map(r => `not admitted (${admission.level}): ${r}`));
   if (jobs.some((j) => jobLane(j) === "remote")) {
     const remoteCeiling = currentMaxPoolWorkers(), runningRemote = runningCount("remote");
@@ -2441,7 +2318,7 @@ server.tool("local_worker_status", `Status of one job started by this server: ph
   return toolText(JSON.stringify({ ...summary, jobDir, hint: entry?.result || files.meta ? "call again with full=true for the complete report" : null }, null, 2), summary.state === "orphaned" || summary.state === "failed");
 });
 server.tool("local_worker_capacity", "What this host can take right now: context per nom and the brief/report budgets derived from it, memory pressure and whether another job would be admitted, and the jobs currently running. Read-only.", {}, async () => {
-  await refreshBudgets();
+  await budgetState.refresh();
   return toolText(JSON.stringify(capacitySnapshot(), null, 2));
 });
 // The only way to know what `verification`/`union_verification`/
@@ -2842,7 +2719,7 @@ if (isMain) {
   // Warm the budget from the profile or the running llama-server. Not awaited:
   // admission refreshes it anyway, and a slow hardware probe must not delay
   // the MCP handshake.
-  refreshBudgets().catch(() => {});
+  budgetState.refresh().catch(() => {});
   // Start the model-catalog refresh now, so it's ready by the first
   // `army` call or remote job rather than kicked off by it.
   try { ensureCatalogRefresh(); } catch { /* best-effort */ }
