@@ -7,8 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { SCOUT_OUTCOMES, SCOUT_STATUS_BY_OUTCOME, scoutPrompt, parseScoutReport, verifyCitations, resolveScoutOutcome, renderScoutReport, isScoutReportUnusable, scoutReportRecoveryPrompt } from "../lib/scout.mjs";
-import { DECOMPOSE_OUTCOMES, DECOMPOSE_STATUS_BY_OUTCOME, decomposePrompt, parseDecomposeReport, buildDecomposeFindings, resolveDecomposeOutcome, checkDecompositionOverlap, renderDecomposeReport } from "../lib/decompose.mjs";
+import { scoutPrompt, parseScoutReport, verifyCitations, resolveScoutOutcome, renderScoutReport, isScoutReportUnusable, scoutReportRecoveryPrompt } from "../lib/scout.mjs";
+import { decomposePrompt, parseDecomposeReport, buildDecomposeFindings, resolveDecomposeOutcome, checkDecompositionOverlap, renderDecomposeReport } from "../lib/decompose.mjs";
 import { deriveBudgets, checkBrief, resolveContextPerNom, assessAdmission, describeBudgets, deriveTimeBudget, FRONTIER } from "../lib/budget.mjs";
 import { readOpenClawTranscript, readOpenClawTranscriptTail, estimateDisplacement } from "../lib/transcript.mjs";
 import { modelRejection, modelRejectionLine } from "../lib/openclaw-errors.mjs";
@@ -31,9 +31,13 @@ import { resolveSubscriptionWorker, findProviderConflicts, describeProviderConfl
 import { queryModelCatalog, queryModelCatalogAsync } from "../lib/model-catalog.mjs";
 import { workerPrompt, describeRecoveryChanges, reportRecoveryPrompt } from "../lib/worker-prompt.mjs";
 import { REPORT_FIELD_NAMES, parseWorkerReport } from "../lib/report.mjs";
+import { OUTCOMES, COORDINATOR_STATUS_BY_OUTCOME } from "../lib/outcomes.mjs";
+import { compactJobRecord, formatResult, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner } from "../lib/job-format.mjs";
 
 export { workerPrompt, describeRecoveryChanges, reportRecoveryPrompt } from "../lib/worker-prompt.mjs";
 export { REPORT_FIELD_NAMES, parseWorkerReport } from "../lib/report.mjs";
+export { OUTCOMES, COORDINATOR_STATUS_BY_OUTCOME };
+export { formatResult, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner };
 
 // Read from package.json rather than a second hardcoded literal -- the two
 // drifted apart for real (this constant still said "1.3.0", an internal
@@ -1813,17 +1817,6 @@ async function runIndependentVerification(context) {
 // failed. Recovery exists so that a mangled REPORT cannot destroy correct WORK.
 // It does not exist to launder a failure into a success.
 // ---------------------------------------------------------------------------
-export const OUTCOMES = Object.freeze({
-  WORKER_DONE: "WORKER_DONE",
-  WORKER_PARTIAL: "WORKER_PARTIAL",
-  WORKER_BLOCKED: "WORKER_BLOCKED",
-  WORKER_REPORT_INVALID: "WORKER_REPORT_INVALID",
-  WORKER_TIMEOUT: "WORKER_TIMEOUT",
-  WORKER_FAILED: "WORKER_FAILED",
-  RECOVERED_SUCCESS: "RECOVERED_SUCCESS",
-  NEEDS_REVIEW: "NEEDS_REVIEW",
-  ...SCOUT_OUTCOMES
-});
 export function resolveOutcome({ report, repositoryChanged = false, independentVerification = null, regressionCheck = null, workerFailed = false, workerTimedOut = false, mode = "implement" }) {
   const verification = independentVerification?.status ?? "not_run";
   const parsed = report ?? parseWorkerReport("");
@@ -2187,19 +2180,6 @@ function worktreePointerState(worktree) {
   const dotGit = path.join(worktree, ".git"); if (!fs.existsSync(dotGit)) return { applicable: true, exists: false, kind: "missing" };
   const stat = fs.lstatSync(dotGit); return { applicable: true, exists: true, kind: stat.isFile() ? "file" : stat.isDirectory() ? "directory" : "other" };
 }
-export const COORDINATOR_STATUS_BY_OUTCOME = Object.freeze({
-  [OUTCOMES.WORKER_DONE]: "complete",
-  [OUTCOMES.RECOVERED_SUCCESS]: "complete",
-  [OUTCOMES.WORKER_BLOCKED]: "blocked",
-  [OUTCOMES.NEEDS_REVIEW]: "needs_review",
-  [OUTCOMES.WORKER_PARTIAL]: "incomplete",
-  [OUTCOMES.WORKER_REPORT_INVALID]: "incomplete",
-  [OUTCOMES.WORKER_TIMEOUT]: "incomplete",
-  [OUTCOMES.WORKER_FAILED]: "failed",
-  ...SCOUT_STATUS_BY_OUTCOME,
-  ...DECOMPOSE_STATUS_BY_OUTCOME
-});
-
 // ---------------------------------------------------------------------------
 // Job status for polling. `status.json` is written at every phase transition
 // so a poller sees where a job is, not a fabricated percentage. The phases are
@@ -2901,118 +2881,6 @@ async function executeDecompose({ task, acceptance, base, jobId, jobDir, runtime
   }
 }
 
-// A degraded orchestrator grades a peer, not a subordinate. Say so on every
-// record it produces, so the weakened guarantee cannot be missed in review.
-const DEGRADED_BANNER = "!!! DEGRADED ACCEPTANCE: coordinator and worker are the same capability class.\n!!! This record is not an independent check. See policies/reviewer.md.\n\n";
-const RECOVERED_BANNER = "!!! RECOVERED RESULT: the worker's report was invalid or truncated. This job was\n!!! accepted on nomArmy's own independent verification, NOT on a worker claim.\n!!! Weaker evidence than a clean report - review the diff before integrating.\n\n";
-const REVIEW_BANNER = "!!! NEEDS REVIEW: no accepted outcome. Worktree retained. See outcome and issues.\n\n";
-const TAINTED_BANNER = "!!! SCOUT TAINTED: the scout modified its read-only snapshot. Findings below were still\n!!! verified against the base commit through Git, but treat the scout's judgement with suspicion.\n\n";
-const DECOMPOSE_TAINTED_BANNER = "!!! DECOMPOSE TAINTED: the decomposer modified its read-only snapshot. Subtasks below were still\n!!! verified against the base commit through Git, but treat the decomposer's judgement with suspicion.\n\n";
-export function testChangeBanner(testChanges) {
-  if (!testChanges?.reviewRequired) return "";
-  return `!!! TEST CHANGES REQUIRE REVIEW:\n${testChanges.reviewFlags.map(f => `!!!   ${f}`).join("\n")}\n!!! nomArmy does not reject test changes. It refuses to let them pass unseen.\n\n`;
-}
-export function regressionCheckBanner(regressionCheck) {
-  if (regressionCheck?.status !== "fail" && regressionCheck?.status !== "restore_failed") return "";
-  if (regressionCheck.status === "restore_failed") {
-    return `!!! REGRESSION CHECK COULD NOT RESTORE THE WORKTREE: ${regressionCheck.reason}\n!!! Commit blocked unconditionally. Inspect this worktree by hand before doing anything else with it.\n\n`;
-  }
-  return `!!! REGRESSION CHECK FAILED: reverting the production change and re-running verification\n!!! still PASSED. No test in this run would catch the change being undone -- the fix\n!!! is unproven, not necessarily wrong.\n\n`;
-}
-export function decomposeOverlapBanner(overlaps) {
-  if (!overlaps?.length) return "";
-  return `!!! SUBTASK FILE OVERLAP: ${overlaps.map(o => `subtask ${o.a + 1} and ${o.b + 1} both claim ${o.files.join(", ")}`).join("; ")}\n!!! These subtasks are not safe to dispatch as independent jobs as proposed. Reconcile before dispatching.\n\n`;
-}
-// The scout record deliberately omits the findings: they are already in the
-// rendered report above it, and repeating the excerpts would spend the very
-// frontier context a scout exists to save.
-// Kept small on purpose: every field here lands in the coordinator's context.
-// Budgets, execution details and the full metrics stay in metadata.json.
-function compactScoutRecord(m) {
-  const met = m.metrics ?? {};
-  return { jobId: m.jobId, workerId: m.workerId, mode: m.mode, outcome: m.outcome, coordinatorStatus: m.coordinatorStatus, reviewRequired: m.reviewRequired,
-    baseSha: m.baseSha ? String(m.baseSha).slice(0, 10) : null,
-    findings: { supported: m.scout?.supported ?? null, weak: m.scout?.weak ?? null, unsupported: m.scout?.unsupported ?? null },
-    report: m.scout?.reportParse ? { parseMode: m.scout.reportParse.parseMode, truncated: m.scout.reportParse.truncated, dropped: m.scout.reportParse.droppedFindings } : null,
-    scoutRead: m.transcript?.filesRead ?? null,
-    displacement: m.displacement ? { read: m.displacement.frontier_read_tokens_est, delivered: m.displacement.delivered_tokens_est, displaced: m.displacement.displaced_tokens_est, verdict: m.displacement.verdict } : null,
-    elapsedSeconds: Number.isFinite(met.total_elapsed) ? Math.round(met.total_elapsed / 1000) : null,
-    modelCalls: met.scout_model_calls ?? null, workerModel: met.worker_model ?? null,
-    issues: m.issues ?? [], dirty: m.dirty ?? null, worktreeRetained: m.worktreeRetained ?? null, error: m.error ?? null };
-}
-// Same convention as compactScoutRecord: small, only what a listing needs.
-// Full subtask detail (citations, excerpts) stays in the rendered report and
-// metadata.json; repeating it here would spend the context this record
-// exists to save.
-function compactDecomposeRecord(m) {
-  const met = m.metrics ?? {};
-  return { jobId: m.jobId, workerId: m.workerId, mode: m.mode, outcome: m.outcome, coordinatorStatus: m.coordinatorStatus, reviewRequired: m.reviewRequired,
-    baseSha: m.baseSha ? String(m.baseSha).slice(0, 10) : null,
-    subtasks: { proposed: m.decompose?.subtasks?.length ?? null, supported: m.decompose?.supported ?? null, weak: m.decompose?.weak ?? null, unsupported: m.decompose?.unsupported ?? null },
-    overlaps: m.decompose?.overlaps?.length ?? 0, notSplittable: m.decompose?.notSplittable ?? null,
-    report: m.decompose?.reportParse ? { parseMode: m.decompose.reportParse.parseMode, truncated: m.decompose.reportParse.truncated, dropped: m.decompose.reportParse.droppedSubtasks } : null,
-    decomposerRead: m.transcript?.filesRead ?? null,
-    displacement: m.displacement ? { read: m.displacement.frontier_read_tokens_est, delivered: m.displacement.delivered_tokens_est, displaced: m.displacement.displaced_tokens_est, verdict: m.displacement.verdict } : null,
-    elapsedSeconds: Number.isFinite(met.total_elapsed) ? Math.round(met.total_elapsed / 1000) : null,
-    modelCalls: met.decompose_model_calls ?? null, workerModel: met.worker_model ?? null,
-    issues: m.issues ?? [], dirty: m.dirty ?? null, worktreeRetained: m.worktreeRetained ?? null, error: m.error ?? null };
-}
-// Same convention as compactScoutRecord/compactDecomposeRecord: small, only
-// what deciding "what to clean up / what needs recovery" actually needs.
-// A real incident this fixes: with no compaction at all, an implement
-// job's FULL manifest (objective text, budgets, timeBudget, every git
-// record, gitBeforeCoordinatorCommit, ...) meant a `limit: 12` listing
-// blew the tool-result size cap outright -- exactly the one call an
-// operator reaches for first when cleaning up a job backlog.
-function compactImplementRecord(m) {
-  const met = m.metrics ?? {};
-  return { jobId: m.jobId, workerId: m.workerId, mode: m.mode, outcome: m.outcome, coordinatorStatus: m.coordinatorStatus, reviewRequired: m.reviewRequired,
-    branch: m.branch ?? null, commit: m.commit?.sha ?? null, worktree: m.worktree ?? null, worktreeRetained: m.worktreeRetained ?? null,
-    filesChanged: met.files_changed ?? null,
-    elapsedSeconds: Number.isFinite(met.total_elapsed) ? Math.round(met.total_elapsed / 1000) : null,
-    workerModel: met.worker_model ?? null,
-    startedAt: m.startedAt ?? null, finishedAt: m.finishedAt ?? null,
-    issues: m.issues ?? [], error: m.error ?? null };
-}
-function compactJobRecord(meta) {
-  return meta.mode === "scout" ? compactScoutRecord(meta) : meta.mode === "decompose" ? compactDecomposeRecord(meta) : compactImplementRecord(meta);
-}
-
-// Evidence before claim, in the display order too: the record is what
-// nomArmy verified against Git, the worker's report is prose it wrote about
-// itself. Leading with the report buried the record below whatever the
-// worker said, including a truncated or garbled reply -- exactly backwards
-// for a tool whose whole premise is not trusting that reply.
-export function formatResult(r) {
-  const banner = orchestratorTrust === "degraded" ? DEGRADED_BANNER : "";
-  const outcomeLine = r.manifest?.outcome ? `OUTCOME: ${r.manifest.outcome}\n\n` : "";
-  const workerReport = `--- WORKER REPORT (a claim, not evidence) ---\n${r.report}`;
-  if (r.manifest?.mode === "scout") {
-    const tainted = r.manifest?.outcome === OUTCOMES.SCOUT_TAINTED ? TAINTED_BANNER : "";
-    return `${banner}${tainted}${outcomeLine}--- SCOUT RECORD ---\n${JSON.stringify(compactScoutRecord(r.manifest), null, 2)}\n\nJob artifacts: ${r.jobDir}${r.manifest.worktree ? `\nWorktree retained for review: ${r.manifest.worktree}` : ""}\n\n${workerReport}`;
-  }
-  if (r.manifest?.mode === "decompose") {
-    const tainted = r.manifest?.outcome === DECOMPOSE_OUTCOMES.DECOMPOSE_TAINTED ? DECOMPOSE_TAINTED_BANNER : "";
-    const overlap = decomposeOverlapBanner(r.manifest?.decompose?.overlaps);
-    return `${banner}${tainted}${overlap}${outcomeLine}--- DECOMPOSE RECORD ---\n${JSON.stringify(compactDecomposeRecord(r.manifest), null, 2)}\n\nJob artifacts: ${r.jobDir}${r.manifest.worktree ? `\nWorktree retained for review: ${r.manifest.worktree}` : ""}\n\n${workerReport}`;
-  }
-  const recovered = r.manifest?.outcome === OUTCOMES.RECOVERED_SUCCESS ? RECOVERED_BANNER : "";
-  const review = r.manifest?.outcome === OUTCOMES.NEEDS_REVIEW ? REVIEW_BANNER : "";
-  const tests = testChangeBanner(r.manifest?.testChanges);
-  const regression = regressionCheckBanner(r.manifest?.regressionCheck);
-  return `${banner}${recovered}${review}${tests}${regression}${outcomeLine}--- VERIFIED EXECUTION RECORD ---\n${JSON.stringify(r.manifest, null, 2)}\n\nJob artifacts: ${r.jobDir}${r.manifest.worktree ? `\nWorktree retained for review: ${r.manifest.worktree}\nBranch retained for review: ${r.manifest.branch}` : ""}\n\n${workerReport}`;
-}
-const UNION_BANNER = "!!! UNION: mechanically merged into one new integration branch for review. This is NOT the developer's branch and was not auto-merged into it. Review and integrate explicitly, same as any other branch here.\n\n";
-const UNION_VERIFICATION_FAILED_BANNER = "!!! UNION VERIFICATION FAILED: the merged branch did not pass its own verification profile. Merge is retained for review; inspect before integrating.\n\n";
-const NO_UNION_BANNER = "!!! NO UNION FORMED: see union.reason below. Per-job branches above are unaffected and still yours to review individually.\n\n";
-// Same visual convention as formatResult: a banner naming what happened,
-// then a labeled JSON block, then an artifacts trailer -- no new vocabulary.
-export function formatUnion(union) {
-  const banner = union.status === "union_verification_failed" ? UNION_VERIFICATION_FAILED_BANNER
-    : union.status === "no_union" ? NO_UNION_BANNER : UNION_BANNER;
-  const artifacts = union.worktree ? `\n\nUnion artifacts: ${path.dirname(union.worktree)}\nWorktree retained for review: ${union.worktree}\nBranch retained for review: ${union.branch}` : "";
-  return `${banner}--- UNION RECORD ---\n${JSON.stringify(union, null, 2)}${artifacts}`;
-}
 // Staggers concurrent job starts by `slot * staggerMs` before each runner
 // begins pulling work. Verified root cause: two OpenClaw sandbox containers
 // created in the same instant reliably hit a podman/crun race ("crun: mount
