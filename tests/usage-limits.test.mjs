@@ -136,3 +136,24 @@ test("settled jobs record provider usage; write failures preserve both success a
   assert.deepEqual(fs.readdirSync(path.join(root, "leases")), []);
   assert.deepEqual(fs.readdirSync(root).filter(name => name.endsWith(".tmp")), []);
 });
+
+test("mergeUsageSnapshot: an idle window's stale, lower reading never replaces a newer one", async () => {
+  const { mergeUsageSnapshot } = await import("../lib/usage-limits.mjs");
+  const now = Date.parse("2026-09-25T06:00:00Z"), week = now + 86400000, fiveHour = now + 3600000;
+  const w = (name, usedPercent, resetsAt) => ({ name, usedPercent, windowMinutes: null, resetsAt });
+  const s = (windows, observedAt = now) => ({ source: "claude", plan: null, limitReached: false, observedAt, windows });
+  const fresh = s([w("5h", 55, fiveHour), w("week", 93, week)]);
+  // Seen live: an idle window reporting 45%/92%, and another only 81% of the week.
+  assert.equal(mergeUsageSnapshot(fresh, s([w("5h", 45, fiveHour), w("week", 92, week)]), now), fresh);
+  assert.equal(mergeUsageSnapshot(fresh, s([w("week", 81, week)]), now), fresh);
+  // A higher figure at the same reset, or a later reset, is taken.
+  const up = mergeUsageSnapshot(fresh, s([w("week", 94, week)]), now + 1000);
+  assert.deepEqual(up.windows.map((x) => [x.name, x.usedPercent]), [["5h", 55], ["week", 94]]);
+  assert.equal(up.observedAt, now + 1000);
+  const reset = mergeUsageSnapshot(fresh, s([w("5h", 3, fiveHour + 18000000)]), now);
+  assert.deepEqual(reset.windows.find((x) => x.name === "5h").usedPercent, 3);
+  // A stored window that has reset is dropped even if the reading lacks it.
+  const later = mergeUsageSnapshot(fresh, s([w("week", 93, week)]), fiveHour + 1);
+  assert.deepEqual(later.windows.map((x) => x.name), ["week"]);
+  assert.equal(mergeUsageSnapshot(null, fresh, now), fresh);
+});

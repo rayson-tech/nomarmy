@@ -185,6 +185,9 @@ test("statusLineText: records changed Claude rate limits only, without risking t
   assert.equal(fs.readFileSync(path.join(root, "usage-limits.json"), "utf8"), first, "an unchanged redraw does not write");
   statusLineText({ session: { ...session, rate_limits: { seven_day: { used_percentage: 86, resets_at: reset } } }, stateRoot: root, now: now + 120000 });
   assert.equal(readUsageSnapshots(root)["claude-cli"].windows[0].usedPercent, 86);
+  // Another, idle window redrawing with an older, lower figure doesn't pull it back.
+  statusLineText({ session: { ...session, rate_limits: { seven_day: { used_percentage: 81, resets_at: reset } } }, stateRoot: root, now: now + 180000 });
+  assert.equal(readUsageSnapshots(root)["claude-cli"].windows[0].usedPercent, 86);
 
   const badRoot = path.join(root, "not-a-directory");
   fs.writeFileSync(badRoot, "occupied");
