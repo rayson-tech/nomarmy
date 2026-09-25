@@ -13,6 +13,9 @@ test("executionMode: local by default; a non-loopback llama host is remote; host
   assert.equal(remote.managesModelServer, false, "nomArmy neither starts nor sizes someone else's server");
   assert.equal(remote.llamaUrl, "http://dgx.internal:9000");
   assert.equal(executionMode({ NOMARMY_LLAMA_HOST: "localhost" }).mode, "local");
+  // An SSH tunnel to a GPU server is loopback but not nomArmy's to run.
+  const tunnel = executionMode({ NOMARMY_EXECUTION: "remote", NOMARMY_LLAMA_HOST: "127.0.0.1", NOMARMY_LLAMA_PORT: "18080" });
+  assert.deepEqual([tunnel.mode, tunnel.hasLocalModel, tunnel.managesModelServer, tunnel.llamaUrl], ["remote", true, false, "http://127.0.0.1:18080"]);
   assert.equal(executionMode({ NOMARMY_LLAMA_HOST: "fd00::5" }).llamaUrl, "http://[fd00::5]:8080");
   for (const mode of ["hosted", "bedrock"]) {
     const m = executionMode({ NOMARMY_EXECUTION: mode, NOMARMY_LLAMA_HOST: "dgx.internal" });

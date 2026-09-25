@@ -19,6 +19,7 @@
    ./install.sh --profile macbook-pro   # or nvidia-linux, cpu-linux, dgx-spark, bedrock
    ./e2e.sh --profile macbook-pro       # should end with: === E2E PASS ===
    ```
+   No local model? See [hosted workers only](#hosted-workers-only) or [a shared model server](#a-shared-model-server).
 3. **Set up your repo:** in the project, run `nomarmy init`. It proposes a `.nomarmy.yml` with your test command.
 4. **Use it:** restart Claude Code in that project and ask it to use nomArmy for one small bug that has a test. When that works, try `/feature <what you want built>`.
 5. **Optional:** add hosted workers with `nomarmy agents add`, give roles to them with `nomarmy army init`, or connect Codex or Cursor with `nomarmy connect codex cursor`.
@@ -53,13 +54,15 @@ Around that core: **agents** say where a job can run, the **army** says which ro
 | Linux, with or without an NVIDIA GPU | [Linux](#linux) |
 | Windows | [Windows](#windows) |
 | NVIDIA DGX Spark | [DGX Spark](#dgx-spark) |
-| No GPU, or no local inference | [Cloud (Bedrock)](#cloud-bedrock) |
+| No local model: API keys and subscriptions only | [Hosted workers only](#hosted-workers-only) |
+| A shared GPU server (or a tunnel to one) | [A shared model server](#a-shared-model-server) |
+| No GPU, with Bedrock | [Cloud (Bedrock)](#cloud-bedrock) |
 
 Every platform needs Git and Podman. `nomarmy doctor` checks the host and prints a fix for anything missing.
 
 `install.sh` builds llama.cpp for local inference, installs and configures [OpenClaw](https://github.com/openclaw/openclaw) (the host-side broker every model call goes through), builds the sandbox image, and registers the MCP server if Claude Code is installed. `nomarmy connect` (run by `install.sh`, or by hand for Codex and Cursor) also installs the `/feature` command, Claude Code's status line and, on macOS, nomArmy's notifier. The coordinator gets nomArmy's instructions from the MCP server itself, so there's nothing to copy into your projects.
 
-**From npm:** `npm install -g nomarmy@alpha` gives you the `nomarmy` command; `nomarmy setup` then picks a profile and model and prints the `install.sh` command to run. Installing from a clone, as in the TL;DR, is the most tested path.
+**From npm:** `npm install -g nomarmy@alpha` gives you the `nomarmy` command; `nomarmy setup` then picks a profile and model and prints the `install.sh` command to run (`nomarmy setup --hosted` or `--llama-url <server>` without a local model). Installing from a clone, as in the TL;DR, is the most tested path.
 
 ### macOS (Apple Silicon)
 
@@ -103,7 +106,7 @@ CPU-only Linux works but is slow for interactive use: see [Sizing](#sizing).
 
 1. **WSL2** (the supported path): install a Linux distro under WSL2, install Podman inside it, and follow the [Linux](#linux) guide entirely inside the distro. Watch WSL2's default cap of about half your RAM (`.wslconfig`), and set `git config --global core.longpaths true` (`nomarmy doctor` checks this).
 2. **Native llama.cpp on Windows**, built from source: more RAM, more setup. Prebuilt binaries aren't a safe shortcut; some CPUs crash every backend at startup.
-3. **No local inference**: `./install.sh --profile bedrock` (see [Cloud (Bedrock)](#cloud-bedrock)), or hosted agents only.
+3. **No local inference**: [hosted workers only](#hosted-workers-only), or [Bedrock](#cloud-bedrock).
 
 `nomarmy sizing` reports what your hardware can support.
 
@@ -118,6 +121,34 @@ chmod +x install.sh e2e.sh scripts/*.sh
 ```
 
 Moving from a Mac install? Don't copy a Mac binary or model cache over: clone fresh and let `install.sh` build llama.cpp for CUDA on that machine.
+
+### Hosted workers only
+
+No GPU and no local model: every job runs on an API key or a subscription (ChatGPT, Muse Code) you add as an agent. Git worktrees, the sandbox and verification still run on your machine, so you still need Git, Node and Podman.
+
+```bash
+git clone https://github.com/rayson-tech/nomarmy.git && cd nomarmy
+npm install && npm link              # or: npm install -g nomarmy@alpha
+nomarmy setup --hosted               # records that this install has no local model
+./install.sh --profile hosted        # OpenClaw, the sandbox, and the Claude Code registration; no llama.cpp
+nomarmy agents add                   # an API key or a subscription login
+nomarmy army init --agent <name>     # every role on that agent (add --model <model> to pick one)
+nomarmy doctor
+```
+
+A hosted install refuses a job that names no role or agent, rather than falling back to a local model that isn't there. `nomarmy health` warns about any role still on `local`. `e2e.sh` tests the local model, so it has nothing to do here; `nomarmy army assign` tests each role's route instead.
+
+### A shared model server
+
+A team GPU box (a DGX, a workstation) runs one llama-server; everyone else points nomArmy at it. That works through an SSH tunnel too (`ssh -L 8080:localhost:8080 gpu-box`, then `http://127.0.0.1:8080`).
+
+```bash
+nomarmy setup --llama-url http://gpu-box:8080   # checks /health, records the address
+./install.sh --profile remote                   # no llama.cpp build; OpenClaw points at that server
+./e2e.sh --profile remote
+```
+
+nomArmy doesn't start, stop or size that server: whoever runs it sets its model, context and slots, and `install.sh` reads the model name and context from the server. Your machine still runs the sandbox and verification for your jobs. Several people sharing one server share its slots, so keep `NOMARMY_MAX_WORKERS` low (the profile sets 1). Run the server itself with any local profile's `install.sh` on the GPU machine, with `NOMARMY_LLAMA_HOST=0.0.0.0` so others can reach it, on a network you trust: llama-server has no authentication.
 
 ### Cloud (Bedrock)
 
@@ -470,7 +501,7 @@ What we've learned from real runs, including where delegating pays and where it 
 - **Deploy-time failures need your own check.** See [Add a check for what unit tests can't see](#nomarmyyml).
 - **Node dependencies install only from npm lockfiles**, one per package (no workspaces, yarn, pnpm or bun yet), and only from the public registry: the image build has no credentials for a private one.
 - **Verification needing services** (a database, a mock server) reports `not_run` instead of running without them. The compose parser doesn't resolve YAML anchors.
-- **Same-host only**: the MCP server and OpenClaw run on the machine with the coordinator. There's no remote-worker mode yet.
+- **Same-host sandboxes**: the MCP server, OpenClaw and every job's sandbox run on the machine with the coordinator. Only the model can be elsewhere (an agent, or [a shared model server](#a-shared-model-server)).
 
 ## Troubleshooting
 

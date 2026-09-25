@@ -20,8 +20,9 @@ import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
 import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv } from "../lib/connect.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
-import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
+import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
 import { loadArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
+import { parseLlamaUrl } from "../lib/execution.mjs";
 import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
 import { recordProbeSuccess } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
@@ -93,6 +94,8 @@ Usage: nomarmy <command> [options]
                   write config/profiles/<name>.env (+ config/common.env).
                   Prints the install.sh command; never runs it.
                   --tier <more|nominal>   with --json, skip the prompt
+                  --hosted               skip hardware/model questions
+                  --llama-url <url>       use a llama-server on another machine
   model           Change the configured model later, without the rest of
                   setup's questions. Offers to also resync the MCP
                   registration's worker-routing env vars, and to restart
@@ -168,7 +171,9 @@ Usage: nomarmy <command> [options]
                             UI/UX, data architect, security analyst, PM,
                             PO, stakeholder, all on \`local\`) to --global
                             (default), --project or --local; --force
-                            replaces an existing one
+                            replaces an existing one; --agent <name>
+                            starts every role there, optionally with
+                            --model <model|auto>
                   assign <role> <agent|none> [model|auto]
                             give a role an agent, and optionally the model
                             to run on it ("auto" lets the General pick per
@@ -516,6 +521,55 @@ async function chooseModel(rl) {
  * command itself does.
  */
 async function cmdSetup() {
+  const hosted = flag("hosted");
+  const hasLlamaUrl = flag("llama-url");
+  if (hosted && hasLlamaUrl) throw new Error("--hosted and --llama-url cannot be used together.");
+
+  if (hosted || hasLlamaUrl) {
+    const commonPath = path.join(nomarmyRoot, "config", "common.env");
+
+    if (hosted) {
+      const next = [
+        `${path.join(nomarmyRoot, "install.sh")} --profile hosted`,
+        "nomarmy agents add",
+        "nomarmy army init --agent <name>",
+      ];
+      fs.mkdirSync(path.dirname(commonPath), { recursive: true });
+      writeEnvLine(commonPath, "NOMARMY_EXECUTION", "hosted");
+      if (json) return out({ written: commonPath, execution: "hosted", next });
+      console.log(c.green(`✓ Wrote NOMARMY_EXECUTION=hosted to ${path.relative(nomarmyRoot, commonPath)}.`));
+      console.log(c.dim("\nNext:"));
+      for (const step of next) console.log(`  ${c.bold(step)}`);
+      return;
+    }
+
+    const llamaInput = value("llama-url");
+    if (!llamaInput) throw new Error("--llama-url requires an http:// URL, for example http://server:8080.");
+    const { host: llamaHost, port: llamaPort } = parseLlamaUrl(llamaInput);
+    const urlHost = llamaHost.includes(":") ? `[${llamaHost}]` : llamaHost;
+    const healthUrl = `http://${urlHost}:${llamaPort}/health`;
+    let reachable = false;
+    try {
+      await fetch(healthUrl, { signal: AbortSignal.timeout(5000) });
+      reachable = true;
+    } catch {
+      // A server may simply be offline during setup; retain its validated address.
+    }
+    fs.mkdirSync(path.dirname(commonPath), { recursive: true });
+    writeEnvLine(commonPath, "NOMARMY_EXECUTION", "remote");
+    writeEnvLine(commonPath, "NOMARMY_LLAMA_HOST", llamaHost);
+    writeEnvLine(commonPath, "NOMARMY_LLAMA_PORT", llamaPort);
+    const next = `${path.join(nomarmyRoot, "install.sh")} --profile remote`;
+    if (json) return out({ written: commonPath, execution: "remote", llamaHost, llamaPort, reachable, next });
+    console.log(reachable
+      ? c.green(`✓ llama-server is reachable at ${healthUrl}.`)
+      : c.yellow(`⚠ llama-server is not reachable at ${healthUrl} right now; configuration was still written.`));
+    console.log(c.green(`✓ Wrote the remote llama-server settings to ${path.relative(nomarmyRoot, commonPath)}.`));
+    console.log(c.dim("\nNext:"));
+    console.log(`  ${c.bold(next)}`);
+    return;
+  }
+
   const execution = value("execution", process.env.NOMARMY_EXECUTION || "local");
   const isCloud = execution !== "local";
   const hardware = isCloud ? null : await detectHardware();
@@ -1962,16 +2016,45 @@ async function cmdArmyShow() {
 async function cmdArmyInit() {
   const layer = armyLayerFlag("global");
   const filePath = armyLayerPath(layer, { projectDir: repoDir });
+  const agentName = value("agent");
+  let selectedAgent = null;
+  let roleModel = null;
+  if (flag("agent") && !agentName) throw new Error("--agent requires a name from agents.yml.");
+  if (agentName) {
+    const agents = loadAgentsOrExit().agents;
+    if (!Object.prototype.hasOwnProperty.call(agents, agentName)) {
+      throw new Error(`Unknown agent "${agentName}". Pick one of: ${Object.keys(agents).join(", ")}`);
+    }
+    selectedAgent = agents[agentName];
+    if (flag("model") && !value("model")) throw new Error("--model requires a model name or auto.");
+    roleModel = value("model") ?? (selectedAgent.model ? null : "auto");
+  }
   const existing = readArmyFile(filePath, { armyOnly: layer !== "project" });
   if (existing?.roles && Object.keys(existing.roles).length && !flag("force")) {
     throw new Error(`${filePath} already defines an army (${Object.keys(existing.roles).join(", ")}). Re-run with --force to replace it.`);
   }
   // Keep a General already defined in this layer; the roster is what init resets.
-  updateArmyInFile(filePath, (army) => ({ ...structuredClone(DEFAULT_ARMY), ...(army.general ? { general: army.general } : {}) }));
+  const roster = structuredClone(DEFAULT_ARMY);
+  if (agentName) {
+    for (const role of Object.values(roster.roles)) {
+      role.agent = agentName;
+      if (roleModel) role.model = roleModel;
+    }
+  }
+  updateArmyInFile(filePath, (army) => ({ ...roster, ...(army.general ? { general: army.general } : {}) }));
   if (layer === "local") ensureLocalLayerIgnored();
   if (json) return out({ written: filePath, layer, roles: Object.keys(DEFAULT_ARMY.roles) });
   console.log(c.green(`✓ Wrote the default army to ${filePath} (${layer}).`));
-  console.log(c.dim("Every role starts on the local model. Next: `nomarmy army general <agent>` (the agent your coordinator session runs on), then `nomarmy army assign <role> <agent>` for any role you want elsewhere."));
+  if (!agentName) {
+    console.log(c.dim("Every role starts on the local model. Next: `nomarmy army general <agent>` (the agent your coordinator session runs on), then `nomarmy army assign <role> <agent>` for any role you want elsewhere."));
+    return;
+  }
+  console.log(c.dim(roleModel === "auto"
+    ? `Every role starts on ${agentName} with model auto; the coordinator picks a model per job.`
+    : `Every role starts on ${agentName}${roleModel ? ` with model ${roleModel}` : ` using its default model ${selectedAgent.model}`}.`));
+  if (agentRunsToolsOnHost(selectedAgent)) {
+    console.log(c.yellow(`⚠ ${agentName} runs its tools on the host. Build roles on it will be refused unless allow_host_tools is set in agents.yml.`));
+  }
 }
 
 async function cmdArmyAssign() {
@@ -2208,9 +2291,10 @@ async function cmdJobs() {
 // 6 hours) and record them, which also refreshes the status line's warning.
 // This install's settings from config/common.env (the execution mode and the
 // model server's address, as `nomarmy connect` gives the MCP server), under
-// anything set in the environment.
+// anything set (non-empty) in the environment.
 function installEnv() {
-  return { ...deriveWorkerModelEnv(nomarmyRoot), ...process.env };
+  const set = Object.fromEntries(Object.entries(process.env).filter(([, v]) => v !== ""));
+  return { ...deriveWorkerModelEnv(nomarmyRoot), ...set };
 }
 
 async function cmdHealth() {

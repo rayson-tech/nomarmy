@@ -5,7 +5,8 @@ import "./helpers/isolate-global-config.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import http from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -185,6 +186,114 @@ function runAgentsCLI(root, args, extraEnv = {}) {
     return { exitCode: error.status ?? 1, stdout: error.stdout ?? "", stderr: error.stderr ?? "" };
   }
 }
+
+function prepareSetupRoot() {
+  // Real path: on macOS the temp folder is a symlink (/var -> /private/var),
+  // and the CLI reports its own resolved location.
+  const root = fs.realpathSync(scratchNomarmyRoot());
+  fs.mkdirSync(path.join(root, "config"), { recursive: true });
+  fs.writeFileSync(path.join(root, "config", "common.env"), "NOMARMY_EXISTING=kept\n");
+  return root;
+}
+
+function runSetupCLI(root, args) {
+  try {
+    const result = execFileSync(process.execPath, [path.join(root, "bin", "nomarmy.mjs"), "setup", ...args], {
+      cwd: root, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, NOMARMY_CONFIG_DIR: path.join(root, "config") },
+    });
+    return { exitCode: 0, stdout: result, stderr: "" };
+  } catch (error) {
+    return { exitCode: error.status ?? 1, stdout: error.stdout ?? "", stderr: error.stderr ?? "" };
+  }
+}
+
+function runSetupCLIAsync(root, args) {
+  return new Promise((resolve) => {
+    execFile(process.execPath, [path.join(root, "bin", "nomarmy.mjs"), "setup", ...args], {
+      cwd: root, encoding: "utf8", env: { ...process.env, NOMARMY_CONFIG_DIR: path.join(root, "config") },
+    }, (error, stdout, stderr) => resolve({ exitCode: error?.code ?? 0, stdout, stderr }));
+  });
+}
+
+test("setup --hosted --json writes only hosted execution and returns the three next steps", () => {
+  const root = prepareSetupRoot();
+  try {
+    const result = runSetupCLI(root, ["--hosted", "--json"]);
+    assert.equal(result.exitCode, 0, result.stdout);
+    const output = JSON.parse(result.stdout);
+    assert.deepEqual(Object.keys(output).sort(), ["execution", "next", "written"]);
+    assert.equal(output.written, path.join(root, "config", "common.env"));
+    assert.equal(output.execution, "hosted");
+    assert.deepEqual(output.next, [
+      `${path.join(root, "install.sh")} --profile hosted`,
+      "nomarmy agents add",
+      "nomarmy army init --agent <name>",
+    ]);
+    assert.equal(fs.readFileSync(output.written, "utf8"), "NOMARMY_EXISTING=kept\nNOMARMY_EXECUTION=hosted\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("setup --llama-url --json writes remote llama settings and treats an offline server as a warning", async () => {
+  const root = prepareSetupRoot();
+  const temporary = http.createServer();
+  await new Promise((resolve) => temporary.listen(0, "127.0.0.1", resolve));
+  const port = temporary.address().port;
+  await new Promise((resolve) => temporary.close(resolve));
+  try {
+    const result = runSetupCLI(root, ["--llama-url", `http://127.0.0.1:${port}`, "--json"]);
+    assert.equal(result.exitCode, 0, result.stdout);
+    const output = JSON.parse(result.stdout);
+    assert.deepEqual(Object.keys(output).sort(), ["execution", "llamaHost", "llamaPort", "next", "reachable", "written"]);
+    assert.deepEqual(output, {
+      written: path.join(root, "config", "common.env"), execution: "remote", llamaHost: "127.0.0.1", llamaPort: String(port), reachable: false,
+      next: `${path.join(root, "install.sh")} --profile remote`,
+    });
+    assert.equal(fs.readFileSync(output.written, "utf8"), `NOMARMY_EXISTING=kept\nNOMARMY_EXECUTION=remote\nNOMARMY_LLAMA_HOST=127.0.0.1\nNOMARMY_LLAMA_PORT=${port}\n`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("setup --llama-url reports a reachable /health endpoint", async () => {
+  const root = prepareSetupRoot();
+  let requestedPath = null;
+  const server = http.createServer((request, response) => {
+    requestedPath = request.url;
+    response.writeHead(200).end("ok");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const port = server.address().port;
+    const result = await runSetupCLIAsync(root, ["--llama-url", `http://127.0.0.1:${port}`, "--json"]);
+    assert.equal(result.exitCode, 0, result.stdout);
+    const output = JSON.parse(result.stdout);
+    assert.equal(output.reachable, true);
+    assert.equal(requestedPath, "/health");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("setup rejects a bad llama URL and conflicting hosted flags without changing common.env", () => {
+  const root = prepareSetupRoot();
+  try {
+    const commonPath = path.join(root, "config", "common.env");
+    const before = fs.readFileSync(commonPath, "utf8");
+    const bad = runSetupCLI(root, ["--llama-url", "not-a-url", "--json"]);
+    assert.equal(bad.exitCode, 1);
+    assert.match(JSON.parse(bad.stdout).error, /isn't a URL|use an http:\/\/ URL/);
+    assert.equal(fs.readFileSync(commonPath, "utf8"), before);
+    const conflict = runSetupCLI(root, ["--hosted", "--llama-url", "http://127.0.0.1:8080", "--json"]);
+    assert.equal(conflict.exitCode, 1);
+    assert.match(JSON.parse(conflict.stdout).error, /cannot be used together/);
+    assert.equal(fs.readFileSync(commonPath, "utf8"), before);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 // `nomarmy agents add --register` shells out to a real `openclaw`
 // binary. To verify EXACTLY what it's invoked with (argv and stdin) without
@@ -412,6 +521,61 @@ test("army init/assign/general/show --json: global roster, a project override, a
     assert.match(summary.roles["ui-ux"].overlapsGeneral, /shares the General's claude-cli login/);
     assert.match(fs.readFileSync(path.join(repo, ".gitignore"), "utf8"), /^\.nomarmy\.local\.yml$/m);
     assert.match(fs.readFileSync(path.join(repo, ".nomarmy.yml"), "utf8"), /ui-ux:\n\s+agent: grok/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("army init --agent puts every role on a defined agent, uses auto without a default, accepts an explicit model, and refuses unknown agents", () => {
+  const root = scratchNomarmyRoot();
+  const repo = mkdtempSync(path.join(tmpdir(), "nomarmy-army-agent-init-"));
+  try {
+    runAgentsCLI(root, ["add", "--json", "--name", "codex", "--kind", "subscription", "--provider", "openai", "--owner", "you@example.com"]);
+    const initialized = runArmyCLI(root, repo, ["init", "--agent", "codex", "--json"]);
+    assert.equal(initialized.exitCode, 0, initialized.stdout);
+    const initOutput = JSON.parse(initialized.stdout);
+    assert.deepEqual(Object.keys(initOutput).sort(), ["layer", "roles", "written"]);
+    let roles = JSON.parse(runArmyCLI(root, repo, ["show", "--json"]).stdout).roles;
+    assert.deepEqual(Object.keys(roles).sort(), ["data-architect", "jr-dev", "pm", "po", "security-analyst", "sr-dev", "stakeholder", "ui-ux"]);
+    for (const role of Object.values(roles)) {
+      assert.equal(role.agent, "codex");
+      assert.equal(role.model, "auto");
+      assert.equal(role.modelIsAuto, true);
+    }
+
+    const explicit = runArmyCLI(root, repo, ["init", "--agent", "codex", "--model", "gpt-6-astra", "--force", "--json"]);
+    assert.equal(explicit.exitCode, 0, explicit.stdout);
+    roles = JSON.parse(runArmyCLI(root, repo, ["show", "--json"]).stdout).roles;
+    for (const role of Object.values(roles)) {
+      assert.equal(role.agent, "codex");
+      assert.equal(role.model, "gpt-6-astra");
+      assert.equal(role.modelIsAuto, false);
+    }
+
+    const unknownRepo = mkdtempSync(path.join(tmpdir(), "nomarmy-army-agent-unknown-"));
+    try {
+      const unknown = runArmyCLI(root, unknownRepo, ["init", "--agent", "ghost", "--project", "--json"]);
+      assert.equal(unknown.exitCode, 1);
+      assert.match(JSON.parse(unknown.stdout).error, /Unknown agent "ghost"\. Pick one of: local, codex/);
+      assert.equal(fs.existsSync(path.join(unknownRepo, ".nomarmy.yml")), false);
+    } finally {
+      rmSync(unknownRepo, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("army init --agent warns when the selected agent runs tools on the host", () => {
+  const root = scratchNomarmyRoot();
+  const repo = mkdtempSync(path.join(tmpdir(), "nomarmy-army-agent-warning-"));
+  try {
+    runAgentsCLI(root, ["add", "--json", "--name", "claude", "--kind", "subscription", "--provider", "claude-cli", "--model", "claude-sonnet-5", "--owner", "you@example.com"]);
+    const result = runArmyCLI(root, repo, ["init", "--agent", "claude"]);
+    assert.equal(result.exitCode, 0, result.stdout);
+    assert.match(result.stdout, /runs its tools on the host\. Build roles on it will be refused unless allow_host_tools is set/);
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(repo, { recursive: true, force: true });
