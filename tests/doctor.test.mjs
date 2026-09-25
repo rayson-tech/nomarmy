@@ -18,6 +18,8 @@ import {
   checkPodmanPresent,
   checkPodmanDaemon,
   checkEndpoint,
+  collectEndpointFacts,
+  probeRemoteEndpoint,
   evaluateChecks,
   runDoctor,
 } from "../lib/doctor.mjs";
@@ -178,6 +180,50 @@ test("checkEndpoint (local) fails with a concrete fix when unreachable", () => {
   assert.match(result.fix, /start-inference\.sh/);
 });
 
+test("checkEndpoint (hosted) passes because there is no local model by design", () => {
+  assert.deepEqual(checkEndpoint({ execution: "hosted", endpoint: { mode: "hosted" } }), {
+    ok: true,
+    message: "No local model by design; jobs run on API and subscription agents (run 'nomarmy agents list' to see them).",
+  });
+});
+
+test("remote endpoint probes its configured health URL and reports it as remote", async () => {
+  const calls = [];
+  const endpoint = await probeRemoteEndpoint("http://gpu.example:9090", async (url, opts) => {
+    calls.push({ url, hasSignal: opts.signal instanceof AbortSignal });
+    return { ok: true, status: 200 };
+  });
+  assert.deepEqual(calls, [{ url: "http://gpu.example:9090/health", hasSignal: true }]);
+  assert.deepEqual(endpoint, { mode: "remote", url: "http://gpu.example:9090/health", healthy: true, error: null });
+  assert.deepEqual(checkEndpoint({ execution: "remote", endpoint }), {
+    ok: true,
+    message: "Remote model server is healthy at http://gpu.example:9090/health.",
+  });
+});
+
+test("endpoint fact collection derives remote mode and URL from injected env", async () => {
+  const calls = [];
+  const facts = await collectEndpointFacts({ NOMARMY_EXECUTION: "local", NOMARMY_LLAMA_HOST: "gpu.internal", NOMARMY_LLAMA_PORT: "8181" }, async (url) => {
+    calls.push(url);
+    return { ok: true, status: 200 };
+  });
+  assert.deepEqual(calls, ["http://gpu.internal:8181/health"]);
+  assert.deepEqual(facts, {
+    execution: "remote",
+    endpoint: { mode: "remote", url: "http://gpu.internal:8181/health", healthy: true, error: null },
+  });
+});
+
+test("remote endpoint failure names the remote server without a local startup instruction", () => {
+  const result = checkEndpoint({ execution: "remote", endpoint: { mode: "remote", url: "http://gpu.example:9090/health", healthy: false, error: "connect ECONNREFUSED" } });
+  assert.deepEqual(result, {
+    ok: false,
+    message: "Remote model server health check failed at http://gpu.example:9090/health: connect ECONNREFUSED",
+    fix: "Check that the remote server is running and reachable from this machine, then re-run 'nomarmy doctor'.",
+  });
+  assert.doesNotMatch(result.fix, /start-inference|start llama-server/i);
+});
+
 test("checkEndpoint (bedrock) fails when region is unset", () => {
   const result = checkEndpoint({
     execution: "bedrock",
@@ -222,7 +268,7 @@ test("checkEndpoint (bedrock) ok with a valid region and credentials", () => {
 test("checkEndpoint rejects an unrecognized NOMARMY_EXECUTION value", () => {
   const result = checkEndpoint({ execution: "carrier-pigeon", endpoint: {} });
   assert.equal(result.ok, false);
-  assert.match(result.fix, /local' or 'bedrock'/);
+  assert.equal(result.fix, "Set NOMARMY_EXECUTION to 'local', 'hosted', or 'bedrock' (see config/common.env).");
 });
 
 test("checkEndpoint never references NOMARMY_MODEL_ENDPOINT (defect #5 - it does not exist)", () => {

@@ -49,6 +49,30 @@ test("armyIssues and leftoverIssues: unusable roles and piled-up storage", () =>
   assert.deepEqual(leftoverIssues({ retainedWorktrees: 3, jobsBytes: 100e6, staleRunning: 0 }), []);
 });
 
+test("armyIssues warns only in hosted mode when roles use the built-in local agent", () => {
+  const summary = { general: { problem: null }, roles: { pm: { agent: "local", problem: null }, reviewer: { agent: "codex", problem: null } } };
+  assert.deepEqual(armyIssues(summary, "local"), []);
+  assert.deepEqual(armyIssues(summary, "remote"), []);
+  assert.deepEqual(armyIssues(summary, "bedrock"), []);
+  assert.deepEqual(armyIssues(summary, "hosted"), [{
+    id: "army:hosted-local:pm",
+    severity: "warn",
+    title: "Role pm uses the local agent in hosted mode",
+    detail: "Hosted installs have no local model, so jobs for this role will be refused.",
+    fix: "nomarmy army assign pm <agent> [model] or nomarmy army init --agent <name>",
+    short: "pm uses local",
+  }]);
+});
+
+test("runHealthChecks accepts hosted mode as an injected parameter for army checks", async () => {
+  const run = async () => ({ ok: false, stdout: "" });
+  const armySummary = { general: { problem: null }, roles: { "jr-dev": { agent: "local", problem: null } } };
+  const hosted = await runHealthChecks({ mode: "hosted", run, armySummary });
+  assert.deepEqual(hosted.issues.map((issue) => issue.id), ["army:hosted-local:jr-dev"]);
+  const local = await runHealthChecks({ mode: "local", run, armySummary });
+  assert.deepEqual(local.issues, []);
+});
+
 test("runHealthChecks: gathers every check with bounded commands, errors first", async () => {
   const jobsRoot = tmp();
   fs.mkdirSync(path.join(jobsRoot, "old-job"));
