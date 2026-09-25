@@ -1304,7 +1304,7 @@ async function cmdAgentsAdd() {
     let kind = argv[2];
     if (!AGENT_KINDS.includes(kind)) {
       console.log("\n" + c.bold("What kind of agent?"));
-      console.log(`  ${c.cyan("1.")} local         ${c.dim("the local model on this machine (free, private)")}`);
+      console.log(`  ${c.cyan("1.")} local         ${c.dim("the local model on this machine (no per-token bill, private; slower)")}`);
       console.log(`  ${c.cyan("2.")} api           ${c.dim("a metered API key (xAI, OpenAI, Anthropic, DeepSeek, ...)")}`);
       console.log(`  ${c.cyan("3.")} subscription  ${c.dim("your own Claude, ChatGPT or Muse Code plan (never shared)")}`);
       kind = AGENT_KINDS[Number((await rl.question(c.bold("Choice: "))).trim()) - 1];
