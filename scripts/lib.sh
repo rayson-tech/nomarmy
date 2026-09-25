@@ -24,9 +24,31 @@ nomarmy_available_profiles(){
   find "$root/config/profiles" -name '*.env' -exec basename {} .env \; | sort | tr '\n' ' '
 }
 
-# True when the active profile runs inference on a hosted endpoint rather than
-# a local llama-server. Scripts branch on this instead of on the profile name.
-nomarmy_is_cloud(){ [[ "${NOMARMY_EXECUTION:-local}" != "local" ]]; }
+# Where this install's models run (lib/execution.mjs is the same logic for the
+# MCP server). Scripts branch on these instead of on the profile name.
+#   local    a llama-server on this machine, started and sized by nomArmy
+#   remote   a llama-server on another machine (NOMARMY_EXECUTION=local with a
+#            non-loopback NOMARMY_LLAMA_HOST), e.g. a team's GPU server
+#   hosted   no local model: every job runs on an api or subscription agent
+#   bedrock  the Bedrock cloud profiles
+nomarmy_is_loopback_host(){
+  local h
+  h="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  [[ -z "$h" || "$h" == localhost || "$h" == ::1 || "$h" == "[::1]" || "$h" == 0.0.0.0 || "$h" == 127.* ]]
+}
+nomarmy_execution_mode(){
+  case "${NOMARMY_EXECUTION:-local}" in
+    hosted) echo hosted ;;
+    bedrock) echo bedrock ;;
+    *) if nomarmy_is_loopback_host "${NOMARMY_LLAMA_HOST:-127.0.0.1}"; then echo local; else echo remote; fi ;;
+  esac
+}
+# True on the Bedrock profiles: a Bedrock credential, the AWS CLI and a region.
+nomarmy_is_cloud(){ [[ "$(nomarmy_execution_mode)" == bedrock ]]; }
+# True when jobs can run on the `local` agent (a llama-server here or remote).
+nomarmy_has_local_model(){ local m; m="$(nomarmy_execution_mode)"; [[ "$m" == local || "$m" == remote ]]; }
+# True when nomArmy builds, starts, stops and sizes llama-server on this machine.
+nomarmy_manages_model_server(){ [[ "$(nomarmy_execution_mode)" == local ]]; }
 
 nomarmy_validate_cloud(){
   local missing=()
@@ -120,10 +142,17 @@ load_profile(){
   export NOMARMY_PROFILE="$profile"
   export NOMARMY_INSTALL_ROOT="${NOMARMY_INSTALL_ROOT/\$HOME/$HOME}"
 
+  if [[ "$profile" == remote ]] && nomarmy_manages_model_server; then
+    echo "ERROR: profile 'remote' needs the model server's address. Run: nomarmy setup --llama-url http://<host>:8080" >&2
+    exit 2
+  fi
   if nomarmy_is_cloud; then
     # Cloud profiles host no local model, so they carry no hardware or OS
     # requirement and are the only profiles usable on a machine without a GPU.
     nomarmy_validate_cloud
+  elif ! nomarmy_manages_model_server; then
+    # hosted and remote run no model here either, so any machine will do.
+    :
   else
     if [[ "$os" == Darwin && "$profile" != macbook-pro ]]; then
       echo "ERROR: profile '$profile' requires Linux. Use macbook-pro on macOS." >&2

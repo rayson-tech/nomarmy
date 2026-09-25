@@ -24,6 +24,11 @@ if nomarmy_is_cloud; then
       echo "FAIL Bedrock model not listed in $NOMARMY_BEDROCK_REGION: $model"; fail=1
     fi
   done
+elif [[ "$(nomarmy_execution_mode)" == hosted ]]; then
+  echo "INFO hosted profile '$NOMARMY_PROFILE': no local model; jobs run on api or subscription agents"
+elif [[ "$(nomarmy_execution_mode)" == remote ]]; then
+  echo "INFO profile '$NOMARMY_PROFILE' uses the model server at $NOMARMY_LLAMA_HOST:$NOMARMY_LLAMA_PORT"
+  check curl -fsS --max-time 5 "http://$NOMARMY_LLAMA_HOST:$NOMARMY_LLAMA_PORT/health"
 else
   check "$NOMARMY_INSTALL_ROOT/llama-server" --version
   if [[ "$(uname -s)" == Darwin ]]; then
@@ -36,9 +41,13 @@ else
   check curl -fsS "http://$NOMARMY_LLAMA_HOST:$NOMARMY_LLAMA_PORT/health"
 fi
 
-openclaw models list --provider "$NOMARMY_WORKER_PROVIDER" | grep -q "$NOMARMY_WORKER_MODEL" \
-  && echo "PASS OpenClaw worker model ($NOMARMY_WORKER_PROVIDER/$NOMARMY_WORKER_MODEL)" \
-  || { echo "FAIL OpenClaw worker model ($NOMARMY_WORKER_PROVIDER/$NOMARMY_WORKER_MODEL)"; fail=1; }
+if [[ "$(nomarmy_execution_mode)" == hosted ]]; then
+  echo "INFO no worker model to check; nomarmy doctor checks each agent"
+else
+  openclaw models list --provider "$NOMARMY_WORKER_PROVIDER" | grep -q "$NOMARMY_WORKER_MODEL" \
+    && echo "PASS OpenClaw worker model ($NOMARMY_WORKER_PROVIDER/$NOMARMY_WORKER_MODEL)" \
+    || { echo "FAIL OpenClaw worker model ($NOMARMY_WORKER_PROVIDER/$NOMARMY_WORKER_MODEL)"; fail=1; }
+fi
 # The sandbox config keeps its "docker" sub-key namespace regardless of
 # backend, so grepping the whole block for "docker" would falsely pass even
 # when the backend is podman. Check the actual backend value instead.
@@ -46,12 +55,13 @@ SANDBOX_BACKEND="$(openclaw config get agents.defaults.sandbox.backend 2>/dev/nu
 [[ "$SANDBOX_BACKEND" == "podman" ]] && echo 'PASS Podman sandbox configured' || { echo "FAIL Podman sandbox (backend is '$SANDBOX_BACKEND')"; fail=1; }
 
 # The no-network sandbox is what keeps repository content away from any
-# credential the host process holds. It is a hard requirement on cloud profiles.
+# credential the host process holds. It is a hard requirement on cloud and
+# hosted profiles, where every job runs against a real credential.
 SANDBOX_NET="$(openclaw config get agents.defaults.sandbox.docker.network 2>/dev/null | tr -d '[:space:]"' || true)"
 if [[ "$SANDBOX_NET" == "none" ]]; then
   echo 'PASS Sandbox network isolated'
-elif nomarmy_is_cloud; then
-  echo "FAIL Sandbox network is '$SANDBOX_NET', must be 'none' on a cloud profile"; fail=1
+elif ! nomarmy_has_local_model; then
+  echo "FAIL Sandbox network is '$SANDBOX_NET', must be 'none' on a ${NOMARMY_EXECUTION} profile"; fail=1
 else
   echo "WARN Sandbox network is '$SANDBOX_NET', expected 'none'"
 fi

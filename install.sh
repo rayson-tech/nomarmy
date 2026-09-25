@@ -15,7 +15,7 @@ case "$OS_NAME" in
     command -v curl >/dev/null 2>&1 || brew install curl
     command -v git >/dev/null 2>&1 || brew install git
     command -v node >/dev/null 2>&1 || brew install node
-    if ! nomarmy_is_cloud; then
+    if nomarmy_manages_model_server; then
       command -v xcode-select >/dev/null 2>&1 && xcode-select -p >/dev/null 2>&1 || { echo 'ERROR: Xcode Command Line Tools are required. Run: xcode-select --install'; exit 1; }
       command -v cmake >/dev/null 2>&1 || brew install cmake
     fi
@@ -24,8 +24,8 @@ case "$OS_NAME" in
     command -v podman >/dev/null 2>&1 || brew install podman
     ;;
   Linux)
-    if nomarmy_is_cloud; then
-      # No local model is built or served, so the C++ toolchain is not needed.
+    if ! nomarmy_manages_model_server; then
+      # No model is built or served here, so the C++ toolchain is not needed.
       need curl; need git; need node; need npm
     else
       if ! command -v cmake >/dev/null 2>&1 || ! command -v c++ >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then install_build_dependencies; fi
@@ -105,7 +105,7 @@ if ! command -v openclaw >/dev/null 2>&1; then
   export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 fi
 need openclaw
-if ! nomarmy_is_cloud; then openclaw plugins install @openclaw/llama-cpp-provider || true; fi
+if nomarmy_has_local_model; then openclaw plugins install @openclaw/llama-cpp-provider || true; fi
 "$ROOT/scripts/start-inference.sh" "$NOMARMY_PROFILE"
 # Sandbox before provider config: configure-openclaw.sh refuses to store a real
 # Bedrock credential unless the coder sandbox is already network-isolated.
@@ -122,4 +122,8 @@ if nomarmy_is_cloud && [[ "${NOMARMY_ORCHESTRATOR_RUNTIME:-}" == "claude-code" ]
   echo "    ./scripts/configure-orchestrator.sh $NOMARMY_PROFILE          # print the settings"
   echo "    ./scripts/configure-orchestrator.sh $NOMARMY_PROFILE --apply  # write them to Claude Code"
 fi
-echo "==> Install complete. Run: ./e2e.sh --profile $NOMARMY_PROFILE"
+if [[ "$(nomarmy_execution_mode)" == hosted ]]; then
+  echo "==> Install complete. Add an agent (nomarmy agents add), give roles to it (nomarmy army init --agent <name>), then run: nomarmy doctor"
+else
+  echo "==> Install complete. Run: ./e2e.sh --profile $NOMARMY_PROFILE"
+fi

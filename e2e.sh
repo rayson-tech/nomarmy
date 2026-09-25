@@ -24,6 +24,12 @@ load_profile "$PROFILE"
 
 echo "=== nomArmy E2E: $NOMARMY_PROFILE ==="
 
+if [[ "$(nomarmy_execution_mode)" == hosted ]]; then
+  echo "e2e.sh runs a job on the local model, and profile '$NOMARMY_PROFILE' has none."
+  echo "Check each agent with: nomarmy doctor"
+  exit 0
+fi
+
 "$ROOT/scripts/start-inference.sh" "$NOMARMY_PROFILE"
 
 if nomarmy_is_cloud; then

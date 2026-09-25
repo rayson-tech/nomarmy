@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; source "$ROOT/scripts/lib.sh"; load_profile "${1:-}"
-if nomarmy_is_cloud; then echo "Profile '$NOMARMY_PROFILE' uses hosted inference; skipping llama.cpp build."; exit 0; fi
+if ! nomarmy_manages_model_server; then
+  case "$(nomarmy_execution_mode)" in
+    remote) echo "Profile '$NOMARMY_PROFILE' uses the model server at $NOMARMY_LLAMA_HOST:$NOMARMY_LLAMA_PORT; skipping llama.cpp build." ;;
+    hosted) echo "Profile '$NOMARMY_PROFILE' runs every job on an api or subscription agent; skipping llama.cpp build." ;;
+    *) echo "Profile '$NOMARMY_PROFILE' uses hosted inference at ${NOMARMY_BEDROCK_BASE_URL:-Bedrock}; skipping llama.cpp build." ;;
+  esac
+  exit 0
+fi
 SRC="$NOMARMY_INSTALL_ROOT/llama.cpp"; mkdir -p "$NOMARMY_INSTALL_ROOT"
 if [[ ! -d "$SRC/.git" ]]; then git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$SRC"; else git -C "$SRC" pull --ff-only; fi
 if [[ "$(uname -s)" == Darwin ]]; then
