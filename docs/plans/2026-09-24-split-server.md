@@ -28,18 +28,36 @@ Line numbers are from `mcp/server.mjs` at the time of writing.
 | `lib/admission.mjs` | `admit`, lanes and slots (`jobLane`, `runningCount`, `withAgentSlot`, `splitJobsByLane`), `refusalText`, the capacity snapshot | 3340-3560 |
 | `lib/job-format.mjs` | the banners, compact records, `formatResult`, `formatUnion` | 3087-3260 |
 
+## Progress
+
+| Step | Module | PR | Result |
+|---|---|---|---|
+| 1 | `lib/report.mjs`, `lib/worker-prompt.mjs` | #4 | merged |
+| 2 | `lib/outcomes.mjs` (pulled forward), `lib/job-format.mjs` | #5 | merged |
+| 3 | `lib/diff-checks.mjs` | #6 | merged |
+
+`mcp/server.mjs`: 4,235 lines before, 3,556 after step 3. Each step was a nomArmy job (Jr Dev on Codex gpt-5.6-sol) declared `refactor: true`: nomArmy committed it only because verification passed with no test file touched, and each new module's lines were checked verbatim against the original.
+
+What the first steps taught:
+
+- **The revert check can't judge a refactor.** Reverting a pure move restores working code, so the tests pass either way. That's why declared refactors exist (#3): verification must pass and no test file may change.
+- **nomArmy's own suite has to pass inside its sandbox.** A unit test ran a real `podman build`, which worked on the host and failed in the sandbox (#2).
+- **Leaf means no shared state, not just no imports.** `OUTCOMES` had to move before the formatting code could (a cycle otherwise). `run()`, `git()` and `gitRaw()` default their working directory to the server's `projectDir`, so `lib/process.mjs` belongs with the shared-state steps below, not step 1. The revert-check functions (`gitShowBuffer` through `runRegressionCheck`) call the verification runner, so they move with verification.
+
 ## The one real design question: shared state
 
 Much of `server.mjs` reads module-level state: `projectDir`, `stateRoot`, the job tracker, the budgets cache, `contextInfo`, the verification runner. Moving functions out as-is would mean either importing that state from a shared module (a hidden global, just relocated) or threading it through every call.
 
-The plan: one small `lib/server-context.mjs` that creates and holds that state (`createServerContext({ projectDir, stateRoot })`), passed explicitly to the modules that need it. Tests already build their own state in several places, so this also makes them simpler.
+The plan: one small `lib/server-context.mjs` that creates that state (`createServerContext({ env })`), passed explicitly to the modules that need it. **Not a module-level singleton:** several tests import a fresh copy of `server.mjs` (`server.mjs?union-test=...`) with different environment settings, and a singleton in `lib/` would not reload with them. So a module that needs state exports a factory (`createGitRecord(ctx)`, `createAdmission(ctx)`, ...) and `server.mjs` wires them to its one context.
+
+The state that moves into the context: `projectDir`, `stateRoot` and the roots under it (`jobsRoot`, `runsRoot`, `leasesRoot`, `slotsRoot`), `execution`, the budget cache (`budgets`, `contextInfo`, `hardwareSnapshot`), `activeRunId`, `verificationRunner`, and the running-job tracker. Mutable values sit behind getters and setters on the context, so every module sees the current value.
 
 ## Order of work
 
 Each step is its own pull request, so each can be reviewed and reverted on its own, and the tests must pass at every step.
 
-1. The leaf modules with no shared state: `report.mjs`, `worker-prompt.mjs`, `job-format.mjs`, `diff-checks.mjs`, `process.mjs`.
-2. `server-context.mjs`, then `git-record.mjs`, `outcome.mjs` and `union.mjs`.
+1. The leaf modules with no shared state: `report.mjs`, `worker-prompt.mjs`, `outcomes.mjs`, `job-format.mjs`, `diff-checks.mjs`. **Done.**
+2. `server-context.mjs` and `process.mjs` together (the context supplies `run()`'s default working directory), then `git-record.mjs`, `outcome.mjs` and `union.mjs`.
 3. `job-budgets.mjs`, `selection.mjs`, `openclaw-run.mjs`.
 4. `execute.mjs` and `admission.mjs`, the ones that touch the most state.
 5. `server.mjs` left with the tool definitions. Point tests at the new modules and delete the re-exports kept during the move.
