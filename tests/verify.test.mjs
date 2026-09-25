@@ -178,7 +178,7 @@ test("capOutput truncates and records the number of bytes dropped", () => {
   const capped = capOutput("x".repeat(1000), 100);
   assert.equal(capped.truncated, true);
   assert.equal(capped.dropped, 900);
-  assert.match(capped.text, new RegExp(TRUNCATION_MARKER.replace(/[[\]]/g, "\\$&")));
+  assert.match(capped.text, new RegExp(TRUNCATION_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.match(capped.text, /900 of 1000 bytes dropped/);
 
   const small = capOutput("hello", 100);
