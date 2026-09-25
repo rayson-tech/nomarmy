@@ -2575,10 +2575,10 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
       independentVerification = await runIndependentVerification({ profile: verification ?? null, cwd, jobId, baseSha: base.sha, branch, mode, record: preCommit });
     }
 
-    // verify_regression: opt-in, doubles verification wall-clock cost, so it
-    // only runs when explicitly requested AND there is something to
-    // re-check -- a passing first-pass verification on a diff that actually
-    // touched production files.
+    // verify_regression: on by default whenever there's a verification
+    // profile (resolveVerifyRegression). It doubles verification wall-clock,
+    // so it runs only when there's something to re-check: a passing
+    // first-pass verification on a diff that touched production files.
     let regressionCheck = null, regressionCheckFatal = false, regressionCheckElapsedMs = null;
     if (verifyRegression && independentVerification.status === "pass" && preCommit.testChanges.production_files_changed.length > 0) {
       const regressionStartedMs = Date.now();
@@ -2713,11 +2713,12 @@ async function executeImplement({ task, acceptance, verification, base, jobId, j
     const afterHostInstalls = hostInstalls.length
       ? { ...afterMislabeledTests, reviewRequired: true, reasons: [...afterMislabeledTests.reasons, `TOOLS OUTSIDE THE SANDBOX: the worker left a real ${hostInstalls.join(", ")}, so packages were installed where the sandbox (no network) couldn't have: its tool calls ran on this machine. nomArmy removed them and verified against the sandbox's own dependencies.`] }
       : afterMislabeledTests;
-    const finalOutcome = possibleSecrets
+    const afterSecrets = possibleSecrets
       ? { ...afterHostInstalls, reviewRequired: true, commitAllowed: false,
           commitBlockedReason: `possible secret detected: ${possibleSecrets.reason}`,
           reasons: [...afterHostInstalls.reasons, `POSSIBLE SECRET DETECTED: ${possibleSecrets.reason}`] }
       : afterHostInstalls;
+    const finalOutcome = applyVerificationPolicy(afterSecrets, independentVerification.status, repoPolicy());
 
     progress("commit");
     const commit = await createCoordinatorCommit({ cwd, jobId, outcome: finalOutcome,
@@ -3489,6 +3490,9 @@ async function admit(jobs) {
       } catch (error) { problems.push(jobs.length > 1 ? `job ${i + 1}: ${error.message}` : error.message); }
     }
   });
+  // The repo's own policy: verification required, revert check required.
+  const policy = repoPolicy();
+  jobs.forEach((j, i) => { for (const p of policyAdmissionProblems(j, policy)) problems.push(`${jobs.length > 1 ? `job ${i + 1}: ` : ""}${p}`); });
   // An implement job on an agent whose own tools run on this machine (the
   // Claude CLI) isn't bounded by the sandbox, so it's refused unless that
   // agent says allow_host_tools (lib/agents.mjs). Scouts and reviews still run.
@@ -3709,6 +3713,31 @@ export function subscriptionJobFieldProblems(args) {
 // against (and this is an implement job -- scouts/decomposes ignore it
 // regardless) -- see resolveVerifyRegression for why "on by default" is the
 // right call, not just a cost/benefit compromise.
+/**
+ * The repo's own policy from the operator's checkout (.nomarmy.yml
+ * `policy:`), never a job's worktree: what every implement job must meet,
+ * whatever the General asks for per job. A reviewer's fair point: without
+ * it, a job with no verification profile still committed (flagged, not
+ * blocked), and the General could switch the revert check off.
+ */
+export function repoPolicy(loadConfigFn = () => loadConfig(projectDir)) {
+  try { return loadConfigFn()?.config?.policy ?? {}; } catch { return {}; }
+}
+/** Admission problems for one implement job under the repo's policy. */
+export function policyAdmissionProblems(job, policy) {
+  if ((job.mode ?? "implement") !== "implement") return [];
+  const problems = [];
+  if (policy.require_verification && !job.verification) problems.push("this repo requires verification (policy.require_verification in .nomarmy.yml): give the job a `verification` profile (local_worker_config lists them)");
+  if (policy.require_regression_check && job.verify_regression === false) problems.push("this repo requires the revert check (policy.require_regression_check in .nomarmy.yml): verify_regression can't be false");
+  return problems;
+}
+/** The outcome with the commit blocked when policy requires verification that didn't pass. */
+export function applyVerificationPolicy(outcome, verificationStatus, policy) {
+  if (!policy.require_verification || verificationStatus === "pass" || !outcome.commitAllowed) return outcome;
+  const why = `policy.require_verification: verification was ${verificationStatus ?? "not run"}, and this repo commits only work whose verification passed`;
+  return { ...outcome, reviewRequired: true, commitAllowed: false, commitBlockedReason: why, reasons: [...(outcome.reasons ?? []), why] };
+}
+
 export function resolveVerifyRegression(args) {
   if (typeof args.verify_regression === "boolean") return args.verify_regression;
   return args.mode === "implement" && Boolean(args.verification);

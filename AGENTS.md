@@ -1,6 +1,6 @@
 # nomArmy by Rayson Technologies: local worker instructions
 
-Use `nomarmy-local-worker` for bounded engineering work that is cheap to verify. Qwen3-Coder-Next is the default local coder; GPT-OSS 20B is a fallback/control.
+Use `nomarmy-local-worker` for bounded engineering work that is cheap to verify. GPT-OSS 20B is the default local coder; Qwen3-Coder-Next is the alternative (swap with `nomarmy model`).
 
 ## Coordinator responsibilities
 
@@ -10,7 +10,7 @@ Codex owns planning, decomposition, uncertain diagnosis, architecture, security 
 
 Give workers outcome-oriented tasks with explicit acceptance criteria. They may inspect the repository, select files, implement multi-file changes, write or update tests, and run verification. Do not prescribe exact edits unless precision requires it.
 
-Use `local_worker` for one job and `local_workers` only for independent jobs that can safely run in isolated worktrees. Start with `max_parallel: 1`; increase only after measuring reliability and throughput.
+Use `local_worker` for one job and `local_workers` only for independent jobs that can safely run in isolated worktrees. For local-model jobs, start with `max_parallel: 1` and increase only after measuring reliability and throughput. Api and subscription jobs don't need it: each agent's `max_concurrent` in agents.yml sets how many run at once.
 
 ## Trust boundary and integration
 

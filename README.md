@@ -10,7 +10,9 @@
 
 **An agent harness where a worker's claims are never trusted, and the environment your tests need is declared, disposable and reproducible.**
 
-Your coding assistant (Claude Code, Codex or Cursor) stays in charge as the **General**: it decides what gets built and whether the result is acceptable. The work goes to **noms**, workers that implement, test and repair in their own git worktree and sandbox. A nom can run on a local model at no token cost, on an API key, or on your own Claude, ChatGPT or Muse Code subscription. nomArmy owns everything in between: worktrees, git, sandboxes, verification, and the evidence that decides whether work is accepted.
+Your coding assistant (Claude Code, Codex or Cursor) stays in charge as the **General**: it decides what gets built and whether the result is acceptable. The work goes to **noms**, workers that implement, test and repair in their own git worktree and sandbox, on a local model, an API key, or your own ChatGPT or Muse Code subscription. nomArmy owns everything in between: worktrees, git, sandboxes, verification, and the evidence that decides whether work is accepted.
+
+**What you get is work you don't have to take on faith**, not cheaper work. Delegating costs the General tokens too: briefing and reviewing. On small, already-diagnosed tickets we measured 4 to 8 times more of the General's tokens than fixing the bug directly, and break-even at roughly 150 lines of context a fix needs to read ([the measurements](docs/experiments/2026-09-20-model-bakeoff-and-economics.md)). It pays off on bigger tickets, on parallel work, and anywhere you'd otherwise have to trust an agent's say-so.
 
 Developed and maintained by Rayson Technologies. This is an alpha (`0.1.0-alpha`).
 
@@ -22,7 +24,7 @@ Developed and maintained by Rayson Technologies. This is an alpha (`0.1.0-alpha`
 4. nomArmy treats that report as a claim. It reads the real diff from git, runs your verification profile itself in a fresh sandbox, reverts the production change to check the tests actually fail without it, and scans for secrets.
 5. Only then does it commit, on the worker's own branch. It never merges into yours: reviewing and integrating stay with the General, and with you.
 
-A malformed report isn't automatically a failure: if the repository changed, nomArmy verifies independently and may recover the work. Failing verification stays failed, unconditionally.
+A malformed report isn't automatically a failure: if the repository changed, nomArmy verifies independently and may recover the work. Failing verification stays failed, unconditionally. And the checks aren't the General's to waive: a repo's `.nomarmy.yml` policy (on by default for new repos) makes verification and the revert check mandatory for every job.
 
 Around that core: **agents** say where a job can run, the **army** says which role runs on which agent, and **`/feature`** runs a whole feature end to end, from plan through build, review and acceptance, handing you a branch to merge.
 
@@ -179,6 +181,8 @@ Changes apply to the next job with no restart. The exception is a **new** api ag
 
 **Your plan decides which models run.** A model can be listed and still refused: on a ChatGPT plan, the Codex route runs gpt-6-astra and the gpt-5.6 models but refuses gpt-6-sol and gpt-6-luna. `army assign` and `agents update --probe` test the exact route a job takes, so they catch this before a job does.
 
+**Vendor terms and platform risk.** Every model call goes through [OpenClaw](https://github.com/openclaw/openclaw), and subscriptions are reached through each vendor's own CLI or login. We've read the terms that apply (see above), but using a personal subscription through a harness is exactly the kind of use vendors tighten, and a change in a vendor's terms or in OpenClaw can stop a subscription agent from working. Local models and API keys don't carry that risk. Plan on subscriptions as a convenience, not the only way your roles can run.
+
 **Picking an agent.** Build work goes to a sandboxed agent: `local`, an api key, Codex or Muse. `local` for a bounded change against a written spec with a test; your code never leaves your machine. An api or subscription agent when the work needs more than the local model, knowing it sends code to that vendor. That's a decision about where your source travels, separate from the trust boundary, which is the same for every agent. The General itself when the answer isn't known yet.
 
 ## The army: who does what
@@ -269,6 +273,16 @@ verification:
 ```
 
 `nomarmy validate` checks the file against the schema; `nomarmy scan --check` diffs it against what the repo actually contains.
+
+**Policy: what no job can skip.**
+
+```yaml
+policy:
+  require_verification: true       # every implement job needs a verification profile; only passing work commits
+  require_regression_check: true   # verify_regression can't be switched off per job
+```
+
+`nomarmy init` proposes both for new repos. Without them, a job with no verification profile still commits (flagged for review, not blocked), and the General decides per job whether to run the revert check. With them, those are the repo's rules, not the General's judgment calls, and since nomArmy reads this file only from your checkout, neither the General nor a worker can relax it.
 
 **Add a check for what unit tests can't see.** A module left out of a deploy bundle passes every unit test and crashes at deploy. When `nomarmy init` sees a bundle or packaging step (Lambda asset scripts, SAM, Serverless, CDK), it suggests a profile that runs it and then imports each entry point from the built bundle.
 

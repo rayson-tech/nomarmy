@@ -88,6 +88,9 @@ import {
   refusalText,
   createCoordinatorCommit,
   isRuntimeJunk,
+  policyAdmissionProblems,
+  applyVerificationPolicy,
+  repoPolicy,
 } from "../mcp/server.mjs";
 
 const report = ({ status = "done", tests = "pass", notDone = "none", note = "n/a" } = {}) =>
@@ -3472,4 +3475,22 @@ test("createCoordinatorCommit: a nested package's npm cache never lands in the c
 test("isRuntimeJunk: .npm at any depth, the dependency links, never a real source file", () => {
   for (const junk of [".npm/_update-notifier-last-checked", "lambda/x/.npm/_cacache/y", "ui/node_modules", "node_modules/.vite/vitest/r.json", "ui/node_modules/.cache/babel/x"]) assert.equal(isRuntimeJunk(junk), true, junk);
   for (const real of ["src/npm.ts", "lambda/x/src/.npmignore-helper.ts", "docs/.npmrc.md", "src/node_modules_util.ts", ".cache/tracked.json"]) assert.equal(isRuntimeJunk(real), false, real);
+});
+
+test("policy: require_verification refuses an implement job without a profile and blocks a commit whose verification didn't pass", () => {
+  const strict = { require_verification: true, require_regression_check: true };
+  assert.match(policyAdmissionProblems({ mode: "implement" }, strict)[0], /requires verification \(policy\.require_verification/);
+  assert.match(policyAdmissionProblems({ mode: "implement", verification: "quick", verify_regression: false }, strict)[0], /requires the revert check/);
+  assert.deepEqual(policyAdmissionProblems({ mode: "implement", verification: "quick" }, strict), []);
+  assert.deepEqual(policyAdmissionProblems({ mode: "scout" }, strict), [], "scouts don't commit");
+  assert.deepEqual(policyAdmissionProblems({ mode: "implement" }, {}), [], "no policy, no change");
+
+  const done = { outcome: "WORKER_DONE", commitAllowed: true, reviewRequired: true, reasons: [] };
+  const blocked = applyVerificationPolicy(done, "not_run", strict);
+  assert.equal(blocked.commitAllowed, false);
+  assert.match(blocked.commitBlockedReason, /verification was not_run/);
+  assert.equal(applyVerificationPolicy(done, "pass", strict), done);
+  assert.equal(applyVerificationPolicy(done, "not_run", {}), done, "without the policy a done job still commits, flagged");
+  assert.equal(repoPolicy(() => ({ found: true, config: { policy: strict } })).require_verification, true);
+  assert.deepEqual(repoPolicy(() => { throw new Error("bad yaml"); }), {});
 });
