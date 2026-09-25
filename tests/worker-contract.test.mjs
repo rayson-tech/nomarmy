@@ -2170,15 +2170,39 @@ function makeRuntimeDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-sbx-override-"));
 }
 
-test("resolveWorkerSandboxOverride: the default image needs no override at all", () => {
+test("resolveWorkerSandboxOverride: every job's config turns OpenClaw's memory search and session-memory hook off, even on the default image", () => {
   const runtimeDir = makeRuntimeDir();
+  // The ambient config as a real install has it: the session-memory hook on,
+  // memory search unset (so on by default, embedding with OpenAI).
+  const ambient = { hooks: { internal: { entries: { "session-memory": { enabled: true }, other: { enabled: true } } } }, memory: { search: { provider: "openai" } }, auth: { kept: true } };
   const result = resolveWorkerSandboxOverride("/repo", runtimeDir, {
     loadConfigFn: () => ({ found: false }),
     resolveSandboxImageFn: () => DEFAULT_AGENT_IMAGE,
-    ambientConfigPathFn: () => { throw new Error("must not be reached for the default image"); },
+    ambientConfigPathFn: () => "/fake/openclaw.json",
+    readAmbientConfig: () => ambient,
   });
-  assert.equal(result, null);
-  assert.deepEqual(fs.readdirSync(runtimeDir), []);
+  assert.ok(result && result.startsWith(runtimeDir), "a config is written for the default image too");
+  const written = JSON.parse(fs.readFileSync(result, "utf8"));
+  assert.equal(written.memory.search.enabled, false, "no transcript indexing or embedding in a job");
+  assert.equal(written.memory.search.provider, "openai", "other memory settings are left as they were");
+  assert.equal(written.hooks.internal.entries["session-memory"].enabled, false);
+  assert.equal(written.hooks.internal.entries.other.enabled, true, "other hooks untouched");
+  assert.equal(written.agents.defaults.sandbox.docker.image, undefined, "the default image isn't pinned");
+  assert.equal(written.agents.defaults.sandbox.docker.env.NPM_CONFIG_CACHE, "/tmp/.npm");
+  assert.deepEqual(written.auth, { kept: true });
+  assert.equal(ambient.memory.search.enabled, undefined, "the ambient config object itself is never modified");
+
+  // No ambient config at all: still memory off (OpenClaw's defaults would turn it on).
+  const bare = JSON.parse(fs.readFileSync(resolveWorkerSandboxOverride("/repo", makeRuntimeDir(), {
+    loadConfigFn: () => ({ found: false }), resolveSandboxImageFn: () => DEFAULT_AGENT_IMAGE, ambientConfigPathFn: () => null,
+  }), "utf8"));
+  assert.equal(bare.memory.search.enabled, false);
+  // An image build failure falls back to the default image, with memory still off.
+  const failed = JSON.parse(fs.readFileSync(resolveWorkerSandboxOverride("/repo", makeRuntimeDir(), {
+    loadConfigFn: () => ({ found: false }), resolveSandboxImageFn: () => { throw new Error("build failed"); }, ambientConfigPathFn: () => null,
+  }), "utf8"));
+  assert.equal(failed.memory.search.enabled, false);
+  assert.equal(failed.agents.defaults.sandbox.docker.image, undefined);
 });
 
 test("resolveWorkerSandboxOverride: a non-default image clones the ambient config with the image swapped in", () => {
@@ -2231,19 +2255,23 @@ test("resolveWorkerSandboxOverride: a lazy image build failure is not fatal -- t
   const result = resolveWorkerSandboxOverride("/repo", runtimeDir, {
     loadConfigFn: () => ({ found: false }),
     resolveSandboxImageFn: () => { throw new Error("podman build failed: offline"); },
-    ambientConfigPathFn: () => { throw new Error("must not be reached"); },
+    ambientConfigPathFn: () => null,
   });
-  assert.equal(result, null);
+  const written = JSON.parse(fs.readFileSync(result, "utf8"));
+  assert.equal(written.agents.defaults.sandbox.docker.image, undefined, "no image pinned: OpenClaw uses its default");
+  assert.equal(written.memory.search.enabled, false);
 });
 
-test("resolveWorkerSandboxOverride: no reachable ambient config degrades to null, not a throw", () => {
+test("resolveWorkerSandboxOverride: no reachable ambient config still gets a config (image and memory off), never a throw", () => {
   const runtimeDir = makeRuntimeDir();
   const result = resolveWorkerSandboxOverride("/repo", runtimeDir, {
     loadConfigFn: () => ({ found: false }),
     resolveSandboxImageFn: () => "openclaw-nomarmy-coder-go:bookworm",
     ambientConfigPathFn: () => null,
   });
-  assert.equal(result, null);
+  const written = JSON.parse(fs.readFileSync(result, "utf8"));
+  assert.equal(written.agents.defaults.sandbox.docker.image, "openclaw-nomarmy-coder-go:bookworm");
+  assert.equal(written.memory.search.enabled, false);
 });
 
 test("resolveWorkerSandboxOverride: a broken .nomarmy.yml does not block the override -- that's verification's failure to report", () => {
