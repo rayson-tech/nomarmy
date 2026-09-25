@@ -1,7 +1,7 @@
-import { executionMode } from "../lib/execution.mjs";
 import { createJobRuntime, jobLane, currentMaxPoolWorkers, splitJobsByLane, toolText, refusalText } from "../lib/admission.mjs";
 export { jobLane, currentMaxPoolWorkers, splitJobsByLane, refusalText };
 import { createExecutor, sleep } from "../lib/execute.mjs";
+import { executionMode } from "../lib/execution.mjs";
 export { JOB_PHASES } from "../lib/execute.mjs";
 import { createVerificationFlow } from "../lib/verification-flow.mjs";
 export { gitShowBuffer, gitModeAtBase, planProductionRevert, revertToBase, restoreWorkerVersion, blobHash, currentBlobHash } from "../lib/verification-flow.mjs";
