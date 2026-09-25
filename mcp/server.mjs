@@ -329,7 +329,7 @@ function jobArgs(args, workerId) {
   const subscriptionWorker = args.subscription_worker;
   return { task: args.task, acceptance: args.acceptance, verification: args.verification, mode: args.mode, baseRef: args.base_ref,
     timeoutSeconds: args.timeout_seconds, profile: args.profile, reasoning: args.reasoning, pool: args.pool,
-    subscriptionWorker, onBehalfOf: args.on_behalf_of, confirm_over_limit: args.confirm_over_limit, model: args.model ?? null, reportSize: args.report ?? null, evidence: args.evidence,
+    subscriptionWorker, onBehalfOf: args.on_behalf_of, model: args.model ?? null, reportSize: args.report ?? null, evidence: args.evidence,
     verifyRegression: resolveVerifyRegression(args), commitSubject: args.commit_subject ?? null, refactor: Boolean(args.refactor), workerId };
 }
 server.tool("local_worker", "Run one isolated local worker and wait for it. mode=implement edits in its own worktree and the coordinator commits only on a valid done report (or a recovered job that passed independent verification); failed or incomplete worktrees are retained. mode=scout answers a question from a read-only snapshot with mandatory [path:line] citations that nomArmy verifies and expands. mode=decompose (also read-only) proposes 2+ independent subtasks for a broad objective instead of one worker turn trying to do too much; the proposal is never auto-dispatched, review it and make a separate call with the subtasks you choose. Refuses under memory pressure or over capacity; use local_worker_start + local_worker_status to avoid blocking.", jobSchema.shape,

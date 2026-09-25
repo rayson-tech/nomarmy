@@ -76,6 +76,9 @@ test("snapshot persistence recovers corrupt files and retains every provider ato
   recordUsageSnapshot(root, "anthropic", { ...snap(), source: "claude" });
   assert.deepEqual(readUsageSnapshots(root), { openai: snap(), anthropic: { ...snap(), source: "claude" } });
   assert.deepEqual(fs.readdirSync(root), ["usage-limits.json"]);
+  // A job that finishes late doesn't replace a newer reading with an older one.
+  recordUsageSnapshot(root, "openai", { ...snap(), observedAt: snap().observedAt - 60000, windows: [] });
+  assert.deepEqual(readUsageSnapshots(root).openai, snap());
 });
 
 function runtime(root) {
