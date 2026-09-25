@@ -3543,3 +3543,9 @@ test("refactor: a declared refactor skips the revert check but commits only with
   assert.equal(applyRefactorContract(done, { refactor: false, verificationStatus: "fail", testChanges: clean }), done, "not a refactor: this rule doesn't apply");
   assert.equal(applyVerificationPolicy(done, "not_run", strict).outcome, "NEEDS_REVIEW");
 });
+
+test("isDocumentationPath: prose files skip the revert check; code, config and tests don't", async () => {
+  const { isDocumentationPath } = await import("../lib/diff-checks.mjs");
+  for (const doc of ["CONTRIBUTING.md", "docs/plans/split.md", "README.mdx", "guide.rst", "notes.txt", "LICENSE", "CHANGELOG.md", "site/page.markdown"]) assert.equal(isDocumentationPath(doc), true, doc);
+  for (const code of ["lib/admission.mjs", "mcp/server.mjs", "package.json", ".nomarmy.yml", "tests/a.test.mjs", "requirements.txt", "lambda/requirements-dev.txt", "constraints.txt", "src/md.js", "Dockerfile"]) assert.equal(isDocumentationPath(code), false, code);
+});
