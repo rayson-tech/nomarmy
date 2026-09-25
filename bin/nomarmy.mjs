@@ -2291,9 +2291,10 @@ async function cmdJobs() {
 // 6 hours) and record them, which also refreshes the status line's warning.
 // This install's settings from config/common.env (the execution mode and the
 // model server's address, as `nomarmy connect` gives the MCP server), under
-// anything set in the environment.
+// anything set (non-empty) in the environment.
 function installEnv() {
-  return { ...deriveWorkerModelEnv(nomarmyRoot), ...process.env };
+  const set = Object.fromEntries(Object.entries(process.env).filter(([, v]) => v !== ""));
+  return { ...deriveWorkerModelEnv(nomarmyRoot), ...set };
 }
 
 async function cmdHealth() {
