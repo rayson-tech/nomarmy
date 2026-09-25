@@ -18,24 +18,24 @@ test('setup checklist covers exact statuses, commands and profile transitions', 
     { id: 'mode', title: 'Where models run', status: 'todo', detail: 'choose where models run', command: ['setup', '--choose'] },
     { id: 'install', title: 'Installed', status: 'todo', detail: 'OpenClaw not found', command: ['install'] },
     { id: 'agents', title: 'Agents', status: 'skipped', detail: 'optional: the local model works without one', command: ['agents', 'add'] },
-    { id: 'roles', title: 'Roles', status: 'todo', detail: 'add an agent first', command: ['army', 'init', '--agent', 'local', '--force'] },
+    { id: 'roles', title: 'Roles', status: 'todo', detail: 'every role on the local model', command: ['army', 'init', '--agent', 'local', '--force'] },
     { id: 'repo', title: 'This repo', status: 'skipped', detail: 'run nomarmy setup inside a project to set it up', command: ['init'] },
     { id: 'check', title: 'Check', status: 'todo', detail: 'verify the installation', command: ['doctor'] },
   ];
   assert.deepEqual(setupSteps(probes), baseline);
-  assert.equal(formatSetupSteps(baseline), '→ Where models run: choose where models run\n  Installed: OpenClaw not found\n– Agents: optional: the local model works without one\n  Roles: add an agent first\n– This repo: run nomarmy setup inside a project to set it up\n  Check: verify the installation');
+  assert.equal(formatSetupSteps(baseline), '→ Where models run: choose where models run\n  Installed: OpenClaw not found\n– Agents: optional: the local model works without one\n  Roles: every role on the local model\n– This repo: run nomarmy setup inside a project to set it up\n  Check: verify the installation');
   probes.mode = () => ({ profile: 'hosted' });
   probes.army = () => ({ roles: { dev: { agent: 'local' } } });
   let steps = setupSteps(probes);
   assert.deepEqual(steps[0], { ...baseline[0], status: 'done', detail: 'hosted' });
   assert.deepEqual(steps[2], { ...baseline[2], status: 'todo', detail: 'add a hosted agent' });
-  assert.deepEqual(steps[3], baseline[3]);
+  assert.deepEqual(steps[3], { ...baseline[3], detail: 'add an agent first' });
   probes.agents = () => ['local', 'api', 'subscription'];
   steps = setupSteps(probes);
   assert.deepEqual(steps[2], { ...baseline[2], status: 'done', detail: 'api, subscription' });
   assert.deepEqual(steps[3], { ...baseline[3], detail: 'roles must use a hosted agent', command: ['army', 'init', '--agent', 'api', '--force'] });
   probes.army = () => ({ roles: { dev: { agent: 'api' } } });
-  assert.deepEqual(setupSteps(probes)[3], { ...steps[3], status: 'done', detail: '1 roles' });
+  assert.deepEqual(setupSteps(probes)[3], { ...steps[3], status: 'done', detail: '1 role' });
   probes.mode = () => ({ profile: 'cpu-linux' });
   probes.army = () => ({ roles: { dev: { agent: 'local' } } });
   assert.deepEqual(setupSteps(probes)[0], { ...baseline[0], status: 'done', detail: 'local cpu-linux' });
@@ -75,7 +75,7 @@ test('setup runner re-evaluates, stops on refusal or failure, and completes afte
     });
     assert.equal(code, scenario === 'fail' ? 7 : 0);
     assert.equal(evaluations, scenario === 'complete' ? 2 : 1);
-    assert.deepEqual(prompts, Array(scenario === 'complete' ? 2 : 1).fill('Run it now? [Y/n] '));
+    assert.deepEqual(prompts, ['Run `nomarmy setup --choose` now? [Y/n] ', 'Run `nomarmy doctor` now? [Y/n] '].slice(0, scenario === 'complete' ? 2 : 1));
     assert.deepEqual(commands, scenario === 'refuse' ? [] : scenario === 'fail' ? [['setup', '--choose']] : [['setup', '--choose'], ['doctor']]);
     assert.deepEqual(printed, scenario === 'complete' ? ['→ Mode: \n  Check: ', '✓ Mode: \n→ Check: ', 'Setup complete', 'Restart Claude Code in the project and ask it to use nomArmy.'] : scenario === 'refuse' ? ['→ Mode: \n  Check: ', 'Resume with: nomarmy setup'] : ['→ Mode: \n  Check: ', 'Setup step failed: Mode (exit 7)']);
   }

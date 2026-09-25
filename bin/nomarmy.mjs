@@ -1,6 +1,11 @@
 #!/usr/bin/env node
-// nomArmy CLI: setup guides the operator through re-runnable setup steps.
-import { setupSteps, formatSetupSteps, runSetupPlaybook } from "../lib/setup-steps.mjs";
+// nomArmy CLI. Every command proposes before it writes anything -- init,
+// setup, model and update all show exactly what would change and write only
+// after explicit confirmation ([y/N]) or an explicit non-interactive flag
+// (--write, --json with the required choices given up front). System-level
+// setup (install.sh: OpenClaw, the sandbox, llama.cpp for a local model)
+// runs only when asked: `nomarmy install`, or `nomarmy setup` after it has
+// shown the exact command and the operator said yes.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -18,6 +23,7 @@ import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, i
 import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
 import { loadArmy, mergeArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
 import { parseLlamaUrl } from "../lib/execution.mjs";
+import { setupSteps, formatSetupSteps, runSetupPlaybook } from "../lib/setup-steps.mjs";
 import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
 import { recordProbeSuccess } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
@@ -517,25 +523,36 @@ function setupProjectDir() {
   return project;
 }
 
+/** The profile install.sh picks when given none (scripts/lib.sh load_profile). */
+function defaultLocalProfile() {
+  if (process.platform === "darwin") return "macbook-pro";
+  return spawnSync("nvidia-smi", ["-L"], { stdio: "ignore", timeout: 5000 }).status === 0 ? "nvidia-linux" : "cpu-linux";
+}
+
 function setupChecklist() {
   const common = path.join(nomarmyRoot, "config", "common.env");
-  const profile = readEnvValue(common, "NOMARMY_SETUP_PROFILE");
+  const chosen = readEnvValue(common, "NOMARMY_SETUP_PROFILE");
   const probeCommand = (binary, args) => {
     const result = spawnSync(binary, args, { encoding: "utf8", timeout: 10000 });
     return result.status === 0 ? result.stdout.trim() : "";
   };
   const project = setupProjectDir();
+  const profileFile = chosen ? path.join(nomarmyRoot, "config", "profiles", `${chosen}.env`) : null;
+  const root = (process.env.NOMARMY_INSTALL_ROOT || (profileFile && readEnvValue(profileFile, "NOMARMY_INSTALL_ROOT")) || readEnvValue(common, "NOMARMY_INSTALL_ROOT") || "$HOME/.local/share/nomarmy-local-agents").replace(/\$HOME|\$\{HOME\}/g, os.homedir());
+  let marker = null;
+  try { marker = JSON.parse(fs.readFileSync(path.join(root, "install.json"), "utf8")); } catch (error) { if (error.code !== "ENOENT") marker = {}; }
+  const version = probeCommand("openclaw", ["--version"]);
+  // `mcp list` would connect to every server; `mcp get` only looks this one up.
+  const registered = !marker && Boolean(version) && ["claude", "codex"].some((name) => spawnSync(name, ["mcp", "get", "nomarmy-local-worker"], { stdio: "ignore", timeout: 10000 }).status === 0);
+  // An install from before setup recorded its profile: the marker's, else the
+  // execution mode's, else (a working local install) install.sh's default.
+  const execution = readEnvValue(common, "NOMARMY_EXECUTION");
+  const profile = chosen ?? marker?.profile
+    ?? (["hosted", "remote", "bedrock"].includes(execution) ? execution : null)
+    ?? (registered ? defaultLocalProfile() : null);
   return setupSteps({
     mode: () => ({ profile, host: readEnvValue(common, "NOMARMY_LLAMA_HOST"), port: readEnvValue(common, "NOMARMY_LLAMA_PORT") }),
-    install: () => {
-      const profileFile = profile ? path.join(nomarmyRoot, "config", "profiles", `${profile}.env`) : null;
-      const root = (process.env.NOMARMY_INSTALL_ROOT || (profileFile && readEnvValue(profileFile, "NOMARMY_INSTALL_ROOT")) || readEnvValue(common, "NOMARMY_INSTALL_ROOT") || "$HOME/.local/share/nomarmy-local-agents").replace(/\$HOME|\$\{HOME\}/g, os.homedir());
-      let marker = null;
-      try { marker = JSON.parse(fs.readFileSync(path.join(root, "install.json"), "utf8")); } catch (error) { if (error.code !== "ENOENT") marker = {}; }
-      const version = probeCommand("openclaw", ["--version"]);
-      const registered = !marker && Boolean(version) && ["claude", "codex"].some((name) => /nomarmy-local-worker/.test(probeCommand(name, ["mcp", "list"])));
-      return { marker, version, registered };
-    },
+    install: () => ({ marker, version, registered }),
     agents: () => Object.keys(loadAgents(globalConfigDir()).agents),
     army: () => {
       const global = readArmyFile(armyLayerPath("global"), { armyOnly: true });
