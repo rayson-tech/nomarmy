@@ -72,7 +72,7 @@ MSG
     exit 1
     ;;
   *)
-    echo "ERROR: $OS_NAME is not a supported host. See the README for supported platforms." >&2
+    echo "ERROR: $OS_NAME is not a supported host. See docs/install.md for supported platforms." >&2
     exit 1
     ;;
 esac
