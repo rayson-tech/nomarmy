@@ -225,11 +225,11 @@ test("setup --hosted --json writes only hosted execution and returns the three n
     assert.equal(output.written, path.join(root, "config", "common.env"));
     assert.equal(output.execution, "hosted");
     assert.deepEqual(output.next, [
-      `${path.join(root, "install.sh")} --profile hosted`,
+      "nomarmy install",
       "nomarmy agents add",
       "nomarmy army init --agent <name>",
     ]);
-    assert.equal(fs.readFileSync(output.written, "utf8"), "NOMARMY_EXISTING=kept\nNOMARMY_EXECUTION=hosted\n");
+    assert.equal(fs.readFileSync(output.written, "utf8"), "NOMARMY_EXISTING=kept\nNOMARMY_EXECUTION=hosted\nNOMARMY_SETUP_PROFILE=hosted\n");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -248,9 +248,9 @@ test("setup --llama-url --json writes remote llama settings and treats an offlin
     assert.deepEqual(Object.keys(output).sort(), ["execution", "llamaHost", "llamaPort", "next", "reachable", "written"]);
     assert.deepEqual(output, {
       written: path.join(root, "config", "common.env"), execution: "remote", llamaHost: "127.0.0.1", llamaPort: String(port), reachable: false,
-      next: `${path.join(root, "install.sh")} --profile remote`,
+      next: "nomarmy install",
     });
-    assert.equal(fs.readFileSync(output.written, "utf8"), `NOMARMY_EXISTING=kept\nNOMARMY_EXECUTION=remote\nNOMARMY_LLAMA_HOST=127.0.0.1\nNOMARMY_LLAMA_PORT=${port}\n`);
+    assert.equal(fs.readFileSync(output.written, "utf8"), `NOMARMY_EXISTING=kept\nNOMARMY_EXECUTION=remote\nNOMARMY_SETUP_PROFILE=remote\nNOMARMY_LLAMA_HOST=127.0.0.1\nNOMARMY_LLAMA_PORT=${port}\n`);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
