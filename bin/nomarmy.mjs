@@ -2,10 +2,10 @@
 // nomArmy CLI. Every command proposes before it writes anything -- init,
 // setup, model and update all show exactly what would change and write only
 // after explicit confirmation ([y/N]) or an explicit non-interactive flag
-// (--write, --json with the required choices given up front). Nothing here
-// provisions SYSTEM-level infrastructure on its own: install.sh (builds
-// llama.cpp, installs OpenClaw, configures the sandbox) stays a separate,
-// manual step in every case, printed but never run.
+// (--write, --json with the required choices given up front). System-level
+// setup (install.sh: OpenClaw, the sandbox, llama.cpp for a local model)
+// runs only when asked: `nomarmy install`, or `nomarmy setup` after it has
+// shown the exact command and the operator said yes.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -21,8 +21,9 @@ import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCa
 import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv } from "../lib/connect.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
 import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
-import { loadArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
+import { loadArmy, mergeArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
 import { parseLlamaUrl } from "../lib/execution.mjs";
+import { setupSteps, formatSetupSteps, runSetupPlaybook } from "../lib/setup-steps.mjs";
 import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
 import { recordProbeSuccess } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
@@ -89,13 +90,16 @@ Usage: nomarmy <command> [options]
                   and write it after confirmation.
                   --force   overwrite an existing .nomarmy.yml
                   --write   with --json, write without prompting (needs a valid proposal)
-  setup           Detect this machine, recommend a profile (offering "more
-                  noms" vs "nominal" when they differ), choose a model, and
-                  write config/profiles/<name>.env (+ config/common.env).
-                  Prints the install.sh command; never runs it.
-                  --tier <more|nominal>   with --json, skip the prompt
+  setup           Show setup progress and run the next unfinished step.
+                  --status [--json]      print the checklist only
+                  --choose               choose hosted/local/remote/Bedrock
                   --hosted               skip hardware/model questions
-                  --llama-url <url>       use a llama-server on another machine
+                  --llama-url <url>       use a shared llama-server
+                  --json --profile-name <name> [--model <model>] [--tier <more|nominal>]
+                                         write a profile non-interactively
+  install         Run the bundled installer for the chosen setup profile.
+                  --profile <name>       override NOMARMY_SETUP_PROFILE
+                  --no-claude            skip Claude Code registration
   model           Change the configured model later, without the rest of
                   setup's questions. Offers to also resync the MCP
                   registration's worker-routing env vars, and to restart
@@ -509,18 +513,108 @@ async function chooseModel(rl) {
   return { kind: "search", thinking: thinkingAnswer === "y" || thinkingAnswer === "yes" };
 }
 
-/**
- * `nomarmy setup`: detect hardware, recommend a profile the same way
- * `nomarmy sizing` already does, let the user pick a model, then write the
- * result to config/profiles/<name>.env and (for the two curated model
- * choices) config/common.env. Stops there -- prints the exact `install.sh`
- * command rather than running it. install.sh builds llama.cpp, curl-pipes an
- * installer and touches sandbox/provider config; that is not a proportionate
- * thing for an opt-in flag on a CLI whose whole brand is "reports or
- * proposes" to cross, unlike the cheap, reversible, single-file writes this
- * command itself does.
- */
+function setupProjectDir() {
+  let project = process.cwd();
+  while (!fs.existsSync(path.join(project, ".git"))) {
+    const parent = path.dirname(project);
+    if (parent === project) { project = null; break; }
+    project = parent;
+  }
+  return project;
+}
+
+/** The profile install.sh picks when given none (scripts/lib.sh load_profile). */
+function defaultLocalProfile() {
+  if (process.platform === "darwin") return "macbook-pro";
+  return spawnSync("nvidia-smi", ["-L"], { stdio: "ignore", timeout: 5000 }).status === 0 ? "nvidia-linux" : "cpu-linux";
+}
+
+function setupChecklist() {
+  const common = path.join(nomarmyRoot, "config", "common.env");
+  const chosen = readEnvValue(common, "NOMARMY_SETUP_PROFILE");
+  const probeCommand = (binary, args) => {
+    const result = spawnSync(binary, args, { encoding: "utf8", timeout: 10000 });
+    return result.status === 0 ? result.stdout.trim() : "";
+  };
+  const project = setupProjectDir();
+  const profileFile = chosen ? path.join(nomarmyRoot, "config", "profiles", `${chosen}.env`) : null;
+  const root = (process.env.NOMARMY_INSTALL_ROOT || (profileFile && readEnvValue(profileFile, "NOMARMY_INSTALL_ROOT")) || readEnvValue(common, "NOMARMY_INSTALL_ROOT") || "$HOME/.local/share/nomarmy-local-agents").replace(/\$HOME|\$\{HOME\}/g, os.homedir());
+  let marker = null;
+  try { marker = JSON.parse(fs.readFileSync(path.join(root, "install.json"), "utf8")); } catch (error) { if (error.code !== "ENOENT") marker = {}; }
+  const version = probeCommand("openclaw", ["--version"]);
+  // `mcp list` would connect to every server; `mcp get` only looks this one up.
+  const registered = !marker && Boolean(version) && ["claude", "codex"].some((name) => spawnSync(name, ["mcp", "get", "nomarmy-local-worker"], { stdio: "ignore", timeout: 10000 }).status === 0);
+  // An install from before setup recorded its profile: the marker's, else the
+  // execution mode's, else (a working local install) install.sh's default.
+  const execution = readEnvValue(common, "NOMARMY_EXECUTION");
+  const profile = chosen ?? marker?.profile
+    ?? (["hosted", "remote", "bedrock"].includes(execution) ? execution : null)
+    ?? (registered ? defaultLocalProfile() : null);
+  return setupSteps({
+    mode: () => ({ profile, host: readEnvValue(common, "NOMARMY_LLAMA_HOST"), port: readEnvValue(common, "NOMARMY_LLAMA_PORT") }),
+    install: () => ({ marker, version, registered }),
+    agents: () => Object.keys(loadAgents(globalConfigDir()).agents),
+    army: () => {
+      const global = readArmyFile(armyLayerPath("global"), { armyOnly: true });
+      const local = project ? readArmyFile(armyLayerPath("project", { projectDir: project })) : null;
+      const merged = mergeArmy([{ layer: "global", army: global }, { layer: "project", army: local }]).army;
+      // Repair the layer that would otherwise keep overriding a global init.
+      const repairLayer = profile === "hosted" && Object.values(local?.roles ?? {}).some((role) => role.agent === "local") ? "project" : null;
+      return { ...merged, repairLayer };
+    },
+    repo: () => ({ inside: Boolean(project), configured: Boolean(project && fs.existsSync(path.join(project, ".nomarmy.yml"))) }),
+  });
+}
+
+function runSetupChild(args) {
+  // Work from the repository root even when setup was started in a subdirectory;
+  // the child's cwd remains unchanged, as it does for every other step.
+  const project = setupProjectDir();
+  if (project && ["init", "army"].includes(args[0])) args = [...args, "--repo", project];
+  const result = spawnSync(process.execPath, [path.join(nomarmyRoot, "bin", "nomarmy.mjs"), ...args], { stdio: "inherit", cwd: process.cwd() });
+  return result.status ?? 1;
+}
+
+function cmdInstall() {
+  const profile = value("profile", readEnvValue(path.join(nomarmyRoot, "config", "common.env"), "NOMARMY_SETUP_PROFILE"));
+  if (!profile) throw new Error("Choose a profile first: nomarmy setup --choose (or install --profile <name>).");
+  const result = spawnSync("bash", [path.join(nomarmyRoot, "install.sh"), "--profile", profile, ...(flag("no-claude") ? ["--no-claude"] : [])], { stdio: "inherit", cwd: nomarmyRoot });
+  process.exitCode = result.status ?? 1;
+}
+
 async function cmdSetup() {
+  if (flag("status") || (!flag("choose") && !flag("hosted") && !flag("llama-url") && !json)) {
+    if (flag("status") || !process.stdin.isTTY) {
+      const steps = setupChecklist();
+      return json ? out(steps) : console.log(formatSetupSteps(steps));
+    }
+    process.exitCode = await runSetupPlaybook({
+      evaluate: setupChecklist, print: console.log, run: runSetupChild,
+      ask: async (prompt) => {
+        const rl = createInterface({ input, output });
+        try { return await rl.question(prompt); } finally { rl.close(); }
+      },
+    });
+    return;
+  }
+  if (flag("choose")) {
+    if (!process.stdin.isTTY) throw new Error("setup --choose needs an interactive terminal.");
+    const rl = createInterface({ input, output });
+    try {
+      console.log("1. hosted (API keys and subscriptions, most people)\n2. a local model on this machine\n3. a shared model server\n4. Bedrock");
+      const choice = await askUntilValid(rl, "Choice [1]: ", { pattern: /^[1-4]$/, invalidMessage: "Choose 1, 2, 3 or 4.", allowEmpty: true, fallback: "1" });
+      if (choice === "1") argv.push("--hosted");
+      if (choice === "3") argv.push("--llama-url", (await rl.question("Server URL: ")).trim());
+      if (choice === "4") {
+        const common = path.join(nomarmyRoot, "config", "common.env");
+        fs.mkdirSync(path.dirname(common), { recursive: true });
+        writeEnvLine(common, "NOMARMY_EXECUTION", "bedrock");
+        writeEnvLine(common, "NOMARMY_SETUP_PROFILE", "bedrock");
+        console.log("Next: nomarmy install");
+        return;
+      }
+    } finally { rl.close(); }
+  }
   const hosted = flag("hosted");
   const hasLlamaUrl = flag("llama-url");
   if (hosted && hasLlamaUrl) throw new Error("--hosted and --llama-url cannot be used together.");
@@ -530,12 +624,13 @@ async function cmdSetup() {
 
     if (hosted) {
       const next = [
-        `${path.join(nomarmyRoot, "install.sh")} --profile hosted`,
+        "nomarmy install",
         "nomarmy agents add",
         "nomarmy army init --agent <name>",
       ];
       fs.mkdirSync(path.dirname(commonPath), { recursive: true });
       writeEnvLine(commonPath, "NOMARMY_EXECUTION", "hosted");
+      writeEnvLine(commonPath, "NOMARMY_SETUP_PROFILE", "hosted");
       if (json) return out({ written: commonPath, execution: "hosted", next });
       console.log(c.green(`✓ Wrote NOMARMY_EXECUTION=hosted to ${path.relative(nomarmyRoot, commonPath)}.`));
       console.log(c.dim("\nNext:"));
@@ -557,9 +652,10 @@ async function cmdSetup() {
     }
     fs.mkdirSync(path.dirname(commonPath), { recursive: true });
     writeEnvLine(commonPath, "NOMARMY_EXECUTION", "remote");
+    writeEnvLine(commonPath, "NOMARMY_SETUP_PROFILE", "remote");
     writeEnvLine(commonPath, "NOMARMY_LLAMA_HOST", llamaHost);
     writeEnvLine(commonPath, "NOMARMY_LLAMA_PORT", llamaPort);
-    const next = `${path.join(nomarmyRoot, "install.sh")} --profile remote`;
+    const next = "nomarmy install";
     if (json) return out({ written: commonPath, execution: "remote", llamaHost, llamaPort, reachable, next });
     console.log(reachable
       ? c.green(`✓ llama-server is reachable at ${healthUrl}.`)
@@ -570,7 +666,7 @@ async function cmdSetup() {
     return;
   }
 
-  const execution = value("execution", process.env.NOMARMY_EXECUTION || "local");
+  const execution = flag("choose") ? "local" : value("execution", process.env.NOMARMY_EXECUTION || "local");
   const isCloud = execution !== "local";
   const hardware = isCloud ? null : await detectHardware();
   const modelPath = isCloud ? null : findModel();
@@ -666,6 +762,9 @@ async function cmdSetup() {
 
     fs.mkdirSync(path.dirname(profilePath), { recursive: true });
     for (const [k, v] of Object.entries(profileWrites)) writeEnvLine(profilePath, k, v);
+    writeEnvLine(commonPath, "NOMARMY_EXECUTION", execution);
+    if (execution === "local") writeEnvLine(commonPath, "NOMARMY_LLAMA_HOST", "127.0.0.1");
+    writeEnvLine(commonPath, "NOMARMY_SETUP_PROFILE", execution === "bedrock" ? "bedrock" : profileName);
     if (model?.kind === "known" && model.repo) {
       writeEnvLine(commonPath, "NOMARMY_MODEL_REPO", model.repo);
       writeEnvLine(commonPath, "NOMARMY_MODEL_QUANT", model.quant);
@@ -686,7 +785,7 @@ async function cmdSetup() {
       }
     }
 
-    const installCmd = `./install.sh --profile ${profileName}${isCloud ? "" : ""}`;
+    const installCmd = "nomarmy install";
     if (json) return out({ written: { profile: profilePath, common: model?.kind === "known" ? commonPath : null }, env: profileWrites, sizingTier, installCommand: installCmd });
     console.log(c.green(`\n✓ Wrote ${path.relative(nomarmyRoot, profilePath)}${model?.kind === "known" ? ` and ${path.relative(nomarmyRoot, commonPath)}` : ""}.`));
     console.log(c.dim("\nThis proposes; it does not install. Run:\n"));
@@ -1205,7 +1304,7 @@ async function cmdAgentsAdd() {
     let kind = argv[2];
     if (!AGENT_KINDS.includes(kind)) {
       console.log("\n" + c.bold("What kind of agent?"));
-      console.log(`  ${c.cyan("1.")} local         ${c.dim("the local model on this machine (free, private)")}`);
+      console.log(`  ${c.cyan("1.")} local         ${c.dim("the local model on this machine (no per-token bill, private; slower)")}`);
       console.log(`  ${c.cyan("2.")} api           ${c.dim("a metered API key (xAI, OpenAI, Anthropic, DeepSeek, ...)")}`);
       console.log(`  ${c.cyan("3.")} subscription  ${c.dim("your own Claude, ChatGPT or Muse Code plan (never shared)")}`);
       kind = AGENT_KINDS[Number((await rl.question(c.bold("Choice: "))).trim()) - 1];
@@ -2320,7 +2419,7 @@ async function cmdStatusline() {
   process.stdout.write(`${statusLineText({ session })}\n`);
 }
 
-const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
+const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, install: cmdInstall, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
   // Import lazily to avoid circular dependencies

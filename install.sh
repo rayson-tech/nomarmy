@@ -127,3 +127,12 @@ if [[ "$(nomarmy_execution_mode)" == hosted ]]; then
 else
   echo "==> Install complete. Run: ./e2e.sh --profile $NOMARMY_PROFILE"
 fi
+# Record only a completed, verified installation.
+node --input-type=module - "$ROOT/package.json" "$NOMARMY_INSTALL_ROOT" "$NOMARMY_PROFILE" "$(nomarmy_execution_mode)" <<'JS'
+import fs from 'node:fs';
+import path from 'node:path';
+const [pkg, root, profile, execution] = process.argv.slice(2);
+const { version } = JSON.parse(fs.readFileSync(pkg, 'utf8'));
+fs.mkdirSync(root, { recursive: true });
+fs.writeFileSync(path.join(root, 'install.json'), JSON.stringify({ profile, execution, installedAt: new Date().toISOString(), version }, null, 2) + '\n');
+JS

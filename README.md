@@ -13,18 +13,26 @@
 ## TL;DR
 
 1. **Have** Git, Node 20+ and [Podman](https://podman.io) (on macOS: `brew install podman && podman machine init && podman machine start`).
-2. **Install** (OpenClaw and the sandbox, and registers nomArmy with Claude Code):
+2. **Install and set up:**
    ```bash
-   git clone https://github.com/rayson-tech/nomarmy.git && cd nomarmy
-   npm install && npm link
-   nomarmy setup --hosted
-   ./install.sh --profile hosted
+   npm install -g nomarmy@alpha
+   cd your-project
+   nomarmy setup
    ```
-3. **Add your workers:** `nomarmy agents add` (an API key, or your ChatGPT or Muse Code subscription), then `nomarmy army init --agent <name>` to put every role on it. `nomarmy doctor` checks the lot.
-4. **Set up your repo:** in the project, run `nomarmy init`. It proposes a `.nomarmy.yml` with your test command.
-5. **Use it:** restart Claude Code in that project and ask it to use nomArmy for one small bug that has a test. When that works, try `/feature <what you want built>`.
+   `nomarmy setup` is the playbook. It shows a checklist and runs the next step each time you say yes:
+   ```text
+   ✓ Where models run: hosted
+   ✓ Installed: OpenClaw 2026.9.6
+   → Agents: add a hosted agent
+     Roles: add an agent first
+     This repo: configure this project
+     Check: verify the installation
+   Run `nomarmy agents add` now? [Y/n]
+   ```
+   In order: pick where models run (API keys and subscriptions for most people), install OpenClaw and the sandbox, add your agents (an API key, or your ChatGPT or Muse Code subscription), put the roles on them, write this repo's `.nomarmy.yml`, then check it all. Stop anytime; `nomarmy setup` picks up where you left off.
+3. **Use it:** restart Claude Code in the project and ask it to use nomArmy for one small bug that has a test. When that works, try `/feature <what you want built>`.
 
-**Have a GPU or a Mac with plenty of memory?** Workers can also run free on a local model: `./install.sh --profile macbook-pro` (or `nvidia-linux`, `cpu-linux`, `dgx-spark`) builds llama.cpp and starts it; see [Install](#install). A team GPU server works too: [a shared model server](#a-shared-model-server). Codex or Cursor as the coordinator: `nomarmy connect codex cursor`.
+**Have a GPU or a Mac with plenty of memory?** Choose "a local model" in `nomarmy setup` and workers run on llama.cpp on your own machine: no per-token bill and your code stays home, but you pay in hardware, power and speed, and a model too big for your memory crawls. `nomarmy sizing` tells you what fits; see [Install](#install). A team GPU server works too: [a shared model server](#a-shared-model-server). Codex or Cursor as the coordinator: `nomarmy connect codex cursor`.
 
 Stuck? `nomarmy doctor` checks the machine, and `nomarmy health` checks everything nomArmy runs on.
 
@@ -64,17 +72,15 @@ Every platform needs Git and Podman. `nomarmy doctor` checks the host and prints
 
 `install.sh` builds llama.cpp when you run a local model, installs and configures [OpenClaw](https://github.com/openclaw/openclaw) (the host-side broker every model call goes through), builds the sandbox image, and registers the MCP server if Claude Code is installed. `nomarmy connect` (run by `install.sh`, or by hand for Codex and Cursor) also installs the `/feature` command, Claude Code's status line and, on macOS, nomArmy's notifier. The coordinator gets nomArmy's instructions from the MCP server itself, so there's nothing to copy into your projects.
 
-**From npm:** `npm install -g nomarmy@alpha` gives you the `nomarmy` command; `nomarmy setup` then picks a profile and model and prints the `install.sh` command to run (`nomarmy setup --hosted` or `--llama-url <server>` without a local model). Installing from a clone, as in the TL;DR, is the most tested path.
+**From npm or a clone:** `npm install -g nomarmy@alpha` (or `git clone` and `npm install && npm link`) gives you the `nomarmy` command, and `nomarmy setup` does the rest. `nomarmy install` runs the bundled `install.sh` for the profile setup chose; the per-platform guides below show the same steps by hand.
 
 ### Hosted workers only
 
-No GPU and no local model: every job runs on an API key or a subscription (ChatGPT, Muse Code) you add as an agent. Git worktrees, the sandbox and verification still run on your machine, so you still need Git, Node and Podman.
+No GPU and no local model: every job runs on an API key or a subscription (ChatGPT, Muse Code) you add as an agent. Git worktrees, the sandbox and verification still run on your machine, so you still need Git, Node and Podman. `nomarmy setup` walks these steps for you; by hand, they are:
 
 ```bash
-git clone https://github.com/rayson-tech/nomarmy.git && cd nomarmy
-npm install && npm link              # or: npm install -g nomarmy@alpha
 nomarmy setup --hosted               # records that this install has no local model
-./install.sh --profile hosted        # OpenClaw, the sandbox, and the Claude Code registration; no llama.cpp
+nomarmy install                      # OpenClaw, the sandbox, and the Claude Code registration; no llama.cpp
 nomarmy agents add                   # an API key or a subscription login
 nomarmy army init --agent <name>     # every role on that agent (add --model <model> to pick one)
 nomarmy doctor
@@ -146,7 +152,7 @@ A team GPU box (a DGX, a workstation) runs one llama-server; everyone else point
 
 ```bash
 nomarmy setup --llama-url http://gpu-box:8080   # checks /health, records the address
-./install.sh --profile remote                   # no llama.cpp build; OpenClaw points at that server
+nomarmy install                                 # no llama.cpp build; OpenClaw points at that server
 ./e2e.sh --profile remote
 ```
 
@@ -422,7 +428,8 @@ Every command proposes before it writes: a `[y/N]` prompt, or an explicit flag u
 | Command | What it does |
 |---|---|
 | `nomarmy doctor` | Checks this machine is ready, with a fix for anything missing. Start here. |
-| `nomarmy setup` | Detects the machine, recommends a profile, picks a model, writes config. Prints (never runs) `install.sh`. |
+| `nomarmy setup` | The setup playbook: a checklist of where models run, install, agents, roles, this repo and a check, running the next step when you say yes. `--status` prints it only; `--choose`, `--hosted` and `--llama-url` set where models run. |
+| `nomarmy install` | Runs the bundled `install.sh` for the profile setup chose (`--profile` to override, `--no-claude` to skip the Claude Code registration). |
 | `nomarmy connect [claude] [codex] [cursor]` | Registers nomArmy with each coordinator and installs `/feature`, the status line and the notifier. No target: pick interactively. |
 | `nomarmy init` | Proposes a `.nomarmy.yml` from what the repo contains. |
 | `nomarmy agents list\|add\|update\|remove` | Where jobs can run. See [Agents](#agents-where-a-job-can-run). |
