@@ -32,6 +32,7 @@ import { liveLeases } from "../lib/slots.mjs";
 import { createRun, loadRun, runTotals, finishRun, resolveRunLimits, describeLoweredLimits } from "../lib/runs.mjs";
 import { agentDispatchFields, resolveAgentModel, agentProviderId, describeAgent } from "../lib/agents.mjs";
 import { OUTCOMES, COORDINATOR_STATUS_BY_OUTCOME } from "../lib/outcomes.mjs";
+import { readUsageSnapshots, usageStatus } from "../lib/usage-limits.mjs";
 import { createBuildMetrics, resolveOutcome, finalText, workerMetadata, usageMetrics, policyAdmissionProblems, applyRefactorContract, applyVerificationPolicy, resolveVerifyRegression } from "../lib/outcome.mjs";
 import { compactJobRecord, formatResult, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner } from "../lib/job-format.mjs";
 
@@ -475,14 +476,17 @@ server.tool("run_finish", "Close a /feature run as complete or stopped, with a o
 server.tool("army", "Who you, the General, are and who you call for what in this repository: your fixed charter and the agent you're defined as, the army's workflow, then each role's description, phase (build, review, acceptance), suggested mode, and the agent it runs on, with which config layer set each value (global, project .nomarmy.yml, local .nomarmy.local.yml). Flags roles with no usable agent, and roles that share your model or subscription (not an independent review). Dispatch a role with `army_role`, or an agent directly with `agent`. Read-only, re-read on every call.", {}, async () => {
   try {
     const agents = agentsConfig().agents;
-    const summary = describeArmy(currentArmy(), { agents, describeAgent });
+    const usageSnapshots = readUsageSnapshots(stateRoot);
+    const summary = describeArmy(currentArmy(), { agents, describeAgent, usageSnapshots, agentProviderId });
     // Each agent's models, from OpenClaw's catalog, so the General can pick
     // one for a role set to "auto". The catalog can lag a brand-new model.
     const catalog = await modelCatalogReady();
     summary.agents = Object.fromEntries(Object.entries(agents).map(([name, agent]) => {
       const provider = agentProviderId(agent);
       const models = provider && catalog ? [...catalog.keys()].filter((k) => k.startsWith(`${provider}/`)).map((k) => k.slice(provider.length + 1)) : [];
-      return [name, { runsOn: describeAgent(agent), defaultModel: agent.model ?? null, models }];
+      const snapshot = usageSnapshots[provider];
+      const usage = snapshot ? (() => { const { level, text } = usageStatus(snapshot); return { level, text }; })() : null;
+      return [name, { runsOn: describeAgent(agent), defaultModel: agent.model ?? null, models, usage }];
     }));
     // A pinned model missing from the catalog isn't necessarily wrong:
     // `army assign` proves an unlisted model with a real test call, and the

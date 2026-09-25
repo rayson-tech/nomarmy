@@ -244,6 +244,21 @@ test("describeArmy: the fixed charter plus the General's agent, each role's agen
   assert.match(undefinedGeneral.general.problem, /nomarmy army general <agent>/);
 });
 
+test("describeArmy: usage text and level appear next to every agent backed by a recorded provider", () => {
+  const now = Date.parse("2026-09-25T12:00:00Z"), reset = now + 3600000;
+  const summary = describeArmy({
+    army: { general: "opus", workflow: null, roles: { pm: { agent: "codex" }, po: { agent: "grok" } } },
+    sources: { general: "global", roles: { pm: {}, po: {} } }, layers: [],
+  }, { agents: AGENTS, agentProviderId: (agent) => agent.provider, now, usageSnapshots: {
+    "claude-cli": { source: "claude", plan: null, limitReached: false, observedAt: now, windows: [{ name: "week", usedPercent: 85, windowMinutes: 10080, resetsAt: reset }] },
+    openai: { source: "codex", plan: null, limitReached: false, observedAt: now, windows: [{ name: "5h", usedPercent: 100, windowMinutes: 300, resetsAt: reset }] },
+  } });
+  const label = new Date(reset).toLocaleString("en-US", { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+  assert.deepEqual(summary.general.usage, { level: "high", text: `85% of week, resets ${label}` });
+  assert.deepEqual(summary.roles.pm.usage, { level: "over", text: `100% of 5h, resets ${label}` });
+  assert.equal(summary.roles.po.usage, null);
+});
+
 test("privateConfigProblem: refuses global config another account owns or can write, fine otherwise", () => {
   const file = path.join(tmp(), "providers.yml");
   write(file, "pools: {}\n");

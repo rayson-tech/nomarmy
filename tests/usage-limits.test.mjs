@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { readCodexRateLimits, normalizeClaudeRateLimits, recordUsageSnapshot, readUsageSnapshots, usageStatus } from "../lib/usage-limits.mjs";
+import { COORDINATOR_INSTRUCTIONS } from "../lib/coordinator-instructions.mjs";
 import { createJobRuntime } from "../lib/admission.mjs";
 import { deriveBudgets } from "../lib/budget.mjs";
 import { expandJobs, jobSchema } from "../mcp/server.mjs";
@@ -63,6 +64,12 @@ test("usage status levels, ordered text, expired windows and reached flags", () 
   assert.deepEqual(usageStatus(snap([win("week", 15)], true), now), { level: "over", text: `15% of week, resets ${label}`, resetsAt: reset, ageMinutes: 0 });
   assert.deepEqual(usageStatus(snap([], true), now), { level: "over", text: "limit reached, reset unknown", resetsAt: null, ageMinutes: 0 });
   assert.deepEqual(usageStatus(snap([win("week", 100, now), win("5h", 85, null, 300)]), now), { level: "high", text: "85% of 5h, resets unknown", resetsAt: null, ageMinutes: 0 });
+});
+
+test("coordinator instructions require operator approval before overriding a usage hold", () => {
+  assert.match(COORDINATOR_INSTRUCTIONS, /usage limits show in army and local_worker_capacity/);
+  assert.match(COORDINATOR_INSTRUCTIONS, /Ask the operator before resubmitting with confirm_over_limit: true/);
+  assert.match(COORDINATOR_INSTRUCTIONS, /Never set it on your own/);
 });
 
 test("snapshot persistence recovers corrupt files and retains every provider atomically", t => {
