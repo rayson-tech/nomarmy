@@ -409,7 +409,7 @@ test("agents add --json --register (custom endpoint) onboards with the REAL mode
     ], { NOMARMY_TEST_KEY_AZURE: "sk-test-azure-secret", ...fake.env });
     assert.equal(exitCode, 0, stdout);
     const [onboardCall, pasteCall] = fake.calls();
-    assert.ok(onboardCall.argv.includes("https://my-resource.openai.azure.com") && onboardCall.argv.includes("gpt-4o-mini"));
+    assert.ok(onboardCall.argv.some((a) => a === "https://my-resource.openai.azure.com") && onboardCall.argv.some((a) => a === "gpt-4o-mini"));
     assert.deepEqual(pasteCall.argv.slice(0, 3), ["models", "auth", "paste-api-key"]);
     assert.equal(pasteCall.stdin.trim(), "sk-test-azure-secret");
   } finally {

@@ -117,3 +117,12 @@ test("runQuery + formatCitations: every output line is a copyable [path:line] ci
     assert.deepEqual(OPS, ["grep", "definitions", "references", "outline", "files"]);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test("matchesGlob: wildcards work inside {a,b}, and every other character is literal", () => {
+  assert.equal(matchesGlob("x/a.test.mjs", "{*.test,*.spec}.mjs"), true);
+  assert.equal(matchesGlob("x/a.other.mjs", "{*.test,*.spec}.mjs"), false);
+  assert.equal(matchesGlob("a+b.js", "a+b.js"), true);
+  assert.equal(matchesGlob("aab.js", "a+b.js"), false);
+  assert.equal(matchesGlob("lib/a.mjs", "{lib,tests}/*.mjs"), true);
+  assert.equal(matchesGlob("src/a.mjs", "{lib,tests}/*.mjs"), false);
+});

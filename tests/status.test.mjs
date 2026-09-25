@@ -66,7 +66,7 @@ test("buildNotifierApp: builds once with the fixed bundle id, then stays current
   const nomarmyRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
   assert.equal(buildNotifierApp({ nomarmyRoot, root, platform: "darwin", env: {}, run }).status, "built");
   const plist = fs.readFileSync(path.join(notifierPaths(root).app, "Contents", "Info.plist"), "utf8");
-  assert.match(plist, new RegExp(`<string>${NOTIFIER_BUNDLE_ID.replace(/\./g, "\\.")}</string>`));
+  assert.match(plist, new RegExp(`<string>${NOTIFIER_BUNDLE_ID.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</string>`));
   assert.ok(ran.includes("codesign"));
   assert.equal(buildNotifierApp({ nomarmyRoot, root, platform: "darwin", env: {}, run }).status, "current");
   assert.equal(buildNotifierApp({ nomarmyRoot, root, platform: "linux", env: {}, run }).status, "skipped");
