@@ -73,6 +73,21 @@ test("runHealthChecks accepts hosted mode as an injected parameter for army chec
   assert.deepEqual(local.issues, []);
 });
 
+test("runHealthChecks emits exact usage warnings for high and over snapshots, but not ok", async () => {
+  const now = Date.parse("2026-09-25T12:00:00Z"), reset = now + 3600000;
+  const label = new Date(reset).toLocaleString("en-US", { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+  const snapshot = (usedPercent, observedAt = now) => ({ source: "codex", plan: null, limitReached: false, observedAt,
+    windows: [{ name: "week", usedPercent, windowMinutes: 10080, resetsAt: reset }] });
+  const { issues } = await runHealthChecks({ now, run: async () => ({ ok: false, stdout: "" }), usageSnapshots: {
+    quiet: snapshot(79), codex: snapshot(85, now - 120000),
+    full: { source: "codex", plan: null, limitReached: true, observedAt: now, windows: [] },
+  } });
+  assert.deepEqual(issues, [
+    { id: "usage:codex:high", severity: "warn", title: "codex usage is 85% wk", detail: `85% of week, resets ${label} (reading 2 minutes old).`, fix: "plan remaining work or move its roles with nomarmy army assign", short: "codex 85% wk" },
+    { id: "usage:full:over", severity: "warn", title: "full is at its usage limit", detail: "limit reached, reset unknown (reading 0 minutes old).", fix: "wait for the reset, or move its roles with nomarmy army assign", short: "full limit" },
+  ]);
+});
+
 test("runHealthChecks: gathers every check with bounded commands, errors first", async () => {
   const jobsRoot = tmp();
   fs.mkdirSync(path.join(jobsRoot, "old-job"));

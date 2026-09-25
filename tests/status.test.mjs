@@ -15,6 +15,7 @@ import { statusLineText } from "../lib/statusline.mjs";
 import { installClaudeStatusLine } from "../lib/connect.mjs";
 import { writeLease } from "../lib/slots.mjs";
 import { createRun, recordRunJob, runAdmissionProblems, loadRun } from "../lib/runs.mjs";
+import { readUsageSnapshots, recordUsageSnapshot } from "../lib/usage-limits.mjs";
 
 const dirs = [];
 function tmp() { const d = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-status-")); dirs.push(d); return d; }
@@ -159,4 +160,45 @@ test("statusLineText: shows the most serious recent health warning, briefly", ()
     { severity: "info", short: null, id: "a" }, { severity: "warn", short: "openai login 5d", id: "b" },
   ] }));
   assert.equal(statusLineText({ session: { workspace: { project_dir: "/r/x" } }, stateRoot: root }), "x │ 🍪 idle │ ⚠ openai login 5d");
+});
+
+test("statusLineText: a usage warning isn't repeated as the health warning", () => {
+  const root = tmp(), now = Date.parse("2026-09-25T12:00:00Z");
+  recordUsageSnapshot(root, "codex", { source: "codex", plan: null, limitReached: false, observedAt: now,
+    windows: [{ name: "week", usedPercent: 85, windowMinutes: 10080, resetsAt: now + 3600000 }] });
+  fs.writeFileSync(path.join(root, "health.json"), JSON.stringify({ checkedAt: new Date(now).toISOString(), issues: [
+    { severity: "warn", short: "codex 85% wk", id: "usage:codex:high" }, { severity: "warn", short: "openai login 5d", id: "b" },
+  ] }));
+  assert.equal(statusLineText({ session: { workspace: { project_dir: "/r/x" } }, stateRoot: root, now }), "x │ 🍪 idle │ ⚠ openai login 5d │ ⚠ codex 85% wk");
+});
+
+test("statusLineText: records changed Claude rate limits only, without risking the printed line", () => {
+  const root = tmp(), now = Date.parse("2026-09-25T12:00:00Z"), reset = Math.floor((now + 3600000) / 1000);
+  const session = { workspace: { project_dir: "/r/x" }, rate_limits: { seven_day: { used_percentage: 85, resets_at: reset } } };
+  assert.equal(statusLineText({ session, stateRoot: root, now }), "x │ 🍪 idle │ ⚠ claude-cli 85% wk");
+  const first = fs.readFileSync(path.join(root, "usage-limits.json"), "utf8");
+  assert.deepEqual(readUsageSnapshots(root)["claude-cli"], {
+    source: "claude", plan: null, limitReached: false, observedAt: now,
+    windows: [{ name: "week", usedPercent: 85, windowMinutes: 10080, resetsAt: reset * 1000 }],
+  });
+  statusLineText({ session, stateRoot: root, now: now + 60000 });
+  assert.equal(fs.readFileSync(path.join(root, "usage-limits.json"), "utf8"), first, "an unchanged redraw does not write");
+  statusLineText({ session: { ...session, rate_limits: { seven_day: { used_percentage: 86, resets_at: reset } } }, stateRoot: root, now: now + 120000 });
+  assert.equal(readUsageSnapshots(root)["claude-cli"].windows[0].usedPercent, 86);
+
+  const badRoot = path.join(root, "not-a-directory");
+  fs.writeFileSync(badRoot, "occupied");
+  assert.equal(statusLineText({ session, stateRoot: badRoot, now }), "x │ 🍪 idle", "capture failures never alter output");
+});
+
+test("statusLineText: shows high and over usage after collapsing jobs and stays within maxLength", () => {
+  const root = tmp(), now = Date.parse("2026-09-25T12:00:00Z");
+  recordUsageSnapshot(root, "codex", { source: "codex", plan: null, limitReached: false, observedAt: now,
+    windows: [{ name: "week", usedPercent: 100, windowMinutes: 10080, resetsAt: now + 3600000 }] });
+  recordUsageSnapshot(root, "claude-cli", { source: "claude", plan: null, limitReached: false, observedAt: now,
+    windows: [{ name: "week", usedPercent: 85, windowMinutes: 10080, resetsAt: now + 3600000 }] });
+  for (const id of ["one-long-running-job", "two-long-running-job"]) writeLease(path.join(root, "leases"), id, { lane: "remote", agent: "codex", repo: "/r/x" });
+  const line = statusLineText({ session: { workspace: { project_dir: "/r/x" } }, stateRoot: root, now, maxLength: 48 });
+  assert.equal(line, "x │ 🍪 2: +2 │ ⛔ codex 100% wk");
+  assert.ok([...line].length <= 48);
 });

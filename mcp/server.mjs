@@ -32,6 +32,7 @@ import { liveLeases } from "../lib/slots.mjs";
 import { createRun, loadRun, runTotals, finishRun, resolveRunLimits, describeLoweredLimits } from "../lib/runs.mjs";
 import { agentDispatchFields, resolveAgentModel, agentProviderId, describeAgent } from "../lib/agents.mjs";
 import { OUTCOMES, COORDINATOR_STATUS_BY_OUTCOME } from "../lib/outcomes.mjs";
+import { readUsageSnapshots, usageStatus } from "../lib/usage-limits.mjs";
 import { createBuildMetrics, resolveOutcome, finalText, workerMetadata, usageMetrics, policyAdmissionProblems, applyRefactorContract, applyVerificationPolicy, resolveVerifyRegression } from "../lib/outcome.mjs";
 import { compactJobRecord, formatResult, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner } from "../lib/job-format.mjs";
 
@@ -282,6 +283,7 @@ export const jobSchema = z.object({
   report: z.enum(["brief", "standard", "full"]).optional().describe("How much the worker may report back, capped by its agent's tier: brief (today's local-sized report), standard (the default), full (the frontier ceiling: about 2k tokens for implement, 4k for a scout). The report lands in your own context and is re-read every later turn, so ask for full only when the job's findings are the point (a broad review). No effect on the local model, whose caps are calibrated."),
   commit_subject: z.string().max(200).optional().describe("implement: the subject line of the commit nomArmy makes on the worker branch, e.g. \"Keep held-back tables in the list_tables cache\". Defaults to the task's first sentence; the body is the worker's NOTE, and the job id is a trailer."),
   army_role: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional().describe("Dispatch by army role (e.g. \"sr-dev\", \"security-analyst\"): nomArmy runs it on the agent this repo assigns to that role and puts the role's description at the top of the brief. Call the `army` tool first to see this repo's roles. Mutually exclusive with agent. Add on_behalf_of in case the role's agent is a subscription; it's ignored otherwise."),
+  confirm_over_limit: z.boolean().optional().describe("Override a reached usage limit: the General must ask the operator before resubmitting with confirm_over_limit: true, or send the job to another agent. nomArmy never sets it itself."),
   on_behalf_of: z.string().min(1).max(254).optional().describe("Required when the job's agent is a subscription: must exactly match that agent's owner in agents.yml, or nomArmy refuses the job. A self-reported attestation, not an independently verified identity check -- nomArmy has no caller-identity boundary today, so what this guarantees is explicit, auditable intent and hard refusal on mismatch or omission, not cryptographic proof of who issued the call. Ignored for a local or api agent."),
   evidence: z.string().max(maxEvidenceChars,
     `Evidence exceeds the ${maxEvidenceChars}-character budget. This is for facts already resolved (e.g. with repo_evidence), not more description of the task -- if it needs more than this, resolve less per job or put the pointer (a path and line range) here instead of the material itself.`
@@ -474,14 +476,17 @@ server.tool("run_finish", "Close a /feature run as complete or stopped, with a o
 server.tool("army", "Who you, the General, are and who you call for what in this repository: your fixed charter and the agent you're defined as, the army's workflow, then each role's description, phase (build, review, acceptance), suggested mode, and the agent it runs on, with which config layer set each value (global, project .nomarmy.yml, local .nomarmy.local.yml). Flags roles with no usable agent, and roles that share your model or subscription (not an independent review). Dispatch a role with `army_role`, or an agent directly with `agent`. Read-only, re-read on every call.", {}, async () => {
   try {
     const agents = agentsConfig().agents;
-    const summary = describeArmy(currentArmy(), { agents, describeAgent });
+    const usageSnapshots = readUsageSnapshots(stateRoot);
+    const summary = describeArmy(currentArmy(), { agents, describeAgent, usageSnapshots, agentProviderId });
     // Each agent's models, from OpenClaw's catalog, so the General can pick
     // one for a role set to "auto". The catalog can lag a brand-new model.
     const catalog = await modelCatalogReady();
     summary.agents = Object.fromEntries(Object.entries(agents).map(([name, agent]) => {
       const provider = agentProviderId(agent);
       const models = provider && catalog ? [...catalog.keys()].filter((k) => k.startsWith(`${provider}/`)).map((k) => k.slice(provider.length + 1)) : [];
-      return [name, { runsOn: describeAgent(agent), defaultModel: agent.model ?? null, models }];
+      const snapshot = usageSnapshots[provider];
+      const usage = snapshot ? (() => { const { level, text } = usageStatus(snapshot); return { level, text }; })() : null;
+      return [name, { runsOn: describeAgent(agent), defaultModel: agent.model ?? null, models, usage }];
     }));
     // A pinned model missing from the catalog isn't necessarily wrong:
     // `army assign` proves an unlisted model with a real test call, and the
