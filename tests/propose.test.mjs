@@ -150,3 +150,10 @@ test("buildConfigProposal: a bundle step in evidence gets a note suggesting a bu
   }
   assert.equal(buildConfigProposal({ commands: { items: [{ kind: "build", command: "npm run build", source: "ci.yml" }] } }).notes.filter((n) => /bundle\/packaging/.test(n)).length, 0);
 });
+
+
+test("buildConfigProposal: new repos start with the strict policy, and it validates", () => {
+  const out = buildConfigProposal({});
+  assert.deepEqual(out.proposal.policy, { require_verification: true, require_regression_check: true });
+  assert.equal(out.valid, true, out.errors.join("; "));
+});

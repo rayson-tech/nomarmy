@@ -1,6 +1,6 @@
 # Local Coder Policy (v1.3)
 
-Qwen3-Coder-Next is the default coding worker (local llama-server, or Bedrock on a cloud profile). A worker (a *nom*) owns implementation within one coherent engineering concern.
+GPT-OSS 20B is the default local coding worker (local llama-server), with Qwen3-Coder-Next as the alternative; a worker can also run on Bedrock or on an api or subscription agent. A worker (a *nom*) owns implementation within one coherent engineering concern.
 
 ## What a nom owns
 

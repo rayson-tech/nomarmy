@@ -8,3 +8,9 @@ verification:
   quick:
     commands:
       - "npm test"
+
+# nomArmy commits only verified work here, and the revert check can't be
+# switched off per job (what `nomarmy init` now proposes for every repo).
+policy:
+  require_verification: true
+  require_regression_check: true
