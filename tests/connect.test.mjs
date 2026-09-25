@@ -449,6 +449,40 @@ test("connectCodex: installs the copy, best-effort removes old registrations, ad
   }
 });
 
+test("connectCodex: forwards the install's settings, keeps an operator's own, and moves the skill to ~/.agents/skills", () => {
+  const nomarmyRoot = fakeRoot();
+  const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-home-"));
+  const configDir = path.join(home, "config");
+  const skillsDir = path.join(home, ".agents", "skills"), legacySkillsDir = path.join(home, ".codex", "skills");
+  const calls = [];
+  try {
+    fs.mkdirSync(path.join(nomarmyRoot, "config"));
+    fs.writeFileSync(path.join(nomarmyRoot, "config", "common.env"), "NOMARMY_EXECUTION=hosted\nNOMARMY_WORKER_MODEL=gpt-oss-20b\n");
+    fs.mkdirSync(path.join(nomarmyRoot, "playbooks"));
+    fs.writeFileSync(path.join(nomarmyRoot, "playbooks", "feature.md"), "# feature\n");
+    fs.mkdirSync(path.join(legacySkillsDir, "nomarmy-feature"), { recursive: true });
+    fs.writeFileSync(path.join(legacySkillsDir, "nomarmy-feature", "SKILL.md"), "<!-- nomarmy:feature -->\nold");
+    fs.mkdirSync(path.join(legacySkillsDir, "mine"), { recursive: true });
+    fs.writeFileSync(path.join(legacySkillsDir, "mine", "SKILL.md"), "the operator's own");
+    const run = (cmd, args) => {
+      calls.push([cmd, ...args]);
+      if (args[0] === "mcp" && args[1] === "get") return JSON.stringify({ transport: { env: { NOMARMY_CUSTOM: "kept", NOMARMY_EXECUTION: "local" } } });
+      return "";
+    };
+    const result = connectCodex({ nomarmyRoot, installDir, run, configDir, skillsDir, legacySkillsDir });
+    const add = calls.find((c) => c[1] === "mcp" && c[2] === "add");
+    assert.ok(add.includes("--env") && add.includes("NOMARMY_EXECUTION=hosted") && add.includes("NOMARMY_CUSTOM=kept"), add.join(" "));
+    assert.ok(!add.includes("NOMARMY_EXECUTION=local"), "the install's own settings win over a stale registration");
+    assert.equal(result.preservedEnv.NOMARMY_WORKER_MODEL, "gpt-oss-20b");
+    assert.ok(fs.existsSync(path.join(skillsDir, "nomarmy-feature", "SKILL.md")), "installed where Codex's apps look");
+    assert.ok(!fs.existsSync(path.join(legacySkillsDir, "nomarmy-feature")), "nomArmy's old copy is removed");
+    assert.ok(fs.existsSync(path.join(legacySkillsDir, "mine", "SKILL.md")), "the operator's own skills are untouched");
+  } finally {
+    for (const dir of [nomarmyRoot, installDir, home]) fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 function fakeCursorConfigPath() {
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-cursor-")), "mcp.json");
 }
