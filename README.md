@@ -13,22 +13,24 @@
 ## TL;DR
 
 1. **Have** Git, Node 20+ and [Podman](https://podman.io) (on macOS: `brew install podman && podman machine init && podman machine start`).
-2. **Install** (builds the local model server, OpenClaw and the sandbox, and registers nomArmy with Claude Code):
+2. **Install** (OpenClaw and the sandbox, and registers nomArmy with Claude Code):
    ```bash
    git clone https://github.com/rayson-tech/nomarmy.git && cd nomarmy
-   ./install.sh --profile macbook-pro   # or nvidia-linux, cpu-linux, dgx-spark, bedrock
-   ./e2e.sh --profile macbook-pro       # should end with: === E2E PASS ===
+   npm install && npm link
+   nomarmy setup --hosted
+   ./install.sh --profile hosted
    ```
-   No local model? See [hosted workers only](#hosted-workers-only) or [a shared model server](#a-shared-model-server).
-3. **Set up your repo:** in the project, run `nomarmy init`. It proposes a `.nomarmy.yml` with your test command.
-4. **Use it:** restart Claude Code in that project and ask it to use nomArmy for one small bug that has a test. When that works, try `/feature <what you want built>`.
-5. **Optional:** add hosted workers with `nomarmy agents add`, give roles to them with `nomarmy army init`, or connect Codex or Cursor with `nomarmy connect codex cursor`.
+3. **Add your workers:** `nomarmy agents add` (an API key, or your ChatGPT or Muse Code subscription), then `nomarmy army init --agent <name>` to put every role on it. `nomarmy doctor` checks the lot.
+4. **Set up your repo:** in the project, run `nomarmy init`. It proposes a `.nomarmy.yml` with your test command.
+5. **Use it:** restart Claude Code in that project and ask it to use nomArmy for one small bug that has a test. When that works, try `/feature <what you want built>`.
+
+**Have a GPU or a Mac with plenty of memory?** Workers can also run free on a local model: `./install.sh --profile macbook-pro` (or `nvidia-linux`, `cpu-linux`, `dgx-spark`) builds llama.cpp and starts it; see [Install](#install). A team GPU server works too: [a shared model server](#a-shared-model-server). Codex or Cursor as the coordinator: `nomarmy connect codex cursor`.
 
 Stuck? `nomarmy doctor` checks the machine, and `nomarmy health` checks everything nomArmy runs on.
 
 ## What it is
 
-Your coding assistant (Claude Code, Codex or Cursor) stays in charge as the **General**: it decides what gets built and whether the result is acceptable. The work goes to **noms**, workers that implement, test and repair in their own git worktree and sandbox, on a local model, an API key, or your own ChatGPT or Muse Code subscription. nomArmy owns everything in between: worktrees, git, sandboxes, verification, and the evidence that decides whether work is accepted.
+Your coding assistant (Claude Code, Codex or Cursor) stays in charge as the **General**: it decides what gets built and whether the result is acceptable. The work goes to **noms**, workers that implement, test and repair in their own git worktree and sandbox, on an API key, your own ChatGPT or Muse Code subscription, or a local model. nomArmy owns everything in between: worktrees, git, sandboxes, verification, and the evidence that decides whether work is accepted.
 
 **What you get is work you don't have to take on faith**, not cheaper work. Delegating costs the General tokens too: briefing and reviewing. On small, already-diagnosed tickets we measured 4 to 8 times more of the General's tokens than fixing the bug directly, and break-even at roughly 150 lines of context a fix needs to read ([the measurements](docs/experiments/2026-09-20-model-bakeoff-and-economics.md)). It pays off on bigger tickets, on parallel work, and anywhere you'd otherwise have to trust an agent's say-so.
 
@@ -48,21 +50,37 @@ Around that core: **agents** say where a job can run, the **army** says which ro
 
 ## Install
 
-| Platform | Guide |
+| Setup | Guide |
 |---|---|
-| macOS (Apple Silicon) | [macOS](#macos-apple-silicon) |
-| Linux, with or without an NVIDIA GPU | [Linux](#linux) |
+| API keys and subscriptions, no local model (most people) | [Hosted workers only](#hosted-workers-only) |
+| A local model on macOS (Apple Silicon) | [macOS](#macos-apple-silicon) |
+| A local model on Linux, with or without an NVIDIA GPU | [Linux](#linux) |
 | Windows | [Windows](#windows) |
 | NVIDIA DGX Spark | [DGX Spark](#dgx-spark) |
-| No local model: API keys and subscriptions only | [Hosted workers only](#hosted-workers-only) |
 | A shared GPU server (or a tunnel to one) | [A shared model server](#a-shared-model-server) |
 | No GPU, with Bedrock | [Cloud (Bedrock)](#cloud-bedrock) |
 
 Every platform needs Git and Podman. `nomarmy doctor` checks the host and prints a fix for anything missing.
 
-`install.sh` builds llama.cpp for local inference, installs and configures [OpenClaw](https://github.com/openclaw/openclaw) (the host-side broker every model call goes through), builds the sandbox image, and registers the MCP server if Claude Code is installed. `nomarmy connect` (run by `install.sh`, or by hand for Codex and Cursor) also installs the `/feature` command, Claude Code's status line and, on macOS, nomArmy's notifier. The coordinator gets nomArmy's instructions from the MCP server itself, so there's nothing to copy into your projects.
+`install.sh` builds llama.cpp when you run a local model, installs and configures [OpenClaw](https://github.com/openclaw/openclaw) (the host-side broker every model call goes through), builds the sandbox image, and registers the MCP server if Claude Code is installed. `nomarmy connect` (run by `install.sh`, or by hand for Codex and Cursor) also installs the `/feature` command, Claude Code's status line and, on macOS, nomArmy's notifier. The coordinator gets nomArmy's instructions from the MCP server itself, so there's nothing to copy into your projects.
 
 **From npm:** `npm install -g nomarmy@alpha` gives you the `nomarmy` command; `nomarmy setup` then picks a profile and model and prints the `install.sh` command to run (`nomarmy setup --hosted` or `--llama-url <server>` without a local model). Installing from a clone, as in the TL;DR, is the most tested path.
+
+### Hosted workers only
+
+No GPU and no local model: every job runs on an API key or a subscription (ChatGPT, Muse Code) you add as an agent. Git worktrees, the sandbox and verification still run on your machine, so you still need Git, Node and Podman.
+
+```bash
+git clone https://github.com/rayson-tech/nomarmy.git && cd nomarmy
+npm install && npm link              # or: npm install -g nomarmy@alpha
+nomarmy setup --hosted               # records that this install has no local model
+./install.sh --profile hosted        # OpenClaw, the sandbox, and the Claude Code registration; no llama.cpp
+nomarmy agents add                   # an API key or a subscription login
+nomarmy army init --agent <name>     # every role on that agent (add --model <model> to pick one)
+nomarmy doctor
+```
+
+A hosted install refuses a job that names no role or agent, rather than falling back to a local model that isn't there. `nomarmy health` warns about any role still on `local`. `e2e.sh` tests the local model, so it has nothing to do here; `nomarmy army assign` tests each role's route instead.
 
 ### macOS (Apple Silicon)
 
@@ -121,22 +139,6 @@ chmod +x install.sh e2e.sh scripts/*.sh
 ```
 
 Moving from a Mac install? Don't copy a Mac binary or model cache over: clone fresh and let `install.sh` build llama.cpp for CUDA on that machine.
-
-### Hosted workers only
-
-No GPU and no local model: every job runs on an API key or a subscription (ChatGPT, Muse Code) you add as an agent. Git worktrees, the sandbox and verification still run on your machine, so you still need Git, Node and Podman.
-
-```bash
-git clone https://github.com/rayson-tech/nomarmy.git && cd nomarmy
-npm install && npm link              # or: npm install -g nomarmy@alpha
-nomarmy setup --hosted               # records that this install has no local model
-./install.sh --profile hosted        # OpenClaw, the sandbox, and the Claude Code registration; no llama.cpp
-nomarmy agents add                   # an API key or a subscription login
-nomarmy army init --agent <name>     # every role on that agent (add --model <model> to pick one)
-nomarmy doctor
-```
-
-A hosted install refuses a job that names no role or agent, rather than falling back to a local model that isn't there. `nomarmy health` warns about any role still on `local`. `e2e.sh` tests the local model, so it has nothing to do here; `nomarmy army assign` tests each role's route instead.
 
 ### A shared model server
 
