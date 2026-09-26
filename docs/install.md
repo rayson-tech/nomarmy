@@ -22,6 +22,18 @@ Every platform needs Git and Podman. `nomarmy doctor` checks the host and prints
 
 **Updating:** `nomarmy update` installs the latest alpha (or pulls, in a clone) and reconnects Claude Code, Codex and Cursor. Then restart every open coordinator session: each one runs the copy of nomArmy it started with. Until you do, `army` and `local_worker_capacity` tell that session to restart, and `nomarmy health` flags any coordinator still running an older copy.
 
+### Per-repository registration
+
+`nomarmy connect claude` registers nomArmy for every project you open. To have it only where you want it:
+
+| | Registers nomArmy | Where |
+|---|---|---|
+| `nomarmy connect claude --scope local` | for this repository, only you | Claude Code's local config; `/feature` in `.claude/commands`, kept out of git |
+| `nomarmy connect claude --scope project` | for this repository, for everyone who clones it | a committed `.mcp.json` that runs `nomarmy mcp`, plus `/feature` in `.claude/commands` |
+| `nomarmy connect cursor --scope local\|project` | the same for Cursor | the repository's `.cursor/mcp.json` |
+
+Run it inside the repository. A committed registration can't carry your install path or your model settings, so it runs `nomarmy mcp`, which starts nomArmy with each person's own: every teammate needs nomArmy installed and set up. Codex registers servers only for every project, so it has no per-repository option. If nomArmy is also registered for all your projects, `connect` says so; `claude mcp remove nomarmy-local-worker -s user` removes that. `nomarmy update` keeps per-repository registrations current without adding a user-wide one.
+
 ## Hosted workers only
 
 No GPU and no local model: every job runs on an API key or a subscription (ChatGPT, Muse Code) you add as an agent. Git worktrees, the sandbox and verification still run on your machine, so you still need Git, Node and Podman. `nomarmy setup` walks these steps for you; by hand, they are:
