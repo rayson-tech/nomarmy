@@ -235,6 +235,7 @@ export function expandJobs(jobs, { getArmy = currentArmy, getAgents = () => agen
       const out = { ...rest, ...fields, agentName: agent };
       if (model) out.model = model; else delete out.model;
       if (!fields.subscription_worker) delete out.on_behalf_of;
+      if (out.mode === "scout" && out.report == null && (fields.pool || fields.subscription_worker)) out.report = "full";
       out.profile ??= "coder";
       return out;
     } catch (error) {
@@ -290,7 +291,7 @@ export const jobSchema = z.object({
   agent: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().describe("Run on this agent from the operator's agents.yml, by name (e.g. \"codex\", \"grok\", \"local\"): the local model, a metered api key, or one person's subscription. Omit agent and army_role to use the local model. Refuses an unknown name, never falls back. Mutually exclusive with army_role. A subscription agent also requires on_behalf_of."),
   model: z.string().regex(/^\S{1,200}$/).optional().describe("The model to run on the job's agent (an api or subscription agent), e.g. \"gpt-6-sol\". Overrides the role's model and the agent's default. Required when the role's model is \"auto\" or the agent has no default. The `army` tool lists each agent's models. Refused on the local agent, whose model `nomarmy model` sets."),
   run_id: z.string().regex(/^run-[a-z0-9-]{1,80}$/).optional().describe("The /feature run this job belongs to (from run_start). Admission then enforces the run's limits (jobs, api spend, hours) and refuses an agent the run has paused after a vendor usage-limit error; the finished job is recorded into the run."),
-  report: z.enum(["brief", "standard", "full"]).optional().describe("How much the worker may report back, capped by its agent's tier: brief (today's local-sized report), standard (the default), full (the frontier ceiling: about 2k tokens for implement, 4k for a scout). The report lands in your own context and is re-read every later turn, so ask for full only when the job's findings are the point (a broad review). No effect on the local model, whose caps are calibrated."),
+  report: z.enum(["brief", "standard", "full"]).optional().describe("How much the worker may report back, capped by its agent's tier: brief (today's local-sized report), standard (the default), full (the frontier ceiling: about 2k tokens for implement, 4k for a scout). An api or subscription scout defaults to full because its findings are the point; other jobs default to standard. The report lands in your own context and is re-read every later turn. No effect on the local model, whose caps are calibrated."),
   commit_subject: z.string().max(200).optional().describe("implement: the subject line of the commit nomArmy makes on the worker branch, e.g. \"Keep held-back tables in the list_tables cache\". Defaults to the task's first sentence; the body is the worker's NOTE, and the job id is a trailer."),
   army_role: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional().describe("Dispatch by army role (e.g. \"sr-dev\", \"security-analyst\"): nomArmy runs it on the agent this repo assigns to that role and puts the role's description at the top of the brief. Call the `army` tool first to see this repo's roles. Mutually exclusive with agent. Add on_behalf_of in case the role's agent is a subscription; it's ignored otherwise."),
   confirm_over_limit: z.boolean().optional().describe("Override a reached usage limit: the General must ask the operator before resubmitting with confirm_over_limit: true, or send the job to another agent. nomArmy never sets it itself."),
@@ -364,6 +365,7 @@ server.tool("local_worker_start", "Start one worker or scout in the background a
     return toolText(JSON.stringify({ started: true, jobId: entry.jobId, workerId: entry.workerId, mode: entry.mode, state: "running",
       jobDir: path.join(jobsRoot, entry.jobId), timeoutSeconds: args.timeout_seconds,
       poll: { tool: "local_worker_status", job_id: entry.jobId, wait_seconds: MAX_STATUS_WAIT_SECONDS },
+      wait: `nomarmy jobs --wait ${entry.jobId}`,
       // This job's own lane and budget: a subscription job used to be
       // reported with the local model's figures.
       lane: jobLane(args), agent: args.mode === "verify" ? null : args.agentName ?? "local", model: args.model ?? null,

@@ -758,3 +758,71 @@ test("jobs --prune removes runtime data only from finished jobs past the age cut
     rmSync(state, { recursive: true, force: true });
   }
 });
+
+function runJobsWait(state, jobId, extraArgs = []) {
+  return new Promise((resolve) => {
+    execFile(process.execPath, [CLI_PATH, "jobs", "--wait", jobId, ...extraArgs], {
+      encoding: "utf8", env: { ...process.env, NOMARMY_AGENT_STATE: state },
+    }, (error, stdout, stderr) => resolve({ exitCode: error?.code ?? 0, stdout, stderr }));
+  });
+}
+
+test("jobs --wait returns an already-finished job with the exact JSON contract and exit status", async () => {
+  const state = mkdtempSync(path.join(tmpdir(), "nomarmy-wait-finished-"));
+  try {
+    const dir = path.join(state, "jobs", "done-job");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify({ state: "finished" }));
+    fs.writeFileSync(path.join(dir, "metadata.json"), JSON.stringify({
+      outcome: "WORKER_DONE", coordinatorStatus: "complete", branch: "worker/done-job",
+      commit: { sha: "abc123" }, issues: [],
+    }));
+    const result = await runJobsWait(state, "done-job", ["--json"]);
+    assert.equal(result.exitCode, 0);
+    const output = JSON.parse(result.stdout);
+    assert.deepEqual(Object.keys(output), ["jobId", "outcome", "coordinatorStatus", "branch", "commit", "issues"]);
+    assert.deepEqual(output, { jobId: "done-job", outcome: "WORKER_DONE", coordinatorStatus: "complete", branch: "worker/done-job", commit: "abc123", issues: [] });
+  } finally {
+    rmSync(state, { recursive: true, force: true });
+  }
+});
+
+test("jobs --wait blocks for a running job, then reports the first issue and exits 1", async () => {
+  const state = mkdtempSync(path.join(tmpdir(), "nomarmy-wait-running-"));
+  try {
+    const dir = path.join(state, "jobs", "running-job");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify({ state: "running" }));
+    const startedAt = Date.now();
+    const pending = runJobsWait(state, "running-job", ["--timeout", "5"]);
+    setTimeout(() => {
+      fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify({ state: "finished" }));
+      fs.writeFileSync(path.join(dir, "metadata.json"), JSON.stringify({
+        outcome: "NEEDS_REVIEW", coordinatorStatus: "needs_review", issues: ["first problem", "second problem"],
+      }));
+    }, 600);
+    const result = await pending;
+    assert.ok(Date.now() - startedAt >= 550, "the command stayed blocked until the delayed result was written");
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.stdout.trim(), "running-job NEEDS_REVIEW needs_review issue=first problem");
+  } finally {
+    rmSync(state, { recursive: true, force: true });
+  }
+});
+
+test("jobs --wait exits 2 for an unknown job and a timeout", async () => {
+  const state = mkdtempSync(path.join(tmpdir(), "nomarmy-wait-errors-"));
+  try {
+    const unknown = await runJobsWait(state, "missing", ["--json"]);
+    assert.equal(unknown.exitCode, 2);
+    assert.deepEqual(JSON.parse(unknown.stdout), { error: "unknown job id: missing" });
+    const dir = path.join(state, "jobs", "slow-job");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify({ state: "running" }));
+    const timedOut = await runJobsWait(state, "slow-job", ["--timeout", "0", "--json"]);
+    assert.equal(timedOut.exitCode, 2);
+    assert.deepEqual(JSON.parse(timedOut.stdout), { error: "timed out waiting for job slow-job" });
+  } finally {
+    rmSync(state, { recursive: true, force: true });
+  }
+});
