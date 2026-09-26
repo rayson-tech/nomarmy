@@ -25,7 +25,7 @@
     "@secretlint/node": "^13.0.5",
     "@secretlint/secretlint-rule-preset-recommend": "^13.0.5",
     "yaml": "^2.5.0",
-    "zod": "^3.24.0"
+    "zod": "^4.6.5"
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs",
