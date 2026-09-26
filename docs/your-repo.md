@@ -204,7 +204,7 @@ registries:
 ```
 
 A pip path whose basename is `.netrc` or `netrc` also selects netrc mode.
-`pip.conf` configures pip (including the pip bootstrap for uv), **not**
+`pip.conf` configures pip, **not**
 uv's own index selection or authentication. Declare credential-free
 index/source URLs in the project's manager configuration and use netrc for
 uv. npm, pnpm, Yarn Classic and bun use the mounted `.npmrc`.
@@ -227,7 +227,23 @@ Private Python packages must ship **wheels**: pip uses `--only-binary=:all:` and
 uv uses `--no-build`; source-only packages fail with an install marker. Poetry
 cannot guarantee build-free installs, so credentialed Poetry builds are refused;
 use uv or wheels via pip. Poetry and Yarn Berry are not supported with registries
-yet. A changed dependency input, or an unavailable trusted
+yet. Credentialed pip requirements and pyproject dependency lists reject VCS,
+direct URLs, local paths/archives and editable requirements before Podman runs.
+Repository-contained `-r`/`-c` includes are followed and checked; escaping includes
+are refused. Requirements options are limited to HTTPS `--index-url`/`-i`,
+`--extra-index-url`, `--find-links`, plus `--trusted-host`, `--require-hashes`
+and `--hash`. Binary-policy overrides and all other options are refused.
+uv locks with git, URL or path dependency sources are also refused.
+Preflight TOML validation requires Python 3.11+ on the build host and fails
+closed if the parser is unavailable.
+These restrictions prevent dependency build code from executing with credentials.
+Corepack fetches pnpm/Yarn in an earlier unmounted RUN as the install user;
+its populated cache remains available and its network/download prompts are disabled
+under the mount. Bun is installed globally as root before any mount. uv is pinned
+to 0.8.22 and installed binary-only from PyPI in an unmounted RUN; only its frozen,
+build-free dependency sync runs with credentials. Recipe previews read no declared
+credential paths; only build calls with a trusted checkout read its declarations.
+A changed dependency input, or an unavailable trusted
 checkout, produces an uncredentialed build with no secret flags or mounts.
 Without a trusted checkout, only the local YAML `registries` key is detected;
 declared credential files are not inspected or read.
