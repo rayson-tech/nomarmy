@@ -1,6 +1,7 @@
 import "./helpers/isolate-global-config.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { stringify } from "yaml";
@@ -10,7 +11,9 @@ import { HARNESS_DOCS, generateHarnessDocs, checkHarnessDocs } from "../scripts/
 
 const minimal = (name = "example") => ({ name, summary: "Example", detect: [], image: { builtin: "node" } });
 function temporary(t) {
-  const dir = fs.mkdtempSync(path.join(path.dirname(HARNESS_ROOT), ".harness-test-"));
+  // Outside any checkout: inside one, package discovery asks git, which
+  // lists only committed files and would miss a fixture's lockfile.
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-harness-test-")));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
