@@ -11,6 +11,7 @@ Workers always remain offline. See the [plan](plans/2026-09-25-sandbox-dependenc
 
 | Harness | Summary | Detects | Network | Requires |
 |---------|---------|---------|---------|----------|
+| [browser-playwright](https://github.com/rayson-tech/nomarmy/blob/main/harnesses/browser-playwright/README.md) | Offline Chromium end-to-end tests with the repository's Playwright version | package: @playwright/test; file: playwright.config.ts; file: playwright.config.js; file: playwright.config.mjs | none | memoryMb: 1024, shmMb: 512 |
 | [go](https://github.com/rayson-tech/nomarmy/blob/main/harnesses/go/README.md) | Go toolchain with prefetched modules for offline verification | file: go.mod; file: go.work | none | none |
 | [node](https://github.com/rayson-tech/nomarmy/blob/main/harnesses/node/README.md) | Node dependencies and workspaces installed with npm, pnpm, yarn or bun | lockfile: package-lock.json; lockfile: npm-shrinkwrap.json; lockfile: pnpm-lock.yaml; lockfile: yarn.lock; lockfile: bun.lock; lockfile: bun.lockb | none | none |
 | [python](https://github.com/rayson-tech/nomarmy/blob/main/harnesses/python/README.md) | Python dependencies from uv, Poetry, pyproject, or requirements files | file: uv.lock; file: poetry.lock; file: pyproject.toml; file: requirements.txt | none | none |

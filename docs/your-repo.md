@@ -79,3 +79,19 @@ Run the narrow pass on the touched files for a fast, sharp signal, *and* the bro
 - **Tests made to pass.** New skip markers, stubbed imports, fake modules named like a dependency, and stray backup files are flagged for review.
 - **Code wired to nothing.** A new function or class that nothing outside its own test calls is flagged (heuristic and review-only).
 - **Secrets.** Every diff and report is scanned for known secret shapes (secretlint's recommended preset) before a commit is allowed; a match blocks it.
+
+## Browser verification and evidence
+
+For a repository with a real Playwright end-to-end gate, select the `browser`
+profile (`npx playwright test`). The browser-playwright harness installs the
+repository's matching Chromium version and declares 1024 MB memory / 512 MB
+shared memory. See [the browser harness](../harnesses/browser-playwright/README.md)
+for offline setup and OpenClaw's `--disable-dev-shm-usage` launch option.
+Usually the General checks UI changes itself after merging.
+
+After independent implement verification and `mode: verify`, matching
+`test-results/**` and `playwright-report/**` files (including screenshots and
+traces) are copied into the job's `artifacts/` directory. Job records list
+job-relative paths in `verification.artifacts`. Collection skips symlinks and
+is capped at 200 files / 50 MB; `verification.artifactsCapped` and the detail
+report when the cap is reached.

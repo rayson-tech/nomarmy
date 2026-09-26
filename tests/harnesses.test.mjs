@@ -61,14 +61,14 @@ test("harness schema rejects forbidden declarations", () => {
   for (const spec of bad) assert.equal(schema.safeParse(spec).success, false, JSON.stringify(spec));
 });
 
-test("registry loads exactly four built-ins and ignores template", () => {
+test("registry loads exactly five built-ins and ignores template", () => {
   const result = loadHarnesses();
   assert.deepEqual(Object.keys(result).sort(), ["harnesses", "problems"]);
   assert.deepEqual(result.problems, []);
-  assert.deepEqual(Object.keys(result.harnesses).sort(), ["go", "node", "python", "rust"]);
+  assert.deepEqual(Object.keys(result.harnesses).sort(), ["browser-playwright", "go", "node", "python", "rust"]);
   for (const [name, spec] of Object.entries(result.harnesses)) {
     assert.equal(spec.name, name);
-    assert.deepEqual(spec.image, { builtin: name });
+    assert.deepEqual(spec.image, { builtin: name === "browser-playwright" ? "playwright" : name });
     assert.equal(spec.network, "none");
   }
 });

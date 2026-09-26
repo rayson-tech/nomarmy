@@ -1,0 +1,18 @@
+name: browser-playwright
+summary: Offline Chromium end-to-end tests with the repository's Playwright version
+detect:
+  - package: '@playwright/test'
+  - file: playwright.config.ts
+  - file: playwright.config.js
+  - file: playwright.config.mjs
+after: [node]
+image:
+  builtin: playwright
+verification:
+  browser: npx playwright test
+artifacts: [test-results/**, playwright-report/**]
+requires:
+  memoryMb: 1024
+  shmMb: 512
+network: none
+docs: README.md
