@@ -31,6 +31,10 @@ test("createRun/loadRun: a run belongs to a repo, starts running, and has a log 
   assert.match(run.id, /^run-join-partners-in-schema-context-[0-9a-f]{6}$/);
   assert.equal(run.status, "running");
   assert.equal(run.logPath, path.join(dir, `${run.id}.md`));
+  // The log exists from the start, with the sections the General fills in.
+  const log = fs.readFileSync(run.logPath, "utf8");
+  assert.match(log, new RegExp(`^# Join partners in schema context! \\(${run.id}\\)`));
+  for (const section of ["## Plan", "## Decisions", "## Jobs", "## Review", "## What's left"]) assert.ok(log.includes(section), section);
   assert.deepEqual(loadRun(dir, run.id).limits, LIMITS);
   assert.throws(() => loadRun(dir, "run-nope"), /unknown run/);
   assert.throws(() => loadRun(dir, "../../etc/passwd"), /not a run id/);
