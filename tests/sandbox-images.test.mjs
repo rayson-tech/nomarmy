@@ -276,13 +276,13 @@ test("resolveSandboxImage: a Python repo with nothing to install still gets the 
   }
 });
 
-test("nodeDependencyFiles: package.json plus an npm lockfile installs; other lockfiles, workspaces and opt-out say why not", () => {
+test("nodeDependencyFiles: package.json plus an npm lockfile installs; supported lockfiles and workspaces install; opt-out says why not", () => {
   const cases = [
     [{ "package.json": "{}", "package-lock.json": "{}" }, null, ["package.json", "package-lock.json"], null],
     [{ "package.json": "{}", "npm-shrinkwrap.json": "{}" }, null, ["package.json", "npm-shrinkwrap.json"], null],
     [{ "package.json": "{}" }, null, [], "no package-lock.json"],
-    [{ "package.json": "{}", "pnpm-lock.yaml": "" }, null, [], "pnpm-lock.yaml isn't supported yet (npm lockfiles only)"],
-    [{ "package.json": JSON.stringify({ workspaces: ["pkgs/*"] }), "package-lock.json": "{}" }, null, [], "npm workspaces aren't supported yet"],
+    [{ "package.json": "{}", "pnpm-lock.yaml": "" }, null, ["package.json", "pnpm-lock.yaml"], null],
+    [{ "package.json": JSON.stringify({ workspaces: ["pkgs/*"] }), "package-lock.json": "{}" }, null, ["package.json", "package-lock.json"], null],
     [{ "package.json": "{}", "package-lock.json": "{}" }, { environment: { node: { install: false } } }, [], "environment.node.install is false"],
   ];
   for (const [files, config, expected, reason] of cases) {
@@ -338,9 +338,9 @@ test("nodeDependencyFiles: every package with its own npm lockfile installs, not
   });
   try {
     const got = nodeDependencyFiles(dir, null);
-    assert.deepEqual(got.packages, [".", "lambda/mcp_server", "lambda/mcp_server/widgets", "ui"]);
+    assert.deepEqual(got.packages, [".", "lambda/mcp_server", "lambda/mcp_server/widgets", "ui", "web", "ws"]);
     assert.ok(got.files.includes("ui/package-lock.json") && got.files.includes("lambda/mcp_server/widgets/package.json"));
-    assert.deepEqual(got.skipped, [{ dir: "ws", reason: "npm workspaces aren't supported yet" }], "a lockfile-less yarn package isn't a lockfile dir at all; node_modules is never searched");
+    assert.deepEqual(got.skipped, [], "all supported lockfiles install; node_modules is never searched");
     // No root package at all: the others still install.
     const noRoot = fakeRepo({ "ui/package.json": "{}", "ui/package-lock.json": "{}" });
     try { assert.deepEqual(nodeDependencyFiles(noRoot, null).packages, ["ui"]); } finally { fs.rmSync(noRoot, { recursive: true, force: true }); }

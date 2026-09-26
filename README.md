@@ -102,7 +102,7 @@ What we've learned from real runs, including where delegating pays and where it 
 - **Claude subscription token counts** come from the Claude CLI's own session log, since OpenClaw sees only the final reply. Totals include cache reads and writes, which make up most of an agent's prompt; each part is also kept separately.
 - **Test-workaround detection is a flag, not a verdict**: a legitimate new skip still gets flagged.
 - **Deploy-time failures need your own check.** See [Add a check for what unit tests can't see](https://github.com/rayson-tech/nomarmy/blob/main/docs/your-repo.md#nomarmyyml).
-- **Node dependencies install only from npm lockfiles**, one per package (no workspaces, yarn, pnpm or bun yet), and only from the public registry: the image build has no credentials for a private one.
+- **Node private registries are not supported yet**: npm, pnpm, yarn and bun lockfiles and workspaces are supported, but the image build has no credentials for private registries (dependency plan step 8).
 - **Verification needing services** (a database, a mock server) reports `not_run` instead of running without them. The compose parser doesn't resolve YAML anchors.
 - **Same-host sandboxes**: the MCP server, OpenClaw and every job's sandbox run on the machine with the coordinator. Only the model can be elsewhere (an agent, or [a shared model server](https://github.com/rayson-tech/nomarmy/blob/main/docs/install.md#a-shared-model-server)).
 
