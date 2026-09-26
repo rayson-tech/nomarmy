@@ -20,6 +20,8 @@ Every platform needs Git and Podman. `nomarmy doctor` checks the host and prints
 
 **From npm or a clone:** `npm install -g nomarmy@alpha` (or `git clone` and `npm install && npm link`) gives you the `nomarmy` command, and `nomarmy setup` does the rest. `nomarmy install` runs the bundled `install.sh` for the profile setup chose; the per-platform guides below show the same steps by hand.
 
+**Updating:** `nomarmy update` installs the latest alpha (or pulls, in a clone) and reconnects Claude Code, Codex and Cursor. Then restart every open coordinator session: each one runs the copy of nomArmy it started with. Until you do, `army` and `local_worker_capacity` tell that session to restart, and `nomarmy health` flags any coordinator still running an older copy.
+
 ## Hosted workers only
 
 No GPU and no local model: every job runs on an API key or a subscription (ChatGPT, Muse Code) you add as an agent. Git worktrees, the sandbox and verification still run on your machine, so you still need Git, Node and Podman. `nomarmy setup` walks these steps for you; by hand, they are:
