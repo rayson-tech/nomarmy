@@ -1,4 +1,4 @@
-FROM node:24-bookworm-slim
+FROM node:26-bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 # Same base as docker/Dockerfile plus a Go toolchain -- the worker's own
 # tool-calling harness needs Node regardless of the target repo's language.
