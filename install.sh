@@ -99,9 +99,23 @@ fi
 # on a fresh macOS install nothing has initialized that VM yet at this point.
 if nomarmy_is_cloud; then need aws || { echo 'ERROR: the AWS CLI is required for cloud profiles.'; exit 1; }; fi
 "$ROOT/scripts/install-llama-cpp.sh" "$NOMARMY_PROFILE"
+# A pinned npm release, which npm checks against the registry's integrity
+# hash, rather than piping a remote installer script into bash.
+OPENCLAW_VERSION="${NOMARMY_OPENCLAW_VERSION:-2026.9.6}"
 if ! command -v openclaw >/dev/null 2>&1; then
-  echo '==> Installing OpenClaw (non-interactive)'
-  curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard
+  if ! node -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit((a === 24 && b >= 16) || (a === 26 && b >= 1) || a > 26 ? 0 : 1)'; then
+    echo "ERROR: OpenClaw $OPENCLAW_VERSION needs Node 24.16+ or 26.1+; this is Node $(node -v)."
+    echo '       Upgrade Node and re-run this installer, or install OpenClaw yourself first:'
+    echo '         https://openclaw.ai (then re-run this installer)'
+    exit 1
+  fi
+  echo "==> Installing OpenClaw $OPENCLAW_VERSION from npm"
+  if [[ -w "$(npm prefix -g)" ]]; then
+    npm install -g "openclaw@$OPENCLAW_VERSION" --no-audit --no-fund
+  else
+    # No writable global prefix: install for this user, as OpenClaw's own installer does.
+    npm install -g --prefix "$HOME/.npm-global" "openclaw@$OPENCLAW_VERSION" --no-audit --no-fund
+  fi
   export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 fi
 need openclaw

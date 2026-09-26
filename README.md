@@ -12,7 +12,7 @@
 
 ## TL;DR
 
-1. **Have** Git, Node 20+ and [Podman](https://podman.io) (on macOS: `brew install podman && podman machine init --memory 8192 && podman machine start`; Podman's 2 GiB default is too small for nomArmy's sandboxes).
+1. **Have** Git, Node 24.16+ (or 26.1+; OpenClaw, which nomArmy installs, needs it) and [Podman](https://podman.io) (on macOS: `brew install podman && podman machine init --memory 8192 && podman machine start`; Podman's 2 GiB default is too small for nomArmy's sandboxes).
 2. **Install and set up:**
    ```bash
    npm install -g nomarmy@alpha
