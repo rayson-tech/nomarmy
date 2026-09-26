@@ -139,7 +139,7 @@ test("generated harness docs match the committed page and detect stale metadata"
   fs.copyFileSync(HARNESS_DOCS, output);
   assert.doesNotThrow(() => checkHarnessDocs(copy, output));
   const file = path.join(copy, "node/harness.yml");
-  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("Node dependencies installed with npm ci", "Changed summary | with <markup>"));
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("Node dependencies and workspaces installed with npm, pnpm, yarn or bun", "Changed summary | with <markup>"));
   assert.throws(() => checkHarnessDocs(copy, output), { message: "Harness docs are stale. Run npm run docs:harnesses." });
   const generated = generateHarnessDocs(copy);
   assert.match(generated, /Changed summary &#124; with &lt;markup&gt;/);

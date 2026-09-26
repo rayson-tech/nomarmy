@@ -1,7 +1,12 @@
 name: node
-summary: Node dependencies installed with npm ci
+summary: Node dependencies and workspaces installed with npm, pnpm, yarn or bun
 detect:
   - lockfile: package-lock.json
+  - lockfile: npm-shrinkwrap.json
+  - lockfile: pnpm-lock.yaml
+  - lockfile: yarn.lock
+  - lockfile: bun.lock
+  - lockfile: bun.lockb
 after: []
 image:
   builtin: node
