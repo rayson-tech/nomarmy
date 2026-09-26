@@ -16,6 +16,11 @@ test("podmanProblem: null when Podman answers; otherwise its reason and how to s
   assert.match(down, /Podman isn't answering \(Cannot connect to Podman/);
   assert.match(down, /no job was sent/);
   assert.match(down, /podman machine start/);
+  // Slow isn't stopped: a timeout says so, and warns against a restart.
+  const slow = podmanProblem({ run: () => ({ status: null, error: Object.assign(new Error("spawnSync podman ETIMEDOUT"), { code: "ETIMEDOUT" }) }) });
+  assert.match(slow, /didn't answer within 15 seconds/);
+  assert.match(slow, /starved/);
+  assert.match(slow, /Don't restart Podman while jobs are running/);
 });
 
 test("podmanVmStartedAt: the running machine's LastUp on macOS and Windows; null on Linux", () => {
