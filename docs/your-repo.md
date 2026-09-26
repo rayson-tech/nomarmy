@@ -73,6 +73,8 @@ verification:
 
 Run the narrow pass on the touched files for a fast, sharp signal, *and* the broad pass whenever production code changed: a shared module can have far more dependents than the files a diff happens to touch. Running the changed tests on their own also catches a test that only passes inside the full suite.
 
+**Both variables are empty when nothing changed**, as in `mode: verify` on a branch, so guarded commands like these exit 0 without running anything. nomArmy counts such a command as skipped, not passed: it exits 0, prints nothing, and every `NOMARMY_CHANGED_*` variable it names is empty. If every command in a profile skipped, verification is `not_run`, never a pass. Keep an unscoped profile (`python3 -m pytest tests/ -q`) for running the full suite on demand.
+
 ## What else nomArmy checks
 
 - **Tests that prove nothing.** With `verify_regression` (on whenever a job has a verification profile), nomArmy reverts the production change and re-runs the tests: a test that still passes is flagged.

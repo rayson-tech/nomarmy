@@ -754,3 +754,51 @@ test("buildPodmanArgs: npm's cache goes to /tmp and its update check is off in e
     assert.ok(i > 0 && args[i - 1] === "--env", kv);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Guarded no-ops: the scoping pattern docs/your-repo.md recommends exits 0
+// without running anything when nothing changed, and read as "2 of 2 passed"
+// (a Senti verify run). Skipped is not passed.
+// ---------------------------------------------------------------------------
+
+const GUARD_TESTS = 'if [ -n "$NOMARMY_CHANGED_TEST_FILES" ]; then python3 -m pytest $NOMARMY_CHANGED_TEST_FILES -q; fi';
+const GUARD_SUITE = 'if [ -n "$NOMARMY_CHANGED_PRODUCTION_FILES" ]; then python3 -m pytest tests/ -q; fi';
+const NOTHING_CHANGED = { NOMARMY_CHANGED_TEST_FILES: "", NOMARMY_CHANGED_PRODUCTION_FILES: "" };
+const silentPass = (command) => ({ command, started: true, exitCode: 0, stdout: "", stderr: "" });
+
+test("classifyResults: every command a guarded no-op is not_run, never a pass", () => {
+  const verdict = classifyResults([silentPass(GUARD_TESTS), silentPass(GUARD_SUITE)], { env: NOTHING_CHANGED });
+  assert.equal(verdict.status, "not_run");
+  assert.match(verdict.detail, /nothing changed, so none ran/);
+  assert.match(verdict.detail, /NOMARMY_CHANGED_TEST_FILES is empty; NOMARMY_CHANGED_PRODUCTION_FILES is empty/);
+});
+
+test("classifyResults: some skipped passes on what ran, and names what skipped", () => {
+  const verdict = classifyResults([silentPass(GUARD_TESTS), { ...silentPass(GUARD_SUITE), stdout: "12 passed" }],
+    { env: { ...NOTHING_CHANGED, NOMARMY_CHANGED_PRODUCTION_FILES: "app.py" } });
+  assert.equal(verdict.status, "pass");
+  assert.match(verdict.detail, /^1 of 2 commands passed; 1 skipped: command 1 \(.*\) did nothing: NOMARMY_CHANGED_TEST_FILES is empty$/);
+});
+
+test("classifyResults: a silent command still ran when it names no changed-file variable, a set one, or has a fallback with output", () => {
+  assert.equal(classifyResults([silentPass("make check")], { env: NOTHING_CHANGED }).detail, "1 of 1 commands passed");
+  assert.equal(classifyResults([silentPass(GUARD_TESTS)], { env: { ...NOTHING_CHANGED, NOMARMY_CHANGED_TEST_FILES: "tests/test_a.py" } }).status, "pass");
+  assert.equal(classifyResults([{ ...silentPass("pytest ${NOMARMY_CHANGED_TEST_FILES:-tests/} -q"), stdout: "3 passed" }], { env: NOTHING_CHANGED }).detail, "1 of 1 commands passed");
+  // Output withheld under credentials still counts as silent when the raw output was empty.
+  assert.equal(classifyResults([{ ...silentPass(GUARD_TESTS), stdout: "output withheld", silent: true }], { env: NOTHING_CHANGED }).status, "not_run");
+  assert.equal(classifyResults([{ ...silentPass(GUARD_TESTS), stdout: "output withheld", silent: false }], { env: NOTHING_CHANGED }).status, "pass");
+  // A failure is still a failure, whatever else skipped.
+  assert.equal(classifyResults([silentPass(GUARD_TESTS), { ...silentPass(GUARD_SUITE), exitCode: 1 }], { env: NOTHING_CHANGED }).status, "fail");
+});
+
+test("createVerificationRunner: guarded commands on an unchanged checkout report not_run", async () => {
+  const host = tempRepo({});
+  const executor = fakeExecutor({ fallback: { started: true, exitCode: 0, stdout: "", stderr: "" } });
+  const config = { verification: { python: { environment: "none", commands: [GUARD_TESTS, GUARD_SUITE] } } };
+  const run = createVerificationRunner({ loadConfig: fixedConfig(config), executor, hostProjectDir: host });
+  const verdict = await run({ ...CONTEXT, profile: "python", cwd: tempRepo({}), mode: "verify", record: {} });
+  assert.equal(verdict.status, "not_run");
+  assert.equal(verdict.basis, "nothing-changed", "not a sandbox problem");
+  assert.match(verdict.reason, /nothing changed, so none ran/);
+  assert.equal(executor.calls.run.length, 2, "both commands were run; they just did nothing");
+});
