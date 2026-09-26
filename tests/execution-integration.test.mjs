@@ -45,7 +45,7 @@ test("remote admission ignores machine memory but retains slots and maxWorkers",
   const env = { NOMARMY_LLAMA_HOST: "gpu.internal" };
   const budgetState = { hardwareSnapshot: hardware, contextInfo: { slots: 3 }, budgets, refresh: async () => {} };
   let maxWorkers = 2;
-  const runtime = createJobRuntime({ env, projectDir: root, stateRoot: root, jobsRoot: root, leasesRoot: path.join(root, "leases"), budgetState,
+  const runtime = createJobRuntime({ env, projectDir: root, projectDirProblem: () => null, stateRoot: root, jobsRoot: root, leasesRoot: path.join(root, "leases"), budgetState,
     currentMaxWorkers: () => maxWorkers, budgetsForJob: () => budgets, subscriptionJobFieldProblems: () => [], repoPolicy: () => ({}),
   });
   for (const host of ["gpu.internal", "localhost"]) {

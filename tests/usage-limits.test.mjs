@@ -90,7 +90,7 @@ test("snapshot persistence recovers corrupt files and retains every provider ato
 
 function runtime(root) {
   const budgets = deriveBudgets({ env: {} });
-  return createJobRuntime({ env: { NOMARMY_EXECUTION: "hosted" }, projectDir: root, stateRoot: root, jobsRoot: path.join(root, "jobs"),
+  return createJobRuntime({ env: { NOMARMY_EXECUTION: "hosted" }, projectDir: root, projectDirProblem: () => null, stateRoot: root, jobsRoot: path.join(root, "jobs"),
     leasesRoot: path.join(root, "leases"), slotsRoot: path.join(root, "slots"),
     budgetState: { hardwareSnapshot: null, contextInfo: { slots: 3 }, budgets, refresh: async () => {} },
     currentMaxWorkers: () => 2, budgetsForJob: () => budgets, subscriptionJobFieldProblems: () => [], repoPolicy: () => ({}), modelCatalogReady: async () => {},
