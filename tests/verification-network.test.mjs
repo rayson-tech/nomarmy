@@ -117,7 +117,7 @@ test('verification egress isolates credentials, networks, redaction and cleanup'
     executor: createPodmanExecutor({ collect }),
   });
   const result = await runner({ cwd, profile: 'quick', jobId: 'egress-test' });
-  assert.deepEqual(Object.keys(result).sort(), ['artifacts', 'artifactsCapped', 'basis', 'detail', 'issues', 'network', 'output', 'reason', 'status']);
+  assert.deepEqual(Object.keys(result).sort(), ['artifacts', 'artifactsCapped', 'artifactsNote', 'basis', 'detail', 'issues', 'network', 'output', 'reason', 'status']);
   assert.equal(result.status, 'pass');
   assert.deepEqual(result.network, { allowlist: policy.allow, reached: ["dev-12345.okta.com:443"], credentials: ['OKTA_CLIENT_SECRET'] });
   assert.deepEqual(result.issues, ['verification had network access to dev-12345.okta.com:443, api.stripe.com:80']);
@@ -258,10 +258,11 @@ test('security: credentialed output and artifacts stay in disposable worktree', 
     assert.deepEqual(Object.keys(result).sort(), ['artifacts', 'artifactsCapped', 'artifactsNote', 'basis', 'detail', 'issues', 'log', 'network', 'profile', 'reason', 'status']);
     assert.equal(result.status, 'fail');
     assert.deepEqual(result.network, { allowlist: policy.allow, reached: ['api.stripe.com:80'], credentials: ['OKTA_CLIENT_SECRET'] });
-    assert.deepEqual(result.artifacts, ['artifacts/test-results/safe.txt']);
+    // No evidence is kept under credentials: a scan can't catch every encoding.
+    assert.deepEqual(result.artifacts, []);
     assert.equal(result.artifactsCapped, false);
-    assert.equal(result.artifactsNote, 'dropped 5 artifact(s) containing credentials');
-    assert.equal(fs.readFileSync(path.join(jobs, String(keep_output), result.artifacts[0]), 'utf8'), 'safe');
+    assert.equal(result.artifactsNote, 'artifacts not kept: credentials or a proxy token were in use');
+    assert.equal(fs.existsSync(path.join(jobs, String(keep_output), 'artifacts')), false, 'no evidence folder is written');
     assert.equal(fs.existsSync(copy), false);
     assert.equal(fs.readFileSync(path.join(cwd, 'tracked.txt'), 'utf8'), 'original');
     assert.equal(fs.existsSync(path.join(cwd, 'test-results')), false);
@@ -313,4 +314,32 @@ test('security: regression reached hosts and log merge into parent evidence', as
   assert.deepEqual(original.network.reached, ['dev-12345.okta.com:443', 'api.stripe.com:80']);
   assert.equal(fs.readFileSync(original.log, 'utf8'), 'dev-12345.okta.com:443 connected\n\n[regression check]\napi.stripe.com:80 connected');
   assert.equal(fs.readFileSync(path.join(cwd, 'new.mjs'), 'utf8'), 'worker');
+});
+
+test('security: an allowlist with no credentials still runs on a disposable copy and keeps no artifacts', async t => {
+  const cwd = temporary(t), jobs = temporary(t);
+  fs.writeFileSync(path.join(cwd, 'tracked.txt'), 'original');
+  let ranIn, tokenSeen;
+  const executor = {
+    probe: async () => ({ available: true }),
+    startServices: async () => ({ network: 'test', cleanup: async () => {}, logs: async () => 'api.stripe.com:80 connected' }),
+    run: async args => {
+      ranIn = args.cwd;
+      // A command writes the proxy URL (with its token) into a file.
+      tokenSeen = String(args.env?.HTTPS_PROXY ?? '');
+      fs.writeFileSync(path.join(args.cwd, 'tracked.txt'), tokenSeen);
+      fs.mkdirSync(path.join(args.cwd, 'test-results'), { recursive: true });
+      fs.writeFileSync(path.join(args.cwd, 'test-results', 'trace.txt'), tokenSeen);
+      return { started: true, exitCode: 0, durationMs: 5, stdout: 'ok', stderr: '' };
+    },
+  };
+  const flow = createVerificationFlow({ ensureJobsRoot: () => jobs });
+  flow.registerVerificationRunner(createVerificationRunner({ image: 'sandbox:1', loadConfig: () => ({ found: true, config }),
+    loadVerificationNetwork: () => ({ allow: policy.allow, env: {} }), hostEnv: {}, executor }));
+  const result = await flow.runIndependentVerification({ cwd, jobId: 'token-only', profile: 'quick' });
+  assert.notEqual(ranIn, cwd, 'commands ran on a copy, not the worktree');
+  assert.match(tokenSeen, /^http:\/\/nomarmy:[0-9a-f]{64}@egress:3128$/, 'the proxy token was issued');
+  assert.equal(fs.readFileSync(path.join(cwd, 'tracked.txt'), 'utf8'), 'original', 'nothing reached the worktree');
+  assert.deepEqual(result.artifacts, []);
+  assert.equal(fs.existsSync(path.join(jobs, 'token-only', 'artifacts')), false);
 });
