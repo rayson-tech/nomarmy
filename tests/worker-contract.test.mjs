@@ -608,6 +608,10 @@ async function initUnionRepo() {
   git("init", "-q");
   git("config", "user.email", "t@example.com");
   git("config", "user.name", "t");
+  // No background gc or maintenance: one still writing into .git/objects/pack
+  // made the cleanup below fail with ENOTEMPTY on a CI run.
+  git("config", "gc.auto", "0");
+  git("config", "maintenance.auto", "false");
   fs.writeFileSync(path.join(dir, "base.txt"), "base\n");
   git("add", "-A");
   git("commit", "-q", "-m", "init");
@@ -647,7 +651,7 @@ async function loadUnionServerModule(projectDir) {
     if (prevAgentState === undefined) delete process.env.NOMARMY_AGENT_STATE; else process.env.NOMARMY_AGENT_STATE = prevAgentState;
   }
 }
-function rmrf(...dirs) { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); }
+function rmrf(...dirs) { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 
 test("buildUnionBranch: two accepted jobs with disjoint changed files merge cleanly", async () => {
   const repo = await initUnionRepo();
