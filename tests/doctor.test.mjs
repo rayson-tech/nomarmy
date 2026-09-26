@@ -322,9 +322,9 @@ function passingFacts() {
 
 test("evaluateChecks reports overall ok when every check passes", () => {
   const checks = evaluateChecks(passingFacts());
-  assert.equal(checks.length, 7);
+  assert.equal(checks.length, 8);
   assert.ok(checks.every((c) => c.ok));
-  assert.deepEqual(checks.map((c) => c.id), ["node", "git", "git-longpaths", "podman", "podman-daemon", "podman-vm-memory", "endpoint"]);
+  assert.deepEqual(checks.map((c) => c.id), ["node", "git", "git-longpaths", "podman", "podman-daemon", "podman-vm-memory", "podman-idmap", "endpoint"]);
 });
 
 test("evaluateChecks fails the whole report when one check fails (defect #4 - no contradictory output)", () => {
@@ -375,7 +375,7 @@ test("runDoctor --json (injected facts) produces machine-readable, consistent ou
     const parsed = JSON.parse(printed);
     assert.equal(parsed.ok, true);
     assert.ok(Array.isArray(parsed.checks));
-    assert.equal(parsed.checks.length, 7);
+    assert.equal(parsed.checks.length, 8);
   } finally {
     console.log = originalLog;
   }

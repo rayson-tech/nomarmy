@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { pickMachine, planResize } from "../lib/sandbox-vm.mjs";
-import { checkPodmanMachineMemory } from "../lib/doctor.mjs";
+import { checkPodmanMachineMemory, checkPodmanIdMappings } from "../lib/doctor.mjs";
 
 const inspect = (machines) => JSON.stringify(machines);
 const vm = { Name: "podman-machine-default", State: "running", Resources: { CPUs: 8, Memory: 2048, DiskSize: 100 } };
@@ -37,4 +37,14 @@ test("doctor: a 2 GiB VM fails with the sandbox command as its fix; 8 GiB passes
   assert.equal(small.fix, "nomarmy sandbox --memory 8");
   assert.equal(checkPodmanMachineMemory({ podmanMachineMemoryMb: 8192 }).ok, true);
   assert.match(checkPodmanMachineMemory({ podmanMachineMemoryMb: null }).message, /not applicable/);
+});
+
+test("doctor: rootless Podman with one mapped ID fails with the repair; ranges present, or rootful, pass", () => {
+  const broken = checkPodmanIdMappings({ podmanIdMappings: { rootless: true, uid: 1, gid: 1 } });
+  assert.equal(broken.ok, false);
+  assert.match(broken.message, /no subordinate ID ranges/);
+  assert.match(broken.fix, /nomarmy sandbox --repair/);
+  assert.equal(checkPodmanIdMappings({ podmanIdMappings: { rootless: true, uid: 2, gid: 2 } }).ok, true);
+  assert.equal(checkPodmanIdMappings({ podmanIdMappings: { rootless: false, uid: 1, gid: 1 } }).ok, true);
+  assert.equal(checkPodmanIdMappings({ podmanIdMappings: null }).ok, true);
 });

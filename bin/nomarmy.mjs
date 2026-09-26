@@ -218,7 +218,8 @@ Usage: nomarmy <command> [options]
                   memory, disk and images. --memory <GiB> resizes it (stops,
                   sets, restarts; refused while jobs run); --prune removes
                   images no container uses (nomArmy rebuilds its own on
-                  demand); --yes skips the confirmation
+                  demand); --repair restores missing subordinate ID
+                  ranges (refused while jobs run); --yes skips confirming
   start <profile> Start local inference (wraps scripts/start-inference.sh).
   stop <profile>  Stop local inference (wraps scripts/stop-inference.sh).
   uninstall       Remove the MCP registration and install directory.
@@ -1805,7 +1806,7 @@ async function cmdSandbox() {
   const runningJobs = liveLeases(path.join(stateRoot, "leases")).length;
   const memoryGib = value("memory");
 
-  if (!memoryGib && !flag("prune")) {
+  if (!memoryGib && !flag("prune") && !flag("repair")) {
     if (json) return out({ platform: process.platform, machine, images, runningJobs, minimumMb: MIN_PODMAN_VM_MB });
     console.log(c.bold("🍪 nomArmy sandbox"));
     if (process.platform === "linux") console.log("\nPodman runs natively on Linux: there's no VM to size.");
@@ -1831,6 +1832,21 @@ async function cmdSandbox() {
     const r = podman(args, { stdio: "inherit" });
     if (r.status !== 0) throw new Error(`podman ${args.join(" ")} failed (exit ${r.status ?? "none"}).`);
   };
+
+  if (flag("repair")) {
+    // Restore the subordinate ID ranges a Podman machine ships with, only
+    // where they're missing, then let Podman re-read them.
+    if (process.platform === "linux") throw new Error("On Linux, add a range for your user to /etc/subuid and /etc/subgid (e.g. `sudo usermod --add-subuids 100000-1099999 --add-subgids 100000-1099999 $USER`), then run `podman system migrate`.");
+    if (!machine) throw new Error("No Podman machine found. Run: podman machine init && podman machine start");
+    // podman system migrate stops every container, a running job's sandbox included.
+    if (runningJobs > 0) throw new Error(`${runningJobs} nomArmy job(s) are running; the repair restarts Podman's containers and would kill their sandboxes. Run it when they're done.`);
+    const script = 'set -e; restored=0; for f in /etc/subuid /etc/subgid; do if ! grep -q "^$(id -un):" "$f" 2>/dev/null; then echo "$(id -un):100000:1000000" | sudo tee -a "$f" >/dev/null; echo "restored $f"; restored=1; else echo "$f already has a range"; fi; done; if [ "$restored" = 1 ]; then podman system migrate; else echo "nothing to repair"; fi';
+    if (!(await ask(`Restore missing subordinate ID ranges in the ${machine.name} VM and run podman system migrate?`))) { console.log(c.dim("Nothing changed.")); return; }
+    const r = spawnSync("podman", ["machine", "ssh", machine.name, script], { stdio: "inherit" });
+    if (r.status !== 0) throw new Error(`the repair failed (exit ${r.status ?? "none"}).`);
+    console.log(c.green("✓ Done. Check with: nomarmy doctor"));
+    return;
+  }
 
   if (memoryGib) {
     const plan = planResize({ gib: memoryGib, machine, hostMemoryMb: os.totalmem() / 1024 / 1024, runningJobs });
