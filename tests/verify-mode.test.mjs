@@ -114,7 +114,7 @@ test("verify against a real git repo: checks the named commit's content, maps pa
     mod.registerVerificationRunner(({ cwd, profile }) => {
       const content = fs.readFileSync(path.join(cwd, "result.txt"), "utf8").trim();
       seen.push({ content, profile });
-      return { status: content === "pass" ? "pass" : "fail", detail: `saw ${content}` };
+      return { status: content === "pass" ? "pass" : "fail", detail: `saw ${content}`, output: `$ npm test\nfull output: ${content}` };
     });
     const ok = await mod.executeJob({ mode: "verify", verification: "quick", task: "check", baseRef: passing, workerId: "v1" });
     assert.equal(ok.manifest.outcome, "VERIFIED");
@@ -124,6 +124,9 @@ test("verify against a real git repo: checks the named commit's content, maps pa
     assert.equal(bad.manifest.outcome, "VERIFICATION_FAILED", "default is HEAD, the failing commit");
     assert.equal(bad.manifest.coordinatorStatus, "failed");
     assert.deepEqual(seen, [{ content: "pass", profile: "quick" }, { content: "fail", profile: "quick" }]);
+    // The full output is kept beside the job record, for diagnosing a failure.
+    assert.equal(bad.manifest.verification.log, path.join(bad.jobDir, "verification.log"));
+    assert.equal(fs.readFileSync(bad.manifest.verification.log, "utf8"), "$ npm test\nfull output: fail");
     for (const r of [notRun, ok, bad]) {
       assert.equal(r.manifest.worktree, null);
       assert.ok(!fs.existsSync(path.join(r.jobDir, "worktree")), "the worktree is removed");
