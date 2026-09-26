@@ -115,4 +115,52 @@ Its non-secret `env` values are exported to the verification container; see
 [mock-oidc](../harnesses/mock-oidc/README.md) for issuer configuration.
 No ports are published and workers stay offline (`--network none`).
 `allowlist` harnesses cannot be enabled by committed `.nomarmy.yml`; that rung
-requires operator-local opt-in and is not implemented yet.
+requires the operator-local opt-in described below.
+
+## Verification-only external services
+
+Prefer the offline `services` harnesses. If a test genuinely needs a real
+external service, opt in from your coordinator checkout's **untracked,
+gitignored `.nomarmy.local.yml`**, never the committed `.nomarmy.yml`:
+
+```yaml
+verification_network:
+  allow: [dev-12345.okta.com, api.stripe.com:443]
+  env:
+    OKTA_CLIENT_SECRET: NOMARMY_TEST_OKTA_SECRET
+```
+
+Set `NOMARMY_TEST_OKTA_SECRET` in the host environment before running nomArmy.
+YAML contains variable **names**, never credential values. Restart the
+coordinator after changing the local policy: authority is snapshotted when the
+verification runner is created, never read from a worker's worktree. A missing
+or empty source variable makes verification `not_run`, naming that variable.
+
+**Use a dedicated test tenant with throwaway credentials, never production.**
+Verification executes worker-written code, which can abuse the test credential
+or send data to an allowed destination. Exact hostnames and ports restrict the
+route, not what that remote service permits. Captured output and
+`verification.log` redact literal credential values; do not deliberately encode
+secrets into output or write them into test artifacts.
+
+An omitted port means 443; specify `:80` explicitly for HTTP. Wildcards, IP
+literals, localhost and private names are refused. The proxy resolves each
+request itself, rejects any answer containing private/loopback/link-local or
+metadata addresses, and connects directly to the checked address. It does not
+follow redirects on behalf of tests: each new destination needs its own entry.
+
+Only the proxy joins an external network. Verification stays on its per-run
+internal network, with HTTP(S) proxy variables in both cases and `NO_PROXY` for
+service aliases. Tools that ignore proxies cannot reach the internet. The proxy
+runs non-root with all capabilities dropped and no-new-privileges, using the
+base sandbox image; that image must already be installed. Networks and
+containers are removed after the run, including failures. Workers remain on
+`network none`; test credentials reach neither workers, image builds nor the
+proxy. The job's verification record lists allowed host:ports and credential
+variable names, includes a network-access issue line, and retains proxy target
+verdicts (never request payloads) in the verification log. An incomplete audit
+log (including the 4 MiB capture limit or a log write failure) makes verification
+`not_run`, never a silent pass.
+
+This security boundary requires independent security review before merge;
+stubbed tests are not a substitute for live Podman topology proof.
