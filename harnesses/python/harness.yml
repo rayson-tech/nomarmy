@@ -1,0 +1,13 @@
+name: python
+summary: Python dependencies installed from requirements files
+detect:
+  - file: requirements.txt
+after: []
+image:
+  builtin: python
+verification:
+  quick: python3 -m unittest discover
+artifacts: []
+requires: {}
+network: none
+docs: README.md

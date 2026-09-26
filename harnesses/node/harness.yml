@@ -1,0 +1,13 @@
+name: node
+summary: Node dependencies installed with npm ci
+detect:
+  - lockfile: package-lock.json
+after: []
+image:
+  builtin: node
+verification:
+  quick: npm test
+artifacts: []
+requires: {}
+network: none
+docs: README.md

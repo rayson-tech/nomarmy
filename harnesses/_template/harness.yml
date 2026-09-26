@@ -1,0 +1,26 @@
+# Copy this folder to harnesses/<name>. Underscore folders are ignored.
+# name: example-harness # Required kebab-case name, equal to the folder name.
+# summary: Short description of what this installs.
+# detect: # Any matching rule applies. Paths are relative to the repo.
+#   - file: example.config.json
+#   - package: example-package # A Node dependency in a discovered package.json.
+#   - lockfile: example.lock
+# after: [node] # Existing harnesses that must precede this one.
+# image: # Choose declarative apt/run OR builtin, never both.
+#   apt: [example-package] # OS packages installed at image build time.
+#   run: ["example-install --frozen"] # Build commands, not worker commands.
+#   # builtin: node # Install logic implemented in lib/.
+# verification: # Proposed profiles mapped to commands or command lists.
+#   quick: example-test
+#   full: [example-lint, example-test]
+# artifacts: [test-results/**] # Repository-relative artifact globs.
+# requires: # Optional resource requirements.
+#   memoryMb: 1024
+#   shmMb: 512
+#   kvm: false
+# network: none # Default; services and allowlist are future verification levels.
+# services: [] # Service names; omit entirely for network none, even if empty.
+# suggestedRole: # Optional role suggestion.
+#   name: example-qa
+#   description: Runs the example suite.
+# docs: README.md # Default; path relative to this harness folder.

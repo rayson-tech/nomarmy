@@ -67,6 +67,7 @@ Around that core: **agents** say where a job can run, the **army** says which ro
 | [Agents and the army](https://github.com/rayson-tech/nomarmy/blob/main/docs/agents-and-army.md) | Where a job can run, who does what, usage limits, picking an agent |
 | [`/feature` runs](https://github.com/rayson-tech/nomarmy/blob/main/docs/feature-runs.md) | A feature end to end, and watching what nomArmy is doing |
 | [Your repository](https://github.com/rayson-tech/nomarmy/blob/main/docs/your-repo.md) | `.nomarmy.yml`, verification, languages and dependencies, what nomArmy checks |
+| [Harnesses](https://github.com/rayson-tech/nomarmy/blob/main/docs/harnesses.md) | Ecosystem registry, detection, network levels, and requirements |
 | [Configuration](https://github.com/rayson-tech/nomarmy/blob/main/docs/configuration.md) | Settings, swapping the local model, sizing, admission |
 | [Reference](https://github.com/rayson-tech/nomarmy/blob/main/docs/reference.md) | Every CLI command and MCP tool |
 | [Security posture](https://github.com/rayson-tech/nomarmy/blob/main/docs/security.md) | What the sandbox holds back, and the one exception |

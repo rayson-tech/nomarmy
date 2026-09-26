@@ -1,0 +1,13 @@
+name: go
+summary: Go toolchain only; module prefetch is not yet supported
+detect:
+  - file: go.mod
+after: []
+image:
+  builtin: go
+verification:
+  quick: go test ./...
+artifacts: []
+requires: {}
+network: none
+docs: README.md

@@ -18,6 +18,16 @@ npm test
 - Add or update a test for the behavior you changed. `tests/*.test.mjs` is organized roughly one file per `lib/*.mjs` module; put a new test next to the code it covers.
 - If you touched `mcp/server.mjs` and are testing against a real Claude Code or Codex session locally, remember the running MCP process needs `nomarmy connect claude` (or `codex`) rerun and the session restarted to pick up the change: it's a long-running process, not something reloaded per-request.
 
+## Adding a harness
+
+1. Copy `harnesses/_template/` to `harnesses/<name>/` and fill in `harness.yml` and every README section. Use a kebab-case name equal to the folder name.
+2. Add a tiny fixture repo under that harness's `fixture/` folder. Document its verification commands and expected results.
+3. Run `npm run docs:harnesses` to regenerate the [registry](docs/harnesses.md), then run `npm test`. CI rejects stale generated docs.
+
+Harnesses are strict data declarations. The schema refuses unknown keys, host paths, mounts, privileged mode, capabilities, devices, environment secrets, and credential fields. These restrictions prevent a contributed harness from expanding sandbox authority. Build commands are still code and need review; the schema cannot detect secrets embedded in arbitrary command strings. Use either built-in install logic or declarative `apt` and `run`, never both. Declare services by name only with `network: services` or `network: allowlist`; omit `services` for `none`.
+
+Image and network changes get a security review. Network declarations do not grant access: operator policy must authorize elevated verification networking when it is implemented. Workers always remain offline. Never commit credentials. The registry currently changes no image, job, or verification behavior.
+
 ## Code map
 
 The following table shows where core functionality now lives after splitting `mcp/server.mjs` into individual modules.

@@ -30,6 +30,8 @@ policy:
 
 ## Languages and dependencies
 
+See the [harness registry](harnesses.md) for ecosystem detection, network levels, and requirements. The registry is metadata only for now.
+
 The sandbox has no network, so dependencies are installed when its image is built, on your machine, and the image is cached by a hash of the dependency files.
 
 | Repo | Detected by | Sandbox |
