@@ -23,7 +23,7 @@ Every command proposes before it writes: a `[y/N]` prompt, or an explicit flag u
 | `nomarmy start` / `stop` | Starts or stops local inference. |
 | `nomarmy scan` | Reports the repo's execution environment. `--check` diffs it against `.nomarmy.yml`. |
 | `nomarmy validate` | Validates `.nomarmy.yml`. |
-| `nomarmy update` | From a clone: pulls (fast-forward only) and resyncs what each coordinator runs. From npm: tells you the npm command. |
+| `nomarmy update` | Updates nomArmy and reconnects every coordinator it finds. From npm: installs the latest alpha. From a clone: pulls (fast-forward only). Then restart open sessions; until you do, `army` and `local_worker_capacity` say so, and `nomarmy health` flags a coordinator still running an older copy. |
 | `nomarmy uninstall` | Removes the MCP registration and install. `--clear-agents`, `--clear-models` or `--all` go further. |
 
 ## MCP tools

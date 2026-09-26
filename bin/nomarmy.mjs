@@ -18,7 +18,8 @@ import { buildConfigProposal } from "../lib/propose.mjs";
 import { detectHardware } from "../lib/hardware.mjs";
 import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf.mjs";
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
-import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv } from "../lib/connect.mjs";
+import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv, defaultInstallDir } from "../lib/connect.mjs";
+import { compareVersions, readPackageVersion, readInstallVersions } from "../lib/install-freshness.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
 import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, agentProviderId, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
 import { loadArmy, mergeArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
@@ -115,8 +116,9 @@ Usage: nomarmy <command> [options]
                                       registration (never done silently)
                   --restart-inference with --json, also stop/start local
                                       inference (never done silently)
-  update          Pull the latest nomArmy code and re-sync the installed
-                  MCP copy (fast-forward only; refuses on local changes).
+  update          Update nomArmy and reconnect your coordinators: installs
+                  npm's latest alpha, or for a git checkout pulls (fast-forward
+                  only; refuses on local changes). Then restart open sessions.
   agents <list|add|update|remove>
                   Every account a job can run on, in one list:
                   ~/.config/nomarmy/agents.yml (or NOMARMY_CONFIG_DIR).
@@ -1642,14 +1644,9 @@ function git(args) {
  */
 async function cmdUpdate() {
   const say = (s) => { if (!json) console.log(s); };
-  // Installed from npm: there's no checkout to pull. npm updates the
-  // package; connect resyncs the copy each coordinator runs.
-  if (!fs.existsSync(path.join(nomarmyRoot, ".git"))) {
-    const how = "npm install -g nomarmy@alpha && nomarmy connect";
-    if (json) return out({ error: "installed from npm, not a git checkout", fix: how });
-    console.log(`This nomArmy was installed from npm, so there's nothing to pull. Update with:\n  ${how}`);
-    return;
-  }
+  // Installed from npm: npm updates the package, then connect resyncs the
+  // copy each coordinator runs.
+  if (!fs.existsSync(path.join(nomarmyRoot, ".git"))) return updateFromNpm();
   const status = git(["status", "--porcelain"]);
   if (status) {
     if (json) { out({ error: "working tree is not clean; refusing to pull over local changes", status }); process.exit(1); }
@@ -1702,6 +1699,45 @@ async function cmdUpdate() {
 
   if (json) return out({ updated: true, sha: git(["rev-parse", "HEAD"]), resynced });
   console.log(c.yellow("\nThe MCP server is a per-session child process: every open Claude Code / Codex / Cursor session needs a restart to pick this up, not just this one."));
+}
+
+// The coordinators nomArmy is registered with. Cursor has no CLI to probe,
+// so it counts when its own config already lists nomArmy.
+function connectedTargets() {
+  return [commandExists("claude") && "claude", commandExists("codex") && "codex", cursorAlreadyConnected() && "cursor"].filter(Boolean);
+}
+
+async function updateFromNpm() {
+  const current = readPackageVersion(nomarmyRoot);
+  let latest = null;
+  try { latest = execFileSync("npm", ["view", "nomarmy", "dist-tags.alpha"], { encoding: "utf8", timeout: 20000 }).trim(); } catch { /* offline */ }
+  if (!latest) {
+    const fix = "npm install -g nomarmy@alpha && nomarmy connect claude";
+    if (json) { out({ error: "could not read nomarmy's latest release from npm", fix }); process.exit(1); }
+    console.log(c.red("Couldn't reach npm to find nomArmy's latest release.") + ` Update by hand:\n  ${fix}`);
+    process.exit(1);
+  }
+  const { copyVersion } = readInstallVersions(defaultInstallDir());
+  const upgrade = compareVersions(current, latest) < 0;
+  const staleCopy = !copyVersion || compareVersions(copyVersion, upgrade ? latest : current) < 0;
+  if (!upgrade && !staleCopy) {
+    if (json) return out({ updated: false, version: current, reason: "already up to date" });
+    console.log(c.green(`✓ nomArmy ${current} is the latest, and your coordinators run it.`));
+    return;
+  }
+  if (upgrade) {
+    if (!json) console.log(c.bold(`🍪 Updating nomArmy ${current} → ${latest}\n`));
+    execFileSync("npm", ["install", "-g", `nomarmy@${latest}`, "--no-audit", "--no-fund"], { stdio: json ? "ignore" : "inherit" });
+  }
+  // A child process, so the reconnect runs the code just installed rather
+  // than the old code this process loaded.
+  const targets = connectedTargets();
+  if (targets.length) {
+    if (!json) console.log(`\nReconnecting ${targets.join(", ")}...`);
+    execFileSync(process.execPath, [path.join(nomarmyRoot, "bin", "nomarmy.mjs"), "connect", ...targets, ...(json ? ["--json"] : [])], { stdio: json ? "ignore" : "inherit" });
+  }
+  if (json) return out({ updated: upgrade, from: current, version: upgrade ? latest : current, resynced: targets });
+  console.log(c.yellow("\nRestart every open Claude Code, Codex and Cursor session: each keeps the code it started with until then."));
 }
 
 function commandExists(cmd) {

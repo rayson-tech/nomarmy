@@ -35,6 +35,7 @@ import { OUTCOMES, COORDINATOR_STATUS_BY_OUTCOME } from "../lib/outcomes.mjs";
 import { readUsageSnapshots, usageStatus } from "../lib/usage-limits.mjs";
 import { modelRefusals } from "../lib/health.mjs";
 import { podmanProblem, podmanVmStartedAt } from "../lib/podman-health.mjs";
+import { restartNotice } from "../lib/install-freshness.mjs";
 import { createBuildMetrics, resolveOutcome, finalText, workerMetadata, usageMetrics, policyAdmissionProblems, applyRefactorContract, applyVerificationPolicy, resolveVerifyRegression } from "../lib/outcome.mjs";
 import { compactJobRecord, formatResult, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner } from "../lib/job-format.mjs";
 
@@ -57,6 +58,7 @@ export { TEST_PATH_PATTERNS, isTestPath, testPatternFor, classifyTestChanges, de
 // package.json to the same relative location next to the installed
 // mcp/server.mjs, so this resolves identically in a dev checkout or an
 // installed copy.
+const SERVER_STARTED_MS = Date.now();
 const VERSION = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8")).version;
 // Sent to every coordinator on connect, so no project needs a copied CLAUDE.md.
 const server = new McpServer({ name: "nomarmy-local-worker", version: VERSION }, { instructions: COORDINATOR_INSTRUCTIONS });
@@ -406,9 +408,20 @@ server.tool("local_worker_status", `Status of one job started by this server: ph
   if (full && files.meta) return toolText(JSON.stringify(files.meta, null, 2), summary.coordinatorStatus !== "complete");
   return toolText(JSON.stringify({ ...summary, jobDir, hint: entry?.result || files.meta ? "call again with full=true for the complete report" : null }, null, 2), summary.state === "orphaned" || summary.state === "failed");
 });
+// Set when this session's copy of nomArmy changed on disk after it started
+// (nomarmy connect or update ran): shown first in army and capacity, and
+// notified once, since only a restart of this session picks it up.
+let restartNotified = false;
+function currentRestartNotice() {
+  const notice = restartNotice({ serverFile: fileURLToPath(import.meta.url), startedAtMs: SERVER_STARTED_MS, runningVersion: VERSION });
+  if (notice && !restartNotified) { restartNotified = true; try { notify("nomArmy: restart this session", notice); } catch { /* best-effort */ } }
+  return notice;
+}
+const withRestartNotice = (value) => { const notice = currentRestartNotice(); return notice ? { restartNeeded: notice, ...value } : value; };
+
 server.tool("local_worker_capacity", "What this host can take right now: context per nom and the brief/report budgets derived from it, memory pressure and whether another job would be admitted, and the jobs currently running. Read-only.", {}, async () => {
   await budgetState.refresh();
-  return toolText(JSON.stringify(capacitySnapshot(), null, 2));
+  return toolText(JSON.stringify(withRestartNotice(capacitySnapshot()), null, 2));
 });
 // The only way to know what `verification`/`union_verification`/
 // `verify_regression` profile names are actually valid for this repo used to
@@ -515,7 +528,7 @@ server.tool("army", "Who you, the General, are and who you call for what in this
         role.modelNote = `${role.model} isn't in OpenClaw's catalog for ${role.agent}; \`army assign\` checked it with a real test call when it was set, and the catalog can lag new models. Use it as assigned; if a job reports "Unknown model", reassign.`;
       }
     }
-    return toolText(JSON.stringify(summary, null, 2));
+    return toolText(JSON.stringify(withRestartNotice(summary), null, 2));
   } catch (error) {
     return toolText(error.message, true);
   }
