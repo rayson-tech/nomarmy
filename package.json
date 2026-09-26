@@ -28,7 +28,8 @@
     "zod": "^3.24.0"
   },
   "scripts": {
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "docs:harnesses": "node scripts/generate-harness-docs.mjs"
   },
   "bin": {
     "nomarmy": "bin/nomarmy.mjs"
@@ -43,6 +44,7 @@
     "scripts",
     "policies",
     "docker",
+    "harnesses",
     "install.sh",
     "e2e.sh",
     "LICENSE",

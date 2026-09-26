@@ -1,0 +1,13 @@
+name: rust
+summary: Rust toolchain only; crate prefetch is not yet supported
+detect:
+  - file: Cargo.toml
+after: []
+image:
+  builtin: rust
+verification:
+  quick: cargo test
+artifacts: []
+requires: {}
+network: none
+docs: README.md
