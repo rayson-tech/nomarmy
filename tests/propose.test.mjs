@@ -120,11 +120,12 @@ test("buildConfigProposal: a fixture-flagged requirements file is excluded, neve
   assert.ok(r.excludedFixturePaths.includes("tests/fixtures/python-svc/requirements.txt"));
 });
 
-test("buildConfigProposal: pyproject.toml/poetry/uv tooling evidence alone (no requirements.txt) proposes nothing -- the sandbox builder has no install path for it yet, so proposing environment.python would claim a capability that doesn't exist", () => {
+test("buildConfigProposal: pyproject tooling proposes pytest without a requirements override", () => {
   const r = buildConfigProposal(evidence({
     tooling: [{ name: "poetry", category: "package-manager", detail: "pyproject.toml", source: "pyproject.toml" }],
   }));
   assert.equal(r.proposal.environment, undefined);
+  assert.deepEqual(r.proposal.verification, { quick: { environment: "none", commands: ["pytest"] } });
 });
 
 test("buildConfigProposal: the returned proposal is always independently valid against the real schema", () => {
