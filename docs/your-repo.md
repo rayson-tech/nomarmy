@@ -30,7 +30,7 @@ policy:
 
 ## Languages and dependencies
 
-See the [harness registry](harnesses.md) for ecosystem detection, network levels, and requirements. Matched harnesses supply image layers and verification requirements.
+See the [harness registry](harnesses.md) for ecosystem detection, network levels, and requirements. Matched harnesses compose the dependency image and supply verification requirements.
 
 The sandbox has no network, so dependencies are installed when its image is built, on your machine, and the image is cached by a hash of the dependency files.
 
@@ -52,7 +52,7 @@ environment:
       - lambda/requirements.txt
 ```
 
-A package whose install fails (a private registry, say) is marked and skipped; the rest still install. npm workspaces, yarn, pnpm and bun aren't installed yet. For those repos, verification borrows your own checkout's `node_modules` read-only, which works for plain JavaScript packages but not for ones with native binaries built for your host.
+A package whose install fails is marked and skipped; the rest still install. The [Node harness](../harnesses/node/README.md) supports npm workspaces, yarn, pnpm and bun. Configure private dependency authentication using the build-only registry secrets below.
 
 ## Scoping verification to the diff
 
@@ -173,5 +173,132 @@ verdicts (never request payloads) in the verification log. An incomplete audit
 log (including the 4 MiB capture limit or a log write failure) makes verification
 `not_run`, never a silent pass.
 
-This security boundary requires independent security review before merge;
-stubbed tests are not a substitute for live Podman topology proof.
+This boundary has had an independent security review and a live Podman check:
+an allowed host is reached, an unlisted one is refused, and the credential
+never appears in output.
+
+## Private registries
+
+Declare build credentials **only in the gitignored `.nomarmy.local.yml`**, never
+in `.nomarmy.yml` or `.nomarmy.yaml` (both reject `registries`). No credential
+values belong in YAML. Paths must be absolute, `~/...`, or explicitly relative
+(`./...` or `../...`, resolved against the repository root), and must identify
+existing readable regular files. Keep the files outside the repository.
+
+```yaml
+registries:
+  npm: ~/.npmrc
+  pip: ~/.config/pip/pip.conf
+  go:
+    netrc: ~/.netrc
+    private: "github.com/acme/*"
+  cargo: ~/.cargo/credentials.toml
+```
+
+For uv, use a netrc instead of pip.conf:
+
+```yaml
+registries:
+  pip:
+    netrc: ~/.netrc
+```
+
+A pip path whose basename is `.netrc` or `netrc` also selects netrc mode.
+`pip.conf` configures pip, **not**
+uv's own index selection or authentication. Declare credential-free
+index/source URLs in the project's manager configuration and use netrc for
+uv. npm, pnpm, Yarn Classic and bun use the mounted `.npmrc`.
+Yarn Berry does not read `.npmrc`; a credentialed Berry build is currently
+rejected explicitly rather than silently installing without authentication.
+Cargo registry names/index URLs must likewise be configured without tokens in
+project metadata; the mounted credentials file supplies authentication.
+
+Credentials are used only when dependency inputs match the operator's trusted
+checkout (the MCP server's project directory) byte for byte, including the set
+of manifest, lockfile, workspace-member and Cargo configuration paths. Keep that
+checkout under operator control: it is the operator's **live working tree**, not
+a clean snapshot, and its contents (including uncommitted edits) are trusted by
+definition. Credentialed installs run no package code. npm-family installs use
+`--ignore-scripts`; lifecycle scripts run in a separate following RUN without
+credentials (`pnpm rebuild` for pnpm, `npm rebuild` for npm, Yarn Classic and
+Bun's npm-compatible node_modules tree). `bun pm untrusted` only lists scripts,
+so it is not used to execute them. Both install and rebuild failures leave markers.
+Private Python packages must ship **wheels**: pip uses `--only-binary=:all:` and
+uv uses `--no-build`; source-only packages fail with an install marker. Poetry
+cannot guarantee build-free installs, so credentialed Poetry builds are refused;
+use uv or wheels via pip. Poetry and Yarn Berry are not supported with registries
+yet. Credentialed pip requirements and pyproject dependency lists reject VCS,
+direct URLs, local paths/archives and editable requirements before Podman runs.
+Repository-contained `-r`/`-c` includes are followed and checked; escaping includes
+are refused. Requirements options are limited to HTTPS `--index-url`/`-i`,
+`--extra-index-url`, `--find-links`, plus `--trusted-host`, `--require-hashes`
+and `--hash`. Binary-policy overrides and all other options are refused.
+uv locks with git, URL or path dependency sources are also refused.
+Preflight TOML validation requires Python 3.11+ on the build host and fails
+closed if the parser is unavailable.
+These restrictions prevent dependency build code from executing with credentials.
+Corepack fetches pnpm/Yarn in an earlier unmounted RUN as the install user;
+its populated cache remains available and its network/download prompts are disabled
+under the mount. Bun is installed globally as root before any mount. uv is pinned
+to 0.8.22 and installed binary-only from PyPI in an unmounted RUN; only its frozen,
+build-free dependency sync runs with credentials. Recipe previews read no declared
+credential paths; only build calls with a trusted checkout read its declarations.
+A changed dependency input, or an unavailable trusted
+checkout, produces an uncredentialed build with no secret flags or mounts.
+Without a trusted checkout, only the local YAML `registries` key is detected;
+declared credential files are not inspected or read.
+Private installs may fail; verification detail and job issues name the changed
+paths and explain that private-registry credentials were not used.
+
+Use a **read-only, least-privilege token**, restricted to the packages needed by
+this repository. The credential files stay on the host: Podman receives only
+`--secret id=...,src=...` file references. A secret is mounted read-only for its
+built-in dependency-install RUN only, never COPYed into the build context or
+image. npm and Cargo mounts belong to node (uid 1000); Python installs run as
+root. Go gets a node-owned netrc and RUN-local `GOPRIVATE` and `GONOSUMDB`.
+Custom harness RUNs receive no secrets. Worker and verification containers get
+neither mounts nor credential environment variables. Local declarations are
+not merged into the returned job config or composition metadata.
+
+Tags hash the declaration and a one-way SHA-256 file digest. Install RUNs also
+include a one-way cache salt: rotating a credential invalidates the install
+layer, not just the tag. Changing a lockfile also rebuilds. Install output and
+credentialed build-error details are withheld; package-manager temporary files
+and authentication/log caches use tmpfs. An install can still leave the usual
+failure marker, so use verification to check that dependencies were installed.
+A credential selected as a dependency input (including a symlink or hardlink)
+is rejected before building.
+
+**Trust boundary:** build secrets are available to the package manager during
+its download/install RUN, with dependency scripts and source builds disabled.
+The package manager itself remains trusted; Podman secret mounts cannot stop a
+compromised installer from copying or exfiltrating a secret. Dependency lifecycle
+scripts run later without credentials, but are not otherwise made safe. Independent security review is required before merging
+this feature, including package-manager-specific credential/cache behavior.
+
+### Manual credential-isolation check
+
+Unit tests stub Podman; they prove recipe, context, argument, error and cache
+invariants, not the behavior of a real engine or package manager. Before merge,
+use a dedicated, revocable read-only canary credential to install one private
+dependency with each supported manager:
+
+1. Build the composed image; check that verification can use the dependency
+   offline. Repeat after rotating the canary and confirm the install RUN executes
+   again (not just a new image tag).
+2. Save `podman history --no-trunc IMAGE` and `podman image inspect IMAGE` to
+   private temporary files. Check that neither contains the canary bytes or
+   credential environment values. RUN text may name a mount target or digest;
+   it must not contain the token.
+3. Use `podman create IMAGE` (do not start it) and `podman export --output
+   rootfs.tar CONTAINER` to inspect the final filesystem. Also use `podman save
+   --format docker-archive --output image.tar IMAGE` and inspect **every unpacked
+   layer**, not just the merged filesystem. Search file contents for the canary
+   with a local scanner that returns only pass/fail, never matching secret lines.
+   Check credential targets and manager caches/logs explicitly; no credential
+   bytes may exist, even in a deleted lower-layer file.
+4. Repeat with an intentional authentication failure. Capture build errors and
+   job records/status/logs privately and check that no canary appears. Inspect
+   the worker/verification container configuration for credential mounts or
+   environment variables. Remove the inspection container and private archives,
+   and revoke the canary when finished.

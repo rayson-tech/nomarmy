@@ -343,3 +343,13 @@ test('security: an allowlist with no credentials still runs on a disposable copy
   assert.deepEqual(result.artifacts, []);
   assert.equal(fs.existsSync(path.join(jobs, 'token-only', 'artifacts')), false);
 });
+
+test('a local file with other settings (registries, the army) is not held to the network provenance rule', t => {
+  const dir = temporary(t);
+  fs.writeFileSync(path.join(dir, '.nomarmy.local.yml'), 'registries:\n  npm: ~/.npmrc\n');
+  let checked = 0;
+  assert.equal(loadVerificationNetwork(dir, { check: () => { checked++; return { status: 128 }; } }), null);
+  assert.equal(checked, 0, 'git provenance is only checked when the file grants network');
+  fs.writeFileSync(path.join(dir, '.nomarmy.local.yml'), 'verification_network:\n  allow: ["example.com"]\n');
+  assert.throws(() => loadVerificationNetwork(dir, { check: () => ({ status: 128 }) }), /untracked, gitignored/);
+});

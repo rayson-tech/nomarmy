@@ -24,3 +24,23 @@ The registry proposes `python3 -m unittest discover` as the `quick` profile. Con
 ## Requirements and artifacts
 
 No additional resource requirements or artifact globs are declared.
+
+
+## Private registries
+
+Use `registries:` in the gitignored `.nomarmy.local.yml` only; the committed
+config rejects it. Values are host credential **file paths**, never tokens.
+pip uses `/etc/pip.conf`; for uv or Poetry use `pip: { netrc: ~/.netrc }` and credential-free index/source URLs in project metadata. The secret is mounted only for the root-owned install RUN, including venv installs.
+
+Credentials stay on the host and enter Podman only as build-secret mounts;
+no credential files are copied into the context or passed to sandbox jobs.
+Use a **read-only, least-privilege token** and reviewed dependencies. Secrets
+are accessible to install code during that RUN, so malicious packages are not
+made safe by a mount. Credential rotation invalidates both tag and install
+cache. Credentialed install output/build-error details are withheld.
+
+See [Private registries](../../docs/your-repo.md#private-registries) for the
+configuration and required manual canary check: inspect `podman history
+--no-trunc`, image configuration, the exported filesystem **and every saved
+image layer**, plus failure logs/job records, for absent secret bytes. Unit
+tests stub Podman; live isolation needs independent security review.
