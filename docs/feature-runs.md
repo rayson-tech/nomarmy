@@ -24,6 +24,8 @@ army:
 
 The General can lower these for one run, never raise them. When a vendor answers with a usage-limit error, that agent is paused for the rest of the run and the General stops and tells you; it never moves the role to another vendor to get around it. The one limit no tool can see is your coordinator's own seat. If that runs out mid-feature, the run log (kept current after every phase) lets `/feature resume <run-id>` in a fresh session carry on.
 
+**Finishing a job that came back unfinished.** A build job that ends partial, blocked or failing verification keeps its worktree, uncommitted. The General finishes it with a new job carrying `continue_from: <that job id>` and a brief of just the correction (say, the one wrong expected value in its test). The new worktree starts from the old job's base with its changes in place, and the finished whole is verified and committed together, so the foundation doesn't land outside nomArmy's checks. The commit carries a `nomArmy-Continues:` trailer naming the earlier job.
+
 ## Watching what nomArmy is doing
 
 - **Claude Code's status line** shows what's running in this repo, a count for other repos, the open run, and the most serious health warning: `Opus 5.5 · rayson-senti │ 🍪 2: sr-dev codex 9m 10f · scout grok 1m │ run 3/14 $0.41`. `nomarmy connect claude` installs it unless you have your own; then `nomarmy statusline` prints nomArmy's part for you to add.

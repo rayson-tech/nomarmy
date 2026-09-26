@@ -36,6 +36,7 @@ import { readUsageSnapshots, usageStatus } from "../lib/usage-limits.mjs";
 import { modelRefusals } from "../lib/health.mjs";
 import { podmanProblem, podmanVmStartedAt } from "../lib/podman-health.mjs";
 import { restartNotice } from "../lib/install-freshness.mjs";
+import { probeModel } from "../lib/model-probe.mjs";
 import { createBuildMetrics, resolveOutcome, finalText, workerMetadata, usageMetrics, policyAdmissionProblems, applyRefactorContract, applyVerificationPolicy, resolveVerifyRegression } from "../lib/outcome.mjs";
 import { jobLabel, compactJobRecord, formatResult, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner } from "../lib/job-format.mjs";
 
@@ -271,6 +272,7 @@ const { WORKER_START_STAGGER_MS, activeJobs, runningCount, agentMaxConcurrent, w
   projectDir, stateRoot, jobsRoot, runsRoot, leasesRoot, slotsRoot, run, currentMaxWorkers, slug, agentsConfig, modelCatalogReady, budgetsForJob, resolveSubscriptionSelection, executeJob, subscriptionJobFieldProblems, repoPolicy, jobArgs,
   env: process.env, budgetState, getActiveRunId: () => activeRunId,
   sandboxProblem: () => podmanChecks?.problem() ?? null,
+  probeModel,
 });
 export { runningCount, track };
 
@@ -301,6 +303,7 @@ export const jobSchema = z.object({
   evidence: z.string().max(maxEvidenceChars,
     `Evidence exceeds the ${maxEvidenceChars}-character budget. This is for facts already resolved (e.g. with repo_evidence), not more description of the task -- if it needs more than this, resolve less per job or put the pointer (a path and line range) here instead of the material itself.`
   ).optional().describe("implement only: facts YOU already resolved (e.g. via repo_evidence) that the worker should trust and not re-derive -- exact signatures, call sites, line ranges, existing behavior. Cuts exploration that would otherwise burn the worker's own context budget on something you already know. Not a substitute for a clear objective and acceptance criteria."),
+  continue_from: z.string().regex(/^[A-Za-z0-9._-]{1,120}$/).optional().describe("implement only: the job id of a retained, uncommitted implement job (partial, blocked, or failed verification) whose unfinished work this job should finish. The new worktree starts from that job's base with its changes in place, so brief only the correction; the finished whole, that work included, is verified and committed together. Use this instead of fixing a worker's files yourself, which would land them unverified. Leave base_ref out."),
   worker_id: z.string().regex(/^[A-Za-z0-9._-]+$/).optional()
 });
 // A plain function, not jobSchema.superRefine: server.tool(...) registers
@@ -344,7 +347,7 @@ function jobArgs(args, workerId) {
   return { task: args.task, acceptance: args.acceptance, verification: args.verification, mode: args.mode, baseRef: args.base_ref,
     timeoutSeconds: args.timeout_seconds, profile: args.profile, reasoning: args.reasoning, pool: args.pool,
     subscriptionWorker, onBehalfOf: args.on_behalf_of, model: args.model ?? null, reportSize: args.report ?? null, evidence: args.evidence,
-    verifyRegression: resolveVerifyRegression(args), commitSubject: args.commit_subject ?? null, refactor: Boolean(args.refactor), workerId };
+    verifyRegression: resolveVerifyRegression(args), commitSubject: args.commit_subject ?? null, refactor: Boolean(args.refactor), continueFrom: args.continue_from ?? null, workerId };
 }
 server.tool("local_worker", "Run one isolated local worker and wait for it. mode=implement edits in its own worktree and the coordinator commits only on a valid done report (or a recovered job that passed independent verification); failed or incomplete worktrees are retained. mode=scout answers a question from a read-only snapshot with mandatory [path:line] citations that nomArmy verifies and expands. mode=decompose (also read-only) proposes 2+ independent subtasks for a broad objective instead of one worker turn trying to do too much; the proposal is never auto-dispatched, review it and make a separate call with the subtasks you choose. Refuses under memory pressure or over capacity; use local_worker_start + local_worker_status to avoid blocking.", jobSchema.shape,
   async rawArgs => {
