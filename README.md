@@ -12,7 +12,7 @@
 
 ## TL;DR
 
-1. **Have** Git, Node 20+ and [Podman](https://podman.io) (on macOS: `brew install podman && podman machine init && podman machine start`).
+1. **Have** Git, Node 20+ and [Podman](https://podman.io) (on macOS: `brew install podman && podman machine init --memory 8192 && podman machine start`; Podman's 2 GiB default is too small for nomArmy's sandboxes).
 2. **Install and set up:**
    ```bash
    npm install -g nomarmy@alpha

@@ -8,6 +8,7 @@ Every command proposes before it writes: a `[y/N]` prompt, or an explicit flag u
 |---|---|
 | `nomarmy doctor` | Checks this machine is ready, with a fix for anything missing. Start here. |
 | `nomarmy setup` | The setup playbook: a checklist of where models run, install, agents, roles, this repo and a check, running the next step when you say yes. `--status` prints it only; `--choose`, `--hosted` and `--llama-url` set where models run. |
+| `nomarmy sandbox` | The Podman VM every sandbox shares (macOS, Windows): memory, disk and images. `--memory <GiB>` resizes it (refused while jobs run, below 4 GiB, or above three quarters of the machine); `--prune` removes images no container uses. |
 | `nomarmy install` | Runs the bundled `install.sh` for the profile setup chose (`--profile` to override, `--no-claude` to skip the Claude Code registration). |
 | `nomarmy connect [claude] [codex] [cursor]` | Registers nomArmy with each coordinator and installs `/feature`, the status line and the notifier. No target: pick interactively. |
 | `nomarmy init` | Proposes a `.nomarmy.yml` from what the repo contains. |
