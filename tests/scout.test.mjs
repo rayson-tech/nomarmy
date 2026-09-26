@@ -458,6 +458,18 @@ test("scoutReportRecoveryPrompt: asks for the report shape only, never to explor
   assert.match(p, /Target 500 tokens; 900 is the hard cap/);
 });
 
+// A live PM scout lost its question twice: its first reply was cut off, and
+// the recovery call only said "restate the question", so the report came back
+// empty. The recovery prompt carries the question itself.
+test("scoutReportRecoveryPrompt: carries the original question and what a complete answer covers", () => {
+  const p = scoutReportRecoveryPrompt({ report: { targetTokens: 500, hardCapTokens: 900 },
+    question: "Does the plan cover every acceptance criterion in docs/plan.md?", acceptance: ["name each criterion", "cite where it's handled"] });
+  assert.match(p, /The question you were answering:\nDoes the plan cover every acceptance criterion in docs\/plan\.md\?/);
+  assert.match(p, /A complete answer covers:\n- name each criterion\n- cite where it's handled/);
+  assert.ok(p.indexOf("The question you were answering") < p.indexOf("SCOUT REPORT\nQUESTION:"), "the question comes before the report shape");
+  assert.doesNotMatch(scoutReportRecoveryPrompt({}), /The question you were answering/);
+});
+
 // A real Senti scout on a frontier agent was offered 24 findings, returned
 // a correctly formatted 24, and had half dropped (and was marked lenient for
 // it) because the parser used the local model's 12-finding limit. The

@@ -1405,6 +1405,12 @@ test("reportRecoveryPrompt: with no known changes, tells the worker to under-cla
 // STATUS: blocked as if nothing happened. `changes` lets the coordinator
 // hand the resumed session its own already-checked git state instead of
 // asking it to recall something the session apparently cannot retain.
+test("reportRecoveryPrompt: carries the objective, so STATUS is judged against it", () => {
+  const p = reportRecoveryPrompt({ report: { targetTokens: 256, hardCapTokens: 512 }, task: "Make greet() say Hi." });
+  assert.match(p, /The objective you were working on:\nMake greet\(\) say Hi\./);
+  assert.doesNotMatch(reportRecoveryPrompt({ report: { targetTokens: 256, hardCapTokens: 512 } }), /The objective you were working on/);
+});
+
 test("reportRecoveryPrompt: known changes are stated as independently-checked fact, not left to the worker's memory", () => {
   const p = reportRecoveryPrompt({ report: { targetTokens: 256, hardCapTokens: 512 }, changes: "1 file(s) changed (+1/-0): lib/repo-query.mjs" });
   assert.match(p, /checked independently just now, not from your memory of this session/);
