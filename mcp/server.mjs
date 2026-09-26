@@ -33,6 +33,7 @@ import { createRun, loadRun, runTotals, finishRun, resolveRunLimits, describeLow
 import { agentDispatchFields, resolveAgentModel, agentProviderId, describeAgent } from "../lib/agents.mjs";
 import { OUTCOMES, COORDINATOR_STATUS_BY_OUTCOME } from "../lib/outcomes.mjs";
 import { readUsageSnapshots, usageStatus } from "../lib/usage-limits.mjs";
+import { modelRefusals } from "../lib/health.mjs";
 import { createBuildMetrics, resolveOutcome, finalText, workerMetadata, usageMetrics, policyAdmissionProblems, applyRefactorContract, applyVerificationPolicy, resolveVerifyRegression } from "../lib/outcome.mjs";
 import { compactJobRecord, formatResult, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner } from "../lib/job-format.mjs";
 
@@ -481,12 +482,17 @@ server.tool("army", "Who you, the General, are and who you call for what in this
     // Each agent's models, from OpenClaw's catalog, so the General can pick
     // one for a role set to "auto". The catalog can lag a brand-new model.
     const catalog = await modelCatalogReady();
+    // A model its vendor refused on a job is listed apart, so a role on
+    // "auto" isn't sent to it (the catalog lists what a plan may refuse).
+    const refusals = modelRefusals(stateRoot);
     summary.agents = Object.fromEntries(Object.entries(agents).map(([name, agent]) => {
       const provider = agentProviderId(agent);
-      const models = provider && catalog ? [...catalog.keys()].filter((k) => k.startsWith(`${provider}/`)).map((k) => k.slice(provider.length + 1)) : [];
+      const listed = provider && catalog ? [...catalog.keys()].filter((k) => k.startsWith(`${provider}/`)).map((k) => k.slice(provider.length + 1)) : [];
+      const models = listed.filter((m) => !refusals[`${provider}/${m}`]);
+      const refusedModels = listed.filter((m) => refusals[`${provider}/${m}`]);
       const snapshot = usageSnapshots[provider];
       const usage = snapshot ? (() => { const { level, text } = usageStatus(snapshot); return { level, text }; })() : null;
-      return [name, { runsOn: describeAgent(agent), defaultModel: agent.model ?? null, models, usage }];
+      return [name, { runsOn: describeAgent(agent), defaultModel: agent.model ?? null, models, ...(refusedModels.length ? { refusedModels } : {}), usage }];
     }));
     // A pinned model missing from the catalog isn't necessarily wrong:
     // `army assign` proves an unlisted model with a real test call, and the

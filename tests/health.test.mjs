@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
-import { armyIssues, leftoverIssues, unknownModelIssues, loginExpiryIssues, recordHealth, runHealthChecks, versionIssues, recentModelRefusal, recordProbeSuccess } from "../lib/health.mjs";
+import { armyIssues, leftoverIssues, unknownModelIssues, loginExpiryIssues, recordHealth, runHealthChecks, versionIssues, recentModelRefusal, recordProbeSuccess, refusedModelIn, recordModelRefusal, clearModelRefusal, modelRefusals } from "../lib/health.mjs";
 
 const dirs = [];
 function tmp() { const d = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-health-")); dirs.push(d); return d; }
@@ -165,4 +165,28 @@ test("recentModelRefusal: a model refused on a job today is refused at admission
     assert.equal(recentModelRefusal(root, "openai/gpt-6-sol", { now }), null, "a passing army assign test clears it");
     assert.equal(recentModelRefusal(path.join(root, "none"), "x/y", { now }), null);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("model refusals are kept past a day, until a test call or a job on the model works", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-refusals-"));
+  try {
+    const record = { workerError: "model_not_found: openai/gpt-6-luna: The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account." };
+    assert.equal(refusedModelIn(record), "openai/gpt-6-luna");
+    assert.equal(refusedModelIn({ workerError: "tests failed" }), null);
+    const then = Date.parse("2026-09-20T12:00:00Z");
+    recordModelRefusal(root, "openai/gpt-6-luna", "not supported with a ChatGPT account", { now: then });
+    // A week later, with no job records at all, it's still refused.
+    const issue = recentModelRefusal(root, "openai/gpt-6-luna", { now: then + 7 * 86400000 });
+    assert.equal(issue.id, "unknown-model:openai/gpt-6-luna");
+    assert.match(issue.title, /2026-09-20/);
+    assert.equal(recentModelRefusal(root, "openai/gpt-6-astra"), null);
+    // A passing test call clears it; so does clearModelRefusal (a job that ran on it).
+    recordProbeSuccess(root, "openai/gpt-6-luna");
+    assert.equal(recentModelRefusal(root, "openai/gpt-6-luna"), null);
+    recordModelRefusal(root, "openai/gpt-6-sol");
+    clearModelRefusal(root, "openai/gpt-6-sol");
+    assert.deepEqual(modelRefusals(root), {});
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
