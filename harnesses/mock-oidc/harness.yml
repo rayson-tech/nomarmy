@@ -1,0 +1,19 @@
+name: mock-oidc
+summary: Mock OAuth2 and OIDC discovery and login on an isolated verification network
+detect: []
+image:
+  apt: []
+  run: []
+network: services
+services:
+  - name: mock-oidc
+    image: ghcr.io/navikt/mock-oauth2-server:2.1.10
+    port: 8080
+    env:
+      SERVER_PORT: '8080'
+    health: /default/.well-known/openid-configuration
+env:
+  OIDC_ISSUER: http://mock-oidc:8080/default
+  OAUTH2_ISSUER: http://mock-oidc:8080/default
+verification:
+  oidc: node discovery.test.mjs

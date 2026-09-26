@@ -1,0 +1,4 @@
+harnesses: [mock-oidc]
+verification:
+  quick:
+    commands: [node --test discovery.test.mjs]
