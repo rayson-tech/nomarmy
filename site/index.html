@@ -3,79 +3,58 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>nomArmy - Local agent harness for bounded, verifiable work</title>
+  <title>nomArmy - Every byte verified</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <main>
     <header class="hero">
       <h1 class="logo"><img src="nomarmy-logo.png" alt="nomArmy" width="240"></h1>
-      <p class="subtitle">Tiny local coders, big appetites for bounded tickets</p>
+      <p class="subtitle">Every byte verified 🍪</p>
     </header>
 
     <section class="intro">
-      <h2>An agent harness where the worker's claims are never trusted</h2>
-      <p>A frontier coordinator (Claude Code, Codex) decides <em>what</em> should be built and whether the result is acceptable. A cheap worker - a <em>nom</em> - does the implementing, testing and repairing, usually on a local model running on your own machine at zero token cost. nomArmy owns everything in between: worktrees, Git, environments, verification, and the evidence that decides whether work is accepted.</p>
+      <h2>Your coding assistant plans; sandboxed workers build; nothing counts until nomArmy has checked it</h2>
+      <p>AI coding workers are confident. Their "done, all tests pass" is a claim, not evidence. nomArmy lets your coding assistant (Claude Code, Codex or Cursor), the <em>General</em>, hand work to workers called <em>noms</em>, then checks every change itself before anything is committed.</p>
     </section>
 
     <section class="core-idea">
-      <h2>The invariant</h2>
-      <p><strong>Worker output is a claim. Repository and environment state are evidence.</strong></p>
-      <p>The worker never runs Git. It cannot commit, merge, or mark its own work accepted. It writes a four-line report, and nomArmy independently derives every fact that matters - what changed, what was added, whether the tests actually pass - from the repository itself. A worker that says <em>done</em> and a repository that disagrees is a failed job.</p>
+      <h2>How every byte gets verified</h2>
+      <p><strong>A worker's report is a claim. The repository is the evidence.</strong></p>
+      <ul>
+        <li>The nom works in its own git worktree, in a Podman sandbox with no network and no host credentials.</li>
+        <li>nomArmy reads the real diff from git, not the nom's description of it.</li>
+        <li>It runs your verification profile itself, in a fresh sandbox.</li>
+        <li>It reverts the production change and reruns the tests: a test that still passes proves nothing, so the job goes to review.</li>
+        <li>It blocks on secrets, and flags tests made to pass and code nothing calls.</li>
+        <li>Only then does it commit, on the nom's own branch. It never merges into yours.</li>
+      </ul>
     </section>
 
     <section class="quickstart">
       <h2>Quickstart</h2>
-      <p>Pick your platform and get running:</p>
-      <pre><code>git clone https://github.com/rayson-tech/nomarmy.git
-cd nomarmy
-chmod +x install.sh e2e.sh scripts/*.sh
-./install.sh --profile macbook-pro
-./e2e.sh --profile macbook-pro</code></pre>
-      <p>For Linux, Windows, NVIDIA DGX Spark, or cloud (Bedrock), see the platform guides in the README.</p>
+      <p>Have Git, Node 24.16+ and Podman, then:</p>
+      <pre><code>npm install -g nomarmy@alpha
+cd your-project
+nomarmy setup</code></pre>
+      <p><code>nomarmy setup</code> is a playbook: it shows a checklist and runs the next step each time you say yes. See the <a href="https://github.com/rayson-tech/nomarmy#readme">README</a> for the full walkthrough.</p>
     </section>
 
     <section class="features">
       <h2>What it does</h2>
       <ul>
-        <li><strong>Bounded delegation</strong> - Workers get tight, self-contained tasks with clear acceptance criteria</li>
-        <li><strong>Isolated worktrees</strong> - Every job runs in its own disposable Git worktree</li>
-        <li><strong>Coordinator-owned Git</strong> - Workers never touch Git; only the coordinator can commit or merge</li>
-        <li><strong>Verified claims</strong> - Every worker report is mechanically checked against repository state</li>
-        <li><strong>Zero-token local inference</strong> - Run nom on your own machine using llama.cpp</li>
-        <li><strong>Cloud fallback</strong> - Amazon Bedrock profiles work when local inference isn't practical</li>
-      </ul>
-    </section>
-
-    <section class="features">
-      <h2>Status</h2>
-      <p>This release (<strong>0.1.0-alpha</strong>) extends the harness toward autonomous workers with real execution environments, and that extension is still in development.</p>
-      <ul>
-        <li>Bounded delegation, coordinator-owned Git, retained worktrees - Working</li>
-        <li>Local (llama.cpp) and Amazon Bedrock execution profiles - Working</li>
-        <li><code>nomarmy doctor</code> - Host readiness with a fix for every failure - Working</li>
-        <li>Scout and decompose modes - Read-only noms with verified citations - Built, tested</li>
-        <li>Disposable per-job service environments - Not yet built</li>
-        <li>Full-stack acceptance test proving the thesis end to end - Run across 3 local models on 7 tickets; task-size-dependent, not unconditionally true - see the README</li>
+        <li><strong>Independent verification</strong> - Every report is checked against the repository and your own tests</li>
+        <li><strong>Checking without building</strong> - <code>mode: verify</code> runs your tests on any branch with no worker and no model tokens</li>
+        <li><strong>Agents</strong> - Jobs run on an API key, your own ChatGPT or Muse Code subscription, or a local model</li>
+        <li><strong>The army</strong> - Roles (devs, security analyst, data architect, PM, PO) on the agents you choose</li>
+        <li><strong><code>/feature</code></strong> - A whole feature from plan through build, review and acceptance, handed back as a branch</li>
+        <li><strong>Harnesses</strong> - Go, Rust, Python, Node and mixed repos, Playwright browser tests and fake services, all offline</li>
       </ul>
     </section>
 
     <section class="core-idea">
       <h2>What we actually measured</h2>
-      <p>Delegating to a local worker does not save tokens unconditionally. Small, precisely-diagnosed fixes lose to just doing them directly - the fixed cost of a dispatch brief plus mandatory independent verification does not shrink because a worker got it right. It starts paying off once the context needed to safely make a fix meaningfully exceeds the fix itself, since a local worker reads that context for free. Three different local models were tested on an identical, genuinely subtle bug and all three found and fixed it correctly - the real differentiator was wall-clock and turn count, not whether they could do it.</p>
-      <p>The case for local specifically: the same bug solved via Claude Haiku 4.5 cost roughly a nickel; solved locally it cost nothing. A nickel a ticket is trivial once - it's the volume that changes the answer, since local cost stays flat at any scale. And the worker seat isn't fixed to one model - better hardware later means a more capable local model in the same harness, with the same verification, unchanged.</p>
-    </section>
-
-    <section class="cli">
-      <h2>The nomarmy CLI</h2>
-      <p>After installing, you'll have these commands available:</p>
-      <ul>
-        <li><code>nomarmy doctor</code> - Checks host readiness and prints a fix for anything missing</li>
-        <li><code>nomarmy setup</code> - Detects your machine and writes a configuration profile</li>
-        <li><code>nomarmy sizing</code> - Recommends context/slot/worker counts from your hardware</li>
-        <li><code>nomarmy scan</code> - Reports a repository's execution environment from evidence</li>
-        <li><code>nomarmy model</code> - Change the configured model later</li>
-      </ul>
+      <p>What you get is work you don't have to take on faith, not cheaper work. Delegating costs the General tokens too, for briefing and review: on small, already-diagnosed tickets we measured 4 to 8 times more of the General's tokens than fixing the bug directly. It pays off on bigger tickets, parallel work, and anywhere you'd otherwise trust an agent's say-so.</p>
     </section>
 
     <footer>
