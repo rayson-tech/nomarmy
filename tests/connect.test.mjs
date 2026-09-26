@@ -554,6 +554,23 @@ test("connectCursor: preserves this entry's env vars and every other configured 
   }
 });
 
+test("connectCursor: the install's settings win over a stale entry, and other variables are kept", () => {
+  const nomarmyRoot = fakeRoot();
+  const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
+  const configPath = fakeCursorConfigPath();
+  fs.mkdirSync(path.join(nomarmyRoot, "config"));
+  fs.writeFileSync(path.join(nomarmyRoot, "config", "common.env"), "NOMARMY_EXECUTION=hosted\n");
+  fs.writeFileSync(configPath, JSON.stringify({ mcpServers: { "nomarmy-local-worker": { command: "node", args: ["/old.mjs"], env: { NOMARMY_EXECUTION: "local", NOMARMY_CUSTOM: "kept" } } } }));
+  try {
+    const { preservedEnv } = connectCursor({ nomarmyRoot, installDir, configPath, run: () => {}, configDir: path.join(installDir, "no-agents") });
+    assert.equal(preservedEnv.NOMARMY_EXECUTION, "hosted");
+    assert.equal(preservedEnv.NOMARMY_CUSTOM, "kept");
+    assert.deepEqual(JSON.parse(fs.readFileSync(configPath, "utf8")).mcpServers["nomarmy-local-worker"].env, preservedEnv);
+  } finally {
+    for (const dir of [nomarmyRoot, installDir, path.dirname(configPath)]) fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("cursorAlreadyConnected: true only when the file exists and has our entry", () => {
   const configPath = fakeCursorConfigPath();
   fs.rmSync(configPath, { force: true });
