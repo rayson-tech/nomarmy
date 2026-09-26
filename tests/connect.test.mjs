@@ -520,7 +520,7 @@ test("connectCursor: creates mcp.json with the nomArmy entry when none exists", 
     const result = connectCursor({ nomarmyRoot, installDir, configPath, run: () => {} });
     const written = JSON.parse(fs.readFileSync(configPath, "utf8"));
     assert.deepEqual(written.mcpServers["nomarmy-local-worker"], {
-      command: "node", args: [path.join(installDir, "mcp", "server.mjs")], env: {},
+      command: "node", args: [path.join(installDir, "mcp", "server.mjs")], env: { NOMARMY_PROJECT_DIR: "${workspaceFolder}" },
     });
     assert.equal(result.configPath, configPath);
   } finally {
@@ -544,9 +544,9 @@ test("connectCursor: preserves this entry's env vars and every other configured 
     const result = connectCursor({ nomarmyRoot, installDir, configPath, run: () => {} });
     const written = JSON.parse(fs.readFileSync(configPath, "utf8"));
     assert.deepEqual(written.mcpServers["some-other-server"], { command: "npx", args: ["-y", "other-mcp"] });
-    assert.deepEqual(written.mcpServers["nomarmy-local-worker"].env, { NOMARMY_WORKER_MODEL: "gpt-oss-20b" });
+    assert.deepEqual(written.mcpServers["nomarmy-local-worker"].env, { NOMARMY_WORKER_MODEL: "gpt-oss-20b", NOMARMY_PROJECT_DIR: "${workspaceFolder}" });
     assert.equal(written.mcpServers["nomarmy-local-worker"].args[0], path.join(installDir, "mcp", "server.mjs"));
-    assert.deepEqual(result.preservedEnv, { NOMARMY_WORKER_MODEL: "gpt-oss-20b" });
+    assert.deepEqual(result.preservedEnv, { NOMARMY_WORKER_MODEL: "gpt-oss-20b", NOMARMY_PROJECT_DIR: "${workspaceFolder}" });
   } finally {
     fs.rmSync(nomarmyRoot, { recursive: true, force: true });
     fs.rmSync(installDir, { recursive: true, force: true });
