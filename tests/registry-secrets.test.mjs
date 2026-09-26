@@ -73,13 +73,14 @@ test("registry tilde expansion resolves only the path, never returns credential 
   const tilde = "~/" + path.relative(os.homedir(), f.secret);
   f.local({ npm: tilde });
   let buildArgs;
-  ensureComposedImageBuilt(f.repo, null, { run: (_cmd, args) => {
+  ensureComposedImageBuilt(f.repo, null, { trustedDir: f.repo, run: (_cmd, args) => {
     if (args[0] === "images") return "";
     buildArgs = args;
     return "";
   } });
   assert.deepEqual(buildArgs.slice(0, 3), ["build", "--secret", "id=npm,src=" + f.secret]);
   assert.equal(JSON.stringify(buildArgs).includes(TOKEN), false);
+  assertUntrustedBuild(f);
 });
 
 for (const [manager, lock, install] of [
@@ -156,7 +157,7 @@ test("registry build uses only secret file args, exact isolated context and sani
     throw new Error(TOKEN);
   };
   const expectedImage = composeSandboxImage(f.repo).image;
-  assert.throws(() => ensureComposedImageBuilt(f.repo, null, { run }), {
+  assert.throws(() => ensureComposedImageBuilt(f.repo, null, { run, trustedDir: f.repo }), {
     message: "failed to build sandbox harness image (" + expectedImage + "): credentialed build failed (output withheld)",
   });
   // Keep assertions outside the stub: the builder intentionally sanitizes ALL
@@ -173,6 +174,7 @@ test("registry build uses only secret file args, exact isolated context and sani
   assert.equal(fs.existsSync(context), false);
   assert.equal(JSON.stringify(calls).includes(TOKEN), false);
   assert.deepEqual(calls.map(({ cmd, args }) => [cmd, args[0]]), [["podman", "images"], ["podman", "build"]]);
+  assertUntrustedBuild(f);
 });
 
 test("registry tag hashes declarations and rotation without exposing secret bytes", (t) => {
@@ -245,3 +247,17 @@ test("registry Cargo indexes are copied as metadata but credentials remain mount
   assert.notEqual(composeSandboxImage(f.repo).image, first);
   assert.equal(JSON.stringify(composed).includes(TOKEN), false);
 });
+
+function assertUntrustedBuild(f) {
+  const notes = [];
+  let buildArgs, dockerfile;
+  ensureComposedImageBuilt(f.repo, null, { onNote: note => notes.push(note), run: (_cmd, args) => {
+    if (args[0] === "images") return "";
+    buildArgs = args;
+    dockerfile = fs.readFileSync(args[args.indexOf("-f") + 1], "utf8");
+    return "";
+  } });
+  assert.equal(buildArgs.includes("--secret"), false);
+  assert.equal(dockerfile.includes("--mount=type=secret"), false);
+  assert.deepEqual(notes, ["private-registry credentials were not used: this job changed dependency inputs (trusted checkout unavailable)"]);
+}

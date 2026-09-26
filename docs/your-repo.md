@@ -213,6 +213,17 @@ rejected explicitly rather than silently installing without authentication.
 Cargo registry names/index URLs must likewise be configured without tokens in
 project metadata; the mounted credentials file supplies authentication.
 
+Credentials are used only when dependency inputs match the operator's trusted
+checkout (the MCP server's project directory) byte for byte, including the set
+of manifest, lockfile, workspace-member and Cargo configuration paths. Keep that
+checkout at the operator's committed manifests: credentialed installation then
+has the same trust boundary as the operator's own CI. npm-family install scripts
+remain enabled for compatibility; worker-modified manifests cannot run them with
+registry credentials. A changed dependency input, or an unavailable trusted
+checkout, produces an uncredentialed build with no secret flags or mounts.
+Private installs may fail; verification detail and job issues name the changed
+paths and explain that private-registry credentials were not used.
+
 Use a **read-only, least-privilege token**, restricted to the packages needed by
 this repository. The credential files stay on the host: Podman receives only
 `--secret id=...,src=...` file references. A secret is mounted read-only for its
