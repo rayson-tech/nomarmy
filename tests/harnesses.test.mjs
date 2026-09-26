@@ -35,7 +35,7 @@ test("harness schema defaults and supported declarations are exact", () => {
     const spec = { ...minimal(), detect: [{ file: "config.ts" }, { package: "@scope/test" }, { lockfile: "test.lock" }],
       after: ["node"], image: { apt: ["chromium"], run: ["install-browser"] },
       verification: { quick: "test", full: ["lint", "test"] }, artifacts: ["results/**"],
-      requires: { memoryMb: 1024, shmMb: 512, kvm: false }, network, services: ["mock"],
+      requires: { memoryMb: 1024, shmMb: 512, kvm: false }, network, services: [{ name: "mock", image: "example/mock:1.0", port: 8080 }],
       suggestedRole: { name: "browser-qa", description: "Runs tests" }, docs: "guide.md" };
     assert.deepEqual(schema.parse(spec), spec);
     assert.deepEqual(schema.parse({ ...spec, services: [] }), { ...spec, services: [] });
@@ -61,13 +61,19 @@ test("harness schema rejects forbidden declarations", () => {
   for (const spec of bad) assert.equal(schema.safeParse(spec).success, false, JSON.stringify(spec));
 });
 
-test("registry loads exactly five built-ins and ignores template", () => {
+test("registry loads built-ins and opt-in mock and ignores template", () => {
   const result = loadHarnesses();
   assert.deepEqual(Object.keys(result).sort(), ["harnesses", "problems"]);
   assert.deepEqual(result.problems, []);
-  assert.deepEqual(Object.keys(result.harnesses).sort(), ["browser-playwright", "go", "node", "python", "rust"]);
+  assert.deepEqual(Object.keys(result.harnesses).sort(), ["browser-playwright", "go", "mock-oidc", "node", "python", "rust"]);
   for (const [name, spec] of Object.entries(result.harnesses)) {
     assert.equal(spec.name, name);
+    if (name === "mock-oidc") {
+      assert.deepEqual(spec.image, { apt: [], run: [] });
+      assert.equal(spec.network, "services");
+      assert.deepEqual(spec.detect, []);
+      continue;
+    }
     assert.deepEqual(spec.image, { builtin: name === "browser-playwright" ? "playwright" : name });
     assert.equal(spec.network, "none");
   }

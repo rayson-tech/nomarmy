@@ -30,7 +30,7 @@ policy:
 
 ## Languages and dependencies
 
-See the [harness registry](harnesses.md) for ecosystem detection, network levels, and requirements. The registry is metadata only for now.
+See the [harness registry](harnesses.md) for ecosystem detection, network levels, and requirements. Matched harnesses supply image layers and verification requirements.
 
 The sandbox has no network, so dependencies are installed when its image is built, on your machine, and the image is cached by a hash of the dependency files.
 
@@ -95,3 +95,24 @@ traces) are copied into the job's `artifacts/` directory. Job records list
 job-relative paths in `verification.artifacts`. Collection skips symlinks and
 is capped at 200 files / 50 MB; `verification.artifactsCapped` and the detail
 report when the cap is reached.
+
+## Opt-in harnesses
+
+Use the top-level `harnesses` list to enable registry harnesses in addition to
+those detected from your repository:
+
+```yaml
+harnesses: [mock-oidc]
+verification:
+  auth:
+    commands: [npm test]
+```
+
+Unknown names are refused with the available registry list. A `services`
+harness runs its pinned fake services on a private, internal Podman network
+only during nomArmy verification, with bounded health checks and cleanup.
+Its non-secret `env` values are exported to the verification container; see
+[mock-oidc](../harnesses/mock-oidc/README.md) for issuer configuration.
+No ports are published and workers stay offline (`--network none`).
+`allowlist` harnesses cannot be enabled by committed `.nomarmy.yml`; that rung
+requires operator-local opt-in and is not implemented yet.
