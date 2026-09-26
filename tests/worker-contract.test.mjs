@@ -2211,7 +2211,7 @@ test("resolveWorkerSandboxOverride: a non-default image clones the ambient confi
   const result = resolveWorkerSandboxOverride("/repo", runtimeDir, {
     loadConfigFn: () => ({ found: false }),
     resolveSandboxImageFn: () => "openclaw-nomarmy-coder-rust:bookworm",
-    detectPrimaryLanguageFn: () => "rust",
+    sandboxPathEntriesFn: () => ["/home/node/.cargo/bin"],
     ambientConfigPathFn: () => "/fake/openclaw.json",
     readAmbientConfig: () => ambient,
   });
@@ -2225,29 +2225,35 @@ test("resolveWorkerSandboxOverride: a non-default image clones the ambient confi
 
 test("resolveWorkerSandboxOverride: an existing ambient pathPrepend is preserved and deduped, not replaced", () => {
   const runtimeDir = makeRuntimeDir();
+  const repo = makeRuntimeDir();
+  fs.writeFileSync(path.join(repo, "go.mod"), "module example.com/mixed\n");
+  fs.mkdirSync(path.join(repo, "ui"));
+  fs.writeFileSync(path.join(repo, "ui/package.json"), "{}");
+  fs.writeFileSync(path.join(repo, "ui/package-lock.json"), "{}");
   const ambient = { tools: { exec: { pathPrepend: ["/usr/local/go/bin", "/opt/custom/bin"] } } };
-  const result = resolveWorkerSandboxOverride("/repo", runtimeDir, {
+  const result = resolveWorkerSandboxOverride(repo, runtimeDir, {
     loadConfigFn: () => ({ found: false }),
     resolveSandboxImageFn: () => "openclaw-nomarmy-coder-go:bookworm",
-    detectPrimaryLanguageFn: () => "go",
     ambientConfigPathFn: () => "/fake/openclaw.json",
     readAmbientConfig: () => ambient,
   });
   const written = JSON.parse(fs.readFileSync(result, "utf8"));
-  assert.deepEqual(written.tools.exec.pathPrepend, ["/usr/local/go/bin", "/home/node/go/bin", "/opt/custom/bin"]);
+  assert.deepEqual(written.tools.exec.pathPrepend, ["/usr/local/go/bin", "/home/node/go/bin", "/deps/node_modules/.bin", "/opt/custom/bin"]);
 });
 
 test("resolveWorkerSandboxOverride: a language with no PATH needs (Python) touches tools.exec not at all", () => {
   const runtimeDir = makeRuntimeDir();
+  const pathCalls = [];
   const result = resolveWorkerSandboxOverride("/repo", runtimeDir, {
     loadConfigFn: () => ({ found: false }),
     resolveSandboxImageFn: () => "openclaw-nomarmy-coder-python-abc12345:bookworm",
-    detectPrimaryLanguageFn: () => "python",
+    sandboxPathEntriesFn: (...args) => { pathCalls.push(args); return []; },
     ambientConfigPathFn: () => "/fake/openclaw.json",
     readAmbientConfig: () => ({}),
   });
   const written = JSON.parse(fs.readFileSync(result, "utf8"));
   assert.equal(written.tools, undefined);
+  assert.deepEqual(pathCalls, [["/repo", null]]);
 });
 
 test("resolveWorkerSandboxOverride: a lazy image build failure is not fatal -- the worker still runs, in the default image", () => {
@@ -2279,11 +2285,12 @@ test("resolveWorkerSandboxOverride: a broken .nomarmy.yml does not block the ove
   const result = resolveWorkerSandboxOverride("/repo", runtimeDir, {
     loadConfigFn: () => { throw new ConfigError("bad yaml", "/repo/.nomarmy.yml", []); },
     resolveSandboxImageFn: () => "openclaw-nomarmy-coder-go:bookworm",
-    detectPrimaryLanguageFn: () => "go",
+    sandboxPathEntriesFn: () => ["/usr/local/go/bin", "/home/node/go/bin"],
     ambientConfigPathFn: () => "/fake/openclaw.json",
     readAmbientConfig: () => ({}),
   });
   assert.ok(result);
+  assert.deepEqual(JSON.parse(fs.readFileSync(result, "utf8")).tools.exec.pathPrepend, ["/usr/local/go/bin", "/home/node/go/bin"]);
 });
 
 test("resolveWorkerSandboxOverride: the written config file is not world/group readable", () => {
@@ -2291,10 +2298,11 @@ test("resolveWorkerSandboxOverride: the written config file is not world/group r
   const result = resolveWorkerSandboxOverride("/repo", runtimeDir, {
     loadConfigFn: () => ({ found: false }),
     resolveSandboxImageFn: () => "openclaw-nomarmy-coder-go:bookworm",
-    detectPrimaryLanguageFn: () => "go",
+    sandboxPathEntriesFn: () => ["/usr/local/go/bin", "/home/node/go/bin"],
     ambientConfigPathFn: () => "/fake/openclaw.json",
     readAmbientConfig: () => ({ auth: { fakeBedrockKey: "shh" } }),
   });
+  assert.deepEqual(JSON.parse(fs.readFileSync(result, "utf8")).tools.exec.pathPrepend, ["/usr/local/go/bin", "/home/node/go/bin"]);
   const mode = fs.statSync(result).mode & 0o777;
   assert.equal(mode, 0o600, "a clone that may carry a real cloud credential must not be group/world readable");
 });

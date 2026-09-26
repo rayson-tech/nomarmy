@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import * as images from "../lib/sandbox-images.mjs";
 
 import {
   LANGUAGE_IMAGES, detectPrimaryLanguage, ensureLanguageImageBuilt, resolveSandboxImage,
@@ -111,11 +112,11 @@ test("resolveSandboxImage: no language detected falls back to defaultImage untou
   }
 });
 
-test("resolveSandboxImage: a detected Go repo resolves to the Go image", () => {
+test("resolveSandboxImage: a detected Go repo resolves to the composed image", () => {
   const dir = fakeRepo({ "go.mod": "module example.com/x\n" });
   const run = (cmd, args) => (args[0] === "images" ? "sha256:existing\n" : "");
   try {
-    assert.equal(resolveSandboxImage({ cwd: dir, explicitImage: null, defaultImage: "default:image", run }), LANGUAGE_IMAGES.go.image);
+    assert.equal(resolveSandboxImage({ cwd: dir, explicitImage: null, defaultImage: "default:image", run }), images.composeSandboxImage(dir).image);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -259,7 +260,7 @@ test("resolveSandboxImage: a Python repo with real dependencies resolves to its 
   const run = (cmd, args) => (args[0] === "images" ? "sha256:existing\n" : "");
   try {
     const image = resolveSandboxImage({ cwd: dir, explicitImage: null, defaultImage: "default:image", run });
-    assert.equal(image, pythonImageTag(dir, ["requirements.txt"]));
+    assert.equal(image, images.composeSandboxImage(dir).image);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

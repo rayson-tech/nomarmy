@@ -14,7 +14,7 @@ Only npm lockfiles are supported today. npm workspaces, pnpm, yarn, and bun inst
 
 ## Verification and network
 
-Proposes `npm test` as the `quick` profile. Network level: `none`. This registry is metadata only; it does not change image building, jobs, or verification.
+Proposes `npm test` as the `quick` profile. Network level: `none`. Matched harnesses compose the sandbox image used by workers and verification. The verification profile is a proposal; the registry does not change job profiles or network access.
 
 ## Requirements and artifacts
 
