@@ -3,7 +3,7 @@
   "description": "A harness for AI coding workers whose claims are never trusted: your coding assistant stays in charge while workers implement and test in sandboxes, on local models, API keys or your own subscriptions.",
   "author": "Rayson Technologies",
   "license": "Apache-2.0",
-  "version": "0.1.0-alpha.6",
+  "version": "0.1.0-alpha.7",
   "private": false,
   "type": "module",
   "engines": {
