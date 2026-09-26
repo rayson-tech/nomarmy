@@ -16,6 +16,10 @@ test("createServerContext: NOMARMY_PROJECT_DIR, then CLAUDE_PROJECT_DIR, then th
   assert.equal(createServerContext({ env: { NOMARMY_PROJECT_DIR: "/r/cursor", CLAUDE_PROJECT_DIR: "/r/claude" }, cwd }).projectDir, "/r/cursor");
   // A client that doesn't fill in ${workspaceFolder} passes it through literally.
   assert.equal(createServerContext({ env: { NOMARMY_PROJECT_DIR: "${workspaceFolder}" }, cwd }).projectDir, cwd);
+  // Seen live: Cursor fills ${workspaceFolder} in as "~/...".
+  assert.equal(createServerContext({ env: { NOMARMY_PROJECT_DIR: "~/Documents/source/nomarmy" }, cwd, homedir: "/Users/someone" }).projectDir, "/Users/someone/Documents/source/nomarmy");
+  assert.equal(createServerContext({ env: { NOMARMY_PROJECT_DIR: "~" }, cwd, homedir: "/Users/someone" }).projectDir, "/Users/someone");
+  assert.equal(createServerContext({ env: { NOMARMY_PROJECT_DIR: "/r/~odd" }, cwd }).projectDir, "/r/~odd", "only a leading ~ is the home folder");
 });
 
 test("projectDirProblem: a git repository is fine; anything else (the home folder) is refused with how to fix it", () => {
