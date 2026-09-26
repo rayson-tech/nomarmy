@@ -15,7 +15,7 @@ Follow the army's workflow, calling only the roles the work needs:
 1. **Plan.** Scout the repo as needed (`repo_evidence` first; a scout only for research that would pull many files into your context). Write the plan into the run log: the outcome, acceptance criteria, the pieces, and which role gets each.
 2. **Build.** Dispatch with `army_role` (and `on_behalf_of` when the role's agent is a subscription). The Sr Dev takes the core and harder work; the Jr Dev takes simple, fully specified pieces; UI/UX takes UI. For a role on `auto`, pick the model from the agent's list in the `army` tool: the lighter model for routine work, the frontier one for subtle work.
 3. **Review.** When the build is in, call the specialists that apply (data architect for data work, security analyst for anything touching auth, input, secrets or data exposure), then the PM against the plan. Send what they find back to the builders as new, bounded jobs.
-4. **Acceptance.** PO and stakeholder test end to end. Fix what they find the same way.
+4. **Acceptance.** PO and stakeholder test end to end. Checks that only run existing tests use mode: verify; writing new e2e checks is still an implement job. Fix what they find the same way.
 5. **Integrate.** Review every diff against nomArmy's verified record -- a worker's report is a claim, not evidence -- and bring the accepted work together on one branch. **Never merge into the developer's branch, and never push.** The finished state is a branch ready for the operator to review and merge.
 
 ## Decisions along the way
