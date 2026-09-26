@@ -76,6 +76,7 @@ Run the narrow pass on the touched files for a fast, sharp signal, *and* the bro
 ## What else nomArmy checks
 
 - **Tests that prove nothing.** With `verify_regression` (on whenever a job has a verification profile), nomArmy reverts the production change and re-runs the tests: a test that still passes is flagged.
+- **Checks rewritten to pass.** `.nomarmy.yml` comes from your checkout, but the files its commands run come from the worker's worktree. A diff that changes what a verification command runs blocks the commit: a script the command names (`node check.js`, `bash scripts/verify.sh`), a Makefile or justfile under `make` or `just`, or the `package.json` script that `npm test` (or `pnpm`, `yarn`, `bun run`) calls. Test files a command names are left to the test-change review below, and changed test-runner configuration (`conftest.py`, `pytest.ini`, `[tool.pytest]`, jest or vitest config) is flagged for review.
 - **Tests made to pass.** New skip markers, stubbed imports, fake modules named like a dependency, and stray backup files are flagged for review.
 - **Code wired to nothing.** A new function or class that nothing outside its own test calls is flagged (heuristic and review-only).
 - **Secrets.** Every diff and report is scanned for known secret shapes (secretlint's recommended preset) before a commit is allowed; a match blocks it.
