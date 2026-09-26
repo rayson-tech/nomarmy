@@ -29,3 +29,7 @@ become job evidence under artifacts/, listed in verification.artifacts.
 Collection is limited to 200 files and 50 MB; a cap is reported in verification.
 Most of the time the General checks the UI itself after merging. This harness
 is for repositories with a real end-to-end suite as their gate.
+
+## Running the fixture
+
+`fixture/` has no lockfile on purpose: with one, nomArmy's own repository would match this harness and every nomArmy job would build Chromium into its image. To try it, copy the folder somewhere, run `npm install --package-lock-only` there (with network), commit, and verify it with the `browser` profile. Checked this way: headless Chromium passes offline, and the screenshot and trace land in the job's `artifacts/`.
