@@ -4,6 +4,7 @@
 |---|---|
 | Anything unclear about the machine | `nomarmy doctor`, then `nomarmy health` |
 | A worker's commands come back `Aborted`, even simple reads, or jobs fail in ways that make no sense (macOS, Windows) | The Podman VM is too small: every sandbox, verification run and image build shares its memory, and Podman's default is 2 GiB. `nomarmy sandbox` shows it; `nomarmy sandbox --memory 8` resizes it (doctor fails below 4 GiB) |
+| Every sandbox fails to start with `error during chown ... permission denied` or `insufficient UIDs or GIDs available in user namespace`, often right after the Podman VM restarted | Rootless Podman lost its subordinate ID ranges (`/etc/subuid`, `/etc/subgid` emptied). `nomarmy doctor` detects it; `nomarmy sandbox --repair` restores them (it waits until no job is running, since it restarts Podman's containers) |
 | The disk fills up with old images | `nomarmy sandbox --prune` removes images no container uses; nomArmy rebuilds its own when a job needs them |
 | `No API key found for provider "llama-cpp"` during `e2e.sh` | `./scripts/configure-openclaw.sh <profile>`, then rerun |
 | A job fails with `model_not_found` | Your plan or OpenClaw can't run that model. `nomarmy agents list` shows which roles use it; `nomarmy army assign <role> <agent> <model>` moves the role and tests the new model |
