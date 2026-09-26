@@ -13,7 +13,7 @@ No GPU and no local model: every job runs on a subscription or the API key. Your
 
 ## Before you start
 
-- Git, Node 20 or newer, and [Podman](https://podman.io). On macOS: `brew install podman && podman machine init && podman machine start`.
+- Git, Node 20 or newer, and [Podman](https://podman.io). On macOS: `brew install podman && podman machine init --memory 8192 && podman machine start` (Podman's 2 GiB default is too small; `nomarmy sandbox --memory 8` fixes an existing VM).
 - [Claude Code](https://claude.com/claude-code), signed in to your Claude plan.
 - A ChatGPT plan that includes Codex. The setup installs the Codex CLI and signs it in if it isn't already.
 - An xAI API key ([console.x.ai](https://console.x.ai)). Any API provider works the same way.

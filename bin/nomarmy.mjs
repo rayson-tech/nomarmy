@@ -25,6 +25,9 @@ import { loadArmy, mergeArmy, describeArmy, readArmyFile, updateArmyInFile, assi
 import { parseLlamaUrl } from "../lib/execution.mjs";
 import { setupSteps, formatSetupSteps, runSetupPlaybook } from "../lib/setup-steps.mjs";
 import { readUsageSnapshots } from "../lib/usage-limits.mjs";
+import { pickMachine, planResize } from "../lib/sandbox-vm.mjs";
+import { MIN_PODMAN_VM_MB } from "../lib/doctor.mjs";
+import { liveLeases } from "../lib/slots.mjs";
 import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
 import { recordProbeSuccess } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
@@ -211,6 +214,11 @@ Usage: nomarmy <command> [options]
                   (Re-)register the MCP server with one or more coordinators.
                   With no target and not --json, prompts an interactive
                   multi-select instead.
+  sandbox         The Podman VM every sandbox shares (macOS, Windows): its
+                  memory, disk and images. --memory <GiB> resizes it (stops,
+                  sets, restarts; refused while jobs run); --prune removes
+                  images no container uses (nomArmy rebuilds its own on
+                  demand); --yes skips the confirmation
   start <profile> Start local inference (wraps scripts/start-inference.sh).
   stop <profile>  Stop local inference (wraps scripts/stop-inference.sh).
   uninstall       Remove the MCP registration and install directory.
@@ -1783,6 +1791,62 @@ async function cmdConnect() {
 function runScript(name, args = []) {
   execFileSync("bash", [path.join(nomarmyRoot, "scripts", name), ...args], { cwd: nomarmyRoot, stdio: "inherit" });
 }
+// `nomarmy sandbox`: see lib/sandbox-vm.mjs.
+async function cmdSandbox() {
+  const stateRoot = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
+  const podman = (args, opts = {}) => spawnSync("podman", args, { encoding: "utf8", ...opts });
+  const machine = process.platform === "linux" ? null : pickMachine(podman(["machine", "inspect"]).stdout);
+  let images = null;
+  try {
+    const rows = JSON.parse(podman(["system", "df", "--format", "json"]).stdout || "[]");
+    const row = rows.find((r) => /image/i.test(r.Type ?? ""));
+    if (row) images = { count: row.Total ?? null, size: row.Size ?? null, reclaimable: row.Reclaimable ?? null };
+  } catch { /* podman missing or old */ }
+  const runningJobs = liveLeases(path.join(stateRoot, "leases")).length;
+  const memoryGib = value("memory");
+
+  if (!memoryGib && !flag("prune")) {
+    if (json) return out({ platform: process.platform, machine, images, runningJobs, minimumMb: MIN_PODMAN_VM_MB });
+    console.log(c.bold("🍪 nomArmy sandbox"));
+    if (process.platform === "linux") console.log("\nPodman runs natively on Linux: there's no VM to size.");
+    else if (!machine) console.log(c.yellow("\nNo Podman machine found. Run: podman machine init && podman machine start"));
+    else {
+      const low = machine.memoryMb && machine.memoryMb < MIN_PODMAN_VM_MB;
+      console.log(`\nVM ${machine.name} (${machine.state}): ${machine.cpus} CPUs, ${low ? c.red(`${machine.memoryMb / 1024} GiB memory`) : `${machine.memoryMb / 1024} GiB memory`}, ${machine.diskGb} GB disk`);
+      if (low) console.log(c.yellow(`  Too small: worker commands get cut off below ${MIN_PODMAN_VM_MB / 1024} GiB. Fix: nomarmy sandbox --memory 8`));
+    }
+    if (images) console.log(`Images: ${images.count}, ${images.size}${images.reclaimable ? `, ${images.reclaimable} reclaimable (nomarmy sandbox --prune)` : ""}`);
+    console.log(c.dim(runningJobs ? `${runningJobs} nomArmy job(s) running.` : "No nomArmy jobs running."));
+    return;
+  }
+
+  const ask = async (question) => {
+    if (flag("yes")) return true;
+    if (!process.stdin.isTTY) throw new Error(`${question} Re-run with --yes to confirm without a terminal.`);
+    const rl = createInterface({ input, output });
+    try { return await confirm(rl, question, { defaultYes: false }); } finally { rl.close(); }
+  };
+  const runPodman = (args) => {
+    console.log(c.dim(`$ podman ${args.join(" ")}`));
+    const r = podman(args, { stdio: "inherit" });
+    if (r.status !== 0) throw new Error(`podman ${args.join(" ")} failed (exit ${r.status ?? "none"}).`);
+  };
+
+  if (memoryGib) {
+    const plan = planResize({ gib: memoryGib, machine, hostMemoryMb: os.totalmem() / 1024 / 1024, runningJobs });
+    if (!plan.ok) throw new Error(plan.problems.join("; "));
+    for (const w of plan.warnings) console.log(c.yellow(`⚠ ${w}`));
+    if (!(await ask(`Restart the Podman VM with ${memoryGib} GiB (from ${machine.memoryMb / 1024})?`))) { console.log(c.dim("Nothing changed.")); return; }
+    for (const args of plan.commands) runPodman(args);
+    console.log(c.green(`✓ The Podman VM now has ${memoryGib} GiB.`));
+  }
+  if (flag("prune")) {
+    if (runningJobs > 0) throw new Error(`${runningJobs} nomArmy job(s) are running; prune when they're done.`);
+    if (!(await ask(`Remove every image no container uses${images?.reclaimable ? ` (about ${images.reclaimable})` : ""}? nomArmy rebuilds its own when a job needs them.`))) { console.log(c.dim("Nothing removed.")); return; }
+    runPodman(["image", "prune", "--all", "--force"]);
+  }
+}
+
 async function cmdStart() { console.log(c.bold("🍪 Starting inference...\n")); runScript("start-inference.sh", argv.slice(1)); }
 async function cmdStop() { runScript("stop-inference.sh", argv.slice(1)); }
 function safeDu(dir) {
@@ -2431,7 +2495,7 @@ async function cmdStatusline() {
   process.stdout.write(`${statusLineText({ session })}\n`);
 }
 
-const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, install: cmdInstall, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
+const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, install: cmdInstall, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, sandbox: cmdSandbox, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
   // Import lazily to avoid circular dependencies
