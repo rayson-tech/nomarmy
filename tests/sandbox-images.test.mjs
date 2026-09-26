@@ -266,10 +266,19 @@ test("resolveSandboxImage: a Python repo with real dependencies resolves to its 
   }
 });
 
-test("resolveSandboxImage: a Python repo with nothing to install still gets the default image, unchanged", () => {
+test("resolveSandboxImage: a project without dependencies gets a venv; tool-only TOML retains the default", async () => {
   const dir = fakeRepo({ "pyproject.toml": "[project]\nname = \"x\"\n" });
-  const run = () => { throw new Error("must not be called"); };
+  const images = await import("../lib/sandbox-images.mjs");
   try {
+    const composed = images.composeSandboxImage(dir);
+    assert.deepEqual(composed.pathEntries, ["/deps/python/.venv/bin"]);
+    assert.equal(resolveSandboxImage({ cwd: dir, defaultImage: "default:image", run: (cmd, args) => {
+      assert.equal(cmd, "podman");
+      assert.equal(args[0], "images");
+      return "cached";
+    } }), composed.image);
+    fs.writeFileSync(path.join(dir, "pyproject.toml"), "[tool.pytest.ini_options]\n");
+    const run = () => { throw new Error("must not be called"); };
     assert.equal(resolveSandboxImage({ cwd: dir, explicitImage: null, defaultImage: "default:image", run }), "default:image");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

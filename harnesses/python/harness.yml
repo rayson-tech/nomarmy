@@ -1,6 +1,9 @@
 name: python
-summary: Python dependencies installed from requirements files
+summary: Python dependencies from uv, Poetry, pyproject, or requirements files
 detect:
+  - file: uv.lock
+  - file: poetry.lock
+  - file: pyproject.toml
   - file: requirements.txt
 after: []
 image:

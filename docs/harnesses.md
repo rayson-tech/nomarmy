@@ -13,5 +13,5 @@ Workers always remain offline. See the [plan](plans/2026-09-25-sandbox-dependenc
 |---------|---------|---------|---------|----------|
 | [go](https://github.com/rayson-tech/nomarmy/blob/main/harnesses/go/README.md) | Go toolchain with prefetched modules for offline verification | file: go.mod; file: go.work | none | none |
 | [node](https://github.com/rayson-tech/nomarmy/blob/main/harnesses/node/README.md) | Node dependencies and workspaces installed with npm, pnpm, yarn or bun | lockfile: package-lock.json; lockfile: npm-shrinkwrap.json; lockfile: pnpm-lock.yaml; lockfile: yarn.lock; lockfile: bun.lock; lockfile: bun.lockb | none | none |
-| [python](https://github.com/rayson-tech/nomarmy/blob/main/harnesses/python/README.md) | Python dependencies installed from requirements files | file: requirements.txt | none | none |
+| [python](https://github.com/rayson-tech/nomarmy/blob/main/harnesses/python/README.md) | Python dependencies from uv, Poetry, pyproject, or requirements files | file: uv.lock; file: poetry.lock; file: pyproject.toml; file: requirements.txt | none | none |
 | [rust](https://github.com/rayson-tech/nomarmy/blob/main/harnesses/rust/README.md) | Rust toolchain with prefetched crates for offline verification | file: Cargo.toml | none | none |
