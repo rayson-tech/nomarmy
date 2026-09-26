@@ -139,9 +139,20 @@ or empty source variable makes verification `not_run`, naming that variable.
 **Use a dedicated test tenant with throwaway credentials, never production.**
 Verification executes worker-written code, which can abuse the test credential
 or send data to an allowed destination. Exact hostnames and ports restrict the
-route, not what that remote service permits. Captured output and
-`verification.log` redact literal credential values; do not deliberately encode
-secrets into output or write them into test artifacts.
+route, not what that remote service permits. With credentials in use, command
+stdout/stderr are **withheld by default**, including failure details. The log
+retains exit codes, timing, and proxy verdicts. Operator-local
+`verification_network.keep_output: true` restores redacted output (literal,
+base64/base64url, hex, and percent-encoded credentials); arbitrary transformed
+output cannot be reliably redacted.
+
+Credentialed commands run against a disposable copy of the worktree, deleted
+after verification. Test writes cannot enter the worker's worktree or a commit.
+Artifacts are collected from that copy; files containing credential bytes or
+the encodings above are dropped with a note. The job record includes
+`verification.network.reached` (successfully connected host:port pairs) alongside
+the allowlist, including regression-check reruns whose verdict logs are merged
+into the job log.
 
 An omitted port means 443; specify `:80` explicitly for HTTP. Wildcards, IP
 literals, localhost and private names are refused. The proxy resolves each

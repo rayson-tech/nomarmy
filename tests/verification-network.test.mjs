@@ -21,6 +21,8 @@ function temporary(t) {
 const config = { verification: { quick: { commands: ['check'] } } };
 const policy = { allow: ['dev-12345.okta.com:443', 'api.stripe.com:80'], env: { OKTA_CLIENT_SECRET: 'NOMARMY_TEST_OKTA_SECRET' } };
 const secret = 'throwaway-test-secret';
+const token = 'test-proxy-token';
+const auth = 'Basic ' + Buffer.from('nomarmy:' + token).toString('base64');
 
 test('operator-local policy validates exact hosts and refuses committed authority', t => {
   assert.deepEqual(validateVerificationNetwork({ allow: ['Dev-12345.okta.com', 'api.stripe.com:80'], env: policy.env }), policy);
@@ -47,9 +49,9 @@ async function listening(t, server) {
   t.after(() => new Promise(resolve => { server.closeAllConnections?.(); server.close(resolve); }));
   return server.address().port;
 }
-function get(proxyPort, url) {
+function get(proxyPort, url, authorization = auth) {
   return new Promise((resolve, reject) => {
-    const req = http.get({ host: '127.0.0.1', port: proxyPort, path: url }, res => {
+    const req = http.get({ host: '127.0.0.1', port: proxyPort, path: url, headers: authorization ? { 'Proxy-Authorization': authorization } : {} }, res => {
       let body = ''; res.on('data', c => body += c); res.on('end', () => resolve({ status: res.statusCode, body }));
     }); req.on('error', reject);
   });
@@ -60,7 +62,7 @@ test('HTTP egress pins public DNS, denies private and unlisted targets, logs no 
   const upstreamPort = await listening(t, http.createServer((req, res) => { seen.push({ host: req.headers.host, url: req.url }); res.end('ok'); }));
   const logs = [], resolved = [], destinations = [];
   let address = '93.184.216.34';
-  const proxy = createEgressProxy({ allow: ['example.com:80'], log: l => logs.push(l),
+  const proxy = createEgressProxy({ token, allow: ['example.com:80'], log: l => logs.push(l),
     resolve: async host => { resolved.push(host); return [{ address }]; },
     // Test transport reaches only our local server; production uses the pinned address.
     request: opts => { destinations.push(opts.hostname); return http.request({ ...opts, hostname: '127.0.0.1', port: upstreamPort }); },
@@ -72,18 +74,18 @@ test('HTTP egress pins public DNS, denies private and unlisted targets, logs no 
   assert.deepEqual(await get(port, 'http://evil.com/hidden'), { status: 403, body: '' });
   for (address of ['127.0.0.1', '10.2.3.4', '169.254.169.254', '172.16.0.1', '192.168.1.1', '100.100.100.200', '168.63.129.16', '::1', '::ffff:127.0.0.1', 'fc00::1', 'fe80::1', '2002:7f00:1::']) assert.deepEqual(await get(port, 'http://example.com/hidden'), { status: 403, body: '' }, address);
   assert.deepEqual(await get(port, 'http://127.0.0.1/hidden'), { status: 403, body: '' });
-  assert.deepEqual(logs, ['example.com:80 allowed', 'evil.com:80 denied', ...Array(12).fill('example.com:80 denied'), 'invalid:0 denied']);
+  assert.deepEqual(logs, ['example.com:80 connected', 'evil.com:80 denied', ...Array(12).fill('example.com:80 denied'), 'invalid:0 denied']);
   assert.deepEqual(resolved, Array(13).fill('example.com'));
   assert.equal(destinations.length, 1);
   assert.equal(publicAddress('2606:4700:4700::1111'), true);
   for (const ip of ['0.0.0.0', '224.0.0.1', '198.18.0.1', '2001:db8::1', '2001::1', '64:ff9b::7f00:1']) assert.equal(publicAddress(ip), false, ip);
 });
 
-function tunnel(port, authority) {
+function tunnel(port, authority, authorization = auth) {
   return new Promise((resolve, reject) => {
     const socket = net.connect(port, '127.0.0.1');
     socket.on('error', reject);
-    socket.on('connect', () => socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n\r\n`));
+    socket.on('connect', () => socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n${authorization ? `Proxy-Authorization: ${authorization}\r\n` : ""}\r\n`));
     socket.once('data', data => { socket.destroy(); resolve(data.toString()); });
   });
 }
@@ -92,7 +94,7 @@ test('CONNECT egress enforces exact ports and rejects mixed private DNS answers'
   const upstreamPort = await listening(t, upstream);
   const logs = [], destinations = [];
   let addresses = [{ address: '93.184.216.34' }];
-  const proxyPort = await listening(t, createEgressProxy({ allow: ['example.com'], log: l => logs.push(l), resolve: async () => addresses,
+  const proxyPort = await listening(t, createEgressProxy({ token, allow: ['example.com'], log: l => logs.push(l), resolve: async () => addresses,
     connect: opts => { destinations.push(opts); return net.connect(upstreamPort, '127.0.0.1'); },
   }));
   assert.equal(await tunnel(proxyPort, 'example.com'), 'HTTP/1.1 200 Connection Established\r\n\r\n');
@@ -100,14 +102,14 @@ test('CONNECT egress enforces exact ports and rejects mixed private DNS answers'
   addresses = [{ address: '93.184.216.34' }, { address: '10.0.0.1' }];
   assert.equal(await tunnel(proxyPort, 'example.com:443'), 'HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
   assert.deepEqual(destinations, [{ host: '93.184.216.34', port: 443 }]);
-  assert.deepEqual(logs, ['example.com:443 allowed', 'evil.com:443 denied', 'example.com:80 denied', 'invalid:0 denied', 'invalid:0 denied', 'example.com:443 denied']);
+  assert.deepEqual(logs, ['example.com:443 connected', 'evil.com:443 denied', 'example.com:80 denied', 'invalid:0 denied', 'invalid:0 denied', 'example.com:443 denied']);
 });
 
 test('verification egress isolates credentials, networks, redaction and cleanup', async t => {
-  const cwd = temporary(t), calls = [];
-  const collect = async (_file, args) => {
-    calls.push(args);
-    return { spawned: true, code: 0, stdout: args[0] === 'logs' ? 'dev-12345.okta.com:443 allowed\nunsafe payload\n' : args.includes('/bin/sh') ? `result ${secret}` : '', stderr: args.includes('/bin/sh') ? secret : '' };
+  const cwd = temporary(t), calls = [], environments = [];
+  const collect = async (_file, args, options) => {
+    calls.push(args); environments.push(options.env);
+    return { spawned: true, code: 0, stdout: args[0] === 'logs' ? 'dev-12345.okta.com:443 connected\nunsafe payload\n' : args.includes('/bin/sh') ? `result ${secret}` : '', stderr: args.includes('/bin/sh') ? secret : '' };
   };
   const runner = createVerificationRunner({ image: 'sandbox:1', hostProjectDir: cwd,
     loadVerificationNetwork: () => policy, hostEnv: { NOMARMY_TEST_OKTA_SECRET: secret },
@@ -115,21 +117,26 @@ test('verification egress isolates credentials, networks, redaction and cleanup'
     executor: createPodmanExecutor({ collect }),
   });
   const result = await runner({ cwd, profile: 'quick', jobId: 'egress-test' });
-  assert.deepEqual(Object.keys(result).sort(), ['basis', 'detail', 'issues', 'network', 'output', 'reason', 'status']);
+  assert.deepEqual(Object.keys(result).sort(), ['artifacts', 'artifactsCapped', 'basis', 'detail', 'issues', 'network', 'output', 'reason', 'status']);
   assert.equal(result.status, 'pass');
-  assert.deepEqual(result.network, { allowlist: policy.allow, credentials: ['OKTA_CLIENT_SECRET'] });
+  assert.deepEqual(result.network, { allowlist: policy.allow, reached: ["dev-12345.okta.com:443"], credentials: ['OKTA_CLIENT_SECRET'] });
   assert.deepEqual(result.issues, ['verification had network access to dev-12345.okta.com:443, api.stripe.com:80']);
-  assert.equal(result.output, 'dev-12345.okta.com:443 allowed\n\n$ check  (exit 0)\nresult ***\n[stderr]\n***');
+  assert.match(result.output, /^dev-12345.okta.com:443 connected\n\n\$ check  \(exit 0, \d+ms\)\noutput withheld: credentials were in use \(set verification_network.keep_output: true in .nomarmy.local.yml to keep it, redacted\)$/);
   assert.equal(JSON.stringify(result).includes(secret), false);
   assert.deepEqual(calls.find(a => a[0] === 'stop'), ['stop', '--time', '2', 'nomarmy-egress-test-egress']);
   assert.equal(calls.findIndex(a => a[0] === 'stop') < calls.findIndex(a => a[0] === 'logs'), true);
   const verify = calls.find(a => a.includes('/bin/sh'));
   assert.equal(verify.includes('--network=nomarmy-egress-test'), true);
-  for (const name of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']) assert.equal(verify.includes(`${name}=http://egress:3128`), true);
+  for (const name of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']) assert.equal(verify.includes(name), true);
   assert.equal(verify.includes('NO_PROXY=mock-oidc'), true);
   assert.equal(verify.includes('no_proxy=mock-oidc'), true);
-  assert.equal(verify.includes(`OKTA_CLIENT_SECRET=${secret}`), true);
-  assert.deepEqual(calls.filter(a => a.join(' ').includes(secret)), [verify]);
+  assert.equal(verify.includes('OKTA_CLIENT_SECRET'), true);
+  assert.equal(environments[calls.indexOf(verify)].OKTA_CLIENT_SECRET, secret);
+  const proxyToken = environments[calls.findIndex(a => a.includes('/egress-proxy.mjs'))].NOMARMY_EGRESS_TOKEN;
+  assert.match(proxyToken, /^[a-f0-9]{64}$/);
+  assert.equal(environments[calls.indexOf(verify)].HTTPS_PROXY, `http://nomarmy:${proxyToken}@egress:3128`);
+  assert.equal(JSON.stringify(calls).includes(proxyToken), false);
+  assert.deepEqual(calls.filter(a => a.join(' ').includes(secret)), []);
   const proxy = calls.find(a => a.includes('/egress-proxy.mjs'));
   assert.equal(proxy.includes('nomarmy-egress-test:alias=egress'), true);
   assert.equal(proxy.includes('nomarmy-egress-test-external'), true);
@@ -141,7 +148,7 @@ test('verification egress isolates credentials, networks, redaction and cleanup'
   assert.deepEqual(calls.filter(a => a[0] === 'rm').map(a => a.at(-1)).sort(), ['nomarmy-egress-test-egress', 'nomarmy-egress-test-egress-health', 'nomarmy-egress-test-health-mock-oidc', 'nomarmy-egress-test-service-mock-oidc']);
   assert.equal(redactCredentials(`x ${secret} ${secret.slice(0, 8)}`, [secret]), 'x *** ***');
   const missing = await createVerificationRunner({ image: 'sandbox:1', loadConfig: () => ({ found: true, config }), loadVerificationNetwork: () => policy, hostEnv: {}, executor: { probe: () => assert.fail('missing secret must not run') } })({ cwd, profile: 'quick' });
-  assert.deepEqual(missing, { status: 'not_run', basis: 'missing-credential', reason: 'missing host environment variable NOMARMY_TEST_OKTA_SECRET', detail: null, network: { allowlist: policy.allow, credentials: ['OKTA_CLIENT_SECRET'] } });
+  assert.deepEqual(missing, { status: 'not_run', basis: 'missing-credential', reason: 'missing host environment variable NOMARMY_TEST_OKTA_SECRET', detail: null, network: { allowlist: policy.allow, reached: [], credentials: ['OKTA_CLIENT_SECRET'] } });
   // A local file created by the worker is not operator authority.
   fs.writeFileSync(path.join(cwd, '.nomarmy.local.yml'), 'verification_network: {allow: [evil.com]}');
   calls.length = 0;
@@ -173,4 +180,137 @@ test('network verification records preserve authority and verdict logs', async t
   assert.equal(fs.readFileSync(path.join(dir, 'job', 'verification.log'), 'utf8'), 'dev-12345.okta.com:443 allowed\n***');
   fs.writeFileSync(path.join(dir, 'blocked'), 'not a directory');
   assert.deepEqual(await flow.runIndependentVerification({ profile: 'quick', jobId: 'blocked' }), { status: 'not_run', profile: 'quick', basis: 'egress-log-failed', reason: 'could not retain verification network log', detail: null, network, issues });
+});
+
+test('security: local keep_output validates and encoded credentials are redacted', () => {
+  assert.deepEqual(validateVerificationNetwork({ ...policy, keep_output: true }), { ...policy, keep_output: true });
+  assert.throws(() => validateVerificationNetwork({ ...policy, keep_output: 'true' }), /boolean/);
+  const value = 'sensitive/+?é';
+  const forms = [value, Buffer.from(value).toString('base64'), Buffer.from(value).toString('base64url'),
+    Buffer.from(value).toString('hex'), Buffer.from(value).toString('hex').toUpperCase(),
+    encodeURIComponent(value), [...Buffer.from(value)].map(b => '%' + b.toString(16).padStart(2, '0')).join('')];
+  for (const form of forms) assert.equal(redactCredentials('start ' + form + ' end!', [value]), 'start *** end!');
+});
+
+test('security: authentication precedes resolution for HTTP and CONNECT', async t => {
+  let resolved = 0;
+  const logs = [];
+  const port = await listening(t, createEgressProxy({ token, allow: ['example.com'], resolve: async () => { resolved++; return []; }, log: s => logs.push(s) }));
+  for (const authorization of [null, 'Basic wrong', 'Basic ' + Buffer.from('nomarmy:wrong').toString('base64')]) {
+    assert.deepEqual(await get(port, 'http://example.com/', authorization), { status: 407, body: '' });
+    assert.equal(await tunnel(port, 'example.com:443', authorization), 'HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="verification"\r\nConnection: close\r\n\r\n');
+  }
+  assert.equal(resolved, 0);
+  assert.deepEqual(logs, []);
+});
+
+test('security: embedded IPv4 IPv6 addresses are refused', () => {
+  for (const value of ['2001:470:1:0:0:5efe:7f00:1', '2001:470:1:0:5efe:0:7f00:1',
+    '2001:470:1:0:0:5efe:127.0.0.1', '::127.0.0.1', '::ffff:7f00:1', '64:ff9b::7f00:1', '64:ff9b:1::7f00:1']) {
+    assert.equal(publicAddress(value), false, value);
+  }
+  assert.equal(publicAddress('2001:470:1::1'), true);
+});
+
+test('security: upstream refusal never counts as connected', async t => {
+  const logs = [];
+  const { PassThrough } = await import('node:stream');
+  const port = await listening(t, createEgressProxy({ token, allow: ['example.com:80'], log: s => logs.push(s),
+    resolve: async () => [{ address: '93.184.216.34' }],
+    request: () => {
+      const stream = new PassThrough();
+      stream.setTimeout = () => {};
+      process.nextTick(() => stream.emit('error', new Error('refused')));
+      return stream;
+    },
+  }));
+  assert.deepEqual(await get(port, 'http://example.com/'), { status: 502, body: '' });
+  assert.deepEqual(logs, ['example.com:80 denied']);
+});
+
+test('security: credentialed output and artifacts stay in disposable worktree', async t => {
+  const cwd = temporary(t), jobs = temporary(t);
+  fs.writeFileSync(path.join(cwd, 'playwright.config.js'), '');
+  fs.writeFileSync(path.join(cwd, 'tracked.txt'), 'original');
+  const value = 'credential/+?unique';
+  const forms = [value, Buffer.from(value).toString('base64'), Buffer.from(value).toString('base64url'),
+    Buffer.from(value).toString('hex'), encodeURIComponent(value)];
+  for (const keep_output of [false, true]) {
+    let copy;
+    const executor = {
+      probe: async () => ({ available: true }),
+      startServices: async () => ({ network: 'test', cleanup: async () => {}, logs: async () => 'api.stripe.com:80 connected' }),
+      run: async args => {
+        copy = args.cwd;
+        assert.notEqual(copy, cwd);
+        assert.equal(fs.readFileSync(path.join(copy, 'tracked.txt'), 'utf8'), 'original');
+        fs.writeFileSync(path.join(copy, 'tracked.txt'), value);
+        fs.mkdirSync(path.join(copy, 'test-results'));
+        for (let i = 0; i < forms.length; i++) fs.writeFileSync(path.join(copy, 'test-results', i + '.bin'), Buffer.concat([Buffer.from([0, 255]), Buffer.from(forms[i])]));
+        fs.writeFileSync(path.join(copy, 'test-results', 'safe.txt'), 'safe');
+        return { started: true, exitCode: 7, durationMs: 12, stdout: 'ordinary output! ' + forms.join(' ') + '!', stderr: keep_output ? forms.join(' ') + '!' : value.split('').join('\n') };
+      },
+    };
+    const flow = createVerificationFlow({ ensureJobsRoot: () => jobs });
+    flow.registerVerificationRunner(createVerificationRunner({ image: 'sandbox:1', loadConfig: () => ({ found: true, config }),
+      loadVerificationNetwork: () => ({ ...policy, keep_output }), hostEnv: { NOMARMY_TEST_OKTA_SECRET: value }, executor }));
+    const result = await flow.runIndependentVerification({ cwd, jobId: String(keep_output), profile: 'quick' });
+    assert.deepEqual(Object.keys(result).sort(), ['artifacts', 'artifactsCapped', 'artifactsNote', 'basis', 'detail', 'issues', 'log', 'network', 'profile', 'reason', 'status']);
+    assert.equal(result.status, 'fail');
+    assert.deepEqual(result.network, { allowlist: policy.allow, reached: ['api.stripe.com:80'], credentials: ['OKTA_CLIENT_SECRET'] });
+    assert.deepEqual(result.artifacts, ['artifacts/test-results/safe.txt']);
+    assert.equal(result.artifactsCapped, false);
+    assert.equal(result.artifactsNote, 'dropped 5 artifact(s) containing credentials');
+    assert.equal(fs.readFileSync(path.join(jobs, String(keep_output), result.artifacts[0]), 'utf8'), 'safe');
+    assert.equal(fs.existsSync(copy), false);
+    assert.equal(fs.readFileSync(path.join(cwd, 'tracked.txt'), 'utf8'), 'original');
+    assert.equal(fs.existsSync(path.join(cwd, 'test-results')), false);
+    const output = fs.readFileSync(result.log, 'utf8');
+    for (const form of forms) assert.equal((output + result.detail).includes(form), false);
+    assert.match(output, /api.stripe.com:80 connected/);
+    assert.match(output, /exit 7, 12ms/);
+    if (keep_output) {
+      assert.match(output, /ordinary output! \*\*\*/);
+      assert.match(result.detail, /last output: \*\*\*/);
+    } else {
+      assert.equal(output.includes('ordinary output!'), false);
+      assert.match(output, /output withheld: credentials were in use/);
+      assert.match(result.detail, /output withheld: credentials were in use/);
+    }
+  }
+});
+
+test('security: timeout removes labeled verification containers before networks', async t => {
+  const cwd = temporary(t), calls = [];
+  const executor = createPodmanExecutor({ collect: async (_file, args) => {
+    calls.push(args);
+    return { spawned: true, code: args.includes('/bin/sh') ? null : 0, timedOut: args.includes('/bin/sh'),
+      stdout: args[0] === 'ps' ? 'abc123\ndef456\n' : '', stderr: '' };
+  } });
+  const result = await createVerificationRunner({ image: 'sandbox:1', loadConfig: () => ({ found: true, config }),
+    loadVerificationNetwork: () => ({ allow: policy.allow, env: {} }), executor })({ cwd, jobId: 'timeout', profile: 'quick' });
+  assert.equal(result.status, 'fail');
+  assert.match(result.detail, /timed out/);
+  assert.deepEqual(calls.find(a => a[0] === 'ps'), ['ps', '-aq', '--filter', 'label=nomarmy.job=timeout']);
+  assert.deepEqual(calls.find(a => a[0] === 'rm'), ['rm', '--force', 'abc123', 'def456']);
+  assert.equal(calls.findIndex(a => a[0] === 'rm' && a.includes('abc123')) < calls.findIndex(a => a[0] === 'rm' && a.includes('nomarmy-timeout-egress')), true);
+  assert.equal(calls.findIndex(a => a[0] === 'rm' && a.includes('abc123')) < calls.findIndex(a => a[0] === 'network' && a[1] === 'rm'), true);
+});
+
+test('security: regression reached hosts and log merge into parent evidence', async t => {
+  const cwd = temporary(t), jobs = temporary(t);
+  fs.writeFileSync(path.join(cwd, 'new.mjs'), 'worker');
+  const first = { allowlist: policy.allow, reached: ['dev-12345.okta.com:443'], credentials: [] };
+  const second = { ...first, reached: ['api.stripe.com:80'] };
+  const flow = createVerificationFlow({ ensureJobsRoot: () => jobs, collectGitRecord: async () => ({}) });
+  flow.registerVerificationRunner(async context => ({ status: context.jobId.endsWith('-regression-check') ? 'fail' : 'pass',
+    network: context.jobId.endsWith('-regression-check') ? second : first, output: context.jobId.endsWith('-regression-check') ? 'api.stripe.com:80 connected' : 'dev-12345.okta.com:443 connected' }));
+  const original = await flow.runIndependentVerification({ cwd, jobId: 'job', profile: 'quick' });
+  const regression = await flow.runRegressionCheck({ cwd, jobId: 'job', productionFiles: ['new.mjs'], nameStatus: [{ status: 'A', path: 'new.mjs' }], profile: 'quick', verificationResult: original });
+  assert.deepEqual(Object.keys(regression).sort(), ['basis', 'detail', 'issues', 'log', 'network', 'rawRerunStatus', 'reason', 'status']);
+  assert.equal(regression.status, 'pass');
+  assert.deepEqual(regression.network, second);
+  assert.deepEqual(original.network.reached, ['dev-12345.okta.com:443', 'api.stripe.com:80']);
+  assert.equal(fs.readFileSync(original.log, 'utf8'), 'dev-12345.okta.com:443 connected\n\n[regression check]\napi.stripe.com:80 connected');
+  assert.equal(fs.readFileSync(path.join(cwd, 'new.mjs'), 'utf8'), 'worker');
 });
