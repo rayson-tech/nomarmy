@@ -18,7 +18,7 @@ import { buildConfigProposal } from "../lib/propose.mjs";
 import { detectHardware } from "../lib/hardware.mjs";
 import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf.mjs";
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
-import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv, defaultInstallDir } from "../lib/connect.mjs";
+import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv, defaultInstallDir, installMcpCopy, SCOPES, claudeUserScoped, portableServerLaunch } from "../lib/connect.mjs";
 import { compareVersions, readPackageVersion, readInstallVersions, copyIsStale } from "../lib/install-freshness.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
 import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, agentProviderId, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
@@ -40,10 +40,10 @@ import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalo
 // "already connected, so resync" detection if it has no CLI to probe.
 const KNOWN_TARGETS = ["claude", "codex", "cursor"];
 
-function connectTarget(target, { nomarmyRoot, run }) {
-  if (target === "claude") return connectClaude({ nomarmyRoot, run });
-  if (target === "codex") return connectCodex({ nomarmyRoot, run });
-  if (target === "cursor") return connectCursor({ nomarmyRoot, run });
+function connectTarget(target, { nomarmyRoot, run, scope = "user", projectDir = null }) {
+  if (target === "claude") return connectClaude({ nomarmyRoot, run, scope, projectDir });
+  if (target === "codex") return connectCodex({ nomarmyRoot, run, scope });
+  if (target === "cursor") return connectCursor({ nomarmyRoot, run, scope, projectDir });
   throw new Error(`unknown connect target: ${target}`);
 }
 
@@ -214,10 +214,16 @@ Usage: nomarmy <command> [options]
   statusline      the one-line summary Claude Code's status line shows
                   (installed by \`nomarmy connect claude\` when no status
                   line is set); reads the session JSON on stdin
-  connect [claude] [codex] [cursor]
+  connect [claude] [codex] [cursor] [--scope user|local|project]
                   (Re-)register the MCP server with one or more coordinators.
                   With no target and not --json, prompts an interactive
-                  multi-select instead.
+                  multi-select instead. --scope user (default) registers it
+                  for every project; local for this repository, only you;
+                  project for this repository, committed for the team
+                  (.mcp.json or .cursor/mcp.json, running \`nomarmy mcp\`).
+                  Codex has only the user scope.
+  mcp             Start nomArmy's MCP server on stdio with this machine's
+                  settings. What a --scope project registration runs.
   sandbox         The Podman VM every sandbox shares (macOS, Windows): its
                   memory, disk and images. --memory <GiB> resizes it (stops,
                   sets, restarts; refused while jobs run); --prune removes
@@ -1709,6 +1715,13 @@ async function cmdUpdate() {
 // this process loaded. Returns the targets reconnected.
 function reconnectCoordinators() {
   const targets = connectedTargets();
+  // Per-repo registrations run the installed copy (or `nomarmy mcp`), so a
+  // refreshed copy is all they need; re-registering them at user scope would
+  // add nomArmy to every project.
+  if (!targets.length) {
+    execFileSync(process.execPath, [path.join(nomarmyRoot, "bin", "nomarmy.mjs"), "connect", "--copy-only", ...(json ? ["--json"] : [])], { stdio: json ? "ignore" : "inherit" });
+    return [];
+  }
   if (targets.length) {
     if (!json) console.log(`\nReconnecting ${targets.join(", ")}...`);
     execFileSync(process.execPath, [path.join(nomarmyRoot, "bin", "nomarmy.mjs"), "connect", ...targets, ...(json ? ["--json"] : [])], { stdio: json ? "ignore" : "inherit" });
@@ -1717,7 +1730,7 @@ function reconnectCoordinators() {
 }
 
 function connectedTargets() {
-  return [commandExists("claude") && "claude", commandExists("codex") && "codex", cursorAlreadyConnected() && "cursor"].filter(Boolean);
+  return [commandExists("claude") && claudeUserScoped() && "claude", commandExists("codex") && "codex", cursorAlreadyConnected() && "cursor"].filter(Boolean);
 }
 
 async function updateFromNpm() {
@@ -1788,7 +1801,20 @@ async function cmdConnect() {
   // scan the whole argv), and `nomarmy connect --json claude` once broke
   // that promise by reading argv[1] directly -- --json landed in target's
   // slot instead. Multiple bare tokens are now allowed too, for multi-select.
-  const requested = argv.slice(1).filter((a) => !a.startsWith("--"));
+  const flagValues = new Set(["--scope", "--repo"].map((name) => argv.indexOf(name)).filter((i) => i >= 0).map((i) => i + 1));
+  const requested = argv.slice(1).filter((a, i) => !a.startsWith("--") && !flagValues.has(i + 1));
+  const scope = value("scope", "user");
+  if (!SCOPES.includes(scope)) throw new Error(`--scope must be one of ${SCOPES.join(", ")}, got "${scope}".`);
+  let projectDir = null;
+  if (scope !== "user") {
+    try { projectDir = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: repoDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
+    catch { throw new Error(`--scope ${scope} registers nomArmy for one repository, and ${repoDir} isn't inside a git repository. Run it from the repository (or pass --repo <dir>).`); }
+  }
+  if (flag("copy-only")) {
+    // `nomarmy update` with only per-repo registrations: refresh the copy they run.
+    installMcpCopy({ nomarmyRoot, installDir: defaultInstallDir(), run: (cmd, args, opts = {}) => execFileSync(cmd, args, { stdio: json ? "ignore" : "inherit", ...opts }) });
+    return json ? out({ refreshed: defaultInstallDir() }) : console.log(c.green(`✓ Refreshed the nomArmy copy in ${defaultInstallDir()}.`));
+  }
   let targets;
   if (requested.length > 0) {
     const unknown = requested.filter((t) => !KNOWN_TARGETS.includes(t));
@@ -1813,9 +1839,12 @@ async function cmdConnect() {
     }
     try {
       if (!json) console.log(c.bold(`\n🍪 Connecting nomArmy to ${target}...`));
-      const result = connectTarget(target, { nomarmyRoot, run });
+      const result = connectTarget(target, { nomarmyRoot, run, scope, projectDir });
       results.push({ target, connected: true, ...result });
-      if (!json) console.log(c.green(`✓ Registered nomarmy-local-worker with ${target}.`));
+      if (!json) console.log(c.green(`✓ Registered nomarmy-local-worker with ${target}${scope === "user" ? "." : scope === "local" ? ` for ${projectDir} only (not committed).` : ` in ${path.relative(projectDir, result.configPath ?? path.join(projectDir, ".mcp.json"))}, for everyone who clones this repository.`}`));
+      if (!json && scope === "local" && result?.excluded?.length) console.log(c.dim(`  Kept out of git (.git/info/exclude): ${result.excluded.join(", ")}`));
+      if (!json && scope === "project") console.log(c.dim(`  Commit it along with the playbook in ${path.relative(projectDir, result.commands.dir)}. Each teammate needs nomArmy installed and set up (npm install -g nomarmy@alpha, then nomarmy setup); the registration runs \`nomarmy mcp\`, which uses their own settings.`));
+      if (!json && scope !== "user" && target === "claude" && result?.userScoped) console.log(c.yellow(`  nomArmy is also registered for all your projects (user scope). To use it only where you register it per repository: claude mcp remove nomarmy-local-worker -s user`));
       if (!json && result?.commands?.installed?.length) console.log(c.green(`✓ Playbooks: ${result.commands.installed.join(", ")}`) + c.dim(` in ${result.commands.dir} (restart ${target} to pick up a new one)`));
       if (!json && result?.notifier?.status === "built") console.log(c.green("✓ Notifications: nomArmy.app, with nomArmy's icon") + c.dim(" (macOS asks once whether to allow it)"));
       if (!json && result?.notifier?.status === "failed") console.log(c.yellow(`⚠ Couldn't build nomArmy.app (${result.notifier.reason}); notifications still work, with Script Editor's icon. Xcode's command-line tools provide swiftc: xcode-select --install`));
@@ -2617,7 +2646,16 @@ async function cmdStatusline() {
   process.stdout.write(`${statusLineText({ session })}\n`);
 }
 
-const commands = { scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, install: cmdInstall, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, sandbox: cmdSandbox, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
+// `nomarmy mcp`: what a --scope project registration runs. Nothing goes to
+// stdout but the server's own protocol.
+function cmdMcp() {
+  const { serverPath, env } = portableServerLaunch({ nomarmyRoot });
+  const child = spawn(process.execPath, [serverPath], { stdio: "inherit", env });
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => child.kill(signal));
+  child.on("exit", (code, signal) => { if (signal) process.kill(process.pid, signal); else process.exit(code ?? 1); });
+}
+
+const commands = { mcp: cmdMcp, scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, install: cmdInstall, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, sandbox: cmdSandbox, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
   // Import lazily to avoid circular dependencies
