@@ -34,6 +34,7 @@ import { agentDispatchFields, resolveAgentModel, agentProviderId, describeAgent 
 import { OUTCOMES, COORDINATOR_STATUS_BY_OUTCOME } from "../lib/outcomes.mjs";
 import { readUsageSnapshots, usageStatus } from "../lib/usage-limits.mjs";
 import { modelRefusals } from "../lib/health.mjs";
+import { podmanProblem, podmanVmStartedAt } from "../lib/podman-health.mjs";
 import { createBuildMetrics, resolveOutcome, finalText, workerMetadata, usageMetrics, policyAdmissionProblems, applyRefactorContract, applyVerificationPolicy, resolveVerifyRegression } from "../lib/outcome.mjs";
 import { compactJobRecord, formatResult, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner } from "../lib/job-format.mjs";
 
@@ -250,7 +251,10 @@ const verificationFlow = createVerificationFlow({
 const { registerVerificationRunner, normalizeVerification, runIndependentVerification, runRegressionCheck, selectUnionCandidates, buildUnionBranch } = verificationFlow;
 export { registerVerificationRunner, normalizeVerification, runRegressionCheck, selectUnionCandidates, buildUnionBranch };
 
+// Podman checks, wired at startup below (a test importing this module gets none).
+let podmanChecks = null;
 const { executeJob, executeImplement, executeScout, executeDecompose } = createExecutor({
+  podmanVmStartedAt: () => podmanChecks?.vmStartedAt() ?? null,
   VERSION, projectDir, jobsRoot, run, git, gitRaw,
   collectGitRecord, createCoordinatorCommit, ensureJobsRoot, slug, assertRepo,
   resolveBase, workerModelThinkingSupported, budgetState, execution, buildMetrics,
@@ -263,6 +267,7 @@ export { executeJob };
 const { WORKER_START_STAGGER_MS, activeJobs, runningCount, agentMaxConcurrent, withAgentSlot, track, notifyJobFinished, capacitySnapshot, admit, refusal, runBrief, recordJobInRun, trackInRun, launch, liveProgress, summarize } = createJobRuntime({
   projectDir, stateRoot, jobsRoot, runsRoot, leasesRoot, slotsRoot, run, currentMaxWorkers, slug, agentsConfig, modelCatalogReady, budgetsForJob, resolveSubscriptionSelection, executeJob, subscriptionJobFieldProblems, repoPolicy, jobArgs,
   env: process.env, budgetState, getActiveRunId: () => activeRunId,
+  sandboxProblem: () => podmanChecks?.problem() ?? null,
 });
 export { runningCount, track };
 
@@ -806,6 +811,12 @@ if (isMain) {
   // sqlglot, so verification could never pass), and a worker could edit its
   // own worktree's copy to weaken the checks that judge it.
   registerVerificationRunner(createVerificationRunner({ hostProjectDir: projectDir, loadConfig: () => loadConfig(projectDir) }));
+  // A healthy answer is reused for 20 seconds, so a batch doesn't ask Podman per job.
+  let podmanOkUntil = 0;
+  podmanChecks = {
+    problem: () => { if (Date.now() < podmanOkUntil) return null; const p = podmanProblem(); if (!p) podmanOkUntil = Date.now() + 20000; return p; },
+    vmStartedAt: () => podmanVmStartedAt(),
+  };
   // Warm the budget from the profile or the running llama-server. Not awaited:
   // admission refreshes it anyway, and a slow hardware probe must not delay
   // the MCP handshake.
