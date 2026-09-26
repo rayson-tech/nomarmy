@@ -74,14 +74,15 @@ test('verification services lifecycle is internal, ordered, bounded and cleaned 
     assert.equal(result.status, failure === 'verification' ? 'fail' : failure ? 'not_run' : 'pass', failure);
     const args = calls.map((call) => call.args);
     assert.deepEqual(args[2], ['network', 'create', '--internal', 'nomarmy-job-42']);
-    if (failure === 'network') { assert.equal(args.length, 3); continue; }
+    assert.deepEqual(args.find(a => a[0] === 'ps'), ['ps', '-aq', '--filter', 'label=nomarmy.job=job-42']);
+    if (failure === 'network') { assert.equal(args.length, 4); continue; }
     assert.deepEqual(args[3], ['image', 'exists', 'ghcr.io/navikt/mock-oauth2-server:2.1.10']);
     assert.deepEqual(args[4], ['pull', 'ghcr.io/navikt/mock-oauth2-server:2.1.10']);
     assert.deepEqual(args.at(-1), ['network', 'rm', 'nomarmy-job-42']);
-    if (failure === 'pull') { assert.equal(args.length, 6); continue; }
+    if (failure === 'pull') { assert.equal(args.length, 7); continue; }
     assert.deepEqual(args[5], ['run', '--detach', '--name', 'nomarmy-job-42-service-mock-oidc', '--network', 'nomarmy-job-42', '--network-alias', 'mock-oidc', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--pids-limit=512', '--env', 'SERVER_PORT=8080', 'ghcr.io/navikt/mock-oauth2-server:2.1.10']);
     assert.deepEqual(args.at(-2), ['rm', '--force', '--ignore', 'nomarmy-job-42-service-mock-oidc']);
-    if (failure === 'service') { assert.equal(args.length, 8); continue; }
+    if (failure === 'service') { assert.equal(args.length, 9); continue; }
     assert.deepEqual(args[6].slice(0, -1), ['run', '--rm', '--name', 'nomarmy-job-42-health-mock-oidc', '--network', 'nomarmy-job-42', '--user=1000:1000', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--entrypoint', 'node', 'sandbox:1', '--input-type=module', '-e']);
     assert.match(args[6].at(-1), /http:\/\/mock-oidc:8080\/default\/\.well-known\/openid-configuration/);
     assert.match(args[6].at(-1), /r.status>=200&&r.status<300/);
@@ -103,7 +104,8 @@ test('verification services lifecycle is internal, ordered, bounded and cleaned 
     loadConfig: () => ({ found: true, config: { verification: { quick: { commands: ['true'] } } } }),
   });
   assert.equal((await runner({ cwd, profile: 'quick' })).status, 'pass');
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
+  assert.equal(calls[3][0], 'ps');
   assert.equal(calls[2].includes('--network=none'), true);
 });
 
@@ -118,7 +120,7 @@ test('multiple services use distinct container names and local images without pu
   assert.deepEqual(Object.keys(run).sort(), ['cleanup', 'network']);
   assert.equal(run.network, 'nomarmy-multi');
   await run.cleanup();
-  assert.deepEqual(calls.map((args) => args[0]), ['network', 'image', 'run', 'image', 'run', 'run', 'rm', 'rm', 'rm', 'network']);
+  assert.deepEqual(calls.map((args) => args[0]), ['network', 'image', 'run', 'image', 'run', 'run', 'ps', 'rm', 'rm', 'rm', 'network']);
   assert.deepEqual(calls.filter((args) => args[0] === 'run').map((args) => args[args.indexOf('--name') + 1]), ['nomarmy-multi-service-mock-oidc', 'nomarmy-multi-service-mock-oidc-health', 'nomarmy-multi-health-mock-oidc']);
   assert.deepEqual(calls.slice(-4), [
     ['rm', '--force', '--ignore', 'nomarmy-multi-health-mock-oidc'],
