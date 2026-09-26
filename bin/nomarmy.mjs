@@ -193,7 +193,7 @@ Usage: nomarmy <command> [options]
                             which agent the General is, in --global
                             (default) or --local
   config paths    where agents.yml and the three army layers live
-  jobs [--watch|--events|--prune] [--interval N] [--older-than DAYS]
+  jobs [--watch|--events|--prune|--wait <jobId>] [--interval N] [--older-than DAYS]
                   what's running across every session (agent, model, phase,
                   last tool call, files changed, heartbeat) and what just
                   finished; --watch redraws every N seconds (default 3);
@@ -201,7 +201,9 @@ Usage: nomarmy <command> [options]
                   finish (for Claude Code's background monitor; --json for
                   JSON lines); --prune removes the bulky runtime data
                   from finished jobs older than DAYS (default 2), keeping
-                  their records, reports and any retained worktree
+                  their records, reports and any retained worktree;
+                  --wait <jobId> [--timeout <seconds>] blocks for one job
+                  to finish (default timeout 1800; --json is supported)
   health          check what's likely to break a run before it does:
                   expiring logins, an outdated OpenClaw or plugin, roles
                   that can't be dispatched, an unloadable agents.yml,
@@ -2449,6 +2451,66 @@ async function streamJobEvents() {
   }
 }
 
+/** Wait for one job in the shared, cross-session state directory. */
+async function waitForJobCli() {
+  const requested = value("wait");
+  const jobId = requested ? path.basename(requested) : null;
+  const timeoutSeconds = Number(value("timeout", "1800"));
+  if (!jobId || jobId !== requested) {
+    if (json) out({ error: "--wait needs a job id" });
+    else console.error("nomarmy jobs: --wait needs a job id");
+    process.exitCode = 2;
+    return;
+  }
+  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 0) {
+    if (json) out({ error: "--timeout must be a non-negative number of seconds" });
+    else console.error("nomarmy jobs: --timeout must be a non-negative number of seconds");
+    process.exitCode = 2;
+    return;
+  }
+  const jobDir = path.join(jobsRootDir(), jobId);
+  const lease = path.join(agentStateRoot(), "leases", `${jobId}.json`);
+  if (!fs.existsSync(jobDir) && !fs.existsSync(lease)) {
+    if (json) out({ error: `unknown job id: ${jobId}` });
+    else console.error(`nomarmy jobs: unknown job id: ${jobId}`);
+    process.exitCode = 2;
+    return;
+  }
+  const deadline = Date.now() + timeoutSeconds * 1000;
+  for (;;) {
+    const status = readJsonSafe(path.join(jobDir, "status.json")) ?? {};
+    const meta = readJsonSafe(path.join(jobDir, "metadata.json")) ?? {};
+    if (status.state === "finished" || meta.outcome) {
+      const issues = Array.isArray(meta.issues) ? meta.issues : Array.isArray(status.issues) ? status.issues : [];
+      const result = {
+        jobId,
+        outcome: meta.outcome ?? status.outcome ?? null,
+        coordinatorStatus: meta.coordinatorStatus ?? status.coordinatorStatus ?? null,
+        branch: meta.branch ?? status.branch ?? null,
+        commit: meta.commit?.sha ?? meta.commit ?? status.commit?.sha ?? status.commit ?? null,
+        issues,
+      };
+      if (json) out(result);
+      else {
+        const firstIssue = issues[0];
+        const issueText = firstIssue == null ? null : typeof firstIssue === "string" ? firstIssue : firstIssue.message ?? JSON.stringify(firstIssue);
+        console.log([result.jobId, result.outcome ?? "unknown", result.coordinatorStatus ?? "unknown",
+          result.branch ? `branch=${result.branch}` : null, result.commit ? `commit=${result.commit}` : null,
+          issueText ? `issue=${issueText}` : null].filter(Boolean).join(" "));
+      }
+      process.exitCode = result.coordinatorStatus === "complete" ? 0 : 1;
+      return;
+    }
+    if (Date.now() >= deadline) {
+      if (json) out({ error: `timed out waiting for job ${jobId}` });
+      else console.error(`nomarmy jobs: timed out waiting for job ${jobId}`);
+      process.exitCode = 2;
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(2000, Math.max(1, deadline - Date.now()))));
+  }
+}
+
 /**
  * `nomarmy jobs --prune [--older-than DAYS]`: remove runtime/ (per-job npm
  * cache, harness state such as Codex's, OpenClaw's transcript) from
@@ -2465,6 +2527,7 @@ function pruneJobRuntimeCli() {
 }
 
 async function cmdJobs() {
+  if (flag("wait")) return waitForJobCli();
   if (flag("events")) return streamJobEvents();
   if (flag("prune")) return pruneJobRuntimeCli();
   if (json) return out(collectJobs());

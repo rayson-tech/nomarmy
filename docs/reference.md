@@ -14,7 +14,7 @@ Every command proposes before it writes: a `[y/N]` prompt, or an explicit flag u
 | `nomarmy init` | Proposes a `.nomarmy.yml` from what the repo contains. |
 | `nomarmy agents list\|add\|update\|remove` | Where jobs can run. See [Agents](agents-and-army.md#agents-where-a-job-can-run). |
 | `nomarmy army show\|init\|assign\|general` | The General and the roster. See [The army](agents-and-army.md#the-army-who-does-what). |
-| `nomarmy jobs [--watch\|--events\|--prune]` | What's running across every session, and what just finished. |
+| `nomarmy jobs [--watch\|--events\|--prune\|--wait <jobId>]` | What's running across every session, and what just finished. `--wait <jobId> [--timeout <seconds>]` waits for one cross-session job (default 1800 seconds; add `--json` for structured output). |
 | `nomarmy health` | Runs the health checks now. |
 | `nomarmy statusline` | nomArmy's part of Claude Code's status line. |
 | `nomarmy config paths` | Where each config file lives. |
@@ -33,7 +33,7 @@ What the General uses. Every job takes the same shape: a `task`, optional `accep
 | Tool | What it does |
 |---|---|
 | `local_worker` | Runs one job and waits for it. |
-| `local_worker_start` / `local_worker_status` | Starts a job in the background / waits for its result. |
+| `local_worker_start` / `local_worker_status` | Starts a job in the background / waits for its result. The start response includes `nomarmy jobs --wait <jobId>` for background monitoring. |
 | `local_workers` | Runs a batch of independent jobs in parallel. `auto_union: true` merges them into one integration branch for review. |
 | `repo_evidence` | Deterministic answers (definitions, references, outlines, grep, files) with `[path:line]` on every hit, no model. |
 | `army` | The General's charter and agent, then this repo's roles and who runs each. |
