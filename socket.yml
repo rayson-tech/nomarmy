@@ -1,0 +1,8 @@
+# Socket (https://socket.dev) dependency scanning for this repository.
+version: 2
+
+# Test fixtures imitate other people's repos, old dependency ranges included,
+# so the scanner can be tested against them. They are read as text, never
+# installed, and not published to npm.
+projectIgnorePaths:
+  - "tests/fixtures/"
