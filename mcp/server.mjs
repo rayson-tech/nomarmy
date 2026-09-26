@@ -217,6 +217,10 @@ export function expandJobs(jobs, { getArmy = currentArmy, getAgents = () => agen
   const expanded = jobs.map((job, i) => {
     try {
       let j = runId && !job.run_id ? { ...job, run_id: runId } : job;
+      if (j.mode === "verify") {
+        const { agent, model, army_role, on_behalf_of, agentName, pool, subscription_worker, roleModel, ...rest } = j;
+        return { ...rest, ...(army_role ? { armyRole: army_role } : {}) };
+      }
       if (j.army_role) { army ??= getArmy().army; j = expandArmyRole(j, army); }
       const { agent, roleModel = null, ...rest } = j;
       if (!agent) {
@@ -274,7 +278,7 @@ export const jobSchema = z.object({
   verify_regression: z.boolean().optional().describe(
     "implement only: after the diff passes `verification` and touches production files, temporarily revert just those production files, re-run the SAME verification profile (expected to fail without the fix), then restore them. A re-run that still PASSES proves no test would catch this regression, and the outcome is downgraded to NEEDS_REVIEW regardless of the worker's report -- never silently committed as done. This is the ONLY mechanism that catches a verification profile that passes for the wrong reason (a test-selection flag that accidentally excludes the changed file's own tests reports a real, honest, green run that never touched the diff -- exit-code checking alone cannot see the difference). Defaults to true whenever `verification` is set, since that gap is exactly what nomArmy's trust boundary claims to close; pass `false` explicitly to skip the doubled wall-clock cost (can matter on repos with thousands of tests) and accept the risk instead. No effect with no `verification` profile -- there is nothing to re-run. Ignored by scouts."
   ),
-  mode: z.enum(["scout", "implement", "decompose"]).default("implement").describe("implement: edit in an isolated worktree, coordinator commits on a valid report. scout: read-only research; every finding must cite [path:start-end] and nomArmy attaches the cited lines after verifying them against the base commit. decompose: read-only; proposes 2+ independent, evidence-grounded subtasks for a broad objective instead of doing everything in one worker turn. Never auto-dispatched -- the proposal is reviewed like a scout's findings, and the coordinator makes its own separate dispatch call with whatever subtasks it chooses to use."),
+  mode: z.enum(["scout", "implement", "decompose", "verify"]).default("implement").describe("verify: run a required verification profile with no worker and no model tokens; base_ref selects the branch or commit (default current HEAD), task is a short record label, agent/model are unused and army_role is only a label. implement: edit in an isolated worktree, coordinator commits on a valid report. scout: read-only research; every finding must cite [path:start-end] and nomArmy attaches the cited lines after verifying them against the base commit. decompose: read-only; proposes 2+ independent, evidence-grounded subtasks for a broad objective instead of doing everything in one worker turn. Never auto-dispatched -- the proposal is reviewed like a scout's findings, and the coordinator makes its own separate dispatch call with whatever subtasks it chooses to use."),
   base_ref: z.string().optional(),
   timeout_seconds: z.number().int().min(30).max(1800).default(600),
   reasoning: z.enum(["low", "medium", "high"]).default("medium").describe("Thinking level passed to the worker model. On the local model it takes effect when that model supports thinking (NOMARMY_MODEL_THINKING); on an api or subscription agent it applies per that agent's own `thinking` setting (false = off, a fixed level = always that level). Default is medium, not high, on real measured evidence: on an identical ticket, gpt-oss-20b at high took 318s with 21 tool calls and 4 failures, and at medium took 62s with 9 calls and 0 failures -- high did not produce a better answer, it thrashed. A separate open-ended task made Qwen3.6-27B time out completely at high (630s, zero output) and succeed at medium. Do not raise this to high by default reasoning that more thinking should help -- it has only ever hurt or timed out in testing so far. Reach for high only after a task has already failed once at medium and the failure looks like an under-thinking problem specifically (wrong root cause, not a formatting or scope issue)."),
@@ -357,9 +361,9 @@ server.tool("local_worker_start", "Start one worker or scout in the background a
       poll: { tool: "local_worker_status", job_id: entry.jobId, wait_seconds: MAX_STATUS_WAIT_SECONDS },
       // This job's own lane and budget: a subscription job used to be
       // reported with the local model's figures.
-      lane: jobLane(args), agent: args.agentName ?? "local", model: args.model ?? null,
+      lane: jobLane(args), agent: args.mode === "verify" ? null : args.agentName ?? "local", model: args.model ?? null,
       ...(args.run_id ? { run: runBrief(args.run_id) } : {}),
-      admission: { level: admission.level, notes: admission.reasons }, budgets: describeBudgets(budgetsForJob(args)) }, null, 2));
+      admission: { level: admission.level, notes: admission.reasons }, budgets: args.mode === "verify" ? null : describeBudgets(budgetsForJob(args)) }, null, 2));
   });
 // A long poll must return inside the MCP client's own idle-timeout: it aborts
 // a tool call after N seconds with no response or progress notification,
