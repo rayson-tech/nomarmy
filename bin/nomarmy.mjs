@@ -543,14 +543,16 @@ function defaultLocalProfile() {
   return spawnSync("nvidia-smi", ["-L"], { stdio: "ignore", timeout: 5000 }).status === 0 ? "nvidia-linux" : "cpu-linux";
 }
 
-function setupChecklist() {
+// Which profile this machine is set up for, the same way for `setup` and
+// `install`: the one setup recorded, else the install marker's, else the
+// execution mode's, else (a working local install) install.sh's default.
+function setupProfileState() {
   const common = path.join(nomarmyRoot, "config", "common.env");
   const chosen = readEnvValue(common, "NOMARMY_SETUP_PROFILE");
   const probeCommand = (binary, args) => {
     const result = spawnSync(binary, args, { encoding: "utf8", timeout: 10000 });
     return result.status === 0 ? result.stdout.trim() : "";
   };
-  const project = setupProjectDir();
   const profileFile = chosen ? path.join(nomarmyRoot, "config", "profiles", `${chosen}.env`) : null;
   const root = (process.env.NOMARMY_INSTALL_ROOT || (profileFile && readEnvValue(profileFile, "NOMARMY_INSTALL_ROOT")) || readEnvValue(common, "NOMARMY_INSTALL_ROOT") || "$HOME/.local/share/nomarmy-local-agents").replace(/\$HOME|\$\{HOME\}/g, os.homedir());
   let marker = null;
@@ -564,6 +566,12 @@ function setupChecklist() {
   const profile = chosen ?? marker?.profile
     ?? (["hosted", "remote", "bedrock"].includes(execution) ? execution : null)
     ?? (registered ? defaultLocalProfile() : null);
+  return { common, profile, marker, version, registered };
+}
+
+function setupChecklist() {
+  const { common, profile, marker, version, registered } = setupProfileState();
+  const project = setupProjectDir();
   return setupSteps({
     mode: () => ({ profile, host: readEnvValue(common, "NOMARMY_LLAMA_HOST"), port: readEnvValue(common, "NOMARMY_LLAMA_PORT") }),
     install: () => ({ marker, version, registered }),
@@ -590,8 +598,9 @@ function runSetupChild(args) {
 }
 
 function cmdInstall() {
-  const profile = value("profile", readEnvValue(path.join(nomarmyRoot, "config", "common.env"), "NOMARMY_SETUP_PROFILE"));
+  const profile = value("profile", null) ?? setupProfileState().profile;
   if (!profile) throw new Error("Choose a profile first: nomarmy setup --choose (or install --profile <name>).");
+  if (!value("profile", null)) console.log(`Installing for profile ${profile} (from nomarmy setup; pass --profile to choose another).`);
   const result = spawnSync("bash", [path.join(nomarmyRoot, "install.sh"), "--profile", profile, ...(flag("no-claude") ? ["--no-claude"] : [])], { stdio: "inherit", cwd: nomarmyRoot });
   process.exitCode = result.status ?? 1;
 }
