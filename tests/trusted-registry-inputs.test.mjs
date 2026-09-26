@@ -26,7 +26,8 @@ function fixture(t) {
   for (const dir of [trustedDir, cwd]) for (const [name, content] of Object.entries(base)) write(dir, name, content);
   const credential = path.join(root, 'credential');
   fs.writeFileSync(credential, 'synthetic-token-never-output');
-  write(cwd, '.nomarmy.local.yml', `registries:\n  npm: ${credential}\n`);
+  // Declared in the trusted checkout, as an operator would; the job's copy is irrelevant.
+  write(trustedDir, '.nomarmy.local.yml', `registries:\n  npm: ${credential}\n`);
   return { root, trustedDir, cwd, credential };
 }
 function capture() {
@@ -70,6 +71,9 @@ for (const [name, content] of [
 
 test('trusted registry accepts identical bytes and same checkout, fails closed without trust or on removed paths', t => {
   const f = fixture(t);
+  // This test also treats the job folder as the operator's own checkout (and as
+  // one with no trusted checkout at all), so it declares registries there too.
+  write(f.cwd, '.nomarmy.local.yml', `registries:\n  npm: ${f.credential}\n`);
   for (const trustedDir of [f.trustedDir, f.cwd]) {
     const build = capture();
     ensureComposedImageBuilt(f.cwd, null, { ...build, trustedDir });
@@ -142,4 +146,33 @@ test('worker sandbox resolution supplies the operator projectDir as trustedDir',
   assert.deepEqual(Object.keys(options).sort(), ['config', 'cwd', 'defaultImage', 'explicitImage', 'trustedDir']);
   assert.equal(options.trustedDir, f.trustedDir);
   assert.equal(options.cwd, f.cwd);
+});
+
+test("registry declarations are read only from the trusted checkout, never from a worker-writable worktree", async () => {
+  const fs = await import("node:fs"), os = await import("node:os"), path = await import("node:path");
+  const { ensureComposedImageBuilt } = await import("../lib/sandbox-images.mjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-registry-origin-"));
+  const trusted = path.join(root, "trusted"), worktree = path.join(root, "worktree"), secret = path.join(root, "planted-secret");
+  try {
+    for (const dir of [trusted, worktree]) {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "package.json"), '{"name":"x"}');
+      fs.writeFileSync(path.join(dir, "package-lock.json"), "{}");
+    }
+    fs.writeFileSync(secret, "//registry.example/:_authToken=planted\n");
+    // A worker plants a local config in its worktree; the trusted checkout declares nothing.
+    fs.writeFileSync(path.join(worktree, ".nomarmy.local.yml"), `registries:\n  npm: ${secret}\n`);
+    const calls = [];
+    const run = (cmd, args) => { calls.push(args); if (args[0] === "images") return ""; return ""; };
+    ensureComposedImageBuilt(worktree, null, { run, trustedDir: trusted });
+    const build = calls.find((args) => args[0] === "build");
+    assert.ok(build, "an image is still built");
+    assert.ok(!build.includes("--secret"), "the worktree's planted declaration is ignored");
+    // Without a trusted checkout, nothing is declared at all.
+    calls.length = 0;
+    ensureComposedImageBuilt(worktree, null, { run });
+    assert.ok(!calls.find((args) => args[0] === "build").includes("--secret"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
