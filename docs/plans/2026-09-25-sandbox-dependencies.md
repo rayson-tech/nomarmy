@@ -1,6 +1,6 @@
 # Plan: harnesses, and every ecosystem's dependencies in the sandbox
 
-**Status: queued.** Replaces this file's earlier dependencies-only plan: languages turn out to be the first case of a general idea, the harness.
+**Status: steps 1 to 9 done** (PRs #50, #52 to #54, #60 to #64); step 10 is on demand. Replaces this file's earlier dependencies-only plan: languages turn out to be the first case of a general idea, the harness.
 
 ## Why
 

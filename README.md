@@ -89,9 +89,10 @@ A worker gets a writable git worktree inside a Podman sandbox and nothing else: 
 | Agents: api keys | Live-verified with xAI; other providers built to OpenClaw's documented interface |
 | Agents: subscriptions | ChatGPT (Codex) and Muse Code sandboxed and live-verified; Claude live-verified, but its tools run on the host (scout and review by default) |
 | The army and `/feature` | Driven by a real Claude Code General across three runs, about 18 implement jobs |
-| Go, Rust, Python and Node repos | Dependency images live-verified for Python and Node (npm); Go modules and Rust crates prefetched at image build for offline verification |
-| Disposable per-job services (Postgres, mocks) | Not built |
-| Browser/E2E testing inside a nom | Not built |
+| Go, Rust, Python and Node repos, and mixed ones | Harness images live-verified: Go modules and Rust crates prefetched; npm, pnpm, yarn, bun and workspaces; pip, pyproject, uv and poetry |
+| Fake services beside the app (mock login server, mock APIs) | Live-verified on a private network with no route out (the `services` harness level) |
+| Browser tests (Playwright + Chromium) | Live-verified offline, with screenshots and traces kept as job evidence |
+| Private registries and a verification-only network allowlist | Live-verified; each passed an independent security review |
 
 What we've learned from real runs, including where delegating pays and where it doesn't, is in [docs/findings.md](https://github.com/rayson-tech/nomarmy/blob/main/docs/findings.md).
 
