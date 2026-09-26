@@ -98,7 +98,12 @@ for (const [manager, lock, install] of [
     const mounts = composed.dockerfile.split("\n").filter((line) => line.includes("--mount=type=secret"));
     assert.equal(mounts.length, 1);
     assert.equal(mounts[0].startsWith("RUN --mount=type=secret,id=npm,target=/home/node/.npmrc,uid=1000,required=true "), true);
-    assert.equal(mounts[0].includes(install), true);
+    assert.equal(mounts[0].includes(install + " --ignore-scripts"), true);
+    const lines = composed.dockerfile.split("\n");
+    const next = lines[lines.indexOf(mounts[0]) + 1];
+    const marker = manager === "npm" ? ".nomarmy-npm-ci-failed" : `.nomarmy-${manager}-install-failed`;
+    assert.equal(mounts[0].includes(`|| touch ${marker}`), true);
+    assert.equal(next, `RUN cd '/deps' && ((test ! -e /home/node/.npmrc && test ! -L /home/node/.npmrc) || { touch ${marker}; exit 1; }) && (${manager === "pnpm" ? "pnpm rebuild" : "npm rebuild"} || touch ${marker})`);
     assert.equal(mounts[0].endsWith(" >/dev/null 2>&1"), true);
     assert.equal(composed.dockerfile.includes(TOKEN), false);
     assert.equal(composed.dockerfile.includes(f.secret), false);
@@ -106,7 +111,7 @@ for (const [manager, lock, install] of [
 }
 
 for (const [manager, files, install] of [
-  ["pip", { "requirements.txt": "example-private==1" }, "pip3 install --no-cache-dir --break-system-packages -r /deps/requirements/req-0.txt"],
+  ["pip", { "requirements.txt": "example-private==1" }, "pip3 install --no-cache-dir --break-system-packages --only-binary=:all: -r /deps/requirements/req-0.txt"],
   ["pyproject", { "pyproject.toml": '[project]\nname="demo"\nversion="1"\ndependencies=[]' }, "python3 -m venv"],
   ["uv", { "pyproject.toml": "[project]\n", "uv.lock": "" }, "uv sync --frozen"],
   ["poetry", { "pyproject.toml": "[tool.poetry]\n", "poetry.lock": "" }, "poetry install --no-root"],
@@ -115,11 +120,22 @@ for (const [manager, files, install] of [
     const f = fixture(t, files);
     for (const [declaration, target] of [[f.secret, "/etc/pip.conf"], [{ netrc: f.secret }, "/root/.netrc"]]) {
       f.local({ pip: declaration });
+      if (manager === "poetry") {
+        assert.throws(() => composeSandboxImage(f.repo), {
+          message: "registries: poetry installs can't be made build-free; use uv, or wheels via pip",
+        });
+        continue;
+      }
       const composed = composeSandboxImage(f.repo);
       const lines = composed.dockerfile.split("\n").filter((line) => line.includes("--mount=type=secret"));
       assert.equal(lines.length, 1);
       assert.equal(lines[0].startsWith("RUN --mount=type=secret,id=pip,target=" + target + ",uid=0,required=true "), true);
       assert.equal(lines[0].includes(install), true);
+      assert.equal(lines[0].includes("--only-binary=:all:"), true);
+      const allLines = composed.dockerfile.split("\n");
+      assert.equal(allLines[allLines.indexOf(lines[0]) + 1], `RUN (test ! -e ${target} && test ! -L ${target}) || { touch /deps/.nomarmy-pip-install-failed; exit 1; }`);
+      assert.equal(lines[0].includes(`.nomarmy-${manager}-install-failed`), true);
+      if (manager === "uv") assert.equal(lines[0].includes("uv sync --frozen --no-install-project --all-groups --no-build"), true);
       assert.equal(lines[0].endsWith(" >/dev/null 2>&1"), true);
       assert.equal(composed.dockerfile.includes(TOKEN), false);
       assert.equal(composed.dockerfile.includes(f.secret), false);
@@ -218,8 +234,8 @@ test("registry credential cannot enter the build context via a manifest, symlink
       if (link === "symlink") fs.symlinkSync(f.secret, lock);
       else fs.linkSync(f.secret, lock);
     }
-    assert.throws(() => ensureComposedImageBuilt(f.repo, null, { run: () => assert.fail("must reject before Podman") }), {
-      message: "registries: a credential file cannot also be a build-context input",
+    assert.throws(() => ensureComposedImageBuilt(f.repo, null, { trustedDir: f.repo, run: () => assert.fail("must reject before Podman") }), {
+      message: link === "symlink" ? "sandbox dependency source must be a repository-contained regular file (no absolute or escaping paths)" : "registries: a credential file cannot also be a build-context input",
     });
   }
 });

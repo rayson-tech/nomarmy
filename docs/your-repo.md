@@ -195,7 +195,7 @@ registries:
   cargo: ~/.cargo/credentials.toml
 ```
 
-For uv or Poetry, use a netrc instead of pip.conf:
+For uv, use a netrc instead of pip.conf:
 
 ```yaml
 registries:
@@ -204,10 +204,10 @@ registries:
 ```
 
 A pip path whose basename is `.netrc` or `netrc` also selects netrc mode.
-`pip.conf` configures pip (including the pip bootstrap for uv/Poetry), **not**
-uv/Poetry's own index selection or authentication. Declare credential-free
+`pip.conf` configures pip (including the pip bootstrap for uv), **not**
+uv's own index selection or authentication. Declare credential-free
 index/source URLs in the project's manager configuration and use netrc for
-those managers. npm, pnpm, Yarn Classic and bun use the mounted `.npmrc`.
+uv. npm, pnpm, Yarn Classic and bun use the mounted `.npmrc`.
 Yarn Berry does not read `.npmrc`; a credentialed Berry build is currently
 rejected explicitly rather than silently installing without authentication.
 Cargo registry names/index URLs must likewise be configured without tokens in
@@ -216,11 +216,21 @@ project metadata; the mounted credentials file supplies authentication.
 Credentials are used only when dependency inputs match the operator's trusted
 checkout (the MCP server's project directory) byte for byte, including the set
 of manifest, lockfile, workspace-member and Cargo configuration paths. Keep that
-checkout at the operator's committed manifests: credentialed installation then
-has the same trust boundary as the operator's own CI. npm-family install scripts
-remain enabled for compatibility; worker-modified manifests cannot run them with
-registry credentials. A changed dependency input, or an unavailable trusted
+checkout under operator control: it is the operator's **live working tree**, not
+a clean snapshot, and its contents (including uncommitted edits) are trusted by
+definition. Credentialed installs run no package code. npm-family installs use
+`--ignore-scripts`; lifecycle scripts run in a separate following RUN without
+credentials (`pnpm rebuild` for pnpm, `npm rebuild` for npm, Yarn Classic and
+Bun's npm-compatible node_modules tree). `bun pm untrusted` only lists scripts,
+so it is not used to execute them. Both install and rebuild failures leave markers.
+Private Python packages must ship **wheels**: pip uses `--only-binary=:all:` and
+uv uses `--no-build`; source-only packages fail with an install marker. Poetry
+cannot guarantee build-free installs, so credentialed Poetry builds are refused;
+use uv or wheels via pip. Poetry and Yarn Berry are not supported with registries
+yet. A changed dependency input, or an unavailable trusted
 checkout, produces an uncredentialed build with no secret flags or mounts.
+Without a trusted checkout, only the local YAML `registries` key is detected;
+declared credential files are not inspected or read.
 Private installs may fail; verification detail and job issues name the changed
 paths and explain that private-registry credentials were not used.
 
@@ -243,11 +253,11 @@ failure marker, so use verification to check that dependencies were installed.
 A credential selected as a dependency input (including a symlink or hardlink)
 is rejected before building.
 
-**Trust boundary:** build secrets are available to the installer during that
-RUN. Only build reviewed dependency manifests/packages with these tokens;
-Podman secret mounts cannot stop malicious install code from deliberately
-copying or exfiltrating a secret. The builder does not claim that arbitrary
-package code is safe. Independent security review is required before merging
+**Trust boundary:** build secrets are available to the package manager during
+its download/install RUN, with dependency scripts and source builds disabled.
+The package manager itself remains trusted; Podman secret mounts cannot stop a
+compromised installer from copying or exfiltrating a secret. Dependency lifecycle
+scripts run later without credentials, but are not otherwise made safe. Independent security review is required before merging
 this feature, including package-manager-specific credential/cache behavior.
 
 ### Manual credential-isolation check
