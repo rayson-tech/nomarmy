@@ -9,6 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
+import * as images from "../lib/sandbox-images.mjs";
 
 import {
   DEFAULT_AGENT_IMAGE,
@@ -351,7 +352,7 @@ test("all commands passing yields pass with a basis naming the profile", async (
   }
 });
 
-test("a detected Go repo resolves to the Go sandbox image, built lazily via the injected run", async () => {
+test("a detected Go repo resolves to the composed sandbox image, built lazily via the injected run", async () => {
   const dir = tempRepo({ "go.mod": "module example.com/x\n" });
   const executor = fakeExecutor({ fallback: { started: true, exitCode: 0, stdout: "ok", stderr: "" } });
   const runCalls = [];
@@ -364,8 +365,9 @@ test("a detected Go repo resolves to the Go sandbox image, built lazily via the 
   const verdict = await run({ ...CONTEXT, cwd: dir });
 
   assert.equal(verdict.status, "pass");
-  assert.ok(runCalls.some((c) => c[1] === "build" && c.some((a) => String(a).includes("openclaw-nomarmy-coder-go"))));
-  for (const call of executor.calls.run) assert.equal(call.image, "openclaw-nomarmy-coder-go:bookworm");
+  const expected = images.composeSandboxImage(dir).image;
+  assert.deepEqual(runCalls.map((c) => c.slice(0, 4)), [["podman", "images", "-q", expected], ["podman", "build", "-t", expected]]);
+  for (const call of executor.calls.run) assert.equal(call.image, expected);
 });
 
 test("an explicit image wins over a detected Go repo -- no build attempted", async () => {
@@ -393,7 +395,7 @@ test("a failed lazy image build is not_run, never runs commands against the wron
 
   assert.equal(verdict.status, "not_run");
   assert.equal(verdict.basis, "sandbox-image-build-failed");
-  assert.match(verdict.reason, /rust sandbox image/);
+  assert.equal(verdict.reason, `failed to build sandbox harness image (${images.composeSandboxImage(dir).image}): network unreachable`);
   assert.equal(executor.calls.run.length, 0, "no command may run once the sandbox image itself is unavailable");
 });
 

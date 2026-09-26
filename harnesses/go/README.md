@@ -10,11 +10,11 @@ Matches `go.mod` at the repository root.
 
 Installs Go 1.27.1 from the upstream tarball for amd64 or arm64, on the Node 24 Debian bookworm base with Python 3 and pip. Sets GOPATH for the node user.
 
-Toolchain only: there is no module prefetch yet. Offline verification with external dependencies needs vendored modules. The current image selector chooses Go before other ecosystems; mixed-repo image composition is not implemented.
+Toolchain only: there is no module prefetch yet. Offline verification with external dependencies needs vendored modules. The Go toolchain layer composes with other matched harnesses, including Node dependencies in mixed repositories.
 
 ## Verification and network
 
-Proposes `go test ./...` as the `quick` profile. Network level: `none`. This registry is metadata only; it does not change image building, jobs, or verification.
+Proposes `go test ./...` as the `quick` profile. Network level: `none`. Matched harnesses compose the sandbox image used by workers and verification. The verification profile is a proposal; the registry does not change job profiles or network access.
 
 ## Requirements and artifacts
 
