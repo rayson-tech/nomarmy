@@ -1,7 +1,8 @@
 name: go
-summary: Go toolchain only; module prefetch is not yet supported
+summary: Go toolchain with prefetched modules for offline verification
 detect:
   - file: go.mod
+  - file: go.work
 after: []
 image:
   builtin: go

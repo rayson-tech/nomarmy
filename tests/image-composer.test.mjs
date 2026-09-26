@@ -32,7 +32,7 @@ test("mixed Go and nested Node: one cached image, exact context, PATH union and 
     builds++;
     context = args.at(-1);
     recipe = fs.readFileSync(path.join(context, "Dockerfile"), "utf8");
-    assert.deepEqual(fs.readdirSync(context).sort(), ["Dockerfile", "node"]);
+    assert.deepEqual(fs.readdirSync(context).sort(), ["Dockerfile", "go", "node"]);
     assert.deepEqual(fs.readdirSync(path.join(context, "node/ui")).sort(), ["package-lock.json", "package.json"]);
     assert.equal(fs.readFileSync(path.join(context, "node/ui/package-lock.json"), "utf8"), "{}");
     cached = true;
@@ -43,6 +43,8 @@ test("mixed Go and nested Node: one cached image, exact context, PATH union and 
   assert.deepEqual(layerNames(recipe), ["go", "node"]);
   assert.equal(recipe.split("FROM ").length - 1, 1);
   assert.ok(recipe.indexOf("ENV GO_VERSION=1.27.1") < recipe.indexOf("npm ci"));
+  assert.equal(fs.readFileSync(path.join(dir, "go.mod"), "utf8"), "module example.com/mixed\n");
+  assert.match(recipe, /go mod download/);
   assert.match(recipe, /ENV GOPATH=\/home\/node\/go/);
   assert.match(recipe, /RUN cd \/deps\/ui && \(npm ci --no-audit --no-fund \|\| touch .nomarmy-npm-ci-failed\) && npm cache clean --force/);
   assert.deepEqual(images.sandboxPathEntries(dir), ["/usr/local/go/bin", "/home/node/go/bin", "/deps/node_modules/.bin"]);
@@ -152,4 +154,118 @@ test("composed build errors propagate and the isolated context is removed", (t) 
     throw new Error("build rejected");
   } }), /failed to build sandbox harness image .*build rejected/);
   assert.equal(fs.existsSync(context), false);
+});
+
+
+test("Go prefetch copies workspace metadata, hashes every input and stays offline", (t) => {
+  const inputs = {
+    "go.mod": "module example.com/root\ngo 1.23\n",
+    "go.sum": "root sum\n",
+    "go.work": 'go 1.23\nuse (\n .\n ./a\n "./nested/b" // member\n)\n',
+    "go.work.sum": "workspace sum\n",
+    "a/go.mod": "module example.com/a\n", "a/go.sum": "a sum\n",
+    "nested/b/go.mod": "module example.com/b\n", "nested/b/go.sum": "b sum\n",
+  };
+  const dir = repo(t, inputs);
+  const composed = images.composeSandboxImage(dir);
+  assert.deepEqual(Object.keys(composed).sort(), ["dockerfile", "files", "image", "pathEntries"]);
+  assert.deepEqual(composed.files, Object.keys(inputs).map((source) => ({ source, destination: `go/${source}` })));
+  assert.match(composed.dockerfile, /COPY --chown=node:node go\/ \/deps\/go\/\nUSER node\nRUN cd \/deps\/go && \(go mod download \|\| touch .nomarmy-go-mod-download-failed\)\nENV GOPROXY=off\nENV GOSUMDB=off/);
+  assert.doesNotMatch(composed.dockerfile, /GOFLAGS=/);
+  for (const [source, content] of Object.entries(inputs)) {
+    fs.writeFileSync(path.join(dir, source), content + "\n");
+    assert.notEqual(images.composeSandboxImage(dir).image, composed.image, source);
+    fs.writeFileSync(path.join(dir, source), content);
+  }
+  let builds = 0;
+  images.ensureComposedImageBuilt(dir, null, { run: (cmd, args) => {
+    assert.equal(cmd, "podman");
+    if (args[0] === "images") return "";
+    assert.equal(args[0], "build");
+    builds++;
+    for (const [source, content] of Object.entries(inputs)) assert.equal(fs.readFileSync(path.join(args.at(-1), "go", source), "utf8"), content);
+    return "";
+  } });
+  assert.equal(builds, 1);
+});
+
+test("vendored Go skips prefetch but retains offline settings", (t) => {
+  const dir = repo(t, { "go.mod": "module example.com/vendor\n", "go.sum": "sum", "vendor/modules.txt": "" });
+  const composed = images.composeSandboxImage(dir);
+  assert.deepEqual(composed.files, []);
+  assert.doesNotMatch(composed.dockerfile, /go mod download|COPY .*go\//);
+  assert.match(composed.dockerfile, /ENV GOPROXY=off\nENV GOSUMDB=off/);
+});
+
+test("Rust workspace prefetch copies manifests, stubs targets and hashes all context files", (t) => {
+  const inputs = {
+    "Cargo.toml": '[workspace]\nmembers = ["crates/*"]\nresolver = "2"\n',
+    "crates/a/Cargo.toml": '[package]\nname = "a"\nversion = "0.1.0"\n[lib]\npath = "custom/lib.rs"\n',
+    "crates/b/Cargo.toml": '[package]\nname = "b"\nversion = "0.1.0"\n[[bin]]\nname = "b"\npath = "cmd/start.rs"\n',
+    "Cargo.lock": "version = 3\n",
+  };
+  const dir = repo(t, { ...inputs, "target/Cargo.toml": "ignored", ".hidden/Cargo.toml": "ignored" });
+  const composed = images.composeSandboxImage(dir);
+  const placeholders = {
+    "crates/a/src/lib.rs": "// Dependency-fetch placeholder.\n",
+    "crates/a/src/main.rs": "fn main() {}\n",
+    "crates/a/custom/lib.rs": "// Dependency-fetch placeholder.\n",
+    "crates/b/src/lib.rs": "// Dependency-fetch placeholder.\n",
+    "crates/b/src/main.rs": "fn main() {}\n",
+    "crates/b/cmd/start.rs": "fn main() {}\n",
+  };
+  assert.deepEqual(composed.files, [
+    ...Object.keys(inputs).map((source) => ({ source, destination: `rust/${source}` })),
+    ...Object.entries(placeholders).map(([rel, content]) => ({ destination: `rust/${rel}`, content })),
+  ]);
+  assert.match(composed.dockerfile, /COPY --chown=node:node rust\/ \/deps\/rust\/\nUSER node\nRUN cd \/deps\/rust && \(cargo fetch --locked \|\| touch .nomarmy-cargo-fetch-failed\)\nENV CARGO_NET_OFFLINE=true/);
+  const hash = crypto.createHash("sha256").update(composed.dockerfile).update("\0");
+  for (const file of composed.files) hash.update(file.source ?? "").update("\0").update(file.destination).update("\0").update(file.content ?? inputs[file.source]).update("\0");
+  assert.equal(composed.image, `openclaw-nomarmy-coder-deps-${hash.digest("hex").slice(0, 8)}:bookworm`);
+  for (const [source, content] of Object.entries(inputs)) {
+    fs.writeFileSync(path.join(dir, source), content + "\n");
+    assert.notEqual(images.composeSandboxImage(dir).image, composed.image, source);
+    fs.writeFileSync(path.join(dir, source), content);
+  }
+  let builds = 0;
+  images.ensureComposedImageBuilt(dir, null, { run: (cmd, args) => {
+    assert.equal(cmd, "podman");
+    if (args[0] === "images") return "";
+    assert.equal(args[0], "build");
+    builds++;
+    for (const [rel, content] of Object.entries({ ...inputs, ...placeholders })) assert.equal(fs.readFileSync(path.join(args.at(-1), "rust", rel), "utf8"), content);
+    return "";
+  } });
+  assert.equal(builds, 1);
+  fs.unlinkSync(path.join(dir, "Cargo.lock"));
+  assert.match(images.composeSandboxImage(dir).dockerfile, /cargo fetch \|\| touch/);
+  assert.doesNotMatch(images.composeSandboxImage(dir).dockerfile, /cargo fetch --locked/);
+});
+
+
+test("Go workspace-only roots are detected and prefetch each module", (t) => {
+  const inputs = {
+    "go.work": "go 1.23\nuse ./a\nuse ./nested/b\n",
+    "a/go.mod": "module example.com/a\n", "a/go.sum": "a sum\n",
+    "nested/b/go.mod": "module example.com/b\n", "nested/b/go.sum": "b sum\n",
+  };
+  const composed = images.composeSandboxImage(repo(t, inputs));
+  assert.deepEqual(layerNames(composed.dockerfile), ["go"]);
+  assert.deepEqual(composed.files, Object.keys(inputs).map((source) => ({ source, destination: `go/${source}` })));
+  assert.match(composed.dockerfile, /go mod download \|\| touch .nomarmy-go-mod-download-failed/);
+});
+
+
+test("Go metadata is retained when the repository root is a symlink", (t) => {
+  const dir = repo(t, { "go.mod": "module example.com/linked\n", "go.sum": "sum\n" });
+  const parent = repo(t, {});
+  const linked = path.join(parent, "linked");
+  fs.symlinkSync(dir, linked, "dir");
+  const original = images.composeSandboxImage(dir);
+  const composed = images.composeSandboxImage(linked);
+  assert.deepEqual(composed.files, [
+    { source: "go.mod", destination: "go/go.mod" },
+    { source: "go.sum", destination: "go/go.sum" },
+  ]);
+  assert.deepEqual(composed, original);
 });

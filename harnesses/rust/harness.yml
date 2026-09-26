@@ -1,5 +1,5 @@
 name: rust
-summary: Rust toolchain only; crate prefetch is not yet supported
+summary: Rust toolchain with prefetched crates for offline verification
 detect:
   - file: Cargo.toml
 after: []

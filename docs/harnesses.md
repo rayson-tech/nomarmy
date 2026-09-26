@@ -11,7 +11,7 @@ Workers always remain offline. See the [plan](plans/2026-09-25-sandbox-dependenc
 
 | Harness | Summary | Detects | Network | Requires |
 |---------|---------|---------|---------|----------|
-| [go](https://github.com/rayson-tech/nomarmy/blob/main/harnesses/go/README.md) | Go toolchain only; module prefetch is not yet supported | file: go.mod | none | none |
+| [go](https://github.com/rayson-tech/nomarmy/blob/main/harnesses/go/README.md) | Go toolchain with prefetched modules for offline verification | file: go.mod; file: go.work | none | none |
 | [node](https://github.com/rayson-tech/nomarmy/blob/main/harnesses/node/README.md) | Node dependencies installed with npm ci | lockfile: package-lock.json | none | none |
 | [python](https://github.com/rayson-tech/nomarmy/blob/main/harnesses/python/README.md) | Python dependencies installed from requirements files | file: requirements.txt | none | none |
-| [rust](https://github.com/rayson-tech/nomarmy/blob/main/harnesses/rust/README.md) | Rust toolchain only; crate prefetch is not yet supported | file: Cargo.toml | none | none |
+| [rust](https://github.com/rayson-tech/nomarmy/blob/main/harnesses/rust/README.md) | Rust toolchain with prefetched crates for offline verification | file: Cargo.toml | none | none |
