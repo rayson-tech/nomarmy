@@ -37,7 +37,7 @@ import { modelRefusals } from "../lib/health.mjs";
 import { podmanProblem, podmanVmStartedAt } from "../lib/podman-health.mjs";
 import { restartNotice } from "../lib/install-freshness.mjs";
 import { createBuildMetrics, resolveOutcome, finalText, workerMetadata, usageMetrics, policyAdmissionProblems, applyRefactorContract, applyVerificationPolicy, resolveVerifyRegression } from "../lib/outcome.mjs";
-import { compactJobRecord, formatResult, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner } from "../lib/job-format.mjs";
+import { jobLabel, compactJobRecord, formatResult, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner } from "../lib/job-format.mjs";
 
 export { run, mapLimit };
 export { readsMeasurable, measureReads };
@@ -582,7 +582,7 @@ server.tool("local_workers", "Run independent jobs (implement or scout) with bou
       // so it was invisible to both ceilings while it ran.
       // A batch job waits for its agent's slot (up to its own timeout) rather
       // than failing because an earlier job in the same batch holds it.
-      return trackInRun(j, track(jobId, { mode: j.mode, workerId, lane: jobLane(j), agent: j.agentName ?? null, runId: j.run_id ?? null, role: j.armyRole ?? null, model: j.model ?? null },
+      return trackInRun(j, track(jobId, { mode: j.mode, workerId, lane: jobLane(j), agent: j.agentName ?? null, runId: j.run_id ?? null, role: j.armyRole ?? null, model: j.model ?? null, label: jobLabel(j) },
         withAgentSlot(j, jobId, () => executeJob({ ...jobArgs(effectiveJob, workerId), jobId }), { waitMs: (j.timeout_seconds ?? 600) * 1000 }))).promise;
     }, { staggerMs: WORKER_START_STAGGER_MS });
     indices.forEach((i, laneI) => { results[i] = laneResults[laneI]; });
