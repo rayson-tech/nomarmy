@@ -83,3 +83,49 @@ test("restartNotice: only when the copy on disk changed after this server starte
   assert.match(newer, /this session runs 0\.1\.0-alpha\.7; 0\.1\.0-alpha\.8 is installed/);
   assert.equal(restartNotice({ serverFile, startedAtMs: 2000, runningVersion: "x", stat: () => { throw new Error("gone"); } }), null);
 });
+
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { copyIsStale } from "../lib/install-freshness.mjs";
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+test("the installed copy loads every harness the checkout has (connect used to leave harnesses/ behind)", async (t) => {
+  const installDir = fs.realpathSync(tmp(t, "nomarmy-fresh-harness-"));
+  installMcpCopy({ nomarmyRoot: REPO_ROOT, installDir, run: () => {} });
+  fs.symlinkSync(path.join(REPO_ROOT, "node_modules"), path.join(installDir, "node_modules"), "dir");
+  const installed = await import(path.join(installDir, "lib", "harnesses.mjs"));
+  const fromCheckout = await import("../lib/harnesses.mjs");
+  assert.equal(installed.HARNESS_ROOT, path.join(installDir, "harnesses") + path.sep);
+  const names = Object.keys(installed.loadHarnesses().harnesses);
+  assert.deepEqual(names, Object.keys(fromCheckout.loadHarnesses().harnesses));
+  assert.ok(names.includes("node") && names.includes("python"), `got ${names.join(", ")}`);
+});
+
+test("freshnessIssues: a copy with no harnesses is an error, with the fix", () => {
+  const [issue] = freshnessIssues({ copyVersion: "0.1.0-alpha.8", sourceVersion: "0.1.0-alpha.8", copyHarnesses: 0 });
+  assert.equal(issue.severity, "error");
+  assert.match(issue.title, /no harnesses/);
+  assert.match(issue.fix, /nomarmy connect claude/);
+  assert.deepEqual(freshnessIssues({ copyVersion: "0.1.0-alpha.8", sourceVersion: "0.1.0-alpha.8", copyHarnesses: 6 }), []);
+  assert.deepEqual(freshnessIssues({ copyVersion: null, copyHarnesses: 0 }), [], "no copy installed yet: nothing to say");
+});
+
+test("copyIsStale: a git checkout that moved on without a version bump makes the copy stale", (t) => {
+  const root = fakeRoot(t, "0.1.0-alpha.8");
+  const git = (...args) => execFileSync("git", args, { cwd: root, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+  git("init", "-q"); git("config", "user.email", "t@example.com"); git("config", "user.name", "t");
+  git("add", "-A"); git("commit", "-qm", "one");
+  const installDir = tmp(t, "nomarmy-fresh-stale-");
+  assert.equal(copyIsStale(installDir, root), true, "never connected");
+  installMcpCopy({ nomarmyRoot: root, installDir, run: () => {} });
+  assert.equal(JSON.parse(fs.readFileSync(path.join(installDir, SOURCE_FILE), "utf8")).commit, git("rev-parse", "HEAD"));
+  assert.equal(copyIsStale(installDir, root), false);
+  fs.writeFileSync(path.join(root, "lib", "new.mjs"), "export {};\n");
+  git("add", "-A"); git("commit", "-qm", "two");
+  assert.equal(copyIsStale(installDir, root), true, "same version, newer commit");
+  installMcpCopy({ nomarmyRoot: root, installDir, run: () => {} });
+  assert.equal(copyIsStale(installDir, root), false);
+  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "nomarmy", version: "0.1.0-alpha.9" }));
+  assert.equal(copyIsStale(installDir, root), true, "version differs");
+});

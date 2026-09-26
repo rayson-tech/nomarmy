@@ -19,7 +19,7 @@ import { detectHardware } from "../lib/hardware.mjs";
 import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf.mjs";
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
 import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv, defaultInstallDir } from "../lib/connect.mjs";
-import { compareVersions, readPackageVersion, readInstallVersions } from "../lib/install-freshness.mjs";
+import { compareVersions, readPackageVersion, readInstallVersions, copyIsStale } from "../lib/install-freshness.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
 import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, agentProviderId, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
 import { loadArmy, mergeArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
@@ -1660,8 +1660,18 @@ async function cmdUpdate() {
   const remote = git(["rev-parse", "@{u}"]);
   const base = git(["merge-base", "HEAD", "@{u}"]);
   if (local === remote) {
-    if (json) return out({ updated: false, reason: "already up to date" });
-    console.log(c.green("✓ Already up to date."));
+    // Nothing to pull, but the copy coordinators run can still be behind
+    // this checkout (commits made or pulled here without a reconnect).
+    if (!copyIsStale(defaultInstallDir(), nomarmyRoot)) {
+      if (json) return out({ updated: false, reason: "already up to date" });
+      console.log(c.green("✓ Already up to date, and your coordinators run this checkout."));
+      return;
+    }
+    say(c.bold("🍪 nomArmy update\n"));
+    say("Nothing to pull, but your coordinators run an older copy of this checkout.");
+    const resynced = reconnectCoordinators();
+    if (json) return out({ updated: false, resynced, sha: local });
+    console.log(c.yellow("\nRestart every open Claude Code, Codex and Cursor session: each keeps the code it started with until then."));
     return;
   }
   if (base !== local) {
@@ -1677,25 +1687,7 @@ async function cmdUpdate() {
   say("\nInstalling dependencies...");
   execFileSync("npm", ["install", "--omit=dev", "--no-audit", "--no-fund"], { cwd: nomarmyRoot, stdio: json ? "ignore" : "inherit" });
 
-  const resynced = [];
-  const runInherit = (cmd, args, opts = {}) => execFileSync(cmd, args, { stdio: json ? "ignore" : "inherit", ...opts });
-  if (commandExists("claude")) {
-    say("\nRe-syncing the Claude Code MCP install...");
-    connectClaude({ nomarmyRoot, run: runInherit });
-    resynced.push("claude");
-  }
-  if (commandExists("codex")) {
-    say("\nRe-syncing the Codex MCP install...");
-    connectCodex({ nomarmyRoot, run: runInherit });
-    resynced.push("codex");
-  }
-  // Cursor has no CLI/PATH binary to probe with commandExists -- "already
-  // connected" is read from its own config file instead.
-  if (cursorAlreadyConnected()) {
-    say("\nRe-syncing the Cursor MCP install...");
-    connectCursor({ nomarmyRoot, run: runInherit });
-    resynced.push("cursor");
-  }
+  const resynced = reconnectCoordinators();
 
   if (json) return out({ updated: true, sha: git(["rev-parse", "HEAD"]), resynced });
   console.log(c.yellow("\nThe MCP server is a per-session child process: every open Claude Code / Codex / Cursor session needs a restart to pick this up, not just this one."));
@@ -1703,6 +1695,18 @@ async function cmdUpdate() {
 
 // The coordinators nomArmy is registered with. Cursor has no CLI to probe,
 // so it counts when its own config already lists nomArmy.
+// Reconnect every connected coordinator through a child process, so it runs
+// the code now on disk (just pulled or installed) rather than the old code
+// this process loaded. Returns the targets reconnected.
+function reconnectCoordinators() {
+  const targets = connectedTargets();
+  if (targets.length) {
+    if (!json) console.log(`\nReconnecting ${targets.join(", ")}...`);
+    execFileSync(process.execPath, [path.join(nomarmyRoot, "bin", "nomarmy.mjs"), "connect", ...targets, ...(json ? ["--json"] : [])], { stdio: json ? "ignore" : "inherit" });
+  }
+  return targets;
+}
+
 function connectedTargets() {
   return [commandExists("claude") && "claude", commandExists("codex") && "codex", cursorAlreadyConnected() && "cursor"].filter(Boolean);
 }
@@ -1729,13 +1733,7 @@ async function updateFromNpm() {
     if (!json) console.log(c.bold(`🍪 Updating nomArmy ${current} → ${latest}\n`));
     execFileSync("npm", ["install", "-g", `nomarmy@${latest}`, "--no-audit", "--no-fund"], { stdio: json ? "ignore" : "inherit" });
   }
-  // A child process, so the reconnect runs the code just installed rather
-  // than the old code this process loaded.
-  const targets = connectedTargets();
-  if (targets.length) {
-    if (!json) console.log(`\nReconnecting ${targets.join(", ")}...`);
-    execFileSync(process.execPath, [path.join(nomarmyRoot, "bin", "nomarmy.mjs"), "connect", ...targets, ...(json ? ["--json"] : [])], { stdio: json ? "ignore" : "inherit" });
-  }
+  const targets = reconnectCoordinators();
   if (json) return out({ updated: upgrade, from: current, version: upgrade ? latest : current, resynced: targets });
   console.log(c.yellow("\nRestart every open Claude Code, Codex and Cursor session: each keeps the code it started with until then."));
 }
