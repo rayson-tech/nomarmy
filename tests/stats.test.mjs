@@ -44,7 +44,7 @@ test("computeStats: this repo, this period, every section from the records", () 
   assert.equal(s.workerMinutes.median, 5);
   assert.equal(s.jobMinutes.p90, 950000 / 60000);
   assert.equal(s.spendUsd.total, 1.75);
-  assert.deepEqual(s.claimVsEvidence, { claimedDone: 4, verificationFailed: 1, revertStillPassed: 1, passedBoth: 2, flaggedAfterPassing: 1 });
+  assert.deepEqual(s.claimVsEvidence, { claimedDone: 4, verificationFailed: 1, revertStillPassed: 1, passedBoth: 2, changedNothing: 0, flaggedAfterPassing: 1 });
   assert.deepEqual(s.notCompleted, { NEEDS_REVIEW: 2, WORKER_TIMEOUT: 1, SCOUT_UNSUPPORTED: 1 });
   assert.deepEqual(s.reviewers["security-analyst"], { runs: 1, outcomes: { SCOUT_DONE: 1 }, findings: 2 });
   assert.equal(s.signals["scoped test selection risk"], 1);
