@@ -83,6 +83,23 @@ Run the narrow pass on the touched files for a fast, sharp signal, *and* the bro
 - **Code wired to nothing.** A new function or class that nothing outside its own test calls is flagged (heuristic and review-only).
 - **Secrets.** Every diff and report is scanned for known secret shapes (secretlint's recommended preset) before a commit is allowed; a match blocks it.
 
+## Optional: semantic checks with Jev
+
+nomArmy's checks above are mechanical. Two judgments they can't make come from [Jev](https://docs.typesafe.ai), TypeSafe's fast judgment model, if you add your own key:
+
+- **Do a scout's cited lines support its finding?** nomArmy already checks that a citation exists; Jev judges the whole cited range against the claim. A finding that fails is marked `[JEV: ...]` in the report, with an issue line.
+- **Does a worker's report match its diff?** A contradiction ("restored check.js to base commit" beside a diff that rewrote it) gets a review flag.
+
+```bash
+nomarmy validators add jev     # asks for the key without showing it; one test call
+nomarmy validators list        # what's on
+nomarmy validators remove jev  # off, and the saved key deleted
+```
+
+The key is saved to `~/.config/nomarmy/secrets/typesafe.key`, readable only by you, never in a config file or a registration (or name an environment variable instead: `key_env` in `~/.config/nomarmy/validators.yml`). Restart open coordinator sessions after adding it.
+
+**Jev only adds flags.** Diffs and reports are written by the worker being judged, and a model can be talked into a verdict, so Jev's answer never passes a check, clears a flag or allows a commit. **It sends excerpts of your code** (findings, cited lines, diffs, worker reports) to TypeSafe, so it's off until you add it. On 40 real scout findings it caught every mismatched citation we planted and flagged real ones (a finding that misread its own cited line, true claims citing the wrong lines); on 30 real reports it flagged none against their own diffs and caught a real false claim. A job's run of both costs a fraction of a cent.
+
 ## Browser verification and evidence
 
 For a repository with a real Playwright end-to-end gate, select the `browser`
