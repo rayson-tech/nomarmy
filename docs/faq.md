@@ -16,11 +16,13 @@ A frontier model like gpt-6-astra is worth it for subtle work and review; a ligh
 
 ### Can I switch a running job to a cheaper model?
 
-No. A job's model is fixed when it's dispatched, and nomArmy has no way to stop a running job; it runs until it finishes or reaches its timeout. Messaging the General mid-job is safe, though: nothing about the running job changes, and the General applies what you say to the jobs it sends next. To move work to a cheaper model from now on:
+Not in place: a job's model is fixed when it's dispatched. But you can stop it and finish the work on another model. Ask the General to stop it (the `local_worker_stop` tool), or run `nomarmy jobs --stop <job id>` yourself: the worker ends within about 15 seconds, without a report-recovery call or a verification run, and its worktree is kept. Then a new job with `continue_from: <job id>` and `model: gpt-5.6-sol` picks the work up where it stopped.
+
+Messaging the General mid-job is safe either way: nothing about the running job changes unless it's stopped, and the General applies what you say to the jobs it sends next. To move work to a cheaper model from now on:
 
 - **For every job on a role:** `nomarmy army assign sr-dev codex gpt-5.6-sol`. It applies to the next job, with no restart.
 - **For one job:** ask the General to send it with `model: gpt-5.6-sol`. A job's `model` overrides the role's.
-- **To finish a job on a cheaper model:** if it comes back partial or failing verification, the General can continue it with `continue_from: <job id>` and `model: gpt-5.6-sol`. The new job starts from the old one's unfinished work, so nothing is redone.
+- **To finish a job on a cheaper model:** if it comes back partial, failing verification or stopped, the General can continue it with `continue_from: <job id>` and `model: gpt-5.6-sol`. The new job starts from the old one's unfinished work, so nothing is redone.
 
 ### Does nomArmy switch models when I'm near my usage limit?
 

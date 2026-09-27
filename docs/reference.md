@@ -14,6 +14,7 @@ Every command proposes before it writes: a `[y/N]` prompt, or an explicit flag u
 | `nomarmy stats [--since 7d\|<date>] [--until <date>] [--role <role>] [--model <model>] [--repo <path\|name>] [--all-repos] [--json]` | What nomArmy's job records show: jobs by mode, role and model; code committed; worker and job time; tokens and API spend; how often a "done, tests pass" report failed independent verification or passed with tests that couldn't catch the change; what didn't complete; reviewers; review flags. From verified records, never reports. `--repo senti` matches a repository by folder name. The General gets the same through the `stats` tool. |
 | `nomarmy validators <list\|add jev\|test jev\|remove jev>` | Optional semantic checks with your own key: Jev judges whether a scout's cited lines support its finding and whether a worker's report matches its diff. Only adds review flags; sends code excerpts to TypeSafe. See [Validators](validators.md#jev). |
 | `nomarmy validators <add judge --agent <name> --model <model> [--host-tools]\|test judge\|remove judge>` | Makes one of your agents a model judge for implement jobs: acceptance criteria, report vs. diff, weakened tests. Only adds review flags. An agent whose tools run on your machine needs `--host-tools`. See [Validators](validators.md#model-judge). |
+| `nomarmy jobs --stop <job> [--reason <text>]` | Stops a running job's worker, keeping its worktree for `continue_from`. |
 | `nomarmy mcp` | Starts nomArmy's MCP server on stdio with this machine's settings: what a `--scope project` registration runs. |
 | `nomarmy init` | Proposes a `.nomarmy.yml` from what the repo contains. |
 | `nomarmy agents list\|add\|update\|remove` | Where jobs can run. See [Agents](agents-and-army.md#agents-where-a-job-can-run). |
@@ -43,6 +44,7 @@ What the General uses. Every job takes the same shape: a `task`, optional `accep
 | `army` | The General's charter and agent, then this repo's roles and who runs each. |
 | `run_start` / `run_status` / `run_finish` | A `/feature` run: its limits, usage per agent, warnings, paused agents and log. |
 | `local_worker_capacity` | Context, budgets, memory pressure and what's running. |
+| `local_worker_stop` | Stops a running job's worker (no report recovery, no verification) and keeps its worktree for `continue_from`. Works for any session's job. |
 | `stats` | What the job records show for this repo (or `all_repos`, or another `repo` by name), filtered by `since`, `until`, `role` and `model`; `format: json` for the raw numbers. |
 | `local_worker_jobs` | Recent job records; `full: true` for the complete manifest. |
 | `local_worker_config` | This repo's verification profiles. |

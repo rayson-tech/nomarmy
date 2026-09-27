@@ -36,6 +36,7 @@ import { readUsageSnapshots, usageStatus } from "../lib/usage-limits.mjs";
 import { modelRefusals } from "../lib/health.mjs";
 import { podmanProblem, podmanVmStartedAt } from "../lib/podman-health.mjs";
 import { restartNotice } from "../lib/install-freshness.mjs";
+import { requestJobStop } from "../lib/openclaw-run.mjs";
 import { loadJobRecords, computeStats, formatStats, parseSince, resolveRepo } from "../lib/stats.mjs";
 import { probeModel } from "../lib/model-probe.mjs";
 import { jevSettings, judgeSettings } from "../lib/validators.mjs";
@@ -441,6 +442,14 @@ server.tool("stats", "What nomArmy's own job records show for this repository (o
     const stats = computeStats(records, { repo: repo ? resolveRepo(records, repo) : all_repos ? null : projectDir, sinceMs: parseSince(since), untilMs: parseSince(until), role: role ?? null, model: model ?? null });
     return toolText(format === "json" ? JSON.stringify(stats, null, 2) : formatStats(stats));
   } catch (error) { return toolText(error.message, true); }
+});
+
+server.tool("local_worker_stop", "Stop a running job's worker, for example one burning a frontier model's usage on the wrong track. Its worker ends within about 15 seconds, without the report-recovery call a timeout gets and without running verification; its worktree is kept uncommitted, so a new job with continue_from: <job_id> (and a cheaper model if you like) can finish the work. Works for a job started by any session. Refuses a job that isn't running or is already past its worker.", {
+  job_id: z.string().regex(/^[A-Za-z0-9._-]{1,120}$/),
+  reason: z.string().max(300).optional().describe("Why it's being stopped; recorded in the job's issues."),
+}, async ({ job_id, reason }) => {
+  const r = requestJobStop({ jobsRoot, jobId: job_id, reason: reason ?? null });
+  return toolText(r.message, !r.ok);
 });
 
 server.tool("local_worker_capacity", "What this host can take right now: context per nom and the brief/report budgets derived from it, memory pressure and whether another job would be admitted, and the jobs currently running. Read-only.", {}, async () => {

@@ -21,6 +21,7 @@ import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCa
 import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv, defaultInstallDir, installMcpCopy, SCOPES, claudeUserScoped, portableServerLaunch } from "../lib/connect.mjs";
 import { compareVersions, readPackageVersion, readInstallVersions, copyIsStale } from "../lib/install-freshness.mjs";
 import { loadJobRecords, computeStats, formatStats, parseSince, resolveRepo } from "../lib/stats.mjs";
+import { requestJobStop } from "../lib/openclaw-run.mjs";
 import { loadValidators, saveJevKey, removeJev, jevSettings, askJev, validatorsPath, JEV_CHECKS, saveJudge, removeJudge, judgeSettings } from "../lib/validators.mjs";
 import { probeModel } from "../lib/model-probe.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
@@ -198,7 +199,7 @@ Usage: nomarmy <command> [options]
                             which agent the General is, in --global
                             (default) or --local
   config paths    where agents.yml and the three army layers live
-  jobs [--watch|--events [--until-done]|--prune|--wait <jobId>] [--interval N] [--older-than DAYS]
+  jobs [--watch|--events [--until-done]|--prune|--wait <jobId>|--stop <jobId> [--reason <text>]] [--interval N] [--older-than DAYS]
                   what's running across every session (agent, model, phase,
                   last tool call, files changed, heartbeat) and what just
                   finished; --watch redraws every N seconds (default 3);
@@ -213,7 +214,10 @@ Usage: nomarmy <command> [options]
                   from finished jobs older than DAYS (default 2), keeping
                   their records, reports and any retained worktree;
                   --wait <jobId> [--timeout <seconds>] blocks for one job
-                  to finish (default timeout 1800; --json is supported)
+                  to finish (default timeout 1800; --json is supported);
+                  --stop <jobId> stops a running job's worker (no report
+                  recovery, no verification), keeping its worktree for
+                  continue_from
   health          check what's likely to break a run before it does:
                   expiring logins, an outdated OpenClaw or plugin, roles
                   that can't be dispatched, an unloadable agents.yml,
@@ -2566,6 +2570,8 @@ async function streamJobEvents() {
   }
 }
 
+const commitSha = (commit) => (typeof commit === "string" ? commit : typeof commit?.sha === "string" ? commit.sha : null);
+
 /** Wait for one job in the shared, cross-session state directory. */
 async function waitForJobCli() {
   const requested = value("wait");
@@ -2602,7 +2608,8 @@ async function waitForJobCli() {
         outcome: meta.outcome ?? status.outcome ?? null,
         coordinatorStatus: meta.coordinatorStatus ?? status.coordinatorStatus ?? null,
         branch: meta.branch ?? status.branch ?? null,
-        commit: meta.commit?.sha ?? meta.commit ?? status.commit?.sha ?? status.commit ?? null,
+        // A job that made no commit has commit: { created: false, sha: null }; only a sha is a commit.
+        commit: commitSha(meta.commit) ?? commitSha(status.commit),
         issues,
       };
       if (json) out(result);
@@ -2643,6 +2650,13 @@ function pruneJobRuntimeCli() {
 
 async function cmdJobs() {
   if (flag("wait")) return waitForJobCli();
+  if (flag("stop")) {
+    const r = requestJobStop({ jobsRoot: jobsRootDir(), jobId: value("stop"), reason: value("reason") });
+    if (json) return out(r);
+    console.log(r.ok ? c.green(`✓ ${r.message}`) : c.red(`✗ ${r.message}`));
+    if (!r.ok) process.exitCode = 1;
+    return;
+  }
   if (flag("events")) return streamJobEvents();
   if (flag("prune")) return pruneJobRuntimeCli();
   if (json) return out(collectJobs());
