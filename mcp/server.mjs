@@ -37,7 +37,8 @@ import { modelRefusals } from "../lib/health.mjs";
 import { podmanProblem, podmanVmStartedAt } from "../lib/podman-health.mjs";
 import { restartNotice } from "../lib/install-freshness.mjs";
 import { requestJobStop } from "../lib/openclaw-run.mjs";
-import { loadJobRecords, computeStats, formatStats, parseSince, resolveRepo } from "../lib/stats.mjs";
+import { loadJobRecords, computeStats, formatStats, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
+import { recentSuggestions } from "../lib/suggestions.mjs";
 import { probeModel } from "../lib/model-probe.mjs";
 import { jevSettings, judgeSettings } from "../lib/validators.mjs";
 import { agentRunsToolsOnHost } from "../lib/dispatch-schema.mjs";
@@ -302,6 +303,8 @@ export const jobSchema = z.object({
   model: z.string().regex(/^\S{1,200}$/).optional().describe("The model to run on the job's agent (an api or subscription agent), e.g. \"gpt-6-sol\". Overrides the role's model and the agent's default. Required when the role's model is \"auto\" or the agent has no default. The `army` tool lists each agent's models. Refused on the local agent, whose model `nomarmy model` sets."),
   run_id: z.string().regex(/^run-[a-z0-9-]{1,80}$/).optional().describe("The /feature run this job belongs to (from run_start). Admission then enforces the run's limits (jobs, api spend, hours) and refuses an agent the run has paused after a vendor usage-limit error; the finished job is recorded into the run."),
   report: z.enum(["brief", "standard", "full"]).optional().describe("How much the worker may report back, capped by its agent's tier: brief (today's local-sized report), standard (the default), full (the frontier ceiling: about 2k tokens for implement, 4k for a scout). An api or subscription scout defaults to full because its findings are the point; other jobs default to standard. The report lands in your own context and is re-read every later turn. No effect on the local model, whose caps are calibrated."),
+  stakes: z.enum(["normal", "high"]).optional().describe("implement: how much a mistake would cost, separate from how hard the work is. high for anything touching security or access control, personal or tenant data, data loss, money, or changes that can't be undone: a verification profile is then required, the revert check can't be turned off, and the job always comes back needing review until an independent review (a scout on another vendor with reviews: <job id>, or a judge on another vendor) has looked at it. A one-line auth change is simple and high-stakes."),
+  reviews: z.string().regex(/^[A-Za-z0-9._-]{1,120}$/).optional().describe("scout: the job id this scout independently reviews, so the review is recorded against that job (nomarmy stats shows high-stakes jobs with and without one). Use a different vendor than the job's worker."),
   commit_subject: z.string().max(200).optional().describe("implement: the subject line of the commit nomArmy makes on the worker branch, e.g. \"Keep held-back tables in the list_tables cache\". Defaults to the task's first sentence; the body is the worker's NOTE, and the job id is a trailer."),
   army_role: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional().describe("Dispatch by army role (e.g. \"sr-dev\", \"security-analyst\"): nomArmy runs it on the agent this repo assigns to that role and puts the role's description at the top of the brief. Call the `army` tool first to see this repo's roles. Mutually exclusive with agent. Add on_behalf_of in case the role's agent is a subscription; it's ignored otherwise."),
   confirm_over_limit: z.boolean().optional().describe("Override a reached usage limit: the General must ask the operator before resubmitting with confirm_over_limit: true, or send the job to another agent. nomArmy never sets it itself."),
@@ -353,7 +356,7 @@ function jobArgs(args, workerId) {
   return { task: args.task, acceptance: args.acceptance, verification: args.verification, mode: args.mode, baseRef: args.base_ref,
     timeoutSeconds: args.timeout_seconds, profile: args.profile, reasoning: args.reasoning, pool: args.pool,
     subscriptionWorker, onBehalfOf: args.on_behalf_of, model: args.model ?? null, reportSize: args.report ?? null, evidence: args.evidence,
-    verifyRegression: resolveVerifyRegression(args), commitSubject: args.commit_subject ?? null, refactor: Boolean(args.refactor), continueFrom: args.continue_from ?? null, workerId };
+    verifyRegression: resolveVerifyRegression(args), commitSubject: args.commit_subject ?? null, refactor: Boolean(args.refactor), continueFrom: args.continue_from ?? null, stakes: args.stakes ?? null, reviews: args.reviews ?? null, workerId };
 }
 server.tool("local_worker", "Run one isolated local worker and wait for it. mode=implement edits in its own worktree and the coordinator commits only on a valid done report (or a recovered job that passed independent verification); failed or incomplete worktrees are retained. mode=scout answers a question from a read-only snapshot with mandatory [path:line] citations that nomArmy verifies and expands. mode=decompose (also read-only) proposes 2+ independent subtasks for a broad objective instead of one worker turn trying to do too much; the proposal is never auto-dispatched, review it and make a separate call with the subtasks you choose. Refuses under memory pressure or over capacity; use local_worker_start + local_worker_status to avoid blocking.", jobSchema.shape,
   async rawArgs => {
@@ -439,7 +442,9 @@ server.tool("stats", "What nomArmy's own job records show for this repository (o
 }, async ({ since, until, all_repos, repo, role, model, format }) => {
   try {
     const records = loadJobRecords(jobsRoot);
-    const stats = computeStats(records, { repo: repo ? resolveRepo(records, repo) : all_repos ? null : projectDir, sinceMs: parseSince(since), untilMs: parseSince(until), role: role ?? null, model: model ?? null });
+    let agentFor = () => null;
+    try { agentFor = agentLookup(agentsConfig().agents, agentProviderId); } catch { /* commands name <agent> */ }
+    const stats = computeStats(records, { repo: repo ? resolveRepo(records, repo) : all_repos ? null : projectDir, sinceMs: parseSince(since), untilMs: parseSince(until), role: role ?? null, model: model ?? null, agentFor });
     return toolText(format === "json" ? JSON.stringify(stats, null, 2) : formatStats(stats));
   } catch (error) { return toolText(error.message, true); }
 });
@@ -561,6 +566,12 @@ server.tool("army", "Who you, the General, are and who you call for what in this
         role.modelNote = `${role.model} isn't in OpenClaw's catalog for ${role.agent}; \`army assign\` checked it with a real test call when it was set, and the catalog can lag new models. Use it as assigned; if a job reports "Unknown model", reassign.`;
       }
     }
+    // Routing suggestions from this repo's recent jobs (lib/suggestions.mjs):
+    // tell the operator about them; never apply one without their say-so.
+    try {
+      const list = recentSuggestions(loadJobRecords(jobsRoot), { projectDir, agentFor: agentLookup(agents, agentProviderId) });
+      if (list.length) summary.suggestions = { note: "From this repo's last 14 days of jobs. Tell the operator; change routing only with their say-so (nomarmy army assign).", items: list.map(({ level, title, evidence, command }) => ({ level, title, evidence, command })) };
+    } catch { /* suggestions are a bonus; the army summary stands without them */ }
     return toolText(JSON.stringify(withRestartNotice(summary), null, 2));
   } catch (error) {
     return toolText(error.message, true);

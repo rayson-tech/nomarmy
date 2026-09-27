@@ -20,7 +20,7 @@ import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
 import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv, defaultInstallDir, installMcpCopy, SCOPES, claudeUserScoped, portableServerLaunch } from "../lib/connect.mjs";
 import { compareVersions, readPackageVersion, readInstallVersions, copyIsStale } from "../lib/install-freshness.mjs";
-import { loadJobRecords, computeStats, formatStats, parseSince, resolveRepo } from "../lib/stats.mjs";
+import { loadJobRecords, computeStats, formatStats, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
 import { requestJobStop } from "../lib/openclaw-run.mjs";
 import { loadValidators, saveJevKey, removeJev, jevSettings, askJev, validatorsPath, JEV_CHECKS, saveJudge, removeJudge, judgeSettings } from "../lib/validators.mjs";
 import { probeModel } from "../lib/model-probe.mjs";
@@ -2712,7 +2712,9 @@ function cmdStats() {
     try { repo = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: repoDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
     catch { throw new Error(`${repoDir} isn't inside a git repository; run nomarmy stats from one, or pass --repo <name> or --all-repos`); }
   }
-  const stats = computeStats(records, { repo, sinceMs: parseSince(value("since")), untilMs: parseSince(value("until")), role: value("role"), model: value("model") });
+  let agentFor = () => null;
+  try { agentFor = agentLookup(loadAgents(globalConfigDir()).agents, agentProviderId); } catch { /* no agents.yml: commands name <agent> */ }
+  const stats = computeStats(records, { repo, sinceMs: parseSince(value("since")), untilMs: parseSince(value("until")), role: value("role"), model: value("model"), agentFor });
   if (json) return out(stats);
   console.log(formatStats(stats));
 }
