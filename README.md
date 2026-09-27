@@ -81,6 +81,7 @@ Developed and maintained by Rayson Technologies. This is an alpha (`0.1.0-alpha`
 | [Configuration](https://github.com/rayson-tech/nomarmy/blob/main/docs/configuration.md) | Settings, swapping the local model, sizing, admission |
 | [Reference](https://github.com/rayson-tech/nomarmy/blob/main/docs/reference.md) | Every CLI command and MCP tool |
 | [Security posture](https://github.com/rayson-tech/nomarmy/blob/main/docs/security.md) | What the sandbox holds back, and the one exception |
+| [FAQ](https://github.com/rayson-tech/nomarmy/blob/main/docs/faq.md) | Which model for which role, switching models, usage limits |
 | [Troubleshooting](https://github.com/rayson-tech/nomarmy/blob/main/docs/troubleshooting.md) | Symptoms and fixes |
 
 ## Security
