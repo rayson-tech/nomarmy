@@ -100,6 +100,21 @@ The key is saved to `~/.config/nomarmy/secrets/typesafe.key`, readable only by y
 
 **Jev only adds flags.** Diffs and reports are written by the worker being judged, and a model can be talked into a verdict, so Jev's answer never passes a check, clears a flag or allows a commit. **It sends excerpts of your code** (findings, cited lines, diffs, worker reports) to TypeSafe, so it's off until you add it. On 40 real scout findings it caught every mismatched citation we planted and flagged real ones (a finding that misread its own cited line, true claims citing the wrong lines); on 30 real reports it flagged none against their own diffs and caught a real false claim. A job's run of both costs a fraction of a cent. **A TypeSafe outage never holds a job up:** a failed or slow call (15 seconds at most) skips Jev for every job for the next 10 minutes, a job never spends more than 45 seconds on it, and the job notes the skip; its result never depends on Jev.
 
+### A model judge
+
+Jev is fast at narrow questions. For judgments that take a few steps, make one of your agents a judge:
+
+```bash
+nomarmy validators add judge --agent grok --model grok-4.7
+nomarmy validators add judge --agent claude --model claude-haiku-4-5 --host-tools
+```
+
+After each implement job it answers three questions about the diff, in one call: does it meet each acceptance criterion, does it match the worker's report, and did any changed test get weaker? An "unmet", "contradicts" or "weakened" answer raises review; like Jev, a judge only adds flags, never passes a check or allows a commit, and a judge that's down or slow is skipped for a while. Pick a model from a different vendor than the workers it judges, so its review is independent, and move to a newer one by running `add judge` again.
+
+The judge runs through OpenClaw in an empty folder, told not to use tools. OpenClaw can't turn an agent's tools off, and a Claude subscription's tools run on your machine, so a judge on that agent needs `--host-tools`, the same consent `allow_host_tools` asks for a build job. An api key, Codex or Muse agent needs none. It sends the diff and report to that agent's vendor, like any job on it.
+
+On 12 real jobs, Claude Haiku 4.5 as judge flagged none of them against their own diffs, caught 8 of 12 reports paired with another job's diff and the `check.js` false claim, and never called a real job's acceptance criterion unmet (it said "unclear" when it couldn't tell). About 13 seconds a job.
+
 ## Browser verification and evidence
 
 For a repository with a real Playwright end-to-end gate, select the `browser`
