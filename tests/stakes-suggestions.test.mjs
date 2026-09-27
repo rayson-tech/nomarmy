@@ -14,7 +14,7 @@ test("stakes: high needs a verification profile and keeps the revert check, what
 });
 
 const impl = (over) => ({ mode: "implement", projectDir: "/r", startedAt: new Date().toISOString(), outcome: "WORKER_DONE", issues: [],
-  metrics: { worker_provider: "openai", worker_model: "gpt-6-astra", worker_tokens_total: 1_000_000 }, ...over });
+  metrics: { worker_provider: "openai", worker_model: "gpt-6-astra", worker_tokens_in: 80_000, worker_tokens_out: 20_000, worker_tokens_cache_read: 900_000, worker_tokens_total: 1_000_000 }, ...over });
 const scout = (over) => ({ mode: "scout", projectDir: "/r", startedAt: new Date().toISOString(), outcome: "SCOUT_DONE", issues: [], metrics: { worker_provider: "xai", worker_model: "grok-4.7" }, ...over });
 
 test("reviewOf: a scout or judge on another vendor counts; the same vendor doesn't", () => {
@@ -29,7 +29,7 @@ test("reviewOf: a scout or judge on another vendor counts; the same vendor doesn
 test("computeSuggestions: a failing pairing, empty scouts, a lighter model, spend and unreviewed high stakes", () => {
   const records = [
     ...Array.from({ length: 6 }, (_, i) => impl({ jobId: `a${i}`, labels: { role: "sr-dev" }, outcome: i < 2 ? "WORKER_DONE" : "WORKER_TIMEOUT" })),
-    ...Array.from({ length: 6 }, (_, i) => impl({ jobId: `b${i}`, labels: { role: "jr-dev" }, metrics: { worker_provider: "openai", worker_model: "gpt-5.6-sol", worker_tokens_total: 300_000 } })),
+    ...Array.from({ length: 6 }, (_, i) => impl({ jobId: `b${i}`, labels: { role: "jr-dev" }, metrics: { worker_provider: "openai", worker_model: "gpt-5.6-sol", worker_tokens_in: 25_000, worker_tokens_out: 5_000 } })),
     ...Array.from({ length: 4 }, (_, i) => scout({ jobId: `c${i}`, labels: { role: "pm" }, outcome: i < 2 ? "SCOUT_UNSUPPORTED" : "SCOUT_DONE", metrics: { worker_provider: "xai", worker_model: "grok-4.7", worker_cost_usd: 3 } })),
     impl({ jobId: "h1", stakes: "high", labels: { role: "sr-dev" } }),
   ];
@@ -42,7 +42,7 @@ test("computeSuggestions: a failing pairing, empty scouts, a lighter model, spen
   assert.equal(low.command, "nomarmy army assign sr-dev codex gpt-5.6-sol");
   assert.match(byKey("timeouts:sr-dev").title, /timed out on 4 of 7/);
   assert.equal(byKey("scout-unsupported:pm").command, "nomarmy army assign pm grok <another model>");
-  assert.match(byKey("lighter:sr-dev:gpt-6-astra:gpt-5.6-sol").command, /army assign sr-dev codex auto/);
+  assert.equal(byKey("lighter:"), undefined, "gpt-5.6-sol did jr-dev work: across roles the numbers don't compare");
   assert.match(byKey("spend:grok-4.7").title, /grok-4\.7 is 100% of API spend \(\$12\.00/);
   assert.match(byKey("unreviewed:").title, /1 high-stakes job\(s\) without an independent review: h1/);
   // Too few jobs: no verdict.
@@ -58,4 +58,41 @@ test("recentSuggestions uses only this repo's last 14 days, and stats reports hi
   assert.deepEqual(s.highStakes, { jobs: 1, reviewed: 1 });
   assert.equal(agentLookup({ codex: { provider: "openai" }, grok: { provider: "xai" }, other: { provider: "openai" } }, (a) => a.provider)("xai"), "grok");
   assert.equal(agentLookup({ codex: { provider: "openai" }, other: { provider: "openai" } }, (a) => a.provider)("openai"), null, "ambiguous: name no agent");
+});
+
+test("runner failures are reported apart and left out of the model's rate", () => {
+  const failed = (i) => scout({ jobId: `f${i}`, metrics: { worker_provider: "llama-cpp", worker_model: "qwen3.6-27b" }, outcome: "WORKER_FAILED", issues: ["scout process failed", "scout error: Error: openclaw exited 2"] });
+  const list = computeSuggestions([0, 1, 2].map(failed).concat(scout({ jobId: "t1", metrics: { worker_provider: "llama-cpp", worker_model: "qwen3.6-27b" }, outcome: "WORKER_TIMEOUT" })));
+  assert.equal(list.length, 1);
+  assert.match(list[0].title, /scouts with no role on qwen3\.6-27b: the runner failed on 3 of 4 scouts before any report/);
+  assert.match(list[0].evidence, /say nothing about the model's work/);
+  // With enough rated jobs, the rate excludes the runner failures and says so.
+  const rated = Array.from({ length: 5 }, (_, i) => impl({ jobId: `r${i}`, labels: { role: "sr-dev" }, outcome: i < 2 ? "WORKER_DONE" : "WORKER_PARTIAL" }));
+  const crashes = Array.from({ length: 2 }, (_, i) => impl({ jobId: `x${i}`, labels: { role: "sr-dev" }, outcome: "WORKER_FAILED", issues: ["worker process failed"] }));
+  const low = computeSuggestions([...rated, ...crashes]).find((s) => s.key.startsWith("low-success"));
+  assert.match(low.title, /finished 2 of 5 implement jobs \(40%\) \(plus 2 the runner failed on, not counted\)/);
+});
+
+test("a lighter model is suggested only within one role, on new tokens, with a command that reaches it", () => {
+  const heavy = Array.from({ length: 5 }, (_, i) => impl({ jobId: `h${i}`, labels: { role: "jr-dev", agent: "codex" } }));
+  const light = Array.from({ length: 5 }, (_, i) => impl({ jobId: `l${i}`, labels: { role: "jr-dev", agent: "codex" },
+    metrics: { worker_provider: "openai", worker_model: "gpt-5.6-sol", worker_tokens_in: 20_000, worker_tokens_out: 5_000, worker_tokens_cache_read: 5_000_000 } }));
+  const s = computeSuggestions([...heavy, ...light]).find((x) => x.key.startsWith("lighter:"));
+  assert.match(s.title, /jr-dev: gpt-5\.6-sol finished 100% of its jobs on 25k new tokens a job; gpt-6-astra finished 100% on 100k/);
+  assert.equal(s.command, "nomarmy army assign jr-dev codex gpt-5.6-sol");
+  // A local model is reached through the local agent, which takes no model.
+  const local = light.map((r) => ({ ...r, labels: { role: "jr-dev" }, metrics: { ...r.metrics, worker_provider: "llama-cpp", worker_model: "gpt-oss-20b" } }));
+  const l = computeSuggestions([...heavy, ...local]).find((x) => x.key.startsWith("lighter:"));
+  assert.equal(l.command, "nomarmy army assign jr-dev local");
+  assert.match(l.evidence, /runs whichever model is loaded; these ran on gpt-oss-20b/);
+  // Jobs with no token counts can't be compared.
+  const untracked = local.map((r) => ({ ...r, metrics: { worker_provider: "llama-cpp", worker_model: "gpt-oss-20b" } }));
+  assert.equal(computeSuggestions([...heavy, ...untracked]).filter((x) => x.key.startsWith("lighter:")).length, 0);
+});
+
+test("stats: a done claim with nothing changed has its own row, and untracked tokens are counted", () => {
+  const empty = impl({ jobId: "e1", reportValidation: { status: "done", tests: "pass" }, independentVerification: { status: "not_run", basis: "not-applicable" }, metrics: {} });
+  const s = computeStats([empty], { repo: "/r" });
+  assert.equal(s.claimVsEvidence.changedNothing, 1);
+  assert.equal(s.tokens.untracked, 1);
 });
