@@ -52,6 +52,8 @@ Failing verification stays failed, unconditionally. A malformed report isn't aut
 
 **Checking without building** costs nothing: `mode: verify` runs a verification profile against any branch, with no worker and no model tokens.
 
+**Want deeper checks?** Three optional [validators](https://github.com/rayson-tech/nomarmy/blob/main/docs/validators.md) go further, each only adding review flags: mutation testing (do the tests pin down the changed lines?), Jev (do a scout's citations support its findings, does a report match its diff?) and a model judge (acceptance criteria, weakened tests).
+
 ## Where the work runs
 
 - **Agents** say where a job can run: an API key, your own ChatGPT or Muse Code subscription, or a local model on llama.cpp.
@@ -74,6 +76,7 @@ Developed and maintained by Rayson Technologies. This is an alpha (`0.1.0-alpha`
 | [Agents and the army](https://github.com/rayson-tech/nomarmy/blob/main/docs/agents-and-army.md) | Where a job can run, who does what, usage limits, picking an agent |
 | [`/feature` runs](https://github.com/rayson-tech/nomarmy/blob/main/docs/feature-runs.md) | A feature end to end, and watching what nomArmy is doing |
 | [Your repository](https://github.com/rayson-tech/nomarmy/blob/main/docs/your-repo.md) | `.nomarmy.yml`, verification, dependencies, private registries, what nomArmy checks |
+| [Validators](https://github.com/rayson-tech/nomarmy/blob/main/docs/validators.md) | Optional deeper checks: mutation testing, Jev, a model judge |
 | [Harnesses](https://github.com/rayson-tech/nomarmy/blob/main/docs/harnesses.md) | Ecosystem registry, detection, network levels, and requirements |
 | [Configuration](https://github.com/rayson-tech/nomarmy/blob/main/docs/configuration.md) | Settings, swapping the local model, sizing, admission |
 | [Reference](https://github.com/rayson-tech/nomarmy/blob/main/docs/reference.md) | Every CLI command and MCP tool |
@@ -97,6 +100,8 @@ A nom gets a writable git worktree inside a Podman sandbox and nothing else: no 
 | The army and `/feature` | Driven by a real Claude Code General across three runs, about 18 implement jobs |
 | Harnesses: Go, Rust, Python, Node and mixed repos; Playwright; fake services | Live-verified offline |
 | Private registries and a verification-only network allowlist | Live-verified; each passed an independent security review |
+| Validators: mutation testing, Jev, a model judge | Unit and live tested; Jev and the judge evaluated on real job records |
+| `nomarmy stats` | Checked against a hand-built report on real job records |
 
 What we've learned from real runs, including where delegating pays and where it doesn't, is in [docs/findings.md](https://github.com/rayson-tech/nomarmy/blob/main/docs/findings.md).
 

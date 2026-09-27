@@ -79,48 +79,14 @@ Run the narrow pass on the touched files for a fast, sharp signal, *and* the bro
 
 - **Tests that prove nothing.** With `verify_regression` (on whenever a job has a verification profile), nomArmy reverts the production change and re-runs the tests: a test that still passes is flagged.
 - **Checks rewritten to pass.** `.nomarmy.yml` comes from your checkout, but the files its commands run come from the worker's worktree. A diff that changes what a verification command runs blocks the commit: a script the command names (`node check.js`, `bash scripts/verify.sh`), a Makefile or justfile under `make` or `just`, or the `package.json` script that `npm test` (or `pnpm`, `yarn`, `bun run`) calls. Test files a command names are left to the test-change review below, and changed test-runner configuration (`conftest.py`, `pytest.ini`, `[tool.pytest]`, jest or vitest config) is flagged for review.
-- **Tests that don't pin the change down** (opt in). With `mutation:` in `.nomarmy.yml`, nomArmy plants small mistakes in the lines the worker changed, one at a time (`<` to `<=`, `&&` to `||`, `true` to `false`, `18` to `19`), and reruns the job's verification profile on each; every one should fail. One that still passes means no test checks what that line does, and the job is flagged for review with the exact line and change. In a live run, a worker's `isAdult(age)` tested 30 and 10, never 18, and both boundary mutants survived. It edits only code (never strings or comments) in JavaScript, TypeScript, Python, Go, Rust, Java, C-family and similar files, needs no mutation tool installed, restores the worker's file after every mutant (a failed restore blocks the commit), and costs one verification run per mutant:
-
-  ```yaml
-  mutation:
-    mutants: 5         # 1 to 20
-    max_seconds: 300   # stop after this, whatever's left
-  ```
+- **Tests that don't pin the change down** (opt in). With `mutation:` in `.nomarmy.yml`, nomArmy plants small mistakes in the changed lines and checks the tests catch each one. See [mutation testing](validators.md#mutation-testing).
 - **Tests made to pass.** New skip markers, stubbed imports, fake modules named like a dependency, and stray backup files are flagged for review.
 - **Code wired to nothing.** A new function or class that nothing outside its own test calls is flagged (heuristic and review-only).
 - **Secrets.** Every diff and report is scanned for known secret shapes (secretlint's recommended preset) before a commit is allowed; a match blocks it.
 
-## Optional: semantic checks with Jev
+## Deeper checks: validators
 
-nomArmy's checks above are mechanical. Two judgments they can't make come from [Jev](https://docs.typesafe.ai), TypeSafe's fast judgment model, if you add your own key:
-
-- **Do a scout's cited lines support its finding?** nomArmy already checks that a citation exists; Jev judges the whole cited range against the claim. A finding that fails is marked `[JEV: ...]` in the report, with an issue line.
-- **Does a worker's report match its diff?** A contradiction ("restored check.js to base commit" beside a diff that rewrote it) gets a review flag.
-
-```bash
-nomarmy validators add jev     # asks for the key without showing it; one test call
-nomarmy validators list        # what's on
-nomarmy validators remove jev  # off, and the saved key deleted
-```
-
-The key is saved to `~/.config/nomarmy/secrets/typesafe.key`, readable only by you, never in a config file or a registration (or name an environment variable instead: `key_env` in `~/.config/nomarmy/validators.yml`). Restart open coordinator sessions after adding it.
-
-**Jev only adds flags.** Diffs and reports are written by the worker being judged, and a model can be talked into a verdict, so Jev's answer never passes a check, clears a flag or allows a commit. **It sends excerpts of your code** (findings, cited lines, diffs, worker reports) to TypeSafe, so it's off until you add it. On 40 real scout findings it caught every mismatched citation we planted and flagged real ones (a finding that misread its own cited line, true claims citing the wrong lines); on 30 real reports it flagged none against their own diffs and caught a real false claim. A job's run of both costs a fraction of a cent. **A TypeSafe outage never holds a job up:** a failed or slow call (15 seconds at most) skips Jev for every job for the next 10 minutes, a job never spends more than 45 seconds on it, and the job notes the skip; its result never depends on Jev.
-
-### A model judge
-
-Jev is fast at narrow questions. For judgments that take a few steps, make one of your agents a judge:
-
-```bash
-nomarmy validators add judge --agent grok --model grok-4.7
-nomarmy validators add judge --agent claude --model claude-haiku-4-5 --host-tools
-```
-
-After each implement job it answers three questions about the diff, in one call: does it meet each acceptance criterion, does it match the worker's report, and did any changed test get weaker? An "unmet", "contradicts" or "weakened" answer raises review; like Jev, a judge only adds flags, never passes a check or allows a commit, and a judge that's down or slow is skipped for a while. Pick a model from a different vendor than the workers it judges, so its review is independent, and move to a newer one by running `add judge` again.
-
-The judge runs through OpenClaw in an empty folder, told not to use tools. OpenClaw can't turn an agent's tools off, and a Claude subscription's tools run on your machine, so a judge on that agent needs `--host-tools`, the same consent `allow_host_tools` asks for a build job. An api key, Codex or Muse agent needs none. It sends the diff and report to that agent's vendor, like any job on it.
-
-On 12 real jobs, Claude Haiku 4.5 as judge flagged none of them against their own diffs, caught 8 of 12 reports paired with another job's diff and the `check.js` false claim, and never called a real job's acceptance criterion unmet (it said "unclear" when it couldn't tell). About 13 seconds a job.
+Three optional checks go beyond the ones above: [mutation testing](validators.md#mutation-testing) (do the tests pin down the changed lines?), [Jev](validators.md#jev) (do cited lines support a finding, does a report match its diff?) and a [model judge](validators.md#model-judge) (acceptance criteria, weakened tests). Each only adds review flags. See [Validators](validators.md).
 
 ## Browser verification and evidence
 
