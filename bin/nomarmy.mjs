@@ -20,6 +20,7 @@ import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
 import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv, defaultInstallDir, installMcpCopy, SCOPES, claudeUserScoped, portableServerLaunch } from "../lib/connect.mjs";
 import { compareVersions, readPackageVersion, readInstallVersions, copyIsStale } from "../lib/install-freshness.mjs";
+import { loadValidators, saveJevKey, removeJev, jevSettings, askJev, validatorsPath, JEV_CHECKS } from "../lib/validators.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
 import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, agentProviderId, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
 import { loadArmy, mergeArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
@@ -222,6 +223,13 @@ Usage: nomarmy <command> [options]
                   project for this repository, committed for the team
                   (.mcp.json or .cursor/mcp.json, running \`nomarmy mcp\`).
                   Codex has only the user scope.
+  validators <list|add jev|test jev|remove jev>
+                  Optional semantic checks from a model you configure with
+                  your own key. Today: Jev (TypeSafe). \`add jev\` asks for the
+                  key without echoing it (or reads --key-stdin), saves it
+                  where only you can read it, and makes one test call. Its
+                  answers only add review flags, and it sends excerpts of
+                  your code to TypeSafe.
   mcp             Start nomArmy's MCP server on stdio with this machine's
                   settings. What a --scope project registration runs.
   sandbox         The Podman VM every sandbox shares (macOS, Windows): its
@@ -2646,6 +2654,82 @@ async function cmdStatusline() {
   process.stdout.write(`${statusLineText({ session })}\n`);
 }
 
+// Read one line without echoing it: stty -echo around the read, restored
+// even if the read fails. Windows has no stty, so it says the input shows.
+async function readHiddenLine(prompt) {
+  const hide = process.stdin.isTTY && process.platform !== "win32";
+  if (!hide) console.log(c.yellow("(your input will be visible as you type)"));
+  const rl = createInterface({ input, output });
+  try {
+    if (hide) spawnSync("stty", ["-echo"], { stdio: ["inherit", "ignore", "ignore"] });
+    return (await rl.question(prompt)).trim();
+  } finally {
+    if (hide) { spawnSync("stty", ["echo"], { stdio: ["inherit", "ignore", "ignore"] }); process.stdout.write("\n"); }
+    rl.close();
+  }
+}
+
+async function readStdin() {
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  return Buffer.concat(chunks).toString("utf8").trim();
+}
+
+// One tiny System One request, to prove the key and the route work.
+async function testJev(settings) {
+  const { answers } = await askJev({ key: settings.key, model: settings.model, state: { text: "The build finished and all 12 tests passed." },
+    questions: { passed: { type: "noul", instructions: "Does the text say the tests passed?", criteria: { true: "It says the tests passed", false: "It doesn't" } } } });
+  return typeof answers.passed?.noul === "number";
+}
+
+async function cmdValidators() {
+  const [sub = "list", name] = argv.slice(1).filter((a) => !a.startsWith("--"));
+  if (sub === "list") {
+    let config = {};
+    try { config = loadValidators(); } catch (error) { if (json) return out({ error: error.message }); console.log(c.red(error.message)); process.exitCode = 1; return; }
+    const jev = config.jev ? { enabled: config.jev.enabled, checks: config.jev.checks, model: config.jev.model, key: config.jev.key_env ? `env ${config.jev.key_env}` : config.jev.key_file, keyReadable: Boolean(jevSettings()) } : null;
+    if (json) return out({ path: validatorsPath(), jev });
+    if (!jev) { console.log("No validators configured. Add Jev with: nomarmy validators add jev"); return; }
+    console.log(`Jev: ${jev.enabled ? c.green("on") : "off"} (${jev.model}); checks: ${jev.checks.join(", ")}; key: ${jev.key}${jev.keyReadable ? "" : c.red(" (not readable)")}`);
+    return;
+  }
+  if (name !== "jev") throw new Error("Usage: nomarmy validators <list|add jev|test jev|remove jev>");
+  if (sub === "add") {
+    if (!json) {
+      console.log(c.bold("🍪 Jev (TypeSafe) for nomArmy's semantic checks\n"));
+      console.log("It checks that a scout's cited lines support its finding, and that a worker's report matches its diff.");
+      console.log("Its answers only add review flags; they never pass a check or allow a commit.");
+      console.log(c.yellow("It sends excerpts of your code (findings, cited lines, diffs, worker reports) to TypeSafe.\n"));
+    }
+    const key = flag("key-stdin") ? await readStdin() : await readHiddenLine("TypeSafe API key (not shown): ");
+    const saved = saveJevKey(key);
+    let ok = false, why = null;
+    try { ok = await testJev(jevSettings()); } catch (error) { why = error.message; }
+    if (json) return out({ saved: true, keyFile: saved.keyFile, configPath: saved.configPath, test: ok ? "pass" : "fail", reason: why });
+    console.log(c.green(`✓ Saved the key to ${saved.keyFile} (readable only by you) and turned Jev on in ${saved.configPath}.`));
+    console.log(ok ? c.green("✓ Test call answered. New jobs use it; restart open coordinator sessions to pick it up.") : c.red(`✗ Test call failed: ${why ?? "no answer"}. Check the key, then: nomarmy validators test jev`));
+    if (!ok) process.exitCode = 1;
+    return;
+  }
+  if (sub === "test") {
+    const settings = jevSettings();
+    if (!settings) throw new Error("Jev isn't configured, or its key isn't readable. Add it with: nomarmy validators add jev");
+    let ok = false, why = null;
+    try { ok = await testJev(settings); } catch (error) { why = error.message; }
+    if (json) return out({ test: ok ? "pass" : "fail", reason: why });
+    console.log(ok ? c.green("✓ Jev answered.") : c.red(`✗ Jev test call failed: ${why ?? "no answer"}`));
+    if (!ok) process.exitCode = 1;
+    return;
+  }
+  if (sub === "remove") {
+    const result = removeJev();
+    if (json) return out(result);
+    console.log(c.green(`✓ Jev is off${result.removedKey ? ", and its saved key is deleted" : ""}.`));
+    return;
+  }
+  throw new Error("Usage: nomarmy validators <list|add jev|test jev|remove jev>");
+}
+
 // `nomarmy mcp`: what a --scope project registration runs. Nothing goes to
 // stdout but the server's own protocol.
 function cmdMcp() {
@@ -2655,7 +2739,7 @@ function cmdMcp() {
   child.on("exit", (code, signal) => { if (signal) process.kill(process.pid, signal); else process.exit(code ?? 1); });
 }
 
-const commands = { mcp: cmdMcp, scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, install: cmdInstall, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, sandbox: cmdSandbox, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
+const commands = { validators: cmdValidators, mcp: cmdMcp, scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, install: cmdInstall, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, sandbox: cmdSandbox, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
   // Import lazily to avoid circular dependencies

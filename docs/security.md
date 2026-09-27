@@ -11,6 +11,8 @@ The worker gets a writable worktree inside Podman and nothing else: no Podman so
 
 So nomArmy refuses **implement** jobs on a Claude subscription unless that agent says `allow_host_tools: true` in `agents.yml`; scouts and reviews still run, labeled. `nomarmy health` and the `army` tool flag any build role on it, and `agents list` says so. If a job's worktree comes back with a real `node_modules` where nomArmy's dependency link was (packages installed where the sandbox couldn't have), nomArmy flags the job for review and verifies against the sandbox's own dependencies. Sandboxing the Claude route properly needs OpenClaw to run it with only OpenClaw's own (sandboxed) tools, which it supports internally but doesn't expose yet. An Anthropic **api key** runs through OpenClaw's own loop and is sandboxed like the rest.
 
+**Optional validators send code excerpts off your machine.** If you add Jev (`nomarmy validators add jev`), scout findings with their cited lines, diffs and worker reports go to TypeSafe for judgment. Its answers only add review flags, since the content it judges is written by the worker being judged. Its key is saved readable only by you and never passed to a worker.
+
 **Never hand a worker** AWS or production credentials, deployment access, SSH keys, Kubernetes contexts or Terraform state.
 
 Every model call, local, api or subscription, is made by OpenClaw on the host, never from inside the sandbox. A subscription is reached through the vendor's own logged-in session; nomArmy never reads or stores the token. What changes with a hosted agent or a Bedrock profile is where your code goes (to that vendor), not what the sandbox can reach.
