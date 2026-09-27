@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { saveJevKey, removeJev, jevSettings, loadValidators, askJev, JEV_ENDPOINT } from "../lib/validators.mjs";
+import { saveJevKey, removeJev, jevSettings, loadValidators, askJev, JEV_ENDPOINT, jevBreaker, resetJevBreaker } from "../lib/validators.mjs";
 import { checkScoutCitations, checkReportClaims, FLAG_AT } from "../lib/jev-checks.mjs";
 
 function configDir(t) {
@@ -60,6 +60,8 @@ test("askJev posts the documented shape with a Bearer key, retries once on 429, 
 
 const settings = { key: "k", model: "jev-latest" };
 
+test.beforeEach(() => resetJevBreaker());
+
 test("checkScoutCitations flags only a confident non-support, and only findings with cited lines", async () => {
   const findings = [
     { text: "retries are capped at 3", citations: [{ status: "ok", path: "a.js", start: 1, end: 2, excerpt: [{ line: 1, text: "const MAX_RETRIES = 3;" }] }] },
@@ -92,9 +94,26 @@ test("checkReportClaims flags a confident contradiction, frames the diff, and sk
   const unsure = await checkReportClaims({ report, diff: "x", settings, ask: async () => ({ answers: { claims: { choice: "unclear", probabilities: { unclear: 0.95 } } } }) });
   assert.equal(unsure.flag, null);
   assert.equal((await checkReportClaims({ report: { note: "" }, diff: "x", settings, ask })).verdict, null, "no note: nothing to check");
+  const long = await checkReportClaims({ report, diff: "+".repeat(70000), settings, ask });
+  assert.equal(long.truncated, true);
   const failed = await checkReportClaims({ report, diff: "x", settings, ask: async () => { throw new Error("TypeSafe answered 529"); } });
   assert.equal(failed.flag, null);
   assert.equal(failed.error, "TypeSafe answered 529");
-  const long = await checkReportClaims({ report, diff: "+".repeat(70000), settings, ask });
-  assert.equal(long.truncated, true);
+});
+
+test("a Jev outage never stalls nomArmy: one failure stops the job's checks and every job skips Jev for a while", async () => {
+  const findings = Array.from({ length: 10 }, (_, i) => ({ text: `claim ${i}`, citations: [{ status: "ok", path: "a.js", start: 1, end: 1, excerpt: [{ line: 1, text: "x" }] }] }));
+  let calls = 0;
+  const down = async () => { calls++; const e = new Error("aborted"); e.name = "AbortError"; throw e; };
+  const r = await checkScoutCitations({ findings, settings, ask: down });
+  assert.ok(calls <= 4, `at most one round of requests, got ${calls}`);
+  assert.deepEqual(r.flags, []);
+  assert.match(r.errors[0], /timed out/);
+  assert.equal(jevBreaker().open, true);
+  // The next job doesn't even try.
+  let later = 0;
+  const next = await checkReportClaims({ report: { status: "done", note: "did the thing" }, diff: "d", settings, ask: async () => { later++; return {}; } });
+  assert.equal(later, 0);
+  assert.match(next.error, /skipped: Jev failed recently \(timed out\)/);
+  assert.equal(next.flag, null);
 });
