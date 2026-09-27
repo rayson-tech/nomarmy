@@ -26,7 +26,7 @@ Stop and ask only for something irreversible or outside this repository: merging
 
 ## Watching jobs
 
-Prefer `local_worker_start`. Right after starting a job, if your coordinator can run a background command, run `nomarmy jobs --wait <job_id>` in the background so you're told the moment it finishes and can tell the operator. Otherwise poll `local_worker_status` with the longest `wait_seconds` it allows. `nomarmy jobs --events` remains available for a stream covering every job. `run_status` lists the run's running jobs as well as finished ones. The operator gets a desktop notification whenever a job finishes and whenever the run crosses a limit, so you don't need to relay each one.
+Prefer `local_worker_start`. Right after starting a job, if your coordinator can run a background command, run `nomarmy jobs --wait <job_id>` in the background so you're told the moment it finishes and can tell the operator. Otherwise poll `local_worker_status` with the longest `wait_seconds` it allows. For several jobs at once, `nomarmy jobs --events --until-done` exits when every one has finished. The plain `nomarmy jobs --events` stream never exits on its own while jobs run, so don't run it as a background command (you'd only hear when it exits); use it only with a monitor that wakes on each line. `run_status` lists the run's running jobs as well as finished ones. The operator gets a desktop notification whenever a job finishes and whenever the run crosses a limit, so you don't need to relay each one.
 
 ## Limits
 
