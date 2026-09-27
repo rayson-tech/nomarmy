@@ -461,6 +461,19 @@ test("scoutReportRecoveryPrompt: asks for the report shape only, never to explor
 // A live PM scout lost its question twice: its first reply was cut off, and
 // the recovery call only said "restate the question", so the report came back
 // empty. The recovery prompt carries the question itself.
+// A Senti scout's recovery started a fresh session after OpenClaw's cleanup
+// crashed, and with "report only what you already found" it had nothing.
+test("scoutReportRecoveryPrompt: carries the cut-off reply and the files read, and allows re-reading only those", () => {
+  const p = scoutReportRecoveryPrompt({ question: "Where is recall filtered?", earlierReply: "FINDING: recall skips retired sources [lambda/recall.py:40-52]", filesRead: ["lambda/recall.py", "lambda/catalog.py"] });
+  assert.match(p, /Your earlier reply, as far as it got:\nFINDING: recall skips retired sources \[lambda\/recall\.py:40-52\]/);
+  assert.match(p, /Files you read during that work: lambda\/recall\.py, lambda\/catalog\.py/);
+  assert.match(p, /You may re-read the files listed above to confirm exact line numbers for what you found; call no other tool/);
+  assert.doesNotMatch(p, /Do not call any tool/);
+  const long = scoutReportRecoveryPrompt({ earlierReply: "x".repeat(20000) + "THE END" });
+  assert.match(long, /\(its last part\):\nx+THE END/);
+  assert.match(scoutReportRecoveryPrompt({}), /Do not call any tool/, "with nothing to re-read, no tools");
+});
+
 test("scoutReportRecoveryPrompt: carries the original question and what a complete answer covers", () => {
   const p = scoutReportRecoveryPrompt({ report: { targetTokens: 500, hardCapTokens: 900 },
     question: "Does the plan cover every acceptance criterion in docs/plan.md?", acceptance: ["name each criterion", "cite where it's handled"] });

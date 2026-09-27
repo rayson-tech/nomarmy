@@ -198,13 +198,18 @@ Usage: nomarmy <command> [options]
                             which agent the General is, in --global
                             (default) or --local
   config paths    where agents.yml and the three army layers live
-  jobs [--watch|--events|--prune|--wait <jobId>] [--interval N] [--older-than DAYS]
+  jobs [--watch|--events [--until-done]|--prune|--wait <jobId>] [--interval N] [--older-than DAYS]
                   what's running across every session (agent, model, phase,
                   last tool call, files changed, heartbeat) and what just
                   finished; --watch redraws every N seconds (default 3);
                   --events prints one line per start, phase change and
-                  finish (for Claude Code's background monitor; --json for
-                  JSON lines); --prune removes the bulky runtime data
+                  finish (--json for JSON lines). It's a stream: read it
+                  with a monitor that wakes on each line. A background
+                  command is only reported when it exits, so there use
+                  --events --until-done, which exits once every job it saw
+                  running has finished (or --wait for one job). The plain
+                  stream ends on its own after 30 minutes with nothing
+                  running (--idle-minutes N); --prune removes the bulky runtime data
                   from finished jobs older than DAYS (default 2), keeping
                   their records, reports and any retained worktree;
                   --wait <jobId> [--timeout <seconds>] blocks for one job
@@ -2518,6 +2523,12 @@ function renderJobs({ running, recent }) {
  */
 async function streamJobEvents() {
   const interval = Math.max(1, Number(value("interval", "3")) || 3) * 1000;
+  // A stream nobody reads must still end: a General that ran this as a
+  // background command (reported only on exit) was never told jobs had
+  // finished, and eight of these streams were left running for days.
+  const untilDone = flag("until-done");
+  const idleLimitMs = Math.max(1, Number(value("idle-minutes", "30")) || 30) * 60000;
+  let idleSinceMs = Date.now(), sawRunning = false;
   const seen = new Map();
   const emit = (event, job, detail = "") => {
     if (json) console.log(JSON.stringify({ at: new Date().toISOString(), event, jobId: job.jobId, agent: job.agent, model: job.model, phase: job.phase, detail }));
@@ -2540,6 +2551,17 @@ async function streamJobEvents() {
     seen.clear();
     for (const [id, j] of now) seen.set(id, j);
     first = false;
+    if (running.length) { sawRunning = true; idleSinceMs = Date.now(); }
+    else if (untilDone && sawRunning) {
+      if (json) console.log(JSON.stringify({ at: new Date().toISOString(), event: "done", detail: "every job seen running has finished" }));
+      else console.log(`${new Date().toLocaleTimeString()}  done      every job seen running has finished`);
+      return;
+    } else if (Date.now() - idleSinceMs >= (untilDone ? Math.min(idleLimitMs, 120000) : idleLimitMs)) {
+      const why = untilDone ? "no job was running to wait for" : `nothing has run for ${Math.round(idleLimitMs / 60000)} minutes`;
+      if (json) console.log(JSON.stringify({ at: new Date().toISOString(), event: "idle", detail: why }));
+      else console.log(`${new Date().toLocaleTimeString()}  idle      ${why}; exiting`);
+      return;
+    }
     await new Promise((r) => setTimeout(r, interval));
   }
 }

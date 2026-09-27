@@ -1586,6 +1586,44 @@ test("makeIdleDiffTick: stops once the worktree has changed and then gone idle p
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Three Senti jobs were cut off at 7 to 13 minutes while still working: a
+// frontier worker running thousands of tests changes no file for minutes.
+test("makeIdleDiffTick: an active worker isn't idle; a quiet one is; a busy one that changes nothing stops at 3x", async () => {
+  const dir = await initTempGitRepo();
+  try {
+    let events = 0, toolInFlight = false;
+    const tick = makeIdleDiffTick(dir, { idleMs: 1000, minElapsedMs: 0, activity: async () => ({ events, toolInFlight }) });
+    fs.writeFileSync(path.join(dir, "a.txt"), "changed");
+    assert.equal((await tick(0)).stop, false);
+    // New transcript events keep it going past the plain idle limit.
+    events = 5; assert.equal((await tick(900)).stop, false);
+    events = 9; assert.equal((await tick(1500)).stop, false, "still working, just not editing");
+    // A long test run: one tool call in flight, no new events.
+    toolInFlight = true;
+    assert.equal((await tick(2400)).stop, false, "waiting on a running command is working");
+    const capped = await tick(3100);
+    assert.equal(capped.stop, true, "nothing changed for 3x the limit, however busy");
+    assert.match(capped.detail, /while the worker kept working \(3x the idle limit\)/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("makeIdleDiffTick: with activity, a worker that's gone quiet still stops at the plain idle limit", async () => {
+  const dir = await initTempGitRepo();
+  try {
+    const tick = makeIdleDiffTick(dir, { idleMs: 1000, minElapsedMs: 0, activity: async () => ({ events: 3, toolInFlight: false }) });
+    fs.writeFileSync(path.join(dir, "a.txt"), "changed");
+    assert.equal((await tick(0)).stop, false);
+    const r = await tick(1100);
+    assert.equal(r.stop, true);
+    assert.equal(r.detail, "worktree unchanged for 1s");
+    // A failing activity read never keeps a job alive or kills it on its own.
+    const broken = makeIdleDiffTick(dir, { idleMs: 1000, minElapsedMs: 0, activity: async () => { throw new Error("db locked"); } });
+    fs.writeFileSync(path.join(dir, "a.txt"), "changed again");
+    assert.equal((await broken(0)).stop, false);
+    assert.equal((await broken(1200)).stop, true);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("makeIdleDiffTick: repeated real edits to the SAME already-dirty file keep resetting the idle clock -- the exact real incident this closes", async () => {
   // The real bug: once a.txt first appears in `git status`, it stays
   // reported on every poll regardless of further edits, so a NAME-only
