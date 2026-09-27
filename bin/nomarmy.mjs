@@ -20,6 +20,7 @@ import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
 import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv, defaultInstallDir, installMcpCopy, SCOPES, claudeUserScoped, portableServerLaunch } from "../lib/connect.mjs";
 import { compareVersions, readPackageVersion, readInstallVersions, copyIsStale } from "../lib/install-freshness.mjs";
+import { loadJobRecords, computeStats, formatStats, parseSince, resolveRepo } from "../lib/stats.mjs";
 import { loadValidators, saveJevKey, removeJev, jevSettings, askJev, validatorsPath, JEV_CHECKS, saveJudge, removeJudge, judgeSettings } from "../lib/validators.mjs";
 import { probeModel } from "../lib/model-probe.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
@@ -224,6 +225,13 @@ Usage: nomarmy <command> [options]
                   project for this repository, committed for the team
                   (.mcp.json or .cursor/mcp.json, running \`nomarmy mcp\`).
                   Codex has only the user scope.
+  stats [--since 7d|<date>] [--until <date>] [--role <role>] [--model <model>]
+        [--repo <path|name>] [--all-repos] [--json]
+                  What nomArmy's job records show for this repository (or
+                  all): volume by role and model, code committed, time,
+                  tokens and spend, how often a "done" report failed
+                  independent verification, what didn't finish, reviewers,
+                  and review flags. From verified records, never reports.
   validators <list|add jev|test jev|remove jev|add judge|test judge|remove judge>
                   Optional semantic checks from a model you configure with
                   your own key. Today: Jev (TypeSafe). \`add jev\` asks for the
@@ -2659,6 +2667,20 @@ async function cmdStatusline() {
   process.stdout.write(`${statusLineText({ session })}\n`);
 }
 
+function cmdStats() {
+  const stateRoot = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
+  const records = loadJobRecords(path.join(stateRoot, "jobs"));
+  let repo = null;
+  if (value("repo")) repo = resolveRepo(records, value("repo"));
+  else if (!flag("all-repos")) {
+    try { repo = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: repoDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
+    catch { throw new Error(`${repoDir} isn't inside a git repository; run nomarmy stats from one, or pass --repo <name> or --all-repos`); }
+  }
+  const stats = computeStats(records, { repo, sinceMs: parseSince(value("since")), untilMs: parseSince(value("until")), role: value("role"), model: value("model") });
+  if (json) return out(stats);
+  console.log(formatStats(stats));
+}
+
 // Read one line without echoing it: stty -echo around the read, restored
 // even if the read fails. Windows has no stty, so it says the input shows.
 async function readHiddenLine(prompt) {
@@ -2783,7 +2805,7 @@ function cmdMcp() {
   child.on("exit", (code, signal) => { if (signal) process.kill(process.pid, signal); else process.exit(code ?? 1); });
 }
 
-const commands = { validators: cmdValidators, mcp: cmdMcp, scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, install: cmdInstall, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, sandbox: cmdSandbox, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
+const commands = { stats: cmdStats, validators: cmdValidators, mcp: cmdMcp, scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, install: cmdInstall, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, sandbox: cmdSandbox, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
   // Import lazily to avoid circular dependencies
