@@ -11,6 +11,7 @@ Every command proposes before it writes: a `[y/N]` prompt, or an explicit flag u
 | `nomarmy sandbox` | The Podman VM every sandbox shares (macOS, Windows): memory, disk and images. `--memory <GiB>` resizes it (refused while jobs run, below 4 GiB, or above three quarters of the machine); `--prune` removes images no container uses; `--repair` restores rootless Podman's subordinate ID ranges if they're missing (refused while jobs run). |
 | `nomarmy install` | Runs the bundled `install.sh` for the profile setup chose (`--profile` to override, `--no-claude` to skip the Claude Code registration). |
 | `nomarmy connect [claude] [codex] [cursor] [--scope user\|local\|project]` | Registers nomArmy with each coordinator and installs `/feature`, the status line and the notifier. No target: pick interactively. `--scope local` registers it for this repository only, just for you; `--scope project` writes a committed `.mcp.json` or `.cursor/mcp.json` for the team (see [Per-repository registration](install.md#per-repository-registration)). Codex has only the user scope. |
+| `nomarmy stats [--since 7d\|<date>] [--until <date>] [--role <role>] [--model <model>] [--repo <path\|name>] [--all-repos] [--json]` | What nomArmy's job records show: jobs by mode, role and model; code committed; worker and job time; tokens and API spend; how often a "done, tests pass" report failed independent verification or passed with tests that couldn't catch the change; what didn't complete; reviewers; review flags. From verified records, never reports. `--repo senti` matches a repository by folder name. The General gets the same through the `stats` tool. |
 | `nomarmy mcp` | Starts nomArmy's MCP server on stdio with this machine's settings: what a `--scope project` registration runs. |
 | `nomarmy init` | Proposes a `.nomarmy.yml` from what the repo contains. |
 | `nomarmy agents list\|add\|update\|remove` | Where jobs can run. See [Agents](agents-and-army.md#agents-where-a-job-can-run). |
@@ -40,6 +41,7 @@ What the General uses. Every job takes the same shape: a `task`, optional `accep
 | `army` | The General's charter and agent, then this repo's roles and who runs each. |
 | `run_start` / `run_status` / `run_finish` | A `/feature` run: its limits, usage per agent, warnings, paused agents and log. |
 | `local_worker_capacity` | Context, budgets, memory pressure and what's running. |
+| `stats` | What the job records show for this repo (or `all_repos`, or another `repo` by name), filtered by `since`, `until`, `role` and `model`; `format: json` for the raw numbers. |
 | `local_worker_jobs` | Recent job records; `full: true` for the complete manifest. |
 | `local_worker_config` | This repo's verification profiles. |
 | `local_worker_cleanup` | Removes one worktree and branch. Recognizes a cherry-picked branch as integrated by content. |

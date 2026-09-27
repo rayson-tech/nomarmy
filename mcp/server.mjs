@@ -36,6 +36,7 @@ import { readUsageSnapshots, usageStatus } from "../lib/usage-limits.mjs";
 import { modelRefusals } from "../lib/health.mjs";
 import { podmanProblem, podmanVmStartedAt } from "../lib/podman-health.mjs";
 import { restartNotice } from "../lib/install-freshness.mjs";
+import { loadJobRecords, computeStats, formatStats, parseSince, resolveRepo } from "../lib/stats.mjs";
 import { probeModel } from "../lib/model-probe.mjs";
 import { createBuildMetrics, resolveOutcome, finalText, workerMetadata, usageMetrics, policyAdmissionProblems, applyRefactorContract, applyVerificationPolicy, resolveVerifyRegression } from "../lib/outcome.mjs";
 import { jobLabel, compactJobRecord, formatResult, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner } from "../lib/job-format.mjs";
@@ -421,6 +422,22 @@ function currentRestartNotice() {
   return notice;
 }
 const withRestartNotice = (value) => { const notice = currentRestartNotice(); return notice ? { restartNeeded: notice, ...value } : value; };
+
+server.tool("stats", "What nomArmy's own job records show for this repository (or all repositories): jobs by mode, role and model; code committed; worker and job time; tokens and API spend; claim vs evidence (how often a \"done, tests pass\" report failed independent verification, or passed with tests that couldn't catch the change); what didn't complete; reviewer outcomes; and review flags. Every number comes from nomArmy's verified records, never a worker's report. Defects you find at integration aren't in the records: add your own count. Read-only.", {
+  since: z.string().max(40).optional().describe("Only jobs started since this: a date (2026-09-25) or an age (7d, 24h). Default: all."),
+  until: z.string().max(40).optional().describe("Only jobs started before this date."),
+  all_repos: z.boolean().optional().describe("Every repository this machine's nomArmy has run jobs for, not just this one."),
+  repo: z.string().max(400).optional().describe("Another repository, by path or folder name (\"senti\" matches rayson-senti if unambiguous)."),
+  role: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional().describe("Only jobs dispatched as this army role (e.g. sr-dev)."),
+  model: z.string().regex(/^\S{1,200}$/).optional().describe("Only jobs that ran on this model (e.g. grok-4.7)."),
+  format: z.enum(["text", "json"]).optional().describe("text (default) is the report; json is the raw numbers."),
+}, async ({ since, until, all_repos, repo, role, model, format }) => {
+  try {
+    const records = loadJobRecords(jobsRoot);
+    const stats = computeStats(records, { repo: repo ? resolveRepo(records, repo) : all_repos ? null : projectDir, sinceMs: parseSince(since), untilMs: parseSince(until), role: role ?? null, model: model ?? null });
+    return toolText(format === "json" ? JSON.stringify(stats, null, 2) : formatStats(stats));
+  } catch (error) { return toolText(error.message, true); }
+});
 
 server.tool("local_worker_capacity", "What this host can take right now: context per nom and the brief/report budgets derived from it, memory pressure and whether another job would be admitted, and the jobs currently running. Read-only.", {}, async () => {
   await budgetState.refresh();

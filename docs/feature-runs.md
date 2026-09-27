@@ -26,6 +26,8 @@ The General can lower these for one run, never raise them. When a vendor answers
 
 **Finishing a job that came back unfinished.** A build job that ends partial, blocked or failing verification keeps its worktree, uncommitted. The General finishes it with a new job carrying `continue_from: <that job id>` and a brief of just the correction (say, the one wrong expected value in its test). The new worktree starts from the old job's base with its changes in place, and the finished whole is verified and committed together, so the foundation doesn't land outside nomArmy's checks. The commit carries a `nomArmy-Continues:` trailer naming the earlier job.
 
+**What a run added up to.** `nomarmy stats --since 7d` (or the `stats` tool, for the General) totals the job records: volume by role and model, code committed, time, tokens and spend, how often a "done" report failed nomArmy's own checks, what didn't finish, and what reviewers and review flags found. Filter with `--role`, `--model` and `--repo`. The one thing it can't count is what the General caught at integration; the report says so.
+
 ## Watching what nomArmy is doing
 
 - **Claude Code's status line** shows what's running in this repo, a count for other repos, the open run, and the most serious health warning: `Opus 5.5 · rayson-senti │ 🍪 2: sr-dev codex 9m 10f · scout grok 1m │ run 3/14 $0.41`. `nomarmy connect claude` installs it unless you have your own; then `nomarmy statusline` prints nomArmy's part for you to add.
