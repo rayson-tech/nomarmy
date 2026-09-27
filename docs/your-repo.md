@@ -79,6 +79,13 @@ Run the narrow pass on the touched files for a fast, sharp signal, *and* the bro
 
 - **Tests that prove nothing.** With `verify_regression` (on whenever a job has a verification profile), nomArmy reverts the production change and re-runs the tests: a test that still passes is flagged.
 - **Checks rewritten to pass.** `.nomarmy.yml` comes from your checkout, but the files its commands run come from the worker's worktree. A diff that changes what a verification command runs blocks the commit: a script the command names (`node check.js`, `bash scripts/verify.sh`), a Makefile or justfile under `make` or `just`, or the `package.json` script that `npm test` (or `pnpm`, `yarn`, `bun run`) calls. Test files a command names are left to the test-change review below, and changed test-runner configuration (`conftest.py`, `pytest.ini`, `[tool.pytest]`, jest or vitest config) is flagged for review.
+- **Tests that don't pin the change down** (opt in). With `mutation:` in `.nomarmy.yml`, nomArmy plants small mistakes in the lines the worker changed, one at a time (`<` to `<=`, `&&` to `||`, `true` to `false`, `18` to `19`), and reruns the job's verification profile on each; every one should fail. One that still passes means no test checks what that line does, and the job is flagged for review with the exact line and change. In a live run, a worker's `isAdult(age)` tested 30 and 10, never 18, and both boundary mutants survived. It edits only code (never strings or comments) in JavaScript, TypeScript, Python, Go, Rust, Java, C-family and similar files, needs no mutation tool installed, restores the worker's file after every mutant (a failed restore blocks the commit), and costs one verification run per mutant:
+
+  ```yaml
+  mutation:
+    mutants: 5         # 1 to 20
+    max_seconds: 300   # stop after this, whatever's left
+  ```
 - **Tests made to pass.** New skip markers, stubbed imports, fake modules named like a dependency, and stray backup files are flagged for review.
 - **Code wired to nothing.** A new function or class that nothing outside its own test calls is flagged (heuristic and review-only).
 - **Secrets.** Every diff and report is scanned for known secret shapes (secretlint's recommended preset) before a commit is allowed; a match blocks it.
