@@ -37,7 +37,8 @@ import { modelRefusals } from "../lib/health.mjs";
 import { podmanProblem, podmanVmStartedAt } from "../lib/podman-health.mjs";
 import { restartNotice } from "../lib/install-freshness.mjs";
 import { probeModel } from "../lib/model-probe.mjs";
-import { jevSettings } from "../lib/validators.mjs";
+import { jevSettings, judgeSettings } from "../lib/validators.mjs";
+import { agentRunsToolsOnHost } from "../lib/dispatch-schema.mjs";
 import { createBuildMetrics, resolveOutcome, finalText, workerMetadata, usageMetrics, policyAdmissionProblems, applyRefactorContract, applyVerificationPolicy, resolveVerifyRegression } from "../lib/outcome.mjs";
 import { jobLabel, compactJobRecord, formatResult, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner } from "../lib/job-format.mjs";
 
@@ -261,6 +262,7 @@ let podmanChecks = null;
 const { executeJob, executeImplement, executeScout, executeDecompose } = createExecutor({
   podmanVmStartedAt: () => podmanChecks?.vmStartedAt() ?? null,
   jevSettings: () => jevSettings(),
+  judgeSettings: () => judgeSettings({ agents: agentsConfig().agents, providerOf: agentProviderId, runsOnHost: agentRunsToolsOnHost }),
   VERSION, projectDir, jobsRoot, run, git, gitRaw,
   collectGitRecord, createCoordinatorCommit, ensureJobsRoot, slug, assertRepo,
   resolveBase, workerModelThinkingSupported, budgetState, execution, buildMetrics,

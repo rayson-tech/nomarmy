@@ -20,7 +20,8 @@ import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
 import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv, defaultInstallDir, installMcpCopy, SCOPES, claudeUserScoped, portableServerLaunch } from "../lib/connect.mjs";
 import { compareVersions, readPackageVersion, readInstallVersions, copyIsStale } from "../lib/install-freshness.mjs";
-import { loadValidators, saveJevKey, removeJev, jevSettings, askJev, validatorsPath, JEV_CHECKS } from "../lib/validators.mjs";
+import { loadValidators, saveJevKey, removeJev, jevSettings, askJev, validatorsPath, JEV_CHECKS, saveJudge, removeJudge, judgeSettings } from "../lib/validators.mjs";
+import { probeModel } from "../lib/model-probe.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
 import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, agentProviderId, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
 import { loadArmy, mergeArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
@@ -223,13 +224,17 @@ Usage: nomarmy <command> [options]
                   project for this repository, committed for the team
                   (.mcp.json or .cursor/mcp.json, running \`nomarmy mcp\`).
                   Codex has only the user scope.
-  validators <list|add jev|test jev|remove jev>
+  validators <list|add jev|test jev|remove jev|add judge|test judge|remove judge>
                   Optional semantic checks from a model you configure with
                   your own key. Today: Jev (TypeSafe). \`add jev\` asks for the
                   key without echoing it (or reads --key-stdin), saves it
                   where only you can read it, and makes one test call. Its
                   answers only add review flags, and it sends excerpts of
-                  your code to TypeSafe.
+                  your code to TypeSafe. \`add judge --agent <name> --model
+                  <model>\` makes one of your agents a model judge: does the
+                  diff meet each acceptance criterion, match the report, keep
+                  its tests as strong? An agent whose tools run on this
+                  machine needs --host-tools.
   mcp             Start nomArmy's MCP server on stdio with this machine's
                   settings. What a --scope project registration runs.
   sandbox         The Podman VM every sandbox shares (macOS, Windows): its
@@ -2687,13 +2692,16 @@ async function cmdValidators() {
   if (sub === "list") {
     let config = {};
     try { config = loadValidators(); } catch (error) { if (json) return out({ error: error.message }); console.log(c.red(error.message)); process.exitCode = 1; return; }
+    const judge = config.judge ? { enabled: config.judge.enabled, agent: config.judge.agent, model: config.judge.model, checks: config.judge.checks, hostTools: config.judge.host_tools } : null;
     const jev = config.jev ? { enabled: config.jev.enabled, checks: config.jev.checks, model: config.jev.model, key: config.jev.key_env ? `env ${config.jev.key_env}` : config.jev.key_file, keyReadable: Boolean(jevSettings()) } : null;
-    if (json) return out({ path: validatorsPath(), jev });
-    if (!jev) { console.log("No validators configured. Add Jev with: nomarmy validators add jev"); return; }
-    console.log(`Jev: ${jev.enabled ? c.green("on") : "off"} (${jev.model}); checks: ${jev.checks.join(", ")}; key: ${jev.key}${jev.keyReadable ? "" : c.red(" (not readable)")}`);
+    if (json) return out({ path: validatorsPath(), jev, judge });
+    if (!jev && !judge) { console.log("No validators configured. Add one with: nomarmy validators add jev, or nomarmy validators add judge --agent <name> --model <model>"); return; }
+    if (jev) console.log(`Jev: ${jev.enabled ? c.green("on") : "off"} (${jev.model}); checks: ${jev.checks.join(", ")}; key: ${jev.key}${jev.keyReadable ? "" : c.red(" (not readable)")}`);
+    if (judge) console.log(`Judge: ${judge.enabled ? c.green("on") : "off"} (${judge.agent}/${judge.model}); checks: ${judge.checks.join(", ")}${judge.hostTools ? c.yellow("; host tools allowed") : ""}`);
     return;
   }
-  if (name !== "jev") throw new Error("Usage: nomarmy validators <list|add jev|test jev|remove jev>");
+  if (name === "judge") return cmdValidatorsJudge(sub);
+  if (name !== "jev") throw new Error("Usage: nomarmy validators <list|add jev|test jev|remove jev|add judge|test judge|remove judge>");
   if (sub === "add") {
     if (!json) {
       console.log(c.bold("🍪 Jev (TypeSafe) for nomArmy's semantic checks\n"));
@@ -2728,6 +2736,42 @@ async function cmdValidators() {
     return;
   }
   throw new Error("Usage: nomarmy validators <list|add jev|test jev|remove jev>");
+}
+
+async function cmdValidatorsJudge(sub) {
+  const agents = loadAgents(globalConfigDir()).agents;
+  const resolve = () => judgeSettings({ agents, providerOf: agentProviderId, runsOnHost: agentRunsToolsOnHost });
+  const probe = async (settings) => probeModel({ provider: settings.provider, model: settings.model, stateRoot: process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents") });
+  if (sub === "add") {
+    const agent = value("agent"), model = value("model");
+    if (!agent || !model) throw new Error("Usage: nomarmy validators add judge --agent <name> --model <model> [--host-tools]");
+    if (!agents[agent]) throw new Error(`"${agent}" isn't an agent in agents.yml. Agents: ${Object.keys(agents).join(", ") || "(none)"}`);
+    if (agentRunsToolsOnHost(agents[agent]) && !flag("host-tools")) throw new Error(`agent "${agent}" runs its tools on this machine, and a judge reads text the worker wrote. Pass --host-tools to accept that, or pick a sandboxed agent (an api key, Codex, Muse).`);
+    const saved = saveJudge({ agent, model, hostTools: flag("host-tools") });
+    const settings = resolve();
+    if (settings?.problem) throw new Error(settings.problem);
+    const test = await probe(settings);
+    if (json) return out({ saved: true, configPath: saved.configPath, test: test.ok ? "pass" : test.refused ? "refused" : "inconclusive", reason: test.reason });
+    console.log(c.green(`✓ The judge is ${agent}/${model}, in ${saved.configPath}.`));
+    console.log(test.ok ? c.green("✓ Test call answered. New implement jobs use it; restart open coordinator sessions to pick it up.") : c.red(`✗ Test call ${test.refused ? "refused" : "didn't answer"}: ${test.reason ?? "no answer"}`));
+    if (!test.ok) process.exitCode = 1;
+    return;
+  }
+  if (sub === "test") {
+    const settings = resolve();
+    if (!settings) throw new Error("No judge configured. Add one with: nomarmy validators add judge --agent <name> --model <model>");
+    if (settings.problem) throw new Error(settings.problem);
+    const test = await probe(settings);
+    if (json) return out({ test: test.ok ? "pass" : "fail", reason: test.reason });
+    console.log(test.ok ? c.green(`✓ ${settings.agent}/${settings.model} answered.`) : c.red(`✗ ${test.reason ?? "no answer"}`));
+    if (!test.ok) process.exitCode = 1;
+    return;
+  }
+  if (sub === "remove") {
+    removeJudge();
+    return json ? out({ removed: true }) : console.log(c.green("✓ The judge is off."));
+  }
+  throw new Error("Usage: nomarmy validators <add judge --agent <name> --model <model> [--host-tools]|test judge|remove judge>");
 }
 
 // `nomarmy mcp`: what a --scope project registration runs. Nothing goes to
