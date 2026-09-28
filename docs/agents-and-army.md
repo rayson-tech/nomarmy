@@ -35,7 +35,7 @@ agents:
 
 **Settings**:
 - `max_concurrent`: how many jobs run on this agent at once, counted across every session on the machine. Defaults are 1 for a subscription and 2 for an api key; raising it spends your plan's usage limits faster. Api and subscription jobs together are also capped machine-wide, across every session, by `nomarmy config max-jobs` (default 4), separately from local workers. Each running job needs a sandbox in the Podman VM, about 1.5 GiB apiece: `nomarmy sandbox` shows how many fit, and `nomarmy sandbox --memory <GiB>` resizes it.
-- `thinking`: `true` follows the job's level, `false` is off, or a fixed `low`, `medium` or `high`.
+- `thinking`: `true` follows the job's level, `false` is off, or a fixed level that every job on this agent uses: any OpenClaw level (`minimal`, `low`, `medium`, `high`, `xhigh`, `adaptive`, `max`, `ultra`), where the vendor offers it. A level a model lacks falls back once to its nearest supported level, and the job record shows what ran (`reasoningApplied`). Jobs default to `medium`: in testing, higher was never better on local models, and on a subscription it spends usage faster.
 - `context_window`: overrides OpenClaw's catalog for a model newer than it knows.
 
 Changes apply to the next job with no restart. The exception is a **new** api agent, which needs one `nomarmy connect claude` so the MCP server sees its key variable (`agents add` offers to do it).
