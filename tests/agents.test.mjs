@@ -107,8 +107,7 @@ test("loadAgents: invalid YAML and invalid agents throw with the path and readab
   assert.throws(() => loadAgents(dir), (e) => e.errors.some((l) => /provider/.test(l)));
 });
 
-test("loadAgents: refuses an agents.yml other accounts can write -- it holds owners and key names", () => {
-  if (process.platform === "win32") return;
+test("loadAgents: refuses an agents.yml other accounts can write -- it holds owners and key names", { skip: process.platform === "win32" ? "POSIX file mode permissions are unavailable on Windows" : false }, () => {
   const dir = tmp();
   writeAgentsFile(dir, REAL.agents);
   fs.chmodSync(path.join(dir, "agents.yml"), 0o666);

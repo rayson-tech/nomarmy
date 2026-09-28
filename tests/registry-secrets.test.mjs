@@ -176,8 +176,9 @@ test("registry build uses only secret file args, exact isolated context and sani
     if (args[0] === "images") return "";
     buildArgs = args;
     context = args.at(-1);
-    contextFiles = fs.readdirSync(context, { recursive: true }).filter((rel) => fs.statSync(path.join(context, rel)).isFile()).sort();
-    contextContents = contextFiles.map((rel) => fs.readFileSync(path.join(context, rel), "utf8"));
+    const nativeContextFiles = fs.readdirSync(context, { recursive: true }).filter((rel) => fs.statSync(path.join(context, rel)).isFile()).sort();
+    contextFiles = nativeContextFiles.map((rel) => rel.split(path.sep).join("/"));
+    contextContents = nativeContextFiles.map((rel) => fs.readFileSync(path.join(context, rel), "utf8"));
     throw new Error(TOKEN);
   };
   const expectedImage = composeSandboxImage(f.repo, null, undefined, { trustedDir: f.repo }).image;
