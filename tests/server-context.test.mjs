@@ -10,16 +10,20 @@ import { test } from "node:test";
 import { createServerContext, projectDirProblem } from "../lib/server-context.mjs";
 
 test("createServerContext: NOMARMY_PROJECT_DIR, then CLAUDE_PROJECT_DIR, then the start folder; an unexpanded placeholder counts as unset", () => {
-  const cwd = "/home/someone";
+  const cwd = path.join(path.sep, "home", "someone");
+  const claudeDir = path.join(path.sep, "r", "claude");
+  const cursorDir = path.join(path.sep, "r", "cursor");
+  const home = path.join(path.sep, "Users", "someone");
   assert.equal(createServerContext({ env: {}, cwd }).projectDir, cwd);
-  assert.equal(createServerContext({ env: { CLAUDE_PROJECT_DIR: "/r/claude" }, cwd }).projectDir, "/r/claude");
-  assert.equal(createServerContext({ env: { NOMARMY_PROJECT_DIR: "/r/cursor", CLAUDE_PROJECT_DIR: "/r/claude" }, cwd }).projectDir, "/r/cursor");
+  assert.equal(createServerContext({ env: { CLAUDE_PROJECT_DIR: claudeDir }, cwd }).projectDir, claudeDir);
+  assert.equal(createServerContext({ env: { NOMARMY_PROJECT_DIR: cursorDir, CLAUDE_PROJECT_DIR: claudeDir }, cwd }).projectDir, cursorDir);
   // A client that doesn't fill in ${workspaceFolder} passes it through literally.
   assert.equal(createServerContext({ env: { NOMARMY_PROJECT_DIR: "${workspaceFolder}" }, cwd }).projectDir, cwd);
   // Seen live: Cursor fills ${workspaceFolder} in as "~/...".
-  assert.equal(createServerContext({ env: { NOMARMY_PROJECT_DIR: "~/Documents/source/nomarmy" }, cwd, homedir: "/Users/someone" }).projectDir, "/Users/someone/Documents/source/nomarmy");
-  assert.equal(createServerContext({ env: { NOMARMY_PROJECT_DIR: "~" }, cwd, homedir: "/Users/someone" }).projectDir, "/Users/someone");
-  assert.equal(createServerContext({ env: { NOMARMY_PROJECT_DIR: "/r/~odd" }, cwd }).projectDir, "/r/~odd", "only a leading ~ is the home folder");
+  assert.equal(createServerContext({ env: { NOMARMY_PROJECT_DIR: `~${path.sep}Documents${path.sep}source${path.sep}nomarmy` }, cwd, homedir: home }).projectDir, path.join(home, "Documents", "source", "nomarmy"));
+  assert.equal(createServerContext({ env: { NOMARMY_PROJECT_DIR: "~" }, cwd, homedir: home }).projectDir, home);
+  const odd = path.join(path.sep, "r", "~odd");
+  assert.equal(createServerContext({ env: { NOMARMY_PROJECT_DIR: odd }, cwd }).projectDir, odd, "only a leading ~ is the home folder");
 });
 
 test("projectDirProblem: a git repository is fine; anything else (the home folder) is refused with how to fix it", () => {

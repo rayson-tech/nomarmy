@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
@@ -588,7 +589,7 @@ test("cursorAlreadyConnected: true only when the file exists and has our entry",
 // ---------------------------------------------------------------------------
 import { installPlaybooks, renderPlaybook } from "../lib/connect.mjs";
 
-const REPO_ROOT = path.join(path.dirname(new URL(import.meta.url).pathname), "..");
+const REPO_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const FEATURE_BODY = fs.readFileSync(path.join(REPO_ROOT, "playbooks", "feature.md"), "utf8");
 
 test("renderPlaybook: Claude gets a /feature command, Codex a skill, Cursor a command -- each marked as nomArmy's", () => {

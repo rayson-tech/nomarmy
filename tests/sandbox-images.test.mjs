@@ -367,7 +367,7 @@ test("dependencyDockerfile: each package installs at its repo path under /deps a
   assert.doesNotMatch(dependencyDockerfile({ nodeFiles: ["ui/package.json", "ui/package-lock.json"], nodePackages: ["ui"] }), /ln -s/, "no root package, no /node_modules link");
 });
 
-test("linkNodePackages: each non-root package gets a node_modules link into the image, never over an existing one, and not with a custom image", () => {
+test("linkNodePackages: each non-root package gets a node_modules link into the image, never over an existing one, and not with a custom image", { skip: process.platform === "win32" ? "creates POSIX container-target symlinks" : false }, () => {
   const dir = fakeRepo({ "package.json": "{}", "package-lock.json": "{}", "ui/package.json": "{}", "ui/package-lock.json": "{}", "api/package.json": "{}", "api/package-lock.json": "{}", "api/node_modules/.keep": "" });
   try {
     assert.deepEqual(linkNodePackages(dir, null, { env: {} }), ["ui/node_modules"]);
@@ -380,7 +380,7 @@ test("linkNodePackages: each non-root package gets a node_modules link into the 
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("repairHostInstalls: a node_modules that became a real directory during the job is removed and relinked; one that was already real is left alone", () => {
+test("repairHostInstalls: a node_modules that became a real directory during the job is removed and relinked; one that was already real is left alone", { skip: process.platform === "win32" ? "creates POSIX container-target symlinks" : false }, () => {
   const dir = fakeRepo({ "package.json": "{}", "package-lock.json": "{}", "ui/package.json": "{}", "ui/package-lock.json": "{}", "api/package.json": "{}", "api/package-lock.json": "{}", "api/node_modules/own/index.js": "" });
   try {
     linkNodePackages(dir, null, { env: {} });

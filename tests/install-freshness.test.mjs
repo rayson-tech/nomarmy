@@ -74,18 +74,19 @@ test("runHealthChecks reports a stale install from npm's alpha tag, and skips np
 });
 
 test("restartNotice: only when the copy on disk changed after this server started", () => {
-  const serverFile = "/install/mcp/server.mjs";
+  const installRoot = path.join(path.sep, "install");
+  const serverFile = path.join(installRoot, "mcp", "server.mjs");
   const at = (mtimeMs) => () => ({ mtimeMs });
   assert.equal(restartNotice({ serverFile, startedAtMs: 2000, runningVersion: "0.1.0-alpha.7", stat: at(1000), readVersion: () => "0.1.0-alpha.7" }), null);
   const sameVersion = restartNotice({ serverFile, startedAtMs: 2000, runningVersion: "0.1.0-alpha.7", stat: at(3000), readVersion: () => "0.1.0-alpha.7" });
   assert.match(sameVersion, /updated after this session started\. Restart this session/);
-  const newer = restartNotice({ serverFile, startedAtMs: 2000, runningVersion: "0.1.0-alpha.7", stat: at(3000), readVersion: (dir) => { assert.equal(dir, "/install"); return "0.1.0-alpha.8"; } });
+  const newer = restartNotice({ serverFile, startedAtMs: 2000, runningVersion: "0.1.0-alpha.7", stat: at(3000), readVersion: (dir) => { assert.equal(dir, installRoot); return "0.1.0-alpha.8"; } });
   assert.match(newer, /this session runs 0\.1\.0-alpha\.7; 0\.1\.0-alpha\.8 is installed/);
   assert.equal(restartNotice({ serverFile, startedAtMs: 2000, runningVersion: "x", stat: () => { throw new Error("gone"); } }), null);
 });
 
 import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { copyIsStale } from "../lib/install-freshness.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -94,7 +95,7 @@ test("the installed copy loads every harness the checkout has (connect used to l
   const installDir = fs.realpathSync(tmp(t, "nomarmy-fresh-harness-"));
   installMcpCopy({ nomarmyRoot: REPO_ROOT, installDir, run: () => {} });
   fs.symlinkSync(path.join(REPO_ROOT, "node_modules"), path.join(installDir, "node_modules"), "dir");
-  const installed = await import(path.join(installDir, "lib", "harnesses.mjs"));
+  const installed = await import(pathToFileURL(path.join(installDir, "lib", "harnesses.mjs")).href);
   const fromCheckout = await import("../lib/harnesses.mjs");
   assert.equal(installed.HARNESS_ROOT, path.join(installDir, "harnesses") + path.sep);
   const names = Object.keys(installed.loadHarnesses().harnesses);

@@ -22,7 +22,7 @@ const layerNames = (dockerfile) => [...dockerfile.matchAll(/^# harness: (.+)$/gm
 
 // Exercise the public resolver as well as the recipe: a first-match selector
 // must fail even if a standalone composer looks correct.
-test("mixed Go and nested Node: one cached image, exact context, PATH union and cleanup", (t) => {
+test("mixed Go and nested Node: one cached image, exact context, PATH union and cleanup", { skip: process.platform === "win32" ? "creates a POSIX container-target symlink" : false }, (t) => {
   const dir = repo(t, { "go.mod": "module example.com/mixed\n", "ui/package.json": "{}", "ui/package-lock.json": "{}" });
   let context, recipe, builds = 0, cached = false;
   const run = (cmd, args) => {
@@ -85,7 +85,7 @@ test("single-ecosystem recipes preserve installers and resolution fallbacks", (t
   assert.equal(images.resolveSandboxImage({ cwd: node, explicitImage: "custom", defaultImage: "base", run: never }), "custom");
 });
 
-test("composition order honors after and declarative commands run as root with named failures", (t) => {
+test("composition order honors after and declarative commands run as root with named failures", { skip: process.platform === "win32" ? "spawns generated POSIX shell commands" : false }, (t) => {
   const dir = repo(t, { ...nodeFiles, "requirements.txt": "requests\n", "go.mod": "", "Cargo.toml": "" });
   const harnesses = loadHarnesses().harnesses;
   harnesses.zeta = { after: ["node"], image: { apt: ["libexample-dev"], run: ["printf '%s\\n' 'first'\nprintf '%s\\n' 'second'", "exit 7"] } };

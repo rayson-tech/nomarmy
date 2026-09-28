@@ -54,7 +54,7 @@ for (const [name, lock, content, command, manager] of cases) {
   });
 }
 
-for (const manager of ["npm", "pnpm"]) test("workspace recipe and links: " + manager, (t) => {
+for (const manager of ["npm", "pnpm"]) test("workspace recipe and links: " + manager, { skip: process.platform === "win32" ? "creates POSIX container-target symlinks" : false }, (t) => {
   const lock = manager === "npm" ? "package-lock.json" : "pnpm-lock.yaml";
   const root = fixture(t, {
     "package.json": JSON.stringify(manager === "npm" ? { workspaces: { packages: ["packages/**", "!packages/excluded"] } } : {}),

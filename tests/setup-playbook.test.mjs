@@ -101,7 +101,7 @@ function fixture() {
   return { dir, env, run };
 }
 
-test('setup CLI status, persisted profiles, legacy probes and stub installer', () => {
+test('setup CLI status, persisted profiles, legacy probes and stub installer', { skip: process.platform === 'win32' ? 'executes POSIX shell stub binaries' : false }, () => {
   const { dir, env, run } = fixture();
   try {
     fs.mkdirSync(path.join(dir, '.git'));

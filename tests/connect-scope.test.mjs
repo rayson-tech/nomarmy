@@ -30,7 +30,7 @@ test("claude --scope local: this repo only, the playbook kept out of git, and a 
   const s = setup(t);
   const result = connectClaude({ nomarmyRoot: s.nomarmyRoot, installDir: s.installDir, run: s.run, configDir: s.configDir, scope: "local", projectDir: s.projectDir });
   const add = s.calls.find((c) => c.line.startsWith("claude mcp add"));
-  assert.match(add.line, /^claude mcp add --scope local nomarmy-local-worker (.* )?-- node .*\/install\/mcp\/server\.mjs$/);
+  assert.match(add.line, /^claude mcp add --scope local nomarmy-local-worker (.* )?-- node .*[/\\]install[/\\]mcp[/\\]server\.mjs$/);
   assert.equal(add.cwd, s.projectDir, "registered from the repository, so Claude Code ties it to that project");
   assert.ok(s.calls.some((c) => c.line === "claude mcp remove nomarmy-local-worker --scope local" && c.cwd === s.projectDir));
   assert.equal(s.calls.some((c) => /--scope user/.test(c.line)), false, "the user-scope registration is left alone");
