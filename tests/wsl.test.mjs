@@ -80,7 +80,7 @@ test("shellQuote protects single quotes, whitespace and bash metacharacters", ()
   assert.equal(shellQuote("$(touch /tmp/x); `whoami`\n*"), "'$(touch /tmp/x); `whoami`\n*'");
 });
 
-const invalidDistros = ["Ubuntu; rm -rf /", "", "a".repeat(65), "Ubuntu Linux", "Ubuntu\n", "$(id)", null, 123];
+const invalidDistros = ["--exec", ".", "..", "Ubuntu; rm -rf /", "", "a".repeat(65), "Ubuntu Linux", "Ubuntu\n", "$(id)", null, 123];
 
 test("wslCommand builds a quoted login-shell launch and refuses invalid distro names", () => {
   assert.deepEqual(wslCommand({ distro: "Ubuntu-24.04", args: ["connect", "Jason's repo"], cwd: "/home/j/my repo" }), {
@@ -96,7 +96,7 @@ test("wslCommand builds a quoted login-shell launch and refuses invalid distro n
 test("mcpBridgeLaunch supplies translated environment paths and validates distro names", () => {
   assert.deepEqual(mcpBridgeLaunch({ distro: "Ubuntu_24.04" }), {
     command: "wsl.exe", args: ["-d", "Ubuntu_24.04", "--", "bash", "-lc", "exec nomarmy mcp"],
-    env: { WSLENV: "CLAUDE_PROJECT_DIR/p:NOMARMY_PROJECT_DIR/p" },
+    env: { WSLENV: "CLAUDE_PROJECT_DIR/pu:NOMARMY_PROJECT_DIR/pu" },
   });
   for (const distro of invalidDistros) assert.throws(() => mcpBridgeLaunch({ distro }), /Invalid WSL distro name/);
 });
@@ -108,15 +108,23 @@ test("windowsSettingsPath prefers USERPROFILE and falls back to HOME independent
   assert.throws(() => windowsSettingsPath({ env: {} }), /USERPROFILE or HOME/);
 });
 
-test("readWindowsSettings returns only a distro and tolerates missing or malformed data", () => {
+test("readWindowsSettings returns validated executable paths and a distro and tolerates missing or malformed data", () => {
   const env = { HOME: "/home/j" };
   const calls = [];
-  assert.deepEqual(readWindowsSettings({ env, fs: { readFileSync: (...args) => { calls.push(args); return '{"distro":"Ubuntu","extra":true}'; } } }), { distro: "Ubuntu" });
+  assert.deepEqual(readWindowsSettings({ env, fs: { readFileSync: (...args) => { calls.push(args); return '{"distro":"Ubuntu","extra":true}'; } } }), { distro: "Ubuntu", node: null, script: null });
   assert.deepEqual(calls, [["/home/j/.config/nomarmy/windows.json", "utf8"]]);
-  for (const text of ["{", "null", "{}", "[]", '{"distro":123}', '{"distro":null}']) {
-    assert.deepEqual(readWindowsSettings({ env, fs: { readFileSync: () => text } }), { distro: null });
+  for (const settings of [
+    { distro: "Ubuntu", node: "/usr/bin/node", script: "/my repo/cli=1.mjs" },
+    { distro: "Ubuntu", node: "/tmp/%PATH%/node", script: "/tmp/cli\nmore" },
+    { distro: "Ubuntu", node: 123, script: "relative" },
+  ]) {
+    assert.deepEqual(readWindowsSettings({ env, fs: { readFileSync: () => JSON.stringify({ ...settings, extra: true }) } }),
+      settings.node === "/usr/bin/node" ? settings : { distro: "Ubuntu", node: null, script: null });
   }
-  assert.deepEqual(readWindowsSettings({ env, fs: { readFileSync: () => { throw new Error("ENOENT"); } } }), { distro: null });
+  for (const text of ["{", "null", "{}", "[]", '{"distro":123}', '{"distro":null}']) {
+    assert.deepEqual(readWindowsSettings({ env, fs: { readFileSync: () => text } }), { distro: null, node: null, script: null });
+  }
+  assert.deepEqual(readWindowsSettings({ env, fs: { readFileSync: () => { throw new Error("ENOENT"); } } }), { distro: null, node: null, script: null });
 });
 
 test("writeWindowsSettings creates its directory and writes pretty JSON via injected fs", () => {
@@ -133,4 +141,34 @@ test("writeWindowsSettings creates its directory and writes pretty JSON via inje
   assert.throws(() => writeWindowsSettings({ distro: null }, { env: { HOME: "/home/j" }, fs: {
     mkdirSync: () => {}, writeFileSync: () => { throw new Error("disk full"); },
   } }), /disk full/);
+});
+
+
+test("wslCommand validates cwd before creating a WSL option", () => {
+  for (const cwd of ["--user", "relative", "", "/tmp/a\nb", "/tmp/a\rb", "/tmp/a\0b", 123]) {
+    assert.throws(() => wslCommand({ distro: "Ubuntu", args: [], cwd }),
+      { message: "Invalid WSL cwd: expected an absolute POSIX path without newlines or NUL" });
+  }
+  assert.deepEqual(wslCommand({ distro: "Ubuntu", args: ["jobs"], cwd: "/" }), {
+    command: "wsl.exe", args: ["-d", "Ubuntu", "--cd", "/", "--", "bash", "-lc", "exec nomarmy jobs"],
+  });
+});
+
+test("wslCommand uses validated saved executables without a shell or quoting", () => {
+  const node = "/my node/bin/node", script = "/my repo/cli=1.mjs";
+  const args = ["jobs", "a b", "$(id)", "x'y", "%PATH%", "--user"];
+  for (const cwd of [null, "/home/my repo"]) {
+    assert.deepEqual(wslCommand({ distro: "Ubuntu", node, script, args, cwd }), {
+      command: "wsl.exe", args: ["-d", "Ubuntu", ...(cwd ? ["--cd", cwd] : []), "--", node, script, ...args],
+    });
+  }
+  for (const bad of ["/tmp/%PATH%", "/tmp/a\nb", "/tmp/a\0b", "relative", ""]) {
+    for (const name of ["node", "script"]) {
+      assert.throws(() => wslCommand({ distro: "Ubuntu", node, script, args, [name]: bad }),
+        { message: `Invalid WSL ${name} path: expected an absolute POSIX path using only ASCII letters, digits, /, _, ., :, @, +, space, =, and -` });
+    }
+  }
+  assert.deepEqual(wslCommand({ distro: "Ubuntu", node, args: ["jobs"] }), {
+    command: "wsl.exe", args: ["-d", "Ubuntu", "--", "bash", "-lc", "exec nomarmy jobs"],
+  });
 });

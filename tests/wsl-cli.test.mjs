@@ -7,12 +7,12 @@ const DISTRO_FIX = "Install a Linux distro: wsl --install -d Ubuntu, open it onc
 const NODE_FIX = "Install Node 24 (24.16+) inside Ubuntu:\ncurl -o- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash\nThen reopen the distro shell and run: nvm install 24\nThen run nomarmy setup again.";
 const NOMARMY_FIX = "nomArmy isn't installed in WSL distro Ubuntu: inside it run `npm install -g nomarmy@alpha` (Node 24.16+), then run nomarmy connect again";
 const NEXT = "Register your coordinators on Windows: nomarmy connect claude (or codex, cursor)";
-const RESOLVE = 'command -v node; readlink -f "$(command -v nomarmy)"';
+const RESOLVE = 'printf "NOMARMY_NODE=%s\\n" "$(command -v node)"; printf "NOMARMY_SCRIPT=%s\\n" "$(readlink -f "$(command -v nomarmy)")"';
 const driveMessage = "A Windows-drive repository works, but a repo inside WSL (for example ~/src in Ubuntu, opened as \\\\wsl.localhost\\Ubuntu\\src) is much faster for jobs.";
 
-function fixture({ listing = "* Ubuntu    Running    2\n", installed = true, node = "v24.16.0\n", answer = "", status = 0, installStatus = 0, saved = null, shaped = false } = {}) {
+function fixture({ listing = "* Ubuntu    Running    2\n", installed = true, node = "v24.16.0\n", answer = "", status = 0, installStatus = 0, saved = null, shaped = false, engine = { ok: true, checks: [] } } = {}) {
   const calls = [], printed = [], prompts = [], writes = [];
-  let settings = saved ? JSON.stringify({ distro: saved }) : null;
+  let settings = saved ? JSON.stringify(typeof saved === "string" ? { distro: saved } : saved) : null;
   const fs = {
     readFileSync(file, encoding) {
       assert.equal(file, "C:\\Users\\me\\.config\\nomarmy\\windows.json");
@@ -27,12 +27,17 @@ function fixture({ listing = "* Ubuntu    Running    2\n", installed = true, nod
     calls.push([command, args, opts]);
     assert.equal(command, "wsl.exe");
     if (opts.stdio === "inherit") {
-      const code = args.at(-1) === "npm install -g nomarmy@alpha" ? installStatus : status;
+      const installing = args.at(-1) === "npm install -g nomarmy@alpha";
+      const code = installing ? installStatus : status;
+      if (installing && code === 0) installed = true;
       return { status: code };
+    }
+    if (opts.stdio[0] === "inherit" && opts.stdio[1] === "pipe") {
+      return { status, stdout: typeof engine === "string" ? engine : JSON.stringify(engine) };
     }
     let stdout;
     if (args[0] === "-l") stdout = listing;
-    else if (args.at(-1) === RESOLVE) stdout = installed ? "/usr/bin/node\n/usr/lib/node_modules/nomarmy/bin/nomarmy.mjs\n" : null;
+    else if (args.at(-1) === RESOLVE) stdout = installed ? "NOMARMY_NODE=/usr/bin/node\nNOMARMY_SCRIPT=/usr/lib/node_modules/nomarmy/bin/nomarmy.mjs\n" : null;
     else if (args.at(-1) === "node --version") stdout = node;
     else assert.fail(`Unexpected probe: ${JSON.stringify(args)}`);
     if (shaped) return { status: stdout === null ? 1 : 0, stdout };
@@ -116,7 +121,7 @@ for (const answer of ["", "y", "Yes"]) {
     const f = fixture({ installed: false, answer, shaped: true });
     assert.equal(await windowsSetup(f), 0);
     assert.deepEqual(f.prompts, ["Install nomArmy inside Ubuntu now? [Y/n]"]);
-    const setup = launch("setup");
+    const setup = { command: "wsl.exe", args: ["-d", "Ubuntu", "--", "/usr/bin/node", "/usr/lib/node_modules/nomarmy/bin/nomarmy.mjs", "setup"] };
     assert.deepEqual(f.calls.filter((call) => call[2].stdio === "inherit"), [
       ["wsl.exe", ["-d", "Ubuntu", "--", "bash", "-lic", "npm install -g nomarmy@alpha"], { stdio: "inherit" }],
       [setup.command, setup.args, { stdio: "inherit" }],
@@ -124,7 +129,7 @@ for (const answer of ["", "y", "Yes"]) {
     assert.deepEqual(f.printed, [NEXT]);
     assert.deepEqual(f.writes, [
       ["mkdir", "C:\\Users\\me\\.config\\nomarmy", { recursive: true }],
-      ["write", "C:\\Users\\me\\.config\\nomarmy\\windows.json", '{\n  "distro": "Ubuntu"\n}\n', "utf8"],
+      ["write", "C:\\Users\\me\\.config\\nomarmy\\windows.json", '{\n  "distro": "Ubuntu",\n  "node": "/usr/bin/node",\n  "script": "/usr/lib/node_modules/nomarmy/bin/nomarmy.mjs"\n}\n', "utf8"],
     ]);
   });
 }
@@ -152,7 +157,7 @@ test("setup already installed skips Node and install and propagates engine failu
   assert.deepEqual(f.prompts, []);
   assert.deepEqual(f.printed, []);
   assert.equal(f.calls.length, 4);
-  const setup = launch("setup");
+  const setup = { command: "wsl.exe", args: ["-d", "Ubuntu", "--", "/usr/bin/node", "/usr/lib/node_modules/nomarmy/bin/nomarmy.mjs", "setup"] };
   assert.deepEqual(f.calls.at(-1), [setup.command, setup.args, { stdio: "inherit" }]);
 });
 
@@ -197,12 +202,16 @@ test("doctor rejects unrelated UNC repo locations", () => {
   ]);
 });
 
-test("doctor prints local JSON then forwards engine doctor and uses worse status", () => {
-  const f = fixture({ status: 5 });
+test("doctor emits one combined JSON document and uses worse status", () => {
+  const engineReport = { ok: false, checks: [{ id: "engine", ok: false }] };
+  const f = fixture({ status: 5, engine: engineReport });
   assert.equal(windowsDoctor({ ...f, json: true, argv: ["doctor", "--json"] }), 5);
-  assert.deepEqual(f.printed, [JSON.stringify({ ok: true, checks: [wslCheck, distroCheck, nomarmyCheck, driveCheck] }, null, 2)]);
+  assert.deepEqual(f.printed, [JSON.stringify({ ok: false, windows: { checks: [wslCheck, distroCheck, nomarmyCheck, driveCheck] }, engine: engineReport }, null, 2)]);
+  assert.deepEqual(JSON.parse(f.printed.join("\n")), {
+    ok: false, windows: { checks: [wslCheck, distroCheck, nomarmyCheck, driveCheck] }, engine: engineReport,
+  });
   const engine = launch("doctor --json", "/mnt/c/src/repo");
-  assert.deepEqual(f.calls.at(-1), [engine.command, engine.args, { stdio: "inherit" }]);
+  assert.deepEqual(f.calls.at(-1), [engine.command, engine.args, { encoding: "utf8", stdio: ["inherit", "pipe", "inherit"] }]);
 });
 
 test("doctor prints normal formatting and does not forward when prerequisites fail", () => {
@@ -217,4 +226,53 @@ test("doctor preserves a local failure even if engine checks pass", () => {
   assert.equal(windowsDoctor({ ...f, cwd: "\\\\server\\repo" }), 1);
   const engine = launch("doctor");
   assert.deepEqual(f.calls.at(-1), [engine.command, engine.args, { stdio: "inherit" }]);
+});
+
+
+test("forwarding uses saved executable argv verbatim without a shell", () => {
+  const saved = { distro: "Debian", node: "/my node/bin/node", script: "/my repo/cli=1.mjs" };
+  const f = fixture({ saved, status: 7 });
+  const argv = ["jobs", "a b", "$(id)", "x'y"];
+  assert.deepEqual(windowsForwardCommand(argv, f), {
+    command: "wsl.exe", args: ["-d", "Debian", "--cd", "/mnt/c/src/repo", "--", saved.node, saved.script, ...argv],
+  });
+  assert.equal(windowsForward(argv, f), 7);
+  assert.deepEqual(f.calls, [["wsl.exe", ["-d", "Debian", "--cd", "/mnt/c/src/repo", "--", saved.node, saved.script, ...argv], { stdio: "inherit" }]]);
+});
+
+test("setup saves resolved executables for subsequent forwarding", async () => {
+  const f = fixture();
+  assert.equal(await windowsSetup(f), 0);
+  assert.deepEqual(JSON.parse(f.writes.at(-1)[2]), {
+    distro: "Ubuntu", node: "/usr/bin/node", script: "/usr/lib/node_modules/nomarmy/bin/nomarmy.mjs",
+  });
+  assert.deepEqual(windowsForwardCommand(["jobs"], f), {
+    command: "wsl.exe", args: ["-d", "Ubuntu", "--cd", "/mnt/c/src/repo", "--", "/usr/bin/node", "/usr/lib/node_modules/nomarmy/bin/nomarmy.mjs", "jobs"],
+  });
+});
+
+test("doctor JSON handles success, invalid output and missing prerequisites in one document", () => {
+  for (const [engine, status, expectedStatus, expectedEngine] of [
+    [{ ok: true, checks: [] }, 0, 0, { ok: true, checks: [] }],
+    [{ ok: false, checks: [] }, 0, 1, { ok: false, checks: [] }],
+    ["not JSON", 0, 1, null],
+    ["{}", null, 1, {}],
+    ["null", 0, 1, null],
+  ]) {
+    const f = fixture({ engine, status });
+    assert.equal(windowsDoctor({ ...f, json: true }), expectedStatus);
+    assert.equal(f.printed.length, 1);
+    assert.deepEqual(JSON.parse(f.printed.join("\n")), {
+      ok: expectedStatus === 0, windows: { checks: [wslCheck, distroCheck, nomarmyCheck, driveCheck] }, engine: expectedEngine,
+    });
+    assert.deepEqual(f.calls.at(-1), ["wsl.exe", launch("doctor --json", "/mnt/c/src/repo").args,
+      { encoding: "utf8", stdio: ["inherit", "pipe", "inherit"] }]);
+  }
+  const f = fixture({ listing: null });
+  assert.equal(windowsDoctor({ ...f, json: true }), 1);
+  assert.equal(f.printed.length, 1);
+  assert.deepEqual(JSON.parse(f.printed.join("\n")), {
+    ok: false, windows: { checks: [{ id: "wsl", ok: false, message: "WSL isn't installed.", fix: WSL_FIX }] }, engine: null,
+  });
+  assert.equal(f.calls.length, 1);
 });
