@@ -370,12 +370,12 @@ test("a repository with none of the recognized files returns valid empty evidenc
 // ---------------------------------------------------------------------------
 test("fixturePaths flags evidence found under a fixtures-style directory, without excluding it from the normal evidence categories", () => {
   const evidence = scanRepository(here); // here = tests/, which contains fixtures/node-stack and fixtures/python-svc
-  assert.ok(evidence.fixturePaths.includes(path.join("fixtures", "node-stack", "compose.yaml")));
-  assert.ok(evidence.fixturePaths.includes(path.join("fixtures", "python-svc", "pyproject.toml")));
+  assert.ok(evidence.fixturePaths.includes("fixtures/node-stack/compose.yaml"));
+  assert.ok(evidence.fixturePaths.includes("fixtures/python-svc/pyproject.toml"));
   // Labeled, not excluded: the fixture's fake services still show up normally.
-  const apiService = evidence.services.items.find((s) => s.name === "api" && s.source === path.join("fixtures", "node-stack", "compose.yaml"));
+  const apiService = evidence.services.items.find((s) => s.name === "api" && s.source === "fixtures/node-stack/compose.yaml");
   assert.ok(apiService, "the fixture's own fake service is still reported as evidence, just flagged separately");
-  assert.ok(evidence.notes.items.some((n) => /looks like test fixture data/.test(n.message) && n.source === path.join("fixtures", "node-stack", "compose.yaml")));
+  assert.ok(evidence.notes.items.some((n) => /looks like test fixture data/.test(n.message) && n.source === "fixtures/node-stack/compose.yaml"));
 });
 
 test("fixturePaths does not flag a bare tests/ or __tests__/ path with no fixtures-style segment", () => {

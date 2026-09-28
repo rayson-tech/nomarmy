@@ -96,7 +96,7 @@ test("installClaudeStatusLine: installs when none is set, refreshes its own, nev
   fs.writeFileSync(settingsPath, JSON.stringify({ model: "opus", permissions: { allow: ["Bash(ls)"] } }));
   assert.equal(installClaudeStatusLine({ installDir, settingsPath }), "installed");
   const s = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
-  assert.equal(s.statusLine.command, `node "${path.join(installDir, "lib", "statusline.mjs")}"`);
+  assert.equal(s.statusLine.command, `node ${JSON.stringify(path.join(installDir, "lib", "statusline.mjs"))}`);
   assert.equal(s.statusLine.refreshInterval, 5, "re-runs while the session is idle");
   assert.deepEqual(s.permissions, { allow: ["Bash(ls)"] }, "every other setting is kept");
   assert.equal(installClaudeStatusLine({ installDir, settingsPath }), "unchanged");
