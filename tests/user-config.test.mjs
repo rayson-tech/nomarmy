@@ -58,7 +58,7 @@ test("migration rescues what only the old installed copy still holds, and never 
   assert.deepEqual(migrateUserConfig({ oldConfigDir: path.join(pkg, "config"), nomarmyRoot: pkg, env }), { keys: [], profiles: [] }, "a checkout's own config isn't an old copy");
 });
 
-test("scripts/lib.sh layers the same files", () => {
+test("scripts/lib.sh layers the same files", { skip: process.platform === "win32" ? "requires the POSIX bash lib.sh runtime" : false }, () => {
   const { pkg, env } = fixture();
   fs.writeFileSync(path.join(pkg, "config", "profiles", "plain.env"), "NOMARMY_LLAMA_PARALLEL=1\n");
   writeSetting("NOMARMY_EXECUTION", "hosted", { env });

@@ -1887,7 +1887,7 @@ test("planProductionRevert + revertToBase + restoreWorkerVersion: binary content
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("gitModeAtBase: reports the executable bit for a 100755 base blob and 0o644 for an ordinary one", async () => {
+test("gitModeAtBase: reports the executable bit for a 100755 base blob and 0o644 for an ordinary one", { skip: process.platform === "win32" ? "Git executable bits and POSIX file modes are unavailable on Windows" : false }, async () => {
   const { dir, baseSha } = await initRevertRepo({
     "run.sh": { content: "#!/bin/sh\necho hi\n", mode: 0o755 },
     "plain.txt": { content: "plain\n" },
@@ -1898,7 +1898,7 @@ test("gitModeAtBase: reports the executable bit for a 100755 base blob and 0o644
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("planProductionRevert + revertToBase + restoreWorkerVersion: the executable bit is preserved correctly at each stage", async () => {
+test("planProductionRevert + revertToBase + restoreWorkerVersion: the executable bit is preserved correctly at each stage", { skip: process.platform === "win32" ? "Git executable bits and POSIX file modes are unavailable on Windows" : false }, async () => {
   const { dir, baseSha } = await initRevertRepo({ "run.sh": { content: "#!/bin/sh\necho base\n", mode: 0o755 } });
   try {
     // The worker's edit is still executable -- mode is unrelated to content here.
@@ -2058,19 +2058,21 @@ test("resolveCleanupTarget: metadata.json's own worktree/branch win when present
 });
 
 test("resolveCleanupTarget: falls back to the deterministic worktree/branch when only status.json survives (server-restart orphan)", () => {
+  const jobDir = path.join(path.sep, "jobs", "foo");
   const target = resolveCleanupTarget({
-    jobDir: "/jobs/foo", jobId: "foo",
+    jobDir, jobId: "foo",
     meta: null, status: { mode: "implement" },
   });
-  assert.deepEqual(target, { worktree: "/jobs/foo/worktree", branch: "agent/foo" });
+  assert.deepEqual(target, { worktree: path.join(jobDir, "worktree"), branch: "agent/foo" });
 });
 
 test("resolveCleanupTarget: a scout orphan has no branch to derive", () => {
+  const jobDir = path.join(path.sep, "jobs", "foo");
   const target = resolveCleanupTarget({
-    jobDir: "/jobs/foo", jobId: "foo",
+    jobDir, jobId: "foo",
     meta: null, status: { mode: "scout" },
   });
-  assert.deepEqual(target, { worktree: "/jobs/foo/worktree", branch: null });
+  assert.deepEqual(target, { worktree: path.join(jobDir, "worktree"), branch: null });
 });
 
 test("resolveCleanupTarget: neither metadata nor status exists -- genuinely unknown", () => {
@@ -2341,7 +2343,7 @@ test("resolveWorkerSandboxOverride: a broken .nomarmy.yml does not block the ove
   assert.deepEqual(JSON.parse(fs.readFileSync(result, "utf8")).tools.exec.pathPrepend, ["/usr/local/go/bin", "/home/node/go/bin"]);
 });
 
-test("resolveWorkerSandboxOverride: the written config file is not world/group readable", () => {
+test("resolveWorkerSandboxOverride: the written config file is not world/group readable", { skip: process.platform === "win32" ? "POSIX file mode permissions are unavailable on Windows" : false }, () => {
   const runtimeDir = makeRuntimeDir();
   const result = resolveWorkerSandboxOverride("/repo", runtimeDir, {
     loadConfigFn: () => ({ found: false }),

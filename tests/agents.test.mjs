@@ -86,7 +86,7 @@ test("loadAgents: no file still gives the built-in local agent", () => {
 test("writeAgentsFile + loadAgents: round-trips, writes the file private to this account, and the built-in local comes first", () => {
   const dir = tmp();
   writeAgentsFile(dir, REAL.agents);
-  assert.equal(fs.statSync(path.join(dir, "agents.yml")).mode & 0o077, 0);
+  if (process.platform !== "win32") assert.equal(fs.statSync(path.join(dir, "agents.yml")).mode & 0o077, 0, "Unix mode bits keep the file private");
   const loaded = loadAgents(dir);
   assert.deepEqual(Object.keys(loaded.agents), ["local", "grok", "claude", "codex"]);
   assert.deepEqual(Object.keys(readAgentsFile(dir)), ["grok", "claude", "codex"], "read-modify-write never persists the built-in");

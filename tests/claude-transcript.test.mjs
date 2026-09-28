@@ -25,9 +25,11 @@ const EVENTS = [
 ];
 
 test("claudeProjectDir: every non-alphanumeric character in the working directory becomes a dash", () => {
+  const cwd = path.join(path.sep, "Users", "j", ".local", "share", "nomarmy-local-agents", "jobs", "scout-20260924-035608-f91743", "worktree");
+  const home = path.join(path.sep, "h");
   assert.equal(
-    claudeProjectDir("/Users/j/.local/share/nomarmy-local-agents/jobs/scout-20260924-035608-f91743/worktree", { home: "/h" }),
-    "/h/.claude/projects/-Users-j--local-share-nomarmy-local-agents-jobs-scout-20260924-035608-f91743-worktree",
+    claudeProjectDir(cwd, { home }),
+    path.join(home, ".claude", "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-")),
   );
 });
 

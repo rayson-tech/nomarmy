@@ -259,7 +259,7 @@ test("describeArmy: usage text and level appear next to every agent backed by a 
   assert.equal(summary.roles.po.usage, null);
 });
 
-test("privateConfigProblem: refuses global config another account owns or can write, fine otherwise", () => {
+test("privateConfigProblem: refuses global config another account owns or can write, fine otherwise", { skip: process.platform === "win32" ? "POSIX ownership and mode bits are unavailable on Windows" : false }, () => {
   const file = path.join(tmp(), "providers.yml");
   write(file, "pools: {}\n");
   fs.chmodSync(file, 0o600);
