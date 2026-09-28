@@ -87,8 +87,14 @@ test("continuationProblem refuses what it can't honestly continue", (t) => {
 });
 
 test("continuationNote tells the worker to build on the carried work, and why it stopped", () => {
-  const note = continuationNote({ continueFrom: "worker-old", record: { issues: ["worker reported partial"] }, files: ["math.js", "math.test.js"] });
+  const record = { outcome: "WORKER_PARTIAL", reportValidation: { notDone: "the edge case for empty input" },
+    issues: ["worker reported partial", "HIGH STAKES: accept this only after an independent review: a scout on another vendor", "SCOPED TEST SELECTION RISK: ..."] };
+  const note = continuationNote({ continueFrom: "worker-old", record, files: ["math.js", "math.test.js"] });
   assert.match(note, /unfinished work of job worker-old \(2 file\(s\): math\.js, math\.test\.js\)/);
   assert.match(note, /Build on it; don't redo it/);
-  assert.match(note, /- worker reported partial/);
+  assert.match(note, /- its worker's NOT DONE: the edge case for empty input/);
+  // From a real Senti run: handed the General's review note, the worker took the pending review as its own task and reported partial.
+  assert.doesNotMatch(note, /HIGH STAKES|independent review|SCOPED TEST/);
+  const failed = continuationNote({ continueFrom: "w", record: { outcome: "NEEDS_REVIEW", independentVerification: { status: "fail", detail: "NoRegionError" } }, files: ["a.py"] });
+  assert.match(failed, /- its verification failed: NoRegionError/);
 });

@@ -37,3 +37,39 @@ test("transcript rows: plain and zstd-compressed events both read", () => {
   if (typeof zlib.zstdCompressSync !== "function") return; // Node before 22.15: compressed rows are skipped, never thrown on
   assert.deepEqual(eventFromRow({ event_json: null, event_zstd: zlib.zstdCompressSync(Buffer.from(JSON.stringify(event))) }), event);
 });
+
+import { defaultTimeoutSeconds } from "../mcp/server.mjs";
+import { detectScopedTestSelectionRisk } from "../lib/diff-checks.mjs";
+import { reportView } from "../lib/job-format.mjs";
+
+test("review scouts default to 20 minutes, everything else to 10", () => {
+  const army = () => ({ roles: { "security-analyst": { phase: "review" }, "sr-dev": { phase: "build" } } });
+  assert.equal(defaultTimeoutSeconds({ mode: "scout", reviews: "worker-1" }, army), 1200);
+  assert.equal(defaultTimeoutSeconds({ mode: "scout", army_role: "security-analyst" }, army), 1200);
+  assert.equal(defaultTimeoutSeconds({ mode: "scout", army_role: "sr-dev" }, army), 600);
+  assert.equal(defaultTimeoutSeconds({ mode: "scout" }, army), 600);
+  assert.equal(defaultTimeoutSeconds({ mode: "implement", army_role: "security-analyst" }, army), 600);
+  assert.equal(defaultTimeoutSeconds({ mode: "scout", army_role: "x" }, () => { throw new Error("bad config"); }), 600);
+});
+
+test("scoped selection: no warning when a command runs the changed test files by name", () => {
+  const testChanges = { new_tests_added: ["lambda/tests/test_x.py"], existing_tests_modified: [] };
+  const byName = 'if [ -n "$NOMARMY_CHANGED_TEST_FILES" ]; then python3 -m pytest $NOMARMY_CHANGED_TEST_FILES -q; fi';
+  const scoped = 'python3 -m pytest lambda/tests/ -k "gx or resolver" -q';
+  assert.equal(detectScopedTestSelectionRisk({ commands: [byName, scoped], testChanges }), null, "Senti's profile: the touched tests always run");
+  assert.ok(detectScopedTestSelectionRisk({ commands: [scoped], testChanges }), "only a filtered run: still a risk");
+  assert.ok(detectScopedTestSelectionRisk({ commands: ["pytest ${NOMARMY_CHANGED_TEST_FILES} -k fast"], testChanges }), "the changed files, but filtered: still a risk");
+});
+
+test("report view: the report and verdict, not the whole record", () => {
+  const meta = { jobId: "w1", mode: "implement", outcome: "WORKER_DONE", coordinatorStatus: "complete", issues: ["TEST CHANGE REVIEW: x"], branch: "nomarmy/w1",
+    reportValidation: { fields: { STATUS: "done", TESTS: "pass", NOT_DONE: "none", NOTE: "added it" }, gate: {} },
+    independentVerification: { status: "pass", basis: "long", detail: null }, regressionCheck: { status: "pass" },
+    commit: { created: true, sha: "abc" }, git: { changedFiles: ["a.py"], additions: 3, deletions: 1 }, metrics: { lots: 1 }, budgets: { lots: 1 }, execution: {} };
+  const v = reportView(meta);
+  assert.deepEqual(v.report, { STATUS: "done", TESTS: "pass", NOT_DONE: "none", NOTE: "added it" });
+  assert.deepEqual(v.commit, { created: true, sha: "abc", branch: "nomarmy/w1", reason: null });
+  assert.equal(v.metrics, undefined); assert.equal(v.budgets, undefined);
+  const scout = reportView({ jobId: "s1", mode: "scout", outcome: "SCOUT_DONE", scout: { question: "q", confidence: "high", findings: [{ claim: "c", citation: "a.py:1-2" }], unsupported: [] } });
+  assert.equal(scout.findings.length, 1); assert.equal(scout.confidence, "high");
+});

@@ -19,7 +19,7 @@ test("verify is model-free from expansion through admission, execution and repor
   for (const role of [null, "po"]) {
     const job = { task: "tests", mode: "verify", verification: "quick", ...(role ? { army_role: role, agent: "missing", model: "missing" } : {}) };
     assert.deepEqual(expandJobs([job], { getActiveRun: () => null, getArmy: forbidden, getAgents: forbidden, env: { NOMARMY_EXECUTION: "hosted" } }),
-      { jobs: [{ task: "tests", mode: "verify", verification: "quick", ...(role ? { armyRole: role } : {}) }], problems: [] });
+      { jobs: [{ task: "tests", mode: "verify", verification: "quick", timeout_seconds: 600, ...(role ? { armyRole: role } : {}) }], problems: [] });
   }
   fs.writeFileSync(path.join(root, ".nomarmy.yml"), "verification:\n  quick:\n    commands: ['true']\n");
   let repoProblem = null;

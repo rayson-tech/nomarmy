@@ -39,7 +39,7 @@ What the General uses. Every job takes the same shape: a `task`, optional `accep
 | Tool | What it does |
 |---|---|
 | `local_worker` | Runs one job and waits for it. |
-| `local_worker_start` / `local_worker_status` | Starts a job in the background / waits for its result. The start response includes `nomarmy jobs --wait <jobId>` for background monitoring. |
+| `local_worker_start` / `local_worker_status` | Starts a job in the background / waits for its result. The start response includes `nomarmy jobs --wait <jobId>` for background monitoring. `report: true` returns just the report (a scout's cited findings), the outcome, issues and commit; `full: true` the whole record. Timeouts default to 10 minutes, 20 for a review scout (`reviews` set, or a review-phase role). |
 | `local_workers` | Runs a batch of independent jobs in parallel. `auto_union: true` merges them into one integration branch for review. |
 | `repo_evidence` | Deterministic answers (definitions, references, outlines, grep, files) with `[path:line]` on every hit, no model. |
 | `army` | The General's charter and agent, then this repo's roles and who runs each. |
