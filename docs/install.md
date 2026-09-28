@@ -96,12 +96,14 @@ Windows is supported with a native front end and the nomArmy engine inside a WSL
    ```powershell
    wsl --install -d Ubuntu
    ```
-3. Inside the distro, install Node 24.16 or newer. For example, use nvm:
+3. Inside the distro, install Podman and Git, then Node 24.16 or newer. For example, on Ubuntu with nvm:
    ```bash
+   sudo apt update && sudo apt install -y podman git
    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash
    # Reopen the distro shell after installing nvm.
    nvm install 24
    ```
+   Podman runs natively inside the distro, so there is no `podman machine` to create on Windows.
 4. With Node 24.16 or newer installed on Windows too, install the front end in Windows PowerShell and allow long Git paths:
    ```powershell
    npm install -g nomarmy@alpha
@@ -111,14 +113,14 @@ Windows is supported with a native front end and the nomArmy engine inside a WSL
    ```powershell
    nomarmy setup
    ```
-   Setup checks WSL, chooses a distro, checks for Node 24.16 or newer inside it, and offers to run `npm install -g nomarmy@alpha` there. It then runs the normal setup inside WSL, including Podman and model setup.
+   Setup checks WSL, chooses a distro, checks for Node 24.16 or newer inside it, and offers to run `npm install -g nomarmy@alpha` there. It then runs the normal setup inside WSL: where models run, agents, and `nomarmy install` (OpenClaw and the sandbox image, built with the distro's Podman). nomArmy inside WSL uses only the distro's own tools, so a Windows install of nomArmy or OpenClaw doesn't stand in for it.
 6. Register each coordinator you use. For example:
    ```powershell
    nomarmy connect claude
    nomarmy connect codex
    nomarmy connect cursor
    ```
-   Restart the coordinator afterward. Registration starts nomArmy in WSL with absolute Node and script paths, without a shell. It passes the project folder through `WSLENV`, which translates a path such as `C:\src\app` to `/mnt/c/src/app`. Per-repository registration with `--scope local` or `--scope project` is not supported on Windows yet.
+   Restart the coordinator afterward. Registration starts nomArmy in WSL with absolute Node and script paths, without a shell (`wsl.exe -d <distro> --exec <node> <nomarmy.mjs> mcp`). It passes the project folder through `WSLENV`, which translates a path such as `C:\src\app` to `/mnt/c/src/app`. Per-repository registration with `--scope local` or `--scope project` is not supported on Windows yet.
 
 Commands such as `nomarmy stats`, `nomarmy jobs` and `nomarmy update` run inside the selected distro from the translated project folder. `nomarmy doctor` checks WSL, the distro's WSL version, nomArmy inside it and the repository location. It then runs the normal engine checks inside WSL.
 
