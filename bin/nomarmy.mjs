@@ -40,6 +40,7 @@ import { recordProbeSuccess } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
 import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
 import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
+import { THINKING_LEVELS } from "../lib/thinking.mjs";
 // OpenClaw in ~/.npm-global/bin (no writable npm prefix) is found without the operator editing PATH.
 ensureOpenClawOnPath();
 
@@ -71,7 +72,7 @@ const repoDir = path.resolve(value("repo", process.cwd()));
 // through the job's requested reasoning); `--no-thinking` is always false.
 // Returns undefined when none of these flags were passed at all, so the
 // caller can tell "not touched" apart from "explicitly set".
-const THINKING_LEVELS = ["low", "medium", "high"];
+// Every level OpenClaw accepts (lib/thinking.mjs).
 function resolveThinkingFlag() {
   const level = value("thinking");
   if (level && THINKING_LEVELS.includes(level)) return level;
@@ -159,7 +160,7 @@ Usage: nomarmy <command> [options]
                             [--update-mcp] (api); --provider --model
                             --owner (subscription); and optionally
                             --max-concurrent --context-window
-                            --thinking [low|medium|high] --no-thinking
+                            --thinking [minimal|low|medium|high|xhigh|adaptive|max|ultra] --no-thinking
                   update <name>
                             change the model (picked from what OpenClaw
                             lists; a subscription gets a real test call),
