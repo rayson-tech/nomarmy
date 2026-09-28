@@ -130,3 +130,8 @@ test("the default stats view leads with what was caught and what needs review, o
   assert.match(text, /nomarmy stats --details/);
   assert.ok(lines.length < 30, "one screen");
 });
+
+test("the General's stats tool defaults to the one-screen summary", async () => {
+  const src = (await import("node:fs")).readFileSync(new URL("../mcp/server.mjs", import.meta.url), "utf8");
+  assert.match(src, /details \? formatStats\(stats\) : formatStatsSummary\(stats\)/);
+});

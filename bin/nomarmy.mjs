@@ -31,6 +31,7 @@ import { parseLlamaUrl } from "../lib/execution.mjs";
 import { setupSteps, formatSetupSteps, runSetupPlaybook } from "../lib/setup-steps.mjs";
 import { readUsageSnapshots } from "../lib/usage-limits.mjs";
 import { pickMachine, planResize } from "../lib/sandbox-vm.mjs";
+import { listProcesses, staleSessions, formatStaleSessions } from "../lib/stale-sessions.mjs";
 import { MIN_PODMAN_VM_MB } from "../lib/doctor.mjs";
 import { liveLeases } from "../lib/slots.mjs";
 import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
@@ -1714,13 +1715,14 @@ async function cmdUpdate() {
     if (!copyIsStale(defaultInstallDir(), nomarmyRoot)) {
       if (json) return out({ updated: false, reason: "already up to date" });
       console.log(c.green("✓ Already up to date, and your coordinators run this checkout."));
+      printSessionRestarts({ quietWhenNone: true });
       return;
     }
     say(c.bold("🍪 nomArmy update\n"));
     say("Nothing to pull, but your coordinators run an older copy of this checkout.");
     const resynced = reconnectCoordinators();
     if (json) return out({ updated: false, resynced, sha: local });
-    console.log(c.yellow("\nRestart every open Claude Code, Codex and Cursor session: each keeps the code it started with until then."));
+    printSessionRestarts();
     return;
   }
   if (base !== local) {
@@ -1747,6 +1749,25 @@ async function cmdUpdate() {
 // Reconnect every connected coordinator through a child process, so it runs
 // the code now on disk (just pulled or installed) rather than the old code
 // this process loaded. Returns the targets reconnected.
+// Each open session keeps the nomArmy it started with: name the ones that
+// started before the installed copy, rather than a blanket "restart".
+function printSessionRestarts({ quietWhenNone = false } = {}) {
+  let list = null;
+  try {
+    const installedAt = fs.statSync(path.join(defaultInstallDir(), "source.json")).mtimeMs;
+    const procs = listProcesses();
+    if (procs) list = staleSessions(procs, { installedAt });
+  } catch { /* no installed copy yet, or ps unavailable */ }
+  if (list === null) {
+    if (!quietWhenNone) console.log(c.yellow("\nRestart every open Claude Code, Codex and Cursor session: each keeps the code it started with until then."));
+    return;
+  }
+  if (!list.length) { if (!quietWhenNone) console.log(c.green("\n✓ No open session runs an older nomArmy.")); return; }
+  console.log(c.yellow(`\n${list.length} open session(s) still run an older nomArmy, until each is restarted:`));
+  for (const line of formatStaleSessions(list)) console.log(line);
+  console.log(c.dim("In Claude Code: /exit, then claude --resume (or /mcp → nomarmy-local-worker → Reconnect). Close any you no longer use."));
+}
+
 function reconnectCoordinators() {
   const targets = connectedTargets();
   // Per-repo registrations run the installed copy (or `nomarmy mcp`), so a
@@ -1791,7 +1812,7 @@ async function updateFromNpm() {
   }
   const targets = reconnectCoordinators();
   if (json) return out({ updated: upgrade, from: current, version: upgrade ? latest : current, resynced: targets });
-  console.log(c.yellow("\nRestart every open Claude Code, Codex and Cursor session: each keeps the code it started with until then."));
+  printSessionRestarts();
 }
 
 function commandExists(cmd) {

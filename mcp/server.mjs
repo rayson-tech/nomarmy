@@ -37,7 +37,7 @@ import { modelRefusals } from "../lib/health.mjs";
 import { podmanProblem, podmanVmStartedAt } from "../lib/podman-health.mjs";
 import { restartNotice } from "../lib/install-freshness.mjs";
 import { requestJobStop } from "../lib/openclaw-run.mjs";
-import { loadJobRecords, computeStats, formatStats, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
+import { loadJobRecords, computeStats, formatStats, formatStatsSummary, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
 import { recentSuggestions } from "../lib/suggestions.mjs";
 import { probeModel } from "../lib/model-probe.mjs";
 import { jevSettings, judgeSettings } from "../lib/validators.mjs";
@@ -453,13 +453,14 @@ server.tool("stats", "What nomArmy's own job records show for this repository (o
   role: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional().describe("Only jobs dispatched as this army role (e.g. sr-dev)."),
   model: z.string().regex(/^\S{1,200}$/).optional().describe("Only jobs that ran on this model (e.g. grok-4.7)."),
   format: z.enum(["text", "json"]).optional().describe("text (default) is the report; json is the raw numbers."),
-}, async ({ since, until, all_repos, repo, role, model, format }) => {
+  details: z.boolean().optional().describe("The full report (volume, reviewers, flags, what didn't finish). Default is the one-screen summary: what nomArmy caught, high-stakes work needing review, the top routing tips, spend."),
+}, async ({ since, until, all_repos, repo, role, model, format, details }) => {
   try {
     const records = loadJobRecords(jobsRoot);
     let agentFor = () => null;
     try { agentFor = agentLookup(agentsConfig().agents, agentProviderId); } catch { /* commands name <agent> */ }
     const stats = computeStats(records, { repo: repo ? resolveRepo(records, repo) : all_repos ? null : projectDir, sinceMs: parseSince(since), untilMs: parseSince(until), role: role ?? null, model: model ?? null, agentFor });
-    return toolText(format === "json" ? JSON.stringify(stats, null, 2) : formatStats(stats));
+    return toolText(format === "json" ? JSON.stringify(stats, null, 2) : details ? formatStats(stats) : formatStatsSummary(stats));
   } catch (error) { return toolText(error.message, true); }
 });
 
