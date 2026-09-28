@@ -112,15 +112,15 @@ for (const target of ["claude", "codex", "cursor"]) {
     assert.equal(fs.readFileSync(path.join(commandsDir, relPath), "utf8"), connect.renderPlaybook("feature", "Build {{REQUEST}}\n", target).text);
     const expected = target === "claude" ? [
       ["claude", ["mcp", "remove", "nomarmy-local-worker", "--scope", "user"]],
-      ["claude", ["mcp", "add", "--scope", "user", "nomarmy-local-worker", "-e", `WSLENV=${WSLENV}`, "--", "wsl.exe", ...args]],
+      ["claude", ["mcp", "add", "--scope", "user", "nomarmy-local-worker", "-e", `WSLENV=${WSLENV}:NOMARMY_COORDINATOR_OS/u`, "-e", "NOMARMY_COORDINATOR_OS=windows", "--", "wsl.exe", ...args]],
     ] : target === "codex" ? [
       ["codex", ["mcp", "remove", "nomarmy-local-worker"]],
-      ["codex", ["mcp", "add", "nomarmy-local-worker", "--env", `WSLENV=${WSLENV}`, "--", "wsl.exe", ...args]],
+      ["codex", ["mcp", "add", "nomarmy-local-worker", "--env", `WSLENV=${WSLENV}:NOMARMY_COORDINATOR_OS/u`, "--env", "NOMARMY_COORDINATOR_OS=windows", "--", "wsl.exe", ...args]],
     ] : [];
     assert.deepEqual(calls, expected);
     assert.deepEqual(JSON.parse(fs.readFileSync(configPath, "utf8")), {
       setting: true, mcpServers: { unrelated, ...(target === "cursor" ? {
-        "nomarmy-local-worker": { command: "wsl.exe", args, env: { WSLENV, NOMARMY_PROJECT_DIR: "${workspaceFolder}" } },
+        "nomarmy-local-worker": { command: "wsl.exe", args, env: { WSLENV: `${WSLENV}:NOMARMY_COORDINATOR_OS/u`, NOMARMY_COORDINATOR_OS: "windows", NOMARMY_PROJECT_DIR: "${workspaceFolder}" } },
       } : {}) },
     });
     assert.equal(fs.existsSync(path.join(home, ".local")), false);
@@ -171,9 +171,11 @@ test("Windows connect persists resolved executable paths in windows.json", (t) =
     await import(${JSON.stringify(cli)});
   `;
   const result = spawnSync(process.execPath, ["--input-type=module", "-e", code], {
-    encoding: "utf8", env: { ...process.env, ...env, WSL_DISTRO_NAME: "", WSL_INTEROP: "" },
+    encoding: "utf8", env: { ...process.env, ...env, NOMARMY_NATIVE: "", WSL_DISTRO_NAME: "", WSL_INTEROP: "" },
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, ".config", "nomarmy", "windows.json"), "utf8")),
     { distro, node, script });
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, ".cursor", "mcp.json"), "utf8")).mcpServers["nomarmy-local-worker"].env,
+    { WSLENV: `${WSLENV}:NOMARMY_COORDINATOR_OS/u`, NOMARMY_COORDINATOR_OS: "windows", NOMARMY_PROJECT_DIR: "${workspaceFolder}" });
 });

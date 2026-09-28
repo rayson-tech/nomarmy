@@ -39,6 +39,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+        env:
+          NOMARMY_NATIVE: "1"
       - run: node bin/nomarmy.mjs validate --json
       - run: node bin/nomarmy.mjs doctor --json
         continue-on-error: true # no Podman on the runner; this checks it reports rather than crashes

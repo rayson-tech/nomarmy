@@ -56,9 +56,9 @@ const distroCheck = { id: "wsl-distro", ok: true, message: "Ubuntu uses WSL 2.",
 const nomarmyCheck = { id: "wsl-nomarmy", ok: true, message: "nomArmy is installed in Ubuntu.", fix: null };
 const driveCheck = { id: "wsl-repo", ok: true, message: driveMessage, fix: null };
 
-test("windowsPlan keeps only the Windows front-end commands local", () => {
-  for (const argv of [[], ["help"], ["--help"], ["connect", "claude"], ["setup"], ["doctor", "--json"]]) assert.equal(windowsPlan(argv), "LOCAL");
-  for (const command of ["mcp", "init", "jobs", "install", "update", "unknown", "--version", "scan"]) assert.equal(windowsPlan([command]), "FORWARD");
+test("windowsPlan forwards only engine commands", () => {
+  for (const argv of [[], ["help"], ["--help"], ["connect", "claude"], ["setup"], ["doctor", "--json"], ["init"], ["unknown"], ["--version"], ["scan"]]) assert.equal(windowsPlan(argv), "LOCAL");
+  for (const command of ["mcp", "jobs", "install", "update"]) assert.equal(windowsPlan([command]), "FORWARD");
   assert.equal(windowsPlan(["jobs", "--help"]), "FORWARD");
 });
 

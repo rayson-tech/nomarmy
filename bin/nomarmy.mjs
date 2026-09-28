@@ -18,7 +18,7 @@ import { buildConfigProposal } from "../lib/propose.mjs";
 import { detectHardware } from "../lib/hardware.mjs";
 import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf.mjs";
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
-import { isNativeWindows, pickDistro, resolveWslNomarmy, mcpBridgeLaunch, writeWindowsSettings } from "../lib/wsl.mjs";
+import { windowsFrontEnd, pickDistro, resolveWslNomarmy, mcpBridgeLaunch, writeWindowsSettings } from "../lib/wsl.mjs";
 import { windowsPlan, windowsForward, windowsSetup, windowsDoctor } from "../lib/wsl-cli.mjs";
 import { connectViaWsl, connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv, defaultInstallDir, installMcpCopy, SCOPES, claudeUserScoped, portableServerLaunch } from "../lib/connect.mjs";
 import { compareVersions, readPackageVersion, readInstallVersions, copyIsStale } from "../lib/install-freshness.mjs";
@@ -661,7 +661,7 @@ function cmdInstall() {
 }
 
 async function cmdSetup() {
-  if (isNativeWindows()) {
+  if (windowsFrontEnd()) {
     process.exitCode = await windowsSetup(argv, { ask: async (prompt) => {
       const rl = createInterface({ input, output });
       try { return await rl.question(prompt); } finally { rl.close(); }
@@ -1885,7 +1885,7 @@ async function cmdConnect() {
   const requested = argv.slice(1).filter((a, i) => !a.startsWith("--") && !flagValues.has(i + 1));
   const scope = value("scope", "user");
   if (!SCOPES.includes(scope)) throw new Error(`--scope must be one of ${SCOPES.join(", ")}, got "${scope}".`);
-  const nativeWindows = isNativeWindows();
+  const nativeWindows = windowsFrontEnd();
   if (nativeWindows && scope !== "user") throw new Error("per-repo registration on Windows isn't supported yet; use the default --scope user");
   if (nativeWindows && flag("copy-only")) throw new Error("Windows runs nomArmy inside WSL; run nomarmy connect <target> instead of --copy-only");
   let projectDir = null;
@@ -3001,7 +3001,7 @@ function cmdMcp() {
 const commands = { stats: cmdStats, validators: cmdValidators, mcp: cmdMcp, scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, install: cmdInstall, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, sandbox: cmdSandbox, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
-  if (isNativeWindows()) {
+  if (windowsFrontEnd()) {
     process.exitCode = windowsDoctor({ json, argv });
     return;
   }
@@ -3010,7 +3010,7 @@ async function cmdDoctor() {
   await runDoctor({ json, exit: true, env: installEnv() });
 }
 commands.doctor = cmdDoctor;
-if (isNativeWindows() && windowsPlan(argv) === "FORWARD") {
+if (windowsFrontEnd() && windowsPlan(argv) === "FORWARD") {
   process.exit(windowsForward(argv));
 }
 if (!command && !flag("help")) {
