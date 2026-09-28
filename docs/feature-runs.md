@@ -28,7 +28,7 @@ The General can lower these for one run, never raise them. When a vendor answers
 
 **What a run added up to.** `nomarmy stats --since 7d` (or the `stats` tool, for the General) fits on one screen: how many "done, tests pass" claims held up and how many nomArmy caught, tests shown to fail without their change, high-stakes work still needing a review, the top routing tips and spend. `--details` adds volume by role and model, code committed, time, tokens, what didn't finish, and what reviewers and review flags found. Filter with `--role`, `--model`, `--repo` and `--run <id>`. The one thing it can't count is what the General caught at integration; the report says so.
 
-**Sharing it.** `run_finish` returns a `prBlock`, a "Verified by nomArmy" table for the pull request's description, scoped to that run; the playbook tells the General to use it as is. `nomarmy stats --share` prints the same block for any period or run, and `nomarmy stats --badge [path]` writes an SVG badge (default `.github/nomarmy-badge.svg`) plus the README line for it. Re-run it to refresh the numbers.
+**Sharing it.** `run_finish` returns a `prBlock`, a "Verified by nomArmy" table for the pull request's description, scoped to that run; the playbook tells the General to use it as is. `nomarmy stats --share` prints the same block for any period or run, and `nomarmy stats --badge [path]` writes an SVG badge (default `.github/nomarmy-badge.svg`) plus the README line for it. Re-run it to refresh the numbers. If your README is also shown on npm, point the image at the file's raw GitHub URL, since npm doesn't resolve relative image paths (nomArmy's own README does this).
 
 ## Watching what nomArmy is doing
 
