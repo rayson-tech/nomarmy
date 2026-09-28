@@ -11,7 +11,7 @@ const distro = "Ubuntu";
 const node = "/home/me/.nvm/versions/node/v24.16.0/bin/node";
 const script = "/home/me/.nvm/versions/node/v24.16.0/lib/node_modules/nomarmy/bin/nomarmy.mjs";
 const WSLENV = "CLAUDE_PROJECT_DIR/pu:NOMARMY_PROJECT_DIR/pu";
-const args = ["-d", distro, "--", node, script, "mcp"];
+const args = ["-d", distro, "--exec", node, script, "mcp"];
 const listing = "* Ubuntu    Running    2\r\n  Debian    Stopped    2\r\n";
 const missing = "nomArmy isn't installed in WSL distro Ubuntu: inside it run `npm install -g nomarmy@alpha` (Node 24.16+), then run nomarmy connect again";
 
@@ -27,7 +27,7 @@ test("resolveWslNomarmy strips banners and CRLF and uses an interactive shell on
     calls.push(call);
     return Buffer.from(`Welcome to Ubuntu!\r\n/a banner/path\r\nNOMARMY_NODE=${node}\r\nNOMARMY_SCRIPT=${script}\r\n`);
   } }), { node, script });
-  assert.deepEqual(calls, [["wsl.exe", ["-d", distro, "--", "bash", "-lic", 'printf "NOMARMY_NODE=%s\\n" "$(command -v node)"; printf "NOMARMY_SCRIPT=%s\\n" "$(readlink -f "$(command -v nomarmy)")"'],
+  assert.deepEqual(calls, [["wsl.exe", ["-d", distro, "--exec", "bash", "-lic", 'printf "NOMARMY_NODE=%s\\n" "$(command -v node)"; printf "NOMARMY_SCRIPT=%s\\n" "$(readlink -f "$(command -v nomarmy)")"'],
     { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }]]);
 });
 
@@ -136,7 +136,7 @@ for (const target of ["claude", "codex", "cursor"]) {
       } : {}) },
     });
     assert.equal(fs.existsSync(path.join(home, ".local")), false);
-    assert.throws(() => connect.connectViaWsl({ target, distro, launch: { ...launch, args: ["-d", distro, "--", node, "/tmp/a;evil", "mcp"] }, nomarmyRoot,
+    assert.throws(() => connect.connectViaWsl({ target, distro, launch: { ...launch, args: ["-d", distro, "--exec", node, "/tmp/a;evil", "mcp"] }, nomarmyRoot,
       run: () => assert.fail("invalid launch must not register") }), /Invalid WSL script path/);
   });
 }

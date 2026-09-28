@@ -87,17 +87,17 @@ const invalidDistros = ["--exec", ".", "..", "Ubuntu; rm -rf /", "", "a".repeat(
 test("wslCommand builds a quoted login-shell launch and refuses invalid distro names", () => {
   assert.deepEqual(wslCommand({ distro: "Ubuntu-24.04", args: ["connect", "Jason's repo"], cwd: "/home/j/my repo" }), {
     command: "wsl.exe",
-    args: ["-d", "Ubuntu-24.04", "--cd", "/home/j/my repo", "--", "bash", "-lc", "exec nomarmy connect 'Jason'\\''s repo'"],
+    args: ["-d", "Ubuntu-24.04", "--cd", "/home/j/my repo", "--exec", "bash", "-lic", "exec nomarmy connect 'Jason'\\''s repo'"],
   });
   assert.deepEqual(wslCommand({ distro: "a".repeat(64), args: [] }), {
-    command: "wsl.exe", args: ["-d", "a".repeat(64), "--", "bash", "-lc", "exec nomarmy "],
+    command: "wsl.exe", args: ["-d", "a".repeat(64), "--exec", "bash", "-lic", "exec nomarmy "],
   });
   for (const distro of invalidDistros) assert.throws(() => wslCommand({ distro, args: [] }), /Invalid WSL distro name/);
 });
 
 test("mcpBridgeLaunch supplies translated environment paths and validates distro names", () => {
   assert.deepEqual(mcpBridgeLaunch({ distro: "Ubuntu_24.04" }), {
-    command: "wsl.exe", args: ["-d", "Ubuntu_24.04", "--", "bash", "-lc", "exec nomarmy mcp"],
+    command: "wsl.exe", args: ["-d", "Ubuntu_24.04", "--exec", "bash", "-lc", "exec nomarmy mcp"],
     env: { WSLENV: "CLAUDE_PROJECT_DIR/pu:NOMARMY_PROJECT_DIR/pu" },
   });
   for (const distro of invalidDistros) assert.throws(() => mcpBridgeLaunch({ distro }), /Invalid WSL distro name/);
@@ -152,7 +152,7 @@ test("wslCommand validates cwd before creating a WSL option", () => {
       { message: "Invalid WSL cwd: expected an absolute POSIX path without newlines or NUL" });
   }
   assert.deepEqual(wslCommand({ distro: "Ubuntu", args: ["jobs"], cwd: "/" }), {
-    command: "wsl.exe", args: ["-d", "Ubuntu", "--cd", "/", "--", "bash", "-lc", "exec nomarmy jobs"],
+    command: "wsl.exe", args: ["-d", "Ubuntu", "--cd", "/", "--exec", "bash", "-lic", "exec nomarmy jobs"],
   });
 });
 
@@ -161,7 +161,7 @@ test("wslCommand uses validated saved executables without a shell or quoting", (
   const args = ["jobs", "a b", "$(id)", "x'y", "%PATH%", "--user"];
   for (const cwd of [null, "/home/my repo"]) {
     assert.deepEqual(wslCommand({ distro: "Ubuntu", node, script, args, cwd }), {
-      command: "wsl.exe", args: ["-d", "Ubuntu", ...(cwd ? ["--cd", cwd] : []), "--", node, script, ...args],
+      command: "wsl.exe", args: ["-d", "Ubuntu", ...(cwd ? ["--cd", cwd] : []), "--exec", node, script, ...args],
     });
   }
   for (const bad of ["/tmp/%PATH%", "/tmp/a\nb", "/tmp/a\0b", "relative", ""]) {
@@ -171,6 +171,6 @@ test("wslCommand uses validated saved executables without a shell or quoting", (
     }
   }
   assert.deepEqual(wslCommand({ distro: "Ubuntu", node, args: ["jobs"] }), {
-    command: "wsl.exe", args: ["-d", "Ubuntu", "--", "bash", "-lc", "exec nomarmy jobs"],
+    command: "wsl.exe", args: ["-d", "Ubuntu", "--exec", "bash", "-lic", "exec nomarmy jobs"],
   });
 });

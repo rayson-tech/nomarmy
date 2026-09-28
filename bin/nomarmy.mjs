@@ -46,6 +46,14 @@ import { THINKING_LEVELS } from "../lib/thinking.mjs";
 import { fileURLToPath } from "node:url";
 // OpenClaw in ~/.npm-global/bin (no writable npm prefix) is found without the operator editing PATH.
 ensureOpenClawOnPath();
+// Windows starts the engine as `wsl.exe --exec <node> nomarmy.mjs`, with no
+// login shell, so an nvm Node's directory isn't on PATH. Children that need
+// `node` (install.sh, OpenClaw's `#!/usr/bin/env node`) get the one running.
+{
+  const nodeDir = path.dirname(process.execPath);
+  const entries = (process.env.PATH ?? "").split(path.delimiter);
+  if (!entries.includes(nodeDir)) process.env.PATH = [nodeDir, ...entries.filter(Boolean)].join(path.delimiter);
+}
 
 // Add a new coordinator: add its name here, teach commandExists/connectTarget
 // about it below (a JSON-file target like Cursor has no PATH binary to check
