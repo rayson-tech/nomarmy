@@ -50,6 +50,8 @@ Stuck? `nomarmy doctor` checks the machine and `nomarmy health` checks everythin
 
 Failing verification stays failed, unconditionally. A malformed report isn't automatically a failure: if the repository changed, nomArmy verifies independently and may recover the work. And the checks aren't the General's to waive: a repo's `.nomarmy.yml` policy (on by default for new repos) makes verification and the revert check mandatory for every job.
 
+**Showing what was checked.** When a `/feature` run finishes, the General gets a "Verified by nomArmy" block for the pull request: how many "done, tests pass" claims held up, how many nomArmy caught and why, and the new tests shown to fail without their change. `nomarmy stats --share` prints the same for any period, and `nomarmy stats --badge` writes a README badge like `nomArmy | 78 claims checked · 11 caught`. Every number comes from the verified records.
+
 **Checking without building** costs nothing: `mode: verify` runs a verification profile against any branch, with no worker and no model tokens.
 
 **Want deeper checks?** Three optional [validators](https://github.com/rayson-tech/nomarmy/blob/main/docs/validators.md) go further, each only adding review flags: mutation testing (do the tests pin down the changed lines?), Jev (do a scout's citations support its findings, does a report match its diff?) and a model judge (acceptance criteria, weakened tests).

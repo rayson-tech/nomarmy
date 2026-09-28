@@ -41,4 +41,4 @@ The `logPath` from `run_start`. Markdown, updated after every phase: the plan; e
 
 ## When it's done
 
-Call `run_finish` (`complete` or `stopped`), then report in one message: what was built and on which branch; what each role found and how it was resolved; the decisions made on the operator's behalf; test and verification results; and the run's cost from `run_status` (jobs and api spend per agent). If a push-notification tool is available, notify the operator that the run finished or stopped.
+Call `run_finish` (`complete` or `stopped`). Its result has a `prBlock`: when you or the operator open a pull request for the run's branch, put it in the description as it is (every number is from nomArmy's verified records). Then report in one message: what was built and on which branch; what each role found and how it was resolved; the decisions made on the operator's behalf; test and verification results; and the run's cost from `run_status` (jobs and api spend per agent). If a push-notification tool is available, notify the operator that the run finished or stopped.

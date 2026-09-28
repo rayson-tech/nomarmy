@@ -243,7 +243,7 @@ Usage: nomarmy <command> [options]
                   project for this repository, committed for the team
                   (.mcp.json or .cursor/mcp.json, running \`nomarmy mcp\`).
                   Codex has only the user scope.
-  stats [--since 7d|<date>] [--until <date>] [--role <role>] [--model <model>] [--details] [--all-suggestions]
+  stats [--since 7d|<date>] [--until <date>] [--role <role>] [--model <model>] [--run <id>] [--details] [--all-suggestions] [--share] [--badge [path]]
         [--repo <path|name>] [--all-repos] [--json]
                   What nomArmy's job records show for this repository (or
                   all): volume by role and model, code committed, time,
@@ -2767,6 +2767,25 @@ async function cmdStatusline() {
   process.stdout.write(`${statusLineText({ session })}\n`);
 }
 
+// `stats --share`: markdown for a PR description or README; `--badge [path]`:
+// an SVG badge to commit, with the README line for it (lib/share.mjs).
+async function shareStats(stats) {
+  const { shareMarkdown, badgeSvg, badgeMarkdown } = await import("../lib/share.mjs");
+  const scope = value("run") ? "this feature run" : value("since") ? `since ${value("since")}` : null;
+  if (flag("share")) console.log(shareMarkdown(stats, { scope }));
+  if (flag("badge")) {
+    const given = value("badge");
+    const top = spawnSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" });
+    const root = top.status === 0 ? top.stdout.trim() : process.cwd();
+    const file = path.resolve(root, given ?? path.join(".github", "nomarmy-badge.svg"));
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, badgeSvg(stats));
+    const rel = path.relative(root, file).split(path.sep).join("/");
+    console.log(`${flag("share") ? "\n" : ""}${c.green("✓")} Wrote ${rel}. Commit it and add this to your README:\n\n  ${badgeMarkdown(rel)}\n`);
+    console.log(c.dim("Re-run nomarmy stats --badge after more jobs to refresh the numbers."));
+  }
+}
+
 function cmdStats() {
   const stateRoot = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
   const records = loadJobRecords(path.join(stateRoot, "jobs"));
@@ -2778,8 +2797,9 @@ function cmdStats() {
   }
   let agentFor = () => null;
   try { agentFor = agentLookup(loadAgents(globalConfigDir()).agents, agentProviderId); } catch { /* no agents.yml: commands name <agent> */ }
-  const stats = computeStats(records, { repo, sinceMs: parseSince(value("since")), untilMs: parseSince(value("until")), role: value("role"), model: value("model"), agentFor, allSuggestions: flag("all-suggestions") });
+  const stats = computeStats(records, { repo, sinceMs: parseSince(value("since")), untilMs: parseSince(value("until")), role: value("role"), model: value("model"), runId: value("run"), agentFor, allSuggestions: flag("all-suggestions") });
   if (json) return out(stats);
+  if (flag("share") || flag("badge")) return shareStats(stats);
   console.log(flag("details") ? formatStats(stats) : formatStatsSummary(stats, { c }));
 }
 
