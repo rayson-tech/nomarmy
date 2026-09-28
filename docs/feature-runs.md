@@ -26,7 +26,9 @@ The General can lower these for one run, never raise them. When a vendor answers
 
 **Finishing a job that came back unfinished.** A build job that ends partial, blocked or failing verification keeps its worktree, uncommitted. The General finishes it with a new job carrying `continue_from: <that job id>` and a brief of just the correction (say, the one wrong expected value in its test). The new worktree starts from the old job's base with its changes in place, and the finished whole is verified and committed together, so the foundation doesn't land outside nomArmy's checks. The commit carries a `nomArmy-Continues:` trailer naming the earlier job.
 
-**What a run added up to.** `nomarmy stats --since 7d` (or the `stats` tool, for the General) opens with routing suggestions, then totals the job records: volume by role and model, code committed, time, tokens and spend, how often a "done" report failed nomArmy's own checks, what didn't finish, and what reviewers and review flags found. Filter with `--role`, `--model` and `--repo`. The one thing it can't count is what the General caught at integration; the report says so.
+**What a run added up to.** `nomarmy stats --since 7d` (or the `stats` tool, for the General) fits on one screen: how many "done, tests pass" claims held up and how many nomArmy caught, tests shown to fail without their change, high-stakes work still needing a review, the top routing tips and spend. `--details` adds volume by role and model, code committed, time, tokens, what didn't finish, and what reviewers and review flags found. Filter with `--role`, `--model`, `--repo` and `--run <id>`. The one thing it can't count is what the General caught at integration; the report says so.
+
+**Sharing it.** `run_finish` returns a `prBlock`, a "Verified by nomArmy" table for the pull request's description, scoped to that run; the playbook tells the General to use it as is. `nomarmy stats --share` prints the same block for any period or run, and `nomarmy stats --badge [path]` writes an SVG badge (default `.github/nomarmy-badge.svg`) plus the README line for it. Re-run it to refresh the numbers.
 
 ## Watching what nomArmy is doing
 
