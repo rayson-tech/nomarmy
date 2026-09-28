@@ -154,7 +154,7 @@ The Windows front end passes `--llama-url` through to setup inside WSL.
 | Setup or doctor message | Fix |
 |---|---|
 | `WSL isn't installed.` | In an administrator PowerShell run `wsl --install`, restart Windows, then run `nomarmy setup` again. |
-| `Install a Linux distro` or `No WSL distro chosen.` | Run `wsl --install -d Ubuntu`, open it once to create your user, then run `nomarmy setup` again. If several distros are installed, run `wsl --set-default <distro>`. |
+| `Install a Linux distro` or `No WSL distro chosen.` | Run `wsl --install -d Ubuntu`, open it once to create your user, then run `nomarmy setup` again. If several distros are installed, run `wsl --set-default <distro>`. Docker Desktop's, Rancher Desktop's and Podman machine's own distros don't count, even when one is the WSL default. |
 | `choose a default WSL 2 distro` | Run `wsl --set-default <distro>`, then run `nomarmy setup` or `nomarmy connect` again. |
 | `<distro> uses WSL 1.` | Run `wsl --set-version <distro> 2`. |
 | `Install Node 24 (24.16+) inside <distro>` | In that distro, install nvm with the command above, reopen its shell, run `nvm install 24`, then run `nomarmy setup` again. |
