@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { setupSteps, formatSetupSteps, runSetupPlaybook } from '../lib/setup-steps.mjs';
+import { linkDir } from "./helpers/symlinks.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const initial = () => ({
@@ -91,7 +92,7 @@ function fixture() {
     }
   };
   for (const name of ['bin', 'lib']) copy(path.join(root, name), path.join(dir, name));
-  fs.symlinkSync(path.join(root, 'node_modules'), path.join(dir, 'node_modules'));
+  linkDir(path.join(root, 'node_modules'), path.join(dir, 'node_modules'));
   fs.mkdirSync(path.join(dir, 'config'));
   fs.mkdirSync(path.join(dir, 'home'));
   fs.mkdirSync(path.join(dir, 'fake-bin'));

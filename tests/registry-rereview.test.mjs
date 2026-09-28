@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { composeSandboxImage, ensureComposedImageBuilt } from '../lib/sandbox-images.mjs';
+import { noPython311 } from './helpers/python.mjs';
 
 function fixture(t, files, ecosystem = 'pip') {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'registry-rereview-'));
@@ -58,7 +59,7 @@ test('safe includes are copied, rewritten and covered by trusted input compariso
   assert.equal(changed.note, 'private-registry credentials were not used: this job changed dependency inputs (nested/deps.txt)');
   assert.equal(changed.dockerfile.includes('--mount=type=secret'), false);
 });
-for (const section of ['dependencies=["pkg @ https://hidden/x"]', '[project.optional-dependencies]\ndev=["pkg @ https://hidden/x"]']) test(`pyproject URL refused: ${section}`, t => {
+for (const section of ['dependencies=["pkg @ https://hidden/x"]', '[project.optional-dependencies]\ndev=["pkg @ https://hidden/x"]']) test(`pyproject URL refused: ${section}`, { skip: noPython311 }, t => {
   const cwd = fixture(t, { 'pyproject.toml': `[project]\n${section}\n` });
   const calls = [];
   assert.throws(() => ensureComposedImageBuilt(cwd, null, { trustedDir: cwd, run: (...args) => calls.push(args) }), {
@@ -66,7 +67,7 @@ for (const section of ['dependencies=["pkg @ https://hidden/x"]', '[project.opti
   });
   assert.deepEqual(calls, []);
 });
-for (const source of ['git', 'url', 'path']) test(`uv lock refuses ${source}`, t => {
+for (const source of ['git', 'url', 'path']) test(`uv lock refuses ${source}`, { skip: noPython311 }, t => {
   const cwd = fixture(t, { 'pyproject.toml': '[project]\n', 'uv.lock': `[[package]]\nname="pkg"\nsource={${source}="hidden"}\n` });
   const calls = [];
   assert.throws(() => ensureComposedImageBuilt(cwd, null, { trustedDir: cwd, run: (...args) => calls.push(args) }), {
@@ -83,7 +84,7 @@ for (const manager of ['pnpm', 'yarn']) for (const pinned of [false, true]) test
   assert.match(lines[mountIndex], /COREPACK_ENABLE_NETWORK=0 COREPACK_ENABLE_DOWNLOAD_PROMPT=0/);
   assert.doesNotMatch(lines[mountIndex], /COREPACK_HOME=|target=\/home\/node\/\.cache/);
 });
-test('uv bootstrap and venv creation precede the mount', t => {
+test('uv bootstrap and venv creation precede the mount', { skip: noPython311 }, t => {
   const cwd = fixture(t, { 'pyproject.toml': '[project]\n', 'uv.lock': '' });
   const lines = composeSandboxImage(cwd, null, undefined, { trustedDir: cwd }).dockerfile.split('\n');
   const index = lines.findIndex(line => line.includes('--mount=type=secret'));

@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { composeSandboxImage, ensureComposedImageBuilt, pythonRequirementsFor } from '../lib/sandbox-images.mjs';
+import { noSymlinks } from './helpers/symlinks.mjs';
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'registry-hardening-'));
@@ -15,7 +16,7 @@ function fixture(t) {
 }
 const sourceError = { message: 'sandbox dependency source must be a repository-contained regular file (no absolute or escaping paths)' };
 for (const kind of ['absolute', 'parent', 'symlink', 'directory-symlink']) {
-  test(`requirements reject ${kind} sources before composing`, t => {
+  test(`requirements reject ${kind} sources before composing`, { skip: noSymlinks }, t => {
     const { root, repo } = fixture(t);
     const outside = path.join(root, 'outside.txt');
     fs.writeFileSync(outside, 'example==1');
@@ -29,7 +30,7 @@ for (const kind of ['absolute', 'parent', 'symlink', 'directory-symlink']) {
   });
 }
 
-test('recipe sources reject an escaping Node manifest symlink even without credentials', t => {
+test('recipe sources reject an escaping Node manifest symlink even without credentials', { skip: noSymlinks }, t => {
   const { root, repo } = fixture(t);
   fs.writeFileSync(path.join(root, 'package.json'), '{}');
   fs.symlinkSync(path.join(root, 'package.json'), path.join(repo, 'package.json'));

@@ -95,7 +95,7 @@ test("computeStats filters by role and model", () => {
 });
 
 test("resolveRepo takes a path or a folder name, preferring an exact or trailing match", () => {
-  const source = path.join(path.sep, "src");
+  const source = path.resolve(path.sep, "src");
   const senti = path.join(source, "rayson-senti");
   const shared = path.join(source, "rayson-senti-shared-services");
   const nomarmy = path.join(source, "nomarmy");

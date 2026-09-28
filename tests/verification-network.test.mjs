@@ -12,6 +12,7 @@ import { validateVerificationNetwork, loadVerificationNetwork, redactCredentials
 import { createEgressProxy, publicAddress } from '../lib/egress-proxy.mjs';
 import { createPodmanExecutor, createVerificationRunner, DEFAULT_AGENT_IMAGE } from '../lib/verify.mjs';
 import { createVerificationFlow } from '../lib/verification-flow.mjs';
+import { noSymlinks } from './helpers/symlinks.mjs';
 
 function temporary(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nomarmy-egress-'));
@@ -24,7 +25,7 @@ const secret = 'throwaway-test-secret';
 const token = 'test-proxy-token';
 const auth = 'Basic ' + Buffer.from('nomarmy:' + token).toString('base64');
 
-test('operator-local policy validates exact hosts and refuses committed authority', t => {
+test('operator-local policy validates exact hosts and refuses committed authority', { skip: noSymlinks }, t => {
   assert.deepEqual(validateVerificationNetwork({ allow: ['Dev-12345.okta.com', 'api.stripe.com:80'], env: policy.env }), policy);
   for (const host of ['*.okta.com', '127.0.0.1', '2130706433', '0x7f000001', '[::1]', '10.1.2.3:443', 'localhost', 'foo.local', 'foo.internal', 'foo.lan', 'foo.home', 'metadata.google.internal', 'okta.com:0', 'okta.com:65536', 'okta.com/path', 'okta.com.', 'okta.com@evil.com']) {
     assert.throws(() => validateVerificationNetwork({ allow: [host] }), /exact public DNS hosts/, host);

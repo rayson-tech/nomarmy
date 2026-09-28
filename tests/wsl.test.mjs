@@ -19,6 +19,8 @@ test("isNativeWindows distinguishes native Windows from WSL and other platforms"
     assert.equal(isNativeWindows({ platform, env: { WSL_DISTRO_NAME: "Ubuntu" } }), false);
     assert.equal(isNativeWindows({ platform, env: { WSL_INTEROP: "/run/WSL/1_interop" } }), false);
   }
+  assert.equal(isNativeWindows({ platform: "win32", env: { NOMARMY_WINDOWS_ENGINE: "native" } }), false);
+  assert.equal(isNativeWindows({ platform: "win32", env: { NOMARMY_WINDOWS_ENGINE: "wsl" } }), true);
   assert.equal(isNativeWindows({ platform: "linux", env: {} }), false);
   assert.equal(isNativeWindows({ platform: "darwin", env: {} }), false);
 });
