@@ -102,10 +102,10 @@ test("admission holds over-limit jobs, allows confirmation and high usage; capac
   t.mock.method(Date, "now", () => now);
   const root = fixture(t), rt = runtime(root), job = { task: "t", agentName: "coder", subscription_worker: "coder", mode: "scout" };
   recordUsageSnapshot(root, "openai", snap([win("week", 100)]));
-  assert.deepEqual(jobSchema.parse({ task: "t", confirm_over_limit: true }), { task: "t", mode: "implement", timeout_seconds: 600, reasoning: "medium", confirm_over_limit: true });
+  assert.deepEqual(jobSchema.parse({ task: "t", confirm_over_limit: true }), { task: "t", mode: "implement", reasoning: "medium", confirm_over_limit: true });
   assert.equal(jobSchema.safeParse({ task: "t", confirm_over_limit: "true" }).success, false);
   const expanded = expandJobs([{ task: "t", confirm_over_limit: true }], { getActiveRun: () => null, env: {} });
-  assert.deepEqual(expanded, { jobs: [{ task: "t", confirm_over_limit: true, profile: "coder" }], problems: [] });
+  assert.deepEqual(expanded, { jobs: [{ task: "t", confirm_over_limit: true, timeout_seconds: 600, profile: "coder" }], problems: [] });
   const label = new Date(reset).toLocaleString("en-US", { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false });
   assert.deepEqual((await rt.admit([job])).problems, [`agent "coder" is held at its usage limit: 100% of week, resets ${label} (reading 0 minutes old). Ask the operator before resubmitting with confirm_over_limit: true, or send the job to another agent.`]);
   assert.deepEqual((await rt.admit([{ ...job, confirm_over_limit: true }])).problems, []);

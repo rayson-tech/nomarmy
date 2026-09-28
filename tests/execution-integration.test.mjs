@@ -31,7 +31,7 @@ test("expandJobs refuses implicit local jobs only in hosted mode", () => {
   const job = { task: "t" };
   const deps = { getActiveRun: () => null, getArmy: () => { throw Error("unexpected army read"); }, getAgents: () => { throw Error("unexpected agents read"); } };
   for (const env of [{}, { NOMARMY_EXECUTION: "local" }, { NOMARMY_LLAMA_HOST: "gpu.internal" }, { NOMARMY_EXECUTION: "bedrock" }]) {
-    assert.deepEqual(expandJobs([job], { ...deps, env }), { jobs: [{ task: "t", profile: "coder" }], problems: [] });
+    assert.deepEqual(expandJobs([job], { ...deps, env }), { jobs: [{ task: "t", timeout_seconds: 600, profile: "coder" }], problems: [] });
   }
   assert.deepEqual(expandJobs([job], { ...deps, env: { NOMARMY_EXECUTION: "hosted" } }), {
     jobs: [job], problems: ["this install has no local model (NOMARMY_EXECUTION=hosted): give the job an army_role or an agent (the army tool lists them)"],

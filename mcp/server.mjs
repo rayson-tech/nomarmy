@@ -43,7 +43,7 @@ import { probeModel } from "../lib/model-probe.mjs";
 import { jevSettings, judgeSettings } from "../lib/validators.mjs";
 import { agentRunsToolsOnHost } from "../lib/dispatch-schema.mjs";
 import { createBuildMetrics, resolveOutcome, finalText, workerMetadata, usageMetrics, policyAdmissionProblems, applyRefactorContract, applyVerificationPolicy, resolveVerifyRegression } from "../lib/outcome.mjs";
-import { jobLabel, compactJobRecord, formatResult, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner } from "../lib/job-format.mjs";
+import { jobLabel, compactJobRecord, formatResult, reportView, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner } from "../lib/job-format.mjs";
 
 export { run, mapLimit };
 export { readsMeasurable, measureReads };
@@ -219,6 +219,17 @@ export function makeHeartbeatTick(jobDir) { return heartbeatTick(jobDir, livePro
 // Senti run none were tagged, so a 4-hour run went 8.46 hours unchecked.
 let activeRunId = null;
 
+export const DEFAULT_TIMEOUT_SECONDS = 600;
+export const REVIEW_SCOUT_TIMEOUT_SECONDS = 1200;
+/** A review scout (reviews set, or a review-phase role) gets longer: reviews trace across the codebase. */
+export function defaultTimeoutSeconds(job, getArmyFn) {
+  if (job.mode !== "scout") return DEFAULT_TIMEOUT_SECONDS;
+  if (job.reviews) return REVIEW_SCOUT_TIMEOUT_SECONDS;
+  if (!job.army_role) return DEFAULT_TIMEOUT_SECONDS;
+  try { return getArmyFn()?.roles?.[job.army_role]?.phase === "review" ? REVIEW_SCOUT_TIMEOUT_SECONDS : DEFAULT_TIMEOUT_SECONDS; }
+  catch { return DEFAULT_TIMEOUT_SECONDS; }
+}
+
 export function expandJobs(jobs, { getArmy = currentArmy, getAgents = () => agentsConfig().agents, getActiveRun = () => activeRunId, env = process.env } = {}) {
   const problems = [];
   let army = null, agents = null;
@@ -226,6 +237,7 @@ export function expandJobs(jobs, { getArmy = currentArmy, getAgents = () => agen
   const expanded = jobs.map((job, i) => {
     try {
       let j = runId && !job.run_id ? { ...job, run_id: runId } : job;
+      if (j.timeout_seconds == null) j = { ...j, timeout_seconds: defaultTimeoutSeconds(j, () => (army ??= getArmy().army)) };
       if (j.mode === "verify") {
         const { agent, model, army_role, on_behalf_of, agentName, pool, subscription_worker, roleModel, ...rest } = j;
         return { ...rest, ...(army_role ? { armyRole: army_role } : {}) };
@@ -297,7 +309,7 @@ export const jobSchema = z.object({
   ),
   mode: z.enum(["scout", "implement", "decompose", "verify"]).default("implement").describe("verify: run a required verification profile with no worker and no model tokens; base_ref selects the branch or commit (default current HEAD), task is a short record label, agent/model are unused and army_role is only a label. implement: edit in an isolated worktree, coordinator commits on a valid report. scout: read-only research; every finding must cite [path:start-end] and nomArmy attaches the cited lines after verifying them against the base commit. decompose: read-only; proposes 2+ independent, evidence-grounded subtasks for a broad objective instead of doing everything in one worker turn. Never auto-dispatched -- the proposal is reviewed like a scout's findings, and the coordinator makes its own separate dispatch call with whatever subtasks it chooses to use."),
   base_ref: z.string().optional(),
-  timeout_seconds: z.number().int().min(30).max(1800).default(600),
+  timeout_seconds: z.number().int().min(30).max(1800).optional().describe("Default 600; 1200 for a review scout (one with `reviews`, or an army role in the review phase), since a real security review read for the full 10 minutes and was cut off."),
   reasoning: z.enum(["low", "medium", "high"]).default("medium").describe("Thinking level passed to the worker model. On the local model it takes effect when that model supports thinking (NOMARMY_MODEL_THINKING); on an api or subscription agent it applies per that agent's own `thinking` setting (false = off, a fixed level = always that level). Default is medium, not high, on real measured evidence: on an identical ticket, gpt-oss-20b at high took 318s with 21 tool calls and 4 failures, and at medium took 62s with 9 calls and 0 failures -- high did not produce a better answer, it thrashed. A separate open-ended task made Qwen3.6-27B time out completely at high (630s, zero output) and succeed at medium. Do not raise this to high by default reasoning that more thinking should help -- it has only ever hurt or timed out in testing so far. Reach for high only after a task has already failed once at medium and the failure looks like an under-thinking problem specifically (wrong root cause, not a formatting or scope issue)."),
   agent: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).optional().describe("Run on this agent from the operator's agents.yml, by name (e.g. \"codex\", \"grok\", \"local\"): the local model, a metered api key, or one person's subscription. Omit agent and army_role to use the local model. Refuses an unknown name, never falls back. Mutually exclusive with army_role. A subscription agent also requires on_behalf_of."),
   model: z.string().regex(/^\S{1,200}$/).optional().describe("The model to run on the job's agent (an api or subscription agent), e.g. \"gpt-6-sol\". Overrides the role's model and the agent's default. Required when the role's model is \"auto\" or the agent has no default. The `army` tool lists each agent's models. Refused on the local agent, whose model `nomarmy model` sets."),
@@ -401,9 +413,10 @@ server.tool("local_worker_start", "Start one worker or scout in the background a
 // always crossed; 110s returns in-line with margin. Raise it only for a
 // client that neither backgrounds nor times out that early.
 export const MAX_STATUS_WAIT_SECONDS = Number.parseInt(process.env.NOMARMY_MAX_STATUS_WAIT_SECONDS ?? "", 10) || 110;
-server.tool("local_worker_status", `Status of one job started by this server: phase (starting, worktree, worker, verification, commit, record, finished), elapsed time against its timeout, and the result once finished. wait_seconds long-polls up to that long for completion (max ${MAX_STATUS_WAIT_SECONDS}, to stay inside MCP client request timeouts; poll again for longer jobs). full=true returns the complete formatted result instead of a summary.`, {
-  job_id: z.string().min(1), wait_seconds: z.number().int().min(0).max(MAX_STATUS_WAIT_SECONDS).default(0), full: z.boolean().default(false)
-}, async ({ job_id, wait_seconds, full }) => {
+server.tool("local_worker_status", `Status of one job started by this server: phase (starting, worktree, worker, verification, commit, record, finished), elapsed time against its timeout, and the result once finished. wait_seconds long-polls up to that long for completion (max ${MAX_STATUS_WAIT_SECONDS}, to stay inside MCP client request timeouts; poll again for longer jobs). report=true returns just the worker's report (a scout's findings with their verified citations), the outcome, issues, verification and commit. full=true returns the complete execution record.`, {
+  job_id: z.string().min(1), wait_seconds: z.number().int().min(0).max(MAX_STATUS_WAIT_SECONDS).default(0), full: z.boolean().default(false),
+  report: z.boolean().default(false).describe("Just the report and nomArmy's verdict on it, without the rest of the record. Prefer this to full."),
+}, async ({ job_id, wait_seconds, full, report }) => {
   const jobId = path.basename(job_id), entry = activeJobs.get(jobId), jobDir = path.join(ensureJobsRoot(), jobId);
   if (entry && !entry.settled && wait_seconds > 0) await Promise.race([entry.promise.catch(() => {}), sleep(wait_seconds * 1000)]);
   const files = { status: readJson(path.join(jobDir, "status.json")), meta: readJson(path.join(jobDir, "metadata.json")), failure: readJson(path.join(jobDir, "failure.json")) };
@@ -416,9 +429,10 @@ server.tool("local_worker_status", `Status of one job started by this server: ph
   ]);
   if (summary.state === "running") return toolText(JSON.stringify({ ...summary, jobDir, hint: `poll again with wait_seconds up to ${MAX_STATUS_WAIT_SECONDS}; lastTool/filesChangedLive are best-effort and may be absent early in a run` }, null, 2));
   if (entry?.error) return toolText(JSON.stringify({ ...summary, jobDir }, null, 2), true);
+  if (report && files.meta) return toolText(JSON.stringify(reportView(files.meta), null, 2), summary.coordinatorStatus !== "complete");
   if (full && entry?.result) return toolText(formatResult(entry.result), !entry.result.ok);
   if (full && files.meta) return toolText(JSON.stringify(files.meta, null, 2), summary.coordinatorStatus !== "complete");
-  return toolText(JSON.stringify({ ...summary, jobDir, hint: entry?.result || files.meta ? "call again with full=true for the complete report" : null }, null, 2), summary.state === "orphaned" || summary.state === "failed");
+  return toolText(JSON.stringify({ ...summary, jobDir, hint: entry?.result || files.meta ? "call again with report=true for the worker's report, or full=true for the complete record" : null }, null, 2), summary.state === "orphaned" || summary.state === "failed");
 });
 // Set when this session's copy of nomArmy changed on disk after it started
 // (nomarmy connect or update ran): shown first in army and capacity, and
