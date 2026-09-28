@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,7 +11,8 @@ function fixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-uc-"));
   const pkg = path.join(dir, "pkg"), cfg = path.join(dir, "cfg");
   fs.mkdirSync(path.join(pkg, "config", "profiles"), { recursive: true });
-  fs.writeFileSync(path.join(pkg, "config", "common.env"), "NOMARMY_EXECUTION=local\nNOMARMY_WORKER_MODEL=gpt-oss-20b\n");
+  // As the shipped file does: scripts/lib.sh reads NOMARMY_INSTALL_ROOT under set -u.
+  fs.writeFileSync(path.join(pkg, "config", "common.env"), "NOMARMY_EXECUTION=local\nNOMARMY_WORKER_MODEL=gpt-oss-20b\nNOMARMY_INSTALL_ROOT=$HOME/.local/share/nomarmy-local-agents\n");
   fs.writeFileSync(path.join(pkg, "config", "profiles", "macbook-pro.env"), "NOMARMY_LLAMA_PARALLEL=1\n");
   return { dir, pkg, env: { NOMARMY_CONFIG_DIR: cfg, HOME: dir } };
 }
@@ -59,9 +60,11 @@ test("migration rescues what only the old installed copy still holds, and never 
 
 test("scripts/lib.sh layers the same files", () => {
   const { pkg, env } = fixture();
+  fs.writeFileSync(path.join(pkg, "config", "profiles", "plain.env"), "NOMARMY_LLAMA_PARALLEL=1\n");
   writeSetting("NOMARMY_EXECUTION", "hosted", { env });
   const lib = path.resolve("scripts/lib.sh");
-  const out = execFileSync("bash", ["-c", `source "${lib}"; nomarmy_root(){ echo "${pkg}"; }; nomarmy_is_cloud(){ return 1; }; nomarmy_validate_local(){ :; }; load_profile macbook-pro >/dev/null 2>&1 || true; echo "$NOMARMY_EXECUTION"`], { env: { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("NOMARMY_"))), ...env }, encoding: "utf8" }).trim();
-  assert.equal(out.split("\n").pop(), "hosted");
+  // A subshell, so an `exit` inside load_profile can't hide the answer; its output is in any failure.
+  const res = spawnSync("bash", ["-c", `source "${lib}"; nomarmy_root(){ echo "${pkg}"; }; ( load_profile plain 2>&1; echo "EXECUTION=$NOMARMY_EXECUTION" )`], { env: { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("NOMARMY_"))), ...env }, encoding: "utf8" });
+  assert.match(res.stdout, /EXECUTION=hosted$/m, `${res.stdout}\n${res.stderr}`);
   assert.ok(userCommonPath(env).startsWith(env.NOMARMY_CONFIG_DIR));
 });
