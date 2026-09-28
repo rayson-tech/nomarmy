@@ -47,6 +47,7 @@ import { createBuildMetrics, resolveOutcome, finalText, workerMetadata, usageMet
 import { jobLabel, compactJobRecord, formatResult, reportView, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner } from "../lib/job-format.mjs";
 import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
+import { samePath } from "../lib/same-path.mjs";
 // OpenClaw in ~/.npm-global/bin (no writable npm prefix) is found without the operator editing PATH.
 ensureOpenClawOnPath();
 
@@ -93,7 +94,8 @@ function slug(prefix = "local") {
 }
 async function assertRepo() {
   const root = await git(["rev-parse", "--show-toplevel"]);
-  if (path.resolve(root) !== projectDir) throw new Error(`CLAUDE_PROJECT_DIR must be the Git root. Expected ${root}, got ${projectDir}`);
+  // Git may print a long, forward-slashed path while Windows supplies an 8.3 path.
+  if (!samePath(root, projectDir)) throw new Error(`CLAUDE_PROJECT_DIR must be the Git root. Expected ${root}, got ${projectDir}`);
 }
 async function resolveBase(baseRef) {
   const ref = baseRef || "HEAD";

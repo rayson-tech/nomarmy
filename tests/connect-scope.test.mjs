@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { connectClaude, connectCodex, connectCursor, portableServerLaunch, excludeFromGit } from "../lib/connect.mjs";
+import { connectClaude, connectCodex, connectCursor, portableServerLaunch, excludeFromGit, includeInGit } from "../lib/connect.mjs";
 
 function setup(t) {
   const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-scope-")));
@@ -73,6 +73,14 @@ test("excludeFromGit adds each path once", (t) => {
   assert.deepEqual(excludeFromGit(s.projectDir, [".cursor/mcp.json"], s.run), ["/.cursor/mcp.json"]);
   assert.deepEqual(excludeFromGit(s.projectDir, [".cursor/mcp.json"], s.run), []);
   assert.equal(fs.readFileSync(path.join(s.projectDir, ".git", "info", "exclude"), "utf8").match(/\/\.cursor\/mcp\.json/g).length, 1);
+});
+
+test("git exclude writes and removes a forward-slashed Windows relative path", (t) => {
+  const s = setup(t);
+  assert.deepEqual(excludeFromGit(s.projectDir, [".cursor\\mcp.json"], s.run), ["/.cursor/mcp.json"]);
+  assert.match(fs.readFileSync(path.join(s.projectDir, ".git", "info", "exclude"), "utf8"), /^\/\.cursor\/mcp\.json$/m);
+  assert.deepEqual(includeInGit(s.projectDir, [".cursor\\mcp.json"], s.run), ["/.cursor/mcp.json"]);
+  assert.doesNotMatch(fs.readFileSync(path.join(s.projectDir, ".git", "info", "exclude"), "utf8"), /\.cursor\/mcp\.json/);
 });
 
 test("nomarmy mcp runs the installed copy when there is one, else the package's own server, and the caller's env wins", (t) => {
