@@ -191,3 +191,22 @@ test("Windows connect persists resolved executable paths in windows.json", (t) =
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, ".cursor", "mcp.json"), "utf8")).mcpServers["nomarmy-local-worker"].env,
     { WSLENV: `${WSLENV}:NOMARMY_COORDINATOR_OS/u`, NOMARMY_COORDINATOR_OS: "windows", NOMARMY_PROJECT_DIR: "${workspaceFolder}" });
 });
+
+test("resolveWslNomarmy refuses the Windows install reached through WSL's appended Windows PATH", () => {
+  for (const [n, s] of [[node, "/mnt/c/Users/J Doe/AppData/Roaming/npm/nomarmy"], ["/mnt/c/Program Files/nodejs/node", script]]) {
+    assert.throws(() => wsl.resolveWslNomarmy({ distro, run: () => `NOMARMY_NODE=${n}\nNOMARMY_SCRIPT=${s}\n` }), /isn't installed in WSL distro/);
+  }
+});
+
+test("dropWindowsPath keeps only the distro's own PATH entries, and only inside WSL", () => {
+  const PATH = "/home/j/.nvm/versions/node/v24/bin:/usr/bin:/mnt/c/Users/J/AppData/Roaming/npm:/mnt/d/tools:/mnt/data/bin";
+  const env = { PATH, WSL_DISTRO_NAME: "Ubuntu" };
+  wsl.dropWindowsPath(env, { platform: "linux" });
+  assert.equal(env.PATH, "/home/j/.nvm/versions/node/v24/bin:/usr/bin:/mnt/data/bin");
+  const plain = { PATH };
+  wsl.dropWindowsPath(plain, { platform: "linux" });
+  assert.equal(plain.PATH, PATH, "plain Linux is untouched");
+  const win = { PATH: "C:\\x;D:\\y", WSL_DISTRO_NAME: "Ubuntu" };
+  wsl.dropWindowsPath(win, { platform: "win32" });
+  assert.equal(win.PATH, "C:\\x;D:\\y");
+});

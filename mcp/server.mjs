@@ -48,7 +48,7 @@ import { jobLabel, compactJobRecord, formatResult, reportView, formatUnion, test
 import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
 import { samePath } from "../lib/same-path.mjs";
-import { withWindowsPaths } from "../lib/wsl.mjs";
+import { withWindowsPaths, dropWindowsPath } from "../lib/wsl.mjs";
 export { withWindowsPaths };
 
 function coordinatorJson(value) { return JSON.stringify(withWindowsPaths(value), null, 2); }
@@ -58,6 +58,8 @@ function coordinatorResult(result) {
   return formatResult(withWindowsPaths(result)) + (windows.length ? `\n\n${windows.join("\n")}` : "");
 }
 
+// Inside WSL, only the distro's own tools (see lib/wsl.mjs).
+dropWindowsPath();
 // OpenClaw in ~/.npm-global/bin (no writable npm prefix) is found without the operator editing PATH.
 ensureOpenClawOnPath();
 

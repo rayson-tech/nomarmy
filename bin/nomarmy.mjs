@@ -18,7 +18,7 @@ import { buildConfigProposal } from "../lib/propose.mjs";
 import { detectHardware } from "../lib/hardware.mjs";
 import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf.mjs";
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
-import { windowsFrontEnd, pickDistro, resolveWslNomarmy, mcpBridgeLaunch, writeWindowsSettings } from "../lib/wsl.mjs";
+import { windowsFrontEnd, dropWindowsPath, pickDistro, resolveWslNomarmy, mcpBridgeLaunch, writeWindowsSettings } from "../lib/wsl.mjs";
 import { windowsPlan, windowsForward, windowsSetup, windowsDoctor } from "../lib/wsl-cli.mjs";
 import { connectViaWsl, connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv, defaultInstallDir, installMcpCopy, SCOPES, claudeUserScoped, portableServerLaunch } from "../lib/connect.mjs";
 import { compareVersions, readPackageVersion, readInstallVersions, copyIsStale } from "../lib/install-freshness.mjs";
@@ -44,6 +44,8 @@ import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalo
 import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
 import { fileURLToPath } from "node:url";
+// Inside WSL, only the distro's own tools (see lib/wsl.mjs).
+dropWindowsPath();
 // OpenClaw in ~/.npm-global/bin (no writable npm prefix) is found without the operator editing PATH.
 ensureOpenClawOnPath();
 // Windows starts the engine as `wsl.exe --exec <node> nomarmy.mjs`, with no
