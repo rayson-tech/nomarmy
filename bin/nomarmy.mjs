@@ -199,6 +199,10 @@ Usage: nomarmy <command> [options]
                             which agent the General is, in --global
                             (default) or --local
   config paths    where agents.yml and the three army layers live
+  config max-jobs [n]
+                  how many api and subscription jobs run at once, across
+                  every session (default 4); with n, sets it in config.yml.
+                  Warns when the Podman VM is too small for that many.
   jobs [--watch|--events [--until-done]|--prune|--wait <jobId>|--stop <jobId> [--reason <text>]] [--interval N] [--older-than DAYS]
                   what's running across every session (agent, model, phase,
                   last tool call, files changed, heartbeat) and what just
@@ -1919,6 +1923,11 @@ async function cmdSandbox() {
       const low = machine.memoryMb && machine.memoryMb < MIN_PODMAN_VM_MB;
       console.log(`\nVM ${machine.name} (${machine.state}): ${machine.cpus} CPUs, ${low ? c.red(`${machine.memoryMb / 1024} GiB memory`) : `${machine.memoryMb / 1024} GiB memory`}, ${machine.diskGb} GB disk`);
       if (low) console.log(c.yellow(`  Too small: worker commands get cut off below ${MIN_PODMAN_VM_MB / 1024} GiB. Fix: nomarmy sandbox --memory 8`));
+      const { maxJobs, jobsThatFit, vmGibFor } = await import("../lib/limits.mjs");
+      const limit = maxJobs().value, fit = jobsThatFit(machine.memoryMb);
+      if (fit !== null) console.log(limit > fit
+        ? c.yellow(`  Fits about ${fit} sandboxes at once, but up to ${limit} api and subscription jobs may run. Fix: nomarmy sandbox --memory ${vmGibFor(limit)}, or nomarmy config max-jobs ${fit}`)
+        : c.dim(`  Fits about ${fit} sandboxes at once; up to ${limit} api and subscription jobs may run (nomarmy config max-jobs).`));
     }
     if (images) console.log(`Images: ${images.count}, ${images.size}${images.reclaimable ? `, ${images.reclaimable} reclaimable (nomarmy sandbox --prune)` : ""}`);
     console.log(c.dim(runningJobs ? `${runningJobs} nomArmy job(s) running.` : "No nomArmy jobs running."));
@@ -2455,10 +2464,31 @@ async function cmdConfigPaths() {
   for (const a of army) console.log(`  ${a.exists ? c.green("●") : c.dim("○")} ${a.layer.padEnd(8)} ${c.dim(a.path)}`);
 }
 
+// `nomarmy config max-jobs [n]`: api and subscription jobs at once, machine-wide.
+async function cmdConfigMaxJobs() {
+  const { maxJobs, setMaxJobs, jobsThatFit, vmGibFor } = await import("../lib/limits.mjs");
+  const given = argv[2];
+  if (given !== undefined) {
+    if (!/^\d+$/.test(given)) throw new Error(`max-jobs must be a whole number, got "${given}"`);
+    setMaxJobs(Number(given));
+  }
+  const limit = maxJobs();
+  const machine = process.platform === "linux" ? null : pickMachine(spawnSync("podman", ["machine", "inspect"], { encoding: "utf8" }).stdout);
+  const fit = jobsThatFit(machine?.memoryMb);
+  if (json) return out({ maxJobs: limit.value, source: limit.source, path: limit.path, podmanVmMemoryMb: machine?.memoryMb ?? null, jobsThatFit: fit });
+  const from = { config: `set in ${limit.path}`, env: "from NOMARMY_MAX_POOL_WORKERS in this shell (config.yml doesn't set it)", default: "the default" }[limit.source];
+  console.log(`${given !== undefined ? c.green("✓ ") : ""}Up to ${c.bold(String(limit.value))} api and subscription jobs at once, across every session (${from}).`);
+  console.log(c.dim("Each agent's max_concurrent in agents.yml also applies, and local-model jobs have their own limit."));
+  if (given !== undefined) console.log(c.dim("Applies to the next job in every session on this version, no restart."));
+  if (fit !== null && limit.value > fit) console.log(c.yellow(`⚠ The Podman VM (${machine.memoryMb / 1024} GiB) fits about ${fit} sandboxes at once; more get refused for memory or cut off. Fix: nomarmy sandbox --memory ${vmGibFor(limit.value)}`));
+  if (given === undefined) console.log(c.dim("Change it with `nomarmy config max-jobs <n>` (1 to 32)."));
+}
+
 async function cmdConfig() {
   const sub = argv[1] ?? "paths";
   if (sub === "paths") return cmdConfigPaths();
-  throw new Error(`Unknown config subcommand "${sub}". Use: nomarmy config paths`);
+  if (sub === "max-jobs") return cmdConfigMaxJobs();
+  throw new Error(`Unknown config subcommand "${sub}". Use: nomarmy config <paths|max-jobs [n]>`);
 }
 
 // --- `nomarmy jobs [--watch]`: what's running, from any session -----------

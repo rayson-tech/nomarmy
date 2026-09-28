@@ -2544,18 +2544,25 @@ test("subscriptionJobFieldProblems: subscription_worker without on_behalf_of is 
 
 
 
-test("currentMaxPoolWorkers: defaults to 4 with no override, matching the cloud-execution default elsewhere", () => {
+// An empty config dir, so the operator's own config.yml limits don't leak in.
+function withEmptyConfigDir(fn) {
+  const saved = process.env.NOMARMY_CONFIG_DIR;
+  process.env.NOMARMY_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-cfg-"));
+  try { fn(); } finally { if (saved === undefined) delete process.env.NOMARMY_CONFIG_DIR; else process.env.NOMARMY_CONFIG_DIR = saved; }
+}
+
+test("currentMaxPoolWorkers: defaults to 4 with no override, matching the cloud-execution default elsewhere", () => withEmptyConfigDir(() => {
   delete process.env.NOMARMY_MAX_POOL_WORKERS;
   assert.equal(currentMaxPoolWorkers(), 4);
-});
+}));
 
-test("currentMaxPoolWorkers: an explicit override is respected and clamped to [1,32]", () => {
+test("currentMaxPoolWorkers: an explicit override is respected and clamped to [1,32]", () => withEmptyConfigDir(() => {
   process.env.NOMARMY_MAX_POOL_WORKERS = "12";
   assert.equal(currentMaxPoolWorkers(), 12);
   process.env.NOMARMY_MAX_POOL_WORKERS = "999";
   assert.equal(currentMaxPoolWorkers(), 32);
   delete process.env.NOMARMY_MAX_POOL_WORKERS;
-});
+}));
 
 // splitJobsByLane / jobLane / runningCount("local"|"remote"): each lane
 // gets its own ceiling. A job is "remote" when its inference runs at a

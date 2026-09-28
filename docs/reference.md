@@ -23,6 +23,7 @@ Every command proposes before it writes: a `[y/N]` prompt, or an explicit flag u
 | `nomarmy health` | Runs the health checks now. |
 | `nomarmy statusline` | nomArmy's part of Claude Code's status line. |
 | `nomarmy config paths` | Where each config file lives. |
+| `nomarmy config max-jobs [n]` | How many api and subscription jobs run at once, across every session (default 4); with `n`, sets it. Warns when the Podman VM is too small. |
 | `nomarmy model` | Changes the local model. |
 | `nomarmy sizing` | Recommends context, slots and workers. `--check` evaluates the loaded profile; `--noms N` sizes for a count. |
 | `nomarmy start` / `stop` | Starts or stops local inference. |
