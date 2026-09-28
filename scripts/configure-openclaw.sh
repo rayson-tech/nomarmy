@@ -57,7 +57,9 @@ else
     if [[ -n "$REMOTE_MODEL" && "$REMOTE_MODEL" != "${NOMARMY_WORKER_MODEL:-}" ]]; then
       # Jobs ask for NOMARMY_WORKER_MODEL, so record the name this server
       # actually serves (`nomarmy connect`, run next by install.sh, reads it).
-      COMMON="$ROOT/config/common.env"
+      # Your settings file, so an update can't reset it (lib/user-config.mjs).
+      COMMON="$(nomarmy_user_config_dir)/common.env"
+      mkdir -p "$(dirname "$COMMON")"; touch "$COMMON"
       for key in NOMARMY_MODEL_ALIAS NOMARMY_WORKER_MODEL; do
         if grep -q "^$key=" "$COMMON"; then
           KEY="$key" VALUE="$REMOTE_MODEL" node -e 'const fs=require("fs"),f=process.argv[1];fs.writeFileSync(f,fs.readFileSync(f,"utf8").replace(new RegExp(`^${process.env.KEY}=.*$`,"m"),`${process.env.KEY}=${process.env.VALUE}`))' "$COMMON"
@@ -66,7 +68,7 @@ else
         fi
       done
       export NOMARMY_MODEL_ALIAS="$REMOTE_MODEL" NOMARMY_WORKER_MODEL="$REMOTE_MODEL"
-      echo "==> The server serves '$REMOTE_MODEL'; recorded it in config/common.env"
+      echo "==> The server serves '$REMOTE_MODEL'; recorded it in $COMMON"
     fi
     # llama-server reports the context of one slot, which is one nom's share.
     REMOTE_CTX="$(curl -fsS --max-time 5 "$SERVER/props" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const n=JSON.parse(s).default_generation_settings?.n_ctx;if(Number.isInteger(n)&&n>0)process.stdout.write(String(n))}catch{}})' || true)"

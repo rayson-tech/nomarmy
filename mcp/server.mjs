@@ -44,6 +44,9 @@ import { jevSettings, judgeSettings } from "../lib/validators.mjs";
 import { agentRunsToolsOnHost } from "../lib/dispatch-schema.mjs";
 import { createBuildMetrics, resolveOutcome, finalText, workerMetadata, usageMetrics, policyAdmissionProblems, applyRefactorContract, applyVerificationPolicy, resolveVerifyRegression } from "../lib/outcome.mjs";
 import { jobLabel, compactJobRecord, formatResult, reportView, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner } from "../lib/job-format.mjs";
+import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
+// OpenClaw in ~/.npm-global/bin (no writable npm prefix) is found without the operator editing PATH.
+ensureOpenClawOnPath();
 
 export { run, mapLimit };
 export { readsMeasurable, measureReads };

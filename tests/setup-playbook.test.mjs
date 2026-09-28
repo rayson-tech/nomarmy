@@ -115,7 +115,7 @@ test('setup CLI status, persisted profiles, legacy probes and stub installer', (
       assert.equal(result.stdout, formatSetupSteps(steps) + '\n');
     }
     assert.equal(run(['setup', '--hosted', '--json']).status, 0);
-    assert.equal(fs.readFileSync(path.join(dir, 'config/common.env'), 'utf8'), 'NOMARMY_EXECUTION=hosted\nNOMARMY_SETUP_PROFILE=hosted\n');
+    assert.match(fs.readFileSync(path.join(dir, 'config/common.env'), 'utf8'), /^# Your nomArmy settings[^]*\nNOMARMY_EXECUTION=hosted\nNOMARMY_SETUP_PROFILE=hosted\n$/);
     fs.writeFileSync(path.join(dir, 'install.sh'), '#!/bin/bash\nprintf "%s\\n" "$@" > "$HOME/install-args"\nexit 9\n');
     const installed = run(['install', '--no-claude']);
     assert.equal(installed.status, 9);
