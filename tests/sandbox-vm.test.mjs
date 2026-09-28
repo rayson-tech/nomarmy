@@ -48,3 +48,17 @@ test("doctor: rootless Podman with one mapped ID fails with the repair; ranges p
   assert.equal(checkPodmanIdMappings({ podmanIdMappings: { rootless: false, uid: 1, gid: 1 } }).ok, true);
   assert.equal(checkPodmanIdMappings({ podmanIdMappings: null }).ok, true);
 });
+
+import { baseImage } from "../lib/sandbox-images.mjs";
+
+test("every generated sandbox image starts from docker/Dockerfile's base, one place to change it", async () => {
+  const fs = await import("node:fs");
+  const shipped = /^FROM\s+(\S+)/m.exec(fs.readFileSync(new URL("../docker/Dockerfile", import.meta.url), "utf8"))[1];
+  assert.equal(baseImage(), shipped);
+  for (const f of ["Dockerfile.go", "Dockerfile.rust"]) {
+    assert.equal(/^FROM\s+(\S+)/m.exec(fs.readFileSync(new URL(`../docker/${f}`, import.meta.url), "utf8"))[1], shipped, `${f} matches`);
+  }
+  const src = fs.readFileSync(new URL("../lib/sandbox-images.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /return `FROM node:/, "no hard-coded Node base in the generated Dockerfiles");
+  assert.equal(baseImage("/nonexistent/Dockerfile"), "node:26-bookworm-slim");
+});
