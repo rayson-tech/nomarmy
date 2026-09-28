@@ -20,7 +20,7 @@ import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
 import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv, defaultInstallDir, installMcpCopy, SCOPES, claudeUserScoped, portableServerLaunch } from "../lib/connect.mjs";
 import { compareVersions, readPackageVersion, readInstallVersions, copyIsStale } from "../lib/install-freshness.mjs";
-import { loadJobRecords, computeStats, formatStats, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
+import { loadJobRecords, computeStats, formatStats, formatStatsSummary, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
 import { requestJobStop } from "../lib/openclaw-run.mjs";
 import { loadValidators, saveJevKey, removeJev, jevSettings, askJev, validatorsPath, JEV_CHECKS, saveJudge, removeJudge, judgeSettings } from "../lib/validators.mjs";
 import { probeModel } from "../lib/model-probe.mjs";
@@ -238,7 +238,7 @@ Usage: nomarmy <command> [options]
                   project for this repository, committed for the team
                   (.mcp.json or .cursor/mcp.json, running \`nomarmy mcp\`).
                   Codex has only the user scope.
-  stats [--since 7d|<date>] [--until <date>] [--role <role>] [--model <model>]
+  stats [--since 7d|<date>] [--until <date>] [--role <role>] [--model <model>] [--details] [--all-suggestions]
         [--repo <path|name>] [--all-repos] [--json]
                   What nomArmy's job records show for this repository (or
                   all): volume by role and model, code committed, time,
@@ -2747,9 +2747,9 @@ function cmdStats() {
   }
   let agentFor = () => null;
   try { agentFor = agentLookup(loadAgents(globalConfigDir()).agents, agentProviderId); } catch { /* no agents.yml: commands name <agent> */ }
-  const stats = computeStats(records, { repo, sinceMs: parseSince(value("since")), untilMs: parseSince(value("until")), role: value("role"), model: value("model"), agentFor });
+  const stats = computeStats(records, { repo, sinceMs: parseSince(value("since")), untilMs: parseSince(value("until")), role: value("role"), model: value("model"), agentFor, allSuggestions: flag("all-suggestions") });
   if (json) return out(stats);
-  console.log(formatStats(stats));
+  console.log(flag("details") ? formatStats(stats) : formatStatsSummary(stats, { c }));
 }
 
 // Read one line without echoing it: stty -echo around the read, restored
