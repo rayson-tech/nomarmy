@@ -14,7 +14,7 @@
 
 Every platform needs Git and Podman. `nomarmy doctor` checks the host and prints a fix for anything missing.
 
-**On macOS and Windows, give Podman's VM at least 4 GiB (8 is better).** Every sandbox, verification run and image build shares it, and Podman's 2 GiB default cuts workers' commands off with `Aborted`. Create it with `podman machine init --memory 8192`, or resize an existing one with `nomarmy sandbox --memory 8`. `nomarmy doctor` checks it.
+**On macOS, give Podman's VM at least 4 GiB (8 is better).** Every sandbox, verification run and image build shares it, and Podman's 2 GiB default cuts workers' commands off with `Aborted`. Create it with `podman machine init --memory 8192`, or resize an existing one with `nomarmy sandbox --memory 8`. `nomarmy doctor` checks it. Windows uses WSL2 memory as described below.
 
 `install.sh` builds llama.cpp when you run a local model, installs a pinned [OpenClaw](https://github.com/openclaw/openclaw) release from npm (the host-side broker every model call goes through; set `NOMARMY_OPENCLAW_VERSION` to choose another) and configures it, builds the sandbox image, and registers the MCP server if Claude Code is installed. `nomarmy connect` (run by `install.sh`, or by hand for Codex and Cursor) also installs the `/feature` command, Claude Code's status line and, on macOS, nomArmy's notifier. The coordinator gets nomArmy's instructions from the MCP server itself, so there's nothing to copy into your projects.
 
@@ -86,13 +86,64 @@ CPU-only Linux works but is slow for interactive use: see [Sizing](configuration
 
 ## Windows
 
-`install.sh` doesn't run natively. In order of preference:
+Windows is supported with a native front end and the nomArmy engine inside a WSL2 Linux distro. The MCP server, sandboxes and Podman run in WSL. Podman on Windows already uses a WSL2 VM, so this does not add another VM. Keeping the engine there also avoids slow job file access across the Windows and VM boundary.
 
-1. **WSL2** (the supported path): install a Linux distro under WSL2, install Podman inside it, and follow the [Linux](#linux) guide entirely inside the distro. Watch WSL2's default cap of about half your RAM (`.wslconfig`), and set `git config --global core.longpaths true` (`nomarmy doctor` checks this).
-2. **Native llama.cpp on Windows**, built from source: more RAM, more setup. Prebuilt binaries aren't a safe shortcut; some CPUs crash every backend at startup.
-3. **No local inference**: [hosted workers only](#hosted-workers-only), or [Bedrock](#cloud-bedrock).
+1. Open an administrator PowerShell and install WSL, then restart Windows:
+   ```powershell
+   wsl --install
+   ```
+2. Install a distro if WSL did not install one. Open it once to create your Linux user:
+   ```powershell
+   wsl --install -d Ubuntu
+   ```
+3. Inside the distro, install Node 24.16 or newer. For example, use nvm:
+   ```bash
+   curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash
+   # Reopen the distro shell after installing nvm.
+   nvm install 24
+   ```
+4. With Node 24.16 or newer installed on Windows too, install the front end in Windows PowerShell and allow long Git paths:
+   ```powershell
+   npm install -g nomarmy@alpha
+   git config --global core.longpaths true
+   ```
+5. From your project in Windows, run setup:
+   ```powershell
+   nomarmy setup
+   ```
+   Setup checks WSL, chooses a distro, checks for Node 24.16 or newer inside it, and offers to run `npm install -g nomarmy@alpha` there. It then runs the normal setup inside WSL, including Podman and model setup.
+6. Register each coordinator you use. For example:
+   ```powershell
+   nomarmy connect claude
+   nomarmy connect codex
+   nomarmy connect cursor
+   ```
+   Restart the coordinator afterward. Registration starts nomArmy in WSL with absolute Node and script paths, without a shell. It passes the project folder through `WSLENV`, which translates a path such as `C:\src\app` to `/mnt/c/src/app`. Per-repository registration with `--scope local` or `--scope project` is not supported on Windows yet.
 
-`nomarmy sizing` reports what your hardware can support.
+Commands such as `nomarmy stats`, `nomarmy jobs` and `nomarmy update` run inside the selected distro from the translated project folder. `nomarmy doctor` checks WSL, the distro's WSL version, nomArmy inside it and the repository location. It then runs the normal engine checks inside WSL.
+
+A repository on a Windows drive works. Jobs are much faster when the repository is inside WSL, for example at `~/src`. Open that repository from Windows as `\\wsl.localhost\<distro>\src`.
+
+WSL2 uses about half of the computer's RAM by default. Raise its memory limit in `%UserProfile%\.wslconfig` when local models or concurrent jobs need more.
+
+For a local model, run llama.cpp inside WSL with NVIDIA GPU passthrough. You can instead run llama.cpp natively on Windows as a shared model server, then point setup at it:
+
+```powershell
+nomarmy setup --llama-url http://127.0.0.1:8080
+```
+
+### Windows troubleshooting
+
+| Setup or doctor message | Fix |
+|---|---|
+| `WSL isn't installed.` | In an administrator PowerShell run `wsl --install`, restart Windows, then run `nomarmy setup` again. |
+| `Install a Linux distro` or `No WSL distro chosen.` | Run `wsl --install -d Ubuntu`, open it once to create your user, then run `nomarmy setup` again. If several distros are installed, run `wsl --set-default <distro>`. |
+| `choose a default WSL 2 distro` | Run `wsl --set-default <distro>`, then run `nomarmy setup` or `nomarmy connect` again. |
+| `<distro> uses WSL 1.` | Run `wsl --set-version <distro> 2`. |
+| `Install Node 24 (24.16+) inside <distro>` | In that distro, install nvm with the command above, reopen its shell, run `nvm install 24`, then run `nomarmy setup` again. |
+| `nomArmy wasn't found in <distro>.` | Inside that distro run `npm install -g nomarmy@alpha`, then run `nomarmy setup` or `nomarmy connect` again. |
+| `Repository location cannot be forwarded to the chosen WSL distro.` | Use a Windows-drive repository, or open one in the selected distro through `\\wsl.localhost\<distro>\`. |
+| `A Windows-drive repository works` | No fix is required. Move the repository into WSL for much faster jobs. |
 
 ## DGX Spark
 
