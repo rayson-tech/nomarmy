@@ -23,6 +23,7 @@ import {
 } from "../lib/hardware.mjs";
 
 import { deriveHeadDim, readGGUFMetadata, findGgufFiles, resolveModelPath, totalSplitBytes } from "../lib/gguf.mjs";
+import { noSymlinks } from "./helpers/symlinks.mjs";
 
 // --- nvidia-smi ------------------------------------------------------------
 
@@ -370,7 +371,7 @@ function writeBlobAndLink(root, snapshotDir, linkName, sizeBytes) {
   return linkPath;
 }
 
-test("findGgufFiles walks nested directories and follows symlinks (the HF cache shape)", () => {
+test("findGgufFiles walks nested directories and follows symlinks (the HF cache shape)", { skip: noSymlinks }, () => {
   const root = tmpRoot();
   try {
     const snapshotDir = path.join(root, "models--Qwen--Qwen3-Coder-Next-GGUF", "snapshots", "abc123", "Qwen3-Coder-Next-Q4_K_M");
@@ -383,7 +384,7 @@ test("findGgufFiles walks nested directories and follows symlinks (the HF cache 
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("findGgufFiles skips a broken symlink instead of throwing", () => {
+test("findGgufFiles skips a broken symlink instead of throwing", { skip: noSymlinks }, () => {
   const root = tmpRoot();
   try {
     fs.symlinkSync(path.join(root, "nowhere"), path.join(root, "dangling.gguf"));
@@ -397,7 +398,7 @@ test("resolveModelPath: an explicit path wins over discovery entirely", () => {
   assert.equal(result, "/some/explicit/model.gguf");
 });
 
-test("resolveModelPath: finds a model nested under a nested HF-cache-shaped root", () => {
+test("resolveModelPath: finds a model nested under a nested HF-cache-shaped root", { skip: noSymlinks }, () => {
   const root = tmpRoot();
   try {
     const snapshotDir = path.join(root, "models--ggml-org--gpt-oss-20b-GGUF", "snapshots", "def456");
@@ -408,7 +409,7 @@ test("resolveModelPath: finds a model nested under a nested HF-cache-shaped root
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("resolveModelPath: a split model resolves to shard 1, not a later shard", () => {
+test("resolveModelPath: a split model resolves to shard 1, not a later shard", { skip: noSymlinks }, () => {
   const root = tmpRoot();
   try {
     const snapshotDir = path.join(root, "models--Qwen--Qwen3-Coder-Next-GGUF", "snapshots", "abc123", "Qwen3-Coder-Next-Q4_K_M");
@@ -422,7 +423,7 @@ test("resolveModelPath: a split model resolves to shard 1, not a later shard", (
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("resolveModelPath: among unrelated candidates, the most recently touched one wins", () => {
+test("resolveModelPath: among unrelated candidates, the most recently touched one wins", { skip: noSymlinks }, () => {
   const root = tmpRoot();
   try {
     const older = writeBlobAndLink(root, path.join(root, "models--a--a", "snapshots", "1"), "old.gguf", 16);

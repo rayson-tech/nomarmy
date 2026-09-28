@@ -16,6 +16,7 @@ AI coding workers are confident. Their "done, all tests pass" is a claim, not ev
 ## TL;DR
 
 1. **Have** Git, Node 24.16+ (or 26.1+) and [Podman](https://podman.io). On macOS, give Podman 8 GiB: `brew install podman && podman machine init --memory 8192 && podman machine start`.
+   Windows is supported with the engine in WSL2. Follow the [Windows setup](https://github.com/rayson-tech/nomarmy/blob/main/docs/install.md#windows).
 2. **Install and set up:**
    ```bash
    npm install -g nomarmy@alpha
@@ -74,7 +75,7 @@ Developed and maintained by Rayson Technologies. This is an alpha (`0.1.0-alpha`
 
 | | |
 |---|---|
-| [Install](https://github.com/rayson-tech/nomarmy/blob/main/docs/install.md) | Every setup: hosted (API keys and subscriptions), a local model on macOS, Linux, Windows or DGX Spark, a shared model server, Bedrock |
+| [Install](https://github.com/rayson-tech/nomarmy/blob/main/docs/install.md) | Every setup: hosted (API keys and subscriptions), a local model on macOS, Linux, [Windows with the engine in WSL2](https://github.com/rayson-tech/nomarmy/blob/main/docs/install.md#windows) or DGX Spark, a shared model server, Bedrock |
 | [Example setup](https://github.com/rayson-tech/nomarmy/blob/main/docs/setup/example.md) | Claude Code, Codex and an API key, command by command |
 | [Agents and the army](https://github.com/rayson-tech/nomarmy/blob/main/docs/agents-and-army.md) | Where a job can run, who does what, usage limits, picking an agent |
 | [`/feature` runs](https://github.com/rayson-tech/nomarmy/blob/main/docs/feature-runs.md) | A feature end to end, and watching what nomArmy is doing |

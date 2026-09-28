@@ -7,6 +7,8 @@ import test from "node:test";
 import YAML from "yaml";
 import { composeSandboxImage, ensureComposedImageBuilt } from "../lib/sandbox-images.mjs";
 import { loadConfig, validateConfig } from "../lib/config.mjs";
+import { noSymlinks } from "./helpers/symlinks.mjs";
+import { noPython311 } from "./helpers/python.mjs";
 
 const TOKEN = "registry-canary-123456789-secret";
 function fixture(t, files = {}) {
@@ -122,7 +124,7 @@ for (const [manager, files, install] of [
   ["uv", { "pyproject.toml": "[project]\n", "uv.lock": "" }, "uv sync --frozen"],
   ["poetry", { "pyproject.toml": "[tool.poetry]\n", "poetry.lock": "" }, "poetry install --no-root"],
 ]) {
-  test("registry Python " + manager + " install has build-only config and netrc mounts", (t) => {
+  test("registry Python " + manager + " install has build-only config and netrc mounts", { skip: (manager === "pyproject" || manager === "uv") && noPython311 }, (t) => {
     const f = fixture(t, files);
     for (const [declaration, target] of [[f.secret, "/etc/pip.conf"], [{ netrc: f.secret }, "/root/.netrc"]]) {
       f.local({ pip: declaration });
@@ -176,7 +178,7 @@ test("registry build uses only secret file args, exact isolated context and sani
     if (args[0] === "images") return "";
     buildArgs = args;
     context = args.at(-1);
-    contextFiles = fs.readdirSync(context, { recursive: true }).filter((rel) => fs.statSync(path.join(context, rel)).isFile()).sort();
+    contextFiles = fs.readdirSync(context, { recursive: true }).filter((rel) => fs.statSync(path.join(context, rel)).isFile()).map((rel) => rel.split(path.sep).join("/")).sort();
     contextContents = contextFiles.map((rel) => fs.readFileSync(path.join(context, rel), "utf8"));
     throw new Error(TOKEN);
   };
@@ -228,7 +230,7 @@ test("registry tag hashes declarations and rotation without exposing secret byte
   assert.equal(JSON.stringify(first).includes(f.secret), false);
 });
 
-test("registry credential cannot enter the build context via a manifest, symlink or hardlink", (t) => {
+test("registry credential cannot enter the build context via a manifest, symlink or hardlink", { skip: noSymlinks }, (t) => {
   const f = fixture(t, npmFiles);
   f.local({ npm: f.secret });
   const lock = path.join(f.repo, "package-lock.json");

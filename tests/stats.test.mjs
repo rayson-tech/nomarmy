@@ -95,10 +95,14 @@ test("computeStats filters by role and model", () => {
 });
 
 test("resolveRepo takes a path or a folder name, preferring an exact or trailing match", () => {
-  const recs = ["/src/rayson-senti", "/src/rayson-senti-shared-services", "/src/nomarmy"].map((p) => ({ projectDir: p }));
-  assert.equal(resolveRepo(recs, "nomarmy"), "/src/nomarmy");
-  assert.equal(resolveRepo(recs, "senti"), "/src/rayson-senti", "ends with -senti beats merely containing it");
-  assert.equal(resolveRepo(recs, "shared"), "/src/rayson-senti-shared-services");
+  const source = path.resolve(path.sep, "src");
+  const senti = path.join(source, "rayson-senti");
+  const shared = path.join(source, "rayson-senti-shared-services");
+  const nomarmy = path.join(source, "nomarmy");
+  const recs = [senti, shared, nomarmy].map((projectDir) => ({ projectDir }));
+  assert.equal(resolveRepo(recs, "nomarmy"), nomarmy);
+  assert.equal(resolveRepo(recs, "senti"), senti, "ends with -senti beats merely containing it");
+  assert.equal(resolveRepo(recs, "shared"), shared);
   assert.throws(() => resolveRepo(recs, "rayson"), /matches several repositories: rayson-senti, rayson-senti-shared-services/);
   assert.throws(() => resolveRepo(recs, "zzz"), /no repository with jobs matches "zzz"/);
   assert.equal(resolveRepo(recs, os.tmpdir()), path.resolve(os.tmpdir()), "an existing path is taken as is");

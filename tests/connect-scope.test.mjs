@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { connectClaude, connectCodex, connectCursor, portableServerLaunch, excludeFromGit } from "../lib/connect.mjs";
+import { connectClaude, connectCodex, connectCursor, portableServerLaunch, excludeFromGit, includeInGit } from "../lib/connect.mjs";
 
 function setup(t) {
   const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-scope-")));
@@ -30,7 +30,7 @@ test("claude --scope local: this repo only, the playbook kept out of git, and a 
   const s = setup(t);
   const result = connectClaude({ nomarmyRoot: s.nomarmyRoot, installDir: s.installDir, run: s.run, configDir: s.configDir, scope: "local", projectDir: s.projectDir });
   const add = s.calls.find((c) => c.line.startsWith("claude mcp add"));
-  assert.match(add.line, /^claude mcp add --scope local nomarmy-local-worker (.* )?-- node .*\/install\/mcp\/server\.mjs$/);
+  assert.match(add.line, /^claude mcp add --scope local nomarmy-local-worker (.* )?-- node .*[/\\]install[/\\]mcp[/\\]server\.mjs$/);
   assert.equal(add.cwd, s.projectDir, "registered from the repository, so Claude Code ties it to that project");
   assert.ok(s.calls.some((c) => c.line === "claude mcp remove nomarmy-local-worker --scope local" && c.cwd === s.projectDir));
   assert.equal(s.calls.some((c) => /--scope user/.test(c.line)), false, "the user-scope registration is left alone");
@@ -73,6 +73,14 @@ test("excludeFromGit adds each path once", (t) => {
   assert.deepEqual(excludeFromGit(s.projectDir, [".cursor/mcp.json"], s.run), ["/.cursor/mcp.json"]);
   assert.deepEqual(excludeFromGit(s.projectDir, [".cursor/mcp.json"], s.run), []);
   assert.equal(fs.readFileSync(path.join(s.projectDir, ".git", "info", "exclude"), "utf8").match(/\/\.cursor\/mcp\.json/g).length, 1);
+});
+
+test("git exclude writes and removes a forward-slashed Windows relative path", (t) => {
+  const s = setup(t);
+  assert.deepEqual(excludeFromGit(s.projectDir, [".cursor\\mcp.json"], s.run), ["/.cursor/mcp.json"]);
+  assert.match(fs.readFileSync(path.join(s.projectDir, ".git", "info", "exclude"), "utf8"), /^\/\.cursor\/mcp\.json$/m);
+  assert.deepEqual(includeInGit(s.projectDir, [".cursor\\mcp.json"], s.run), ["/.cursor/mcp.json"]);
+  assert.doesNotMatch(fs.readFileSync(path.join(s.projectDir, ".git", "info", "exclude"), "utf8"), /\.cursor\/mcp\.json/);
 });
 
 test("nomarmy mcp runs the installed copy when there is one, else the package's own server, and the caller's env wins", (t) => {

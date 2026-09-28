@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import * as images from "../lib/sandbox-images.mjs";
 import { buildConfigProposal } from "../lib/propose.mjs";
+import { noPython311 } from "./helpers/python.mjs";
 
 function repo(t, files) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-python-managers-"));
@@ -23,7 +24,7 @@ for (const [manager, manifest, lock, dev] of [
   ["poetry", poetry, null, false],
   ["pyproject", project, null, false],
 ]) {
-  test(`Python ${manager} composition (${lock ?? "unlocked"}, dev=${dev}) installs offline runtime dependencies`, (t) => {
+  test(`Python ${manager} composition (${lock ?? "unlocked"}, dev=${dev}) installs offline runtime dependencies`, { skip: manager !== "uv" && (process.platform === "win32" ? "runs Python tooling natively (Windows Python prints CRLF); on Windows the engine runs it inside WSL" : noPython311) }, (t) => {
     const inputs = { "pyproject.toml": manifest, ...(lock ? { [lock]: "# fixture lock\n" } : {}) };
     const dir = repo(t, inputs);
     const result = images.composeSandboxImage(dir);

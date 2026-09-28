@@ -50,7 +50,7 @@ for (const [name, content] of [
   ['packages/new/package.json', '{"name":"new","scripts":{"postinstall":"attacker"}}'],
   ['requirements.txt', 'attacker==1\n'],
 ]) {
-  test(`trusted registry blocks changed input ${name}`, t => {
+  test(`trusted registry blocks changed input ${name}`, { skip: process.platform === 'win32' ? 'credential and build-context identity checks depend on POSIX inodes' : false }, t => {
     const f = fixture(t);
     write(f.cwd, name, content);
     const build = capture();

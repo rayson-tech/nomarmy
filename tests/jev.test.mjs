@@ -17,8 +17,10 @@ test("saveJevKey keeps the key out of validators.yml, in a file only this user c
   const dir = configDir(t);
   const { keyFile, configPath } = saveJevKey("  ts-secret-key  ", { configDir: dir });
   assert.equal(fs.readFileSync(keyFile, "utf8"), "ts-secret-key\n");
-  assert.equal(fs.statSync(keyFile).mode & 0o777, 0o600);
-  assert.equal(fs.statSync(path.dirname(keyFile)).mode & 0o777, 0o700);
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(keyFile).mode & 0o777, 0o600, "Unix mode bits keep the key private");
+    assert.equal(fs.statSync(path.dirname(keyFile)).mode & 0o777, 0o700, "Unix mode bits keep the directory private");
+  }
   assert.equal(fs.readFileSync(configPath, "utf8").includes("ts-secret-key"), false, "the key is never in the config");
   assert.deepEqual(loadValidators(dir).jev.checks, ["scout-citations", "report-claims"]);
   assert.equal(jevSettings({ configDir: dir }).key, "ts-secret-key");

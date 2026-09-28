@@ -24,3 +24,25 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: node bin/nomarmy.mjs validate --json
+
+  # Windows users hit bugs Linux CI can't see (a path built the Unix way broke
+  # `nomarmy connect` on every Windows machine). Node 24: what OpenClaw needs.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - run: git config --global core.longpaths true
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24.x"
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      # Native: check the command itself, not its forwarding into WSL (the
+      # runner has no distro with nomArmy in it).
+      - run: node bin/nomarmy.mjs validate --json
+        env:
+          NOMARMY_WINDOWS_ENGINE: native
+      - run: node bin/nomarmy.mjs doctor --json
+        continue-on-error: true # no nomArmy in WSL on the runner; this checks the Windows front end reports rather than crashes

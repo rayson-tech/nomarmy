@@ -47,6 +47,19 @@ import { createBuildMetrics, resolveOutcome, finalText, workerMetadata, usageMet
 import { jobLabel, compactJobRecord, formatResult, reportView, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner } from "../lib/job-format.mjs";
 import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
+import { samePath } from "../lib/same-path.mjs";
+import { withWindowsPaths, dropWindowsPath } from "../lib/wsl.mjs";
+export { withWindowsPaths };
+
+function coordinatorJson(value) { return JSON.stringify(withWindowsPaths(value), null, 2); }
+function coordinatorResult(result) {
+  const paths = withWindowsPaths({ jobDir: result.jobDir, worktree: result.manifest?.worktree });
+  const windows = ["jobDirWindows", "worktreeWindows"].filter(key => paths[key]).map(key => `${key}: ${paths[key]}`);
+  return formatResult(withWindowsPaths(result)) + (windows.length ? `\n\n${windows.join("\n")}` : "");
+}
+
+// Inside WSL, only the distro's own tools (see lib/wsl.mjs).
+dropWindowsPath();
 // OpenClaw in ~/.npm-global/bin (no writable npm prefix) is found without the operator editing PATH.
 ensureOpenClawOnPath();
 
@@ -93,7 +106,8 @@ function slug(prefix = "local") {
 }
 async function assertRepo() {
   const root = await git(["rev-parse", "--show-toplevel"]);
-  if (path.resolve(root) !== projectDir) throw new Error(`CLAUDE_PROJECT_DIR must be the Git root. Expected ${root}, got ${projectDir}`);
+  // Git may print a long, forward-slashed path while Windows supplies an 8.3 path.
+  if (!samePath(root, projectDir)) throw new Error(`CLAUDE_PROJECT_DIR must be the Git root. Expected ${root}, got ${projectDir}`);
 }
 async function resolveBase(baseRef) {
   const ref = baseRef || "HEAD";
@@ -383,7 +397,7 @@ server.tool("local_worker", "Run one isolated local worker and wait for it. mode
     const { problems } = await admit([args]);
     if (problems.length) return refusal(problems);
     const r = await launch(args).promise;
-    return toolText(formatResult(r), !r.ok);
+    return toolText(coordinatorResult(r), !r.ok);
   });
 server.tool("local_worker_start", "Start one worker or scout in the background and return immediately with a job_id. Poll it with local_worker_status (optionally long-polling with wait_seconds). Same admission rules as local_worker: refuses under memory pressure or when NOMARMY_MAX_WORKERS jobs are already running.", jobSchema.shape,
   async rawArgs => {
@@ -393,7 +407,7 @@ server.tool("local_worker_start", "Start one worker or scout in the background a
     const { problems, admission } = await admit([args]);
     if (problems.length) return refusal(problems);
     const entry = launch(args);
-    return toolText(JSON.stringify({ started: true, jobId: entry.jobId, workerId: entry.workerId, mode: entry.mode, state: "running",
+    return toolText(coordinatorJson({ started: true, jobId: entry.jobId, workerId: entry.workerId, mode: entry.mode, state: "running",
       jobDir: path.join(jobsRoot, entry.jobId), timeoutSeconds: args.timeout_seconds,
       poll: { tool: "local_worker_status", job_id: entry.jobId, wait_seconds: MAX_STATUS_WAIT_SECONDS },
       wait: `nomarmy jobs --wait ${entry.jobId}`,
@@ -401,7 +415,7 @@ server.tool("local_worker_start", "Start one worker or scout in the background a
       // reported with the local model's figures.
       lane: jobLane(args), agent: args.mode === "verify" ? null : args.agentName ?? "local", model: args.model ?? null,
       ...(args.run_id ? { run: runBrief(args.run_id) } : {}),
-      admission: { level: admission.level, notes: admission.reasons }, budgets: args.mode === "verify" ? null : describeBudgets(budgetsForJob(args)) }, null, 2));
+      admission: { level: admission.level, notes: admission.reasons }, budgets: args.mode === "verify" ? null : describeBudgets(budgetsForJob(args)) }));
   });
 // A long poll must return inside the MCP client's own idle-timeout: it aborts
 // a tool call after N seconds with no response or progress notification,
@@ -432,12 +446,12 @@ server.tool("local_worker_status", `Status of one job started by this server: ph
     summarize(entry, files, jobDir),
     sleep(15000).then(() => summarize(entry, files, null)),
   ]);
-  if (summary.state === "running") return toolText(JSON.stringify({ ...summary, jobDir, hint: `poll again with wait_seconds up to ${MAX_STATUS_WAIT_SECONDS}; lastTool/filesChangedLive are best-effort and may be absent early in a run` }, null, 2));
-  if (entry?.error) return toolText(JSON.stringify({ ...summary, jobDir }, null, 2), true);
-  if (report && files.meta) return toolText(JSON.stringify(reportView(files.meta), null, 2), summary.coordinatorStatus !== "complete");
-  if (full && entry?.result) return toolText(formatResult(entry.result), !entry.result.ok);
-  if (full && files.meta) return toolText(JSON.stringify(files.meta, null, 2), summary.coordinatorStatus !== "complete");
-  return toolText(JSON.stringify({ ...summary, jobDir, hint: entry?.result || files.meta ? "call again with report=true for the worker's report, or full=true for the complete record" : null }, null, 2), summary.state === "orphaned" || summary.state === "failed");
+  if (summary.state === "running") return toolText(coordinatorJson({ ...summary, jobDir, hint: `poll again with wait_seconds up to ${MAX_STATUS_WAIT_SECONDS}; lastTool/filesChangedLive are best-effort and may be absent early in a run` }));
+  if (entry?.error) return toolText(coordinatorJson({ ...summary, jobDir }), true);
+  if (report && files.meta) return toolText(coordinatorJson(reportView(files.meta)), summary.coordinatorStatus !== "complete");
+  if (full && entry?.result) return toolText(coordinatorResult(entry.result), !entry.result.ok);
+  if (full && files.meta) return toolText(coordinatorJson(files.meta), summary.coordinatorStatus !== "complete");
+  return toolText(coordinatorJson({ ...summary, jobDir, hint: entry?.result || files.meta ? "call again with report=true for the worker's report, or full=true for the complete record" : null }), summary.state === "orphaned" || summary.state === "failed");
 });
 // Set when this session's copy of nomArmy changed on disk after it started
 // (nomarmy connect or update ran): shown first in army and capacity, and
@@ -680,8 +694,8 @@ server.tool("local_workers", "Run independent jobs (implement or scout) with bou
     reviewRequired: results.filter(r => r.manifest?.reviewRequired).length,
     jobs: results.map(r => ({ jobId: r.manifest.jobId, workerId: r.manifest.workerId, mode: r.manifest.mode, outcome: r.manifest.outcome || OUTCOMES.WORKER_FAILED, recovered: Boolean(r.manifest.recovered), status: r.manifest.coordinatorStatus || "failed", branch: r.manifest.branch, commit: r.manifest.commit?.sha || null, worktree: r.manifest.worktree, jobDir: r.jobDir })),
     ...(union ? { union } : {}) };
-  const unionSection = union ? `UNION\n\n${formatUnion(union)}\n\n` : "";
-  const text = `BATCH EXECUTION RECORD\n${JSON.stringify(summary, null, 2)}\n\n${unionSection}WORKER RESULTS\n\n${results.map((r, i) => `===== WORKER ${i + 1} =====\n${formatResult(r)}`).join("\n\n")}`;
+  const unionSection = union ? `UNION\n\n${formatUnion(withWindowsPaths(union))}\n\n` : "";
+  const text = `BATCH EXECUTION RECORD\n${coordinatorJson(summary)}\n\n${unionSection}WORKER RESULTS\n\n${results.map((r, i) => `===== WORKER ${i + 1} =====\n${coordinatorResult(r)}`).join("\n\n")}`;
   return toolText(text, results.some(r => !r.ok) || union?.status === "union_verification_failed" || union?.status === "union_error");
 });
 // No model, no sandbox, no tokens spent on a worker: the coordinator asks the
@@ -706,7 +720,7 @@ server.tool("local_worker_jobs", "List recent job records for review/recovery, i
     if (status) return summarize(activeJobs.get(name) ?? null, { status, meta: null, failure: null }, dir);
     return { jobId: name, state: "unknown" };
   }));
-  return toolText(JSON.stringify(rows, null, 2));
+  return toolText(coordinatorJson(rows));
 });
 // The sandbox writes skill/guardrail files under .openclaw/ with permissions
 // meant to stop the SANDBOXED AGENT from deleting them. On macOS, the
@@ -838,7 +852,7 @@ server.tool("local_worker_sweep", "Bulk-reap job worktrees/branches that are PRO
       skipped.push({ jobId, reason: `removal failed: ${error.message}` });
     }
   }
-  return toolText(JSON.stringify({ examined: dirs.length, reapedCount: reaped.length, skippedCount: skipped.length, dryRun: dry_run, reaped, skipped }, null, 2));
+  return toolText(coordinatorJson({ examined: dirs.length, reapedCount: reaped.length, skippedCount: skipped.length, dryRun: dry_run, reaped, skipped }));
 });
 server.tool("local_worker_cleanup", "Remove a retained worker worktree and optionally its agent branch after Claude has reviewed/integrated or deliberately discarded it. Refuses to delete the current branch. A branch whose commits were cherry-picked (not merged) into the current branch -- nomArmy's own integration model -- is recognized as integrated by comparing PATCH CONTENT (git cherry), not git's own ancestry-only check, so a genuinely-integrated job's cleanup does not need force: true. Reserve force for a branch you are actually discarding unintegrated work from.", {
   job_id: z.string().min(1), delete_branch: z.boolean().default(false), force: z.boolean().default(false)

@@ -8,6 +8,7 @@ import * as verify from "../lib/verify.mjs";
 import { loadHarnesses } from "../lib/harnesses.mjs";
 import { createVerificationFlow } from "../lib/verification-flow.mjs";
 import { collectVerificationArtifacts } from "../lib/verification-artifacts.mjs";
+import { noSymlinks } from "./helpers/symlinks.mjs";
 
 function temporary(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-browser-"));
@@ -80,7 +81,7 @@ test("verification forwards largest matched shared memory and omits undeclared s
   assert.deepEqual(verify.buildPodmanArgs(calls[1]).filter((arg) => arg.startsWith("--shm-size")), ["--shm-size=512m"]);
 });
 
-test("independent implement and verify runners retain exact screenshot evidence and report caps", async (t) => {
+test("independent implement and verify runners retain exact screenshot evidence and report caps", { skip: noSymlinks }, async (t) => {
   for (const mode of ["implement", "verify"]) {
     const root = temporary(t), cwd = path.join(root, "worktree"), jobDir = path.join(root, "job");
     write(cwd, "playwright.config.js", "");

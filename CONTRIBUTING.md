@@ -9,7 +9,7 @@ npm install
 npm test
 ```
 
-`npm test` runs the full suite (`node --test tests/*.test.mjs`) against plain Node built-ins: no services, no network, no local model, no Podman. That's the bar for a passing PR. If your change touches something only reachable with a real local model and sandbox running (`local_worker`/`local_workers` themselves, `nomarmy setup`/`init` end to end), say so in the PR description and how you tested it manually; CI can't exercise that path.
+`npm test` runs the full suite (`node --test tests/*.test.mjs`) against plain Node built-ins: no services, no network, no local model, no Podman. On native Windows the suite runs every command in-process (`NOMARMY_WINDOWS_ENGINE=native`, set by `tests/helpers/isolate-global-config.mjs`) rather than forwarding it into WSL; tests that need file symlinks skip without Windows Developer Mode, and tests that run `python3` 3.11+ skip without it. That's the bar for a passing PR. If your change touches something only reachable with a real local model and sandbox running (`local_worker`/`local_workers` themselves, `nomarmy setup`/`init` end to end), say so in the PR description and how you tested it manually; CI can't exercise that path.
 
 ## Before opening a PR
 

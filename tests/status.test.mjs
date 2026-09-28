@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 
 import { appleScriptString, notificationCommand, notify, spoolNotification } from "../lib/notify.mjs";
@@ -63,7 +64,7 @@ test("buildNotifierApp: builds once with the fixed bundle id, then stays current
     if (cmd === "iconutil") fs.writeFileSync(args[args.indexOf("-o") + 1], "icns");
     return Buffer.from("");
   };
-  const nomarmyRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+  const nomarmyRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   assert.equal(buildNotifierApp({ nomarmyRoot, root, platform: "darwin", env: {}, run }).status, "built");
   const plist = fs.readFileSync(path.join(notifierPaths(root).app, "Contents", "Info.plist"), "utf8");
   assert.match(plist, new RegExp(`<string>${NOTIFIER_BUNDLE_ID.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</string>`));
@@ -91,19 +92,20 @@ test("statusLineText: the session, what's running machine-wide, and this repo's 
 
 test("installClaudeStatusLine: installs when none is set, refreshes its own, never replaces the operator's", () => {
   const settingsPath = path.join(tmp(), "settings.json");
+  const installDir = path.join(path.sep, "opt", "nomarmy");
   fs.writeFileSync(settingsPath, JSON.stringify({ model: "opus", permissions: { allow: ["Bash(ls)"] } }));
-  assert.equal(installClaudeStatusLine({ installDir: "/opt/nomarmy", settingsPath }), "installed");
+  assert.equal(installClaudeStatusLine({ installDir, settingsPath }), "installed");
   const s = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
-  assert.equal(s.statusLine.command, 'node "/opt/nomarmy/lib/statusline.mjs"');
+  assert.equal(s.statusLine.command, `node ${JSON.stringify(path.join(installDir, "lib", "statusline.mjs"))}`);
   assert.equal(s.statusLine.refreshInterval, 5, "re-runs while the session is idle");
   assert.deepEqual(s.permissions, { allow: ["Bash(ls)"] }, "every other setting is kept");
-  assert.equal(installClaudeStatusLine({ installDir: "/opt/nomarmy", settingsPath }), "unchanged");
-  assert.equal(installClaudeStatusLine({ installDir: "/new/place", settingsPath }), "updated");
+  assert.equal(installClaudeStatusLine({ installDir, settingsPath }), "unchanged");
+  assert.equal(installClaudeStatusLine({ installDir: path.join(path.sep, "new", "place"), settingsPath }), "updated");
   fs.writeFileSync(settingsPath, JSON.stringify({ statusLine: { type: "command", command: "~/bin/my-line.sh" } }));
-  assert.equal(installClaudeStatusLine({ installDir: "/opt/nomarmy", settingsPath }), "kept-yours");
+  assert.equal(installClaudeStatusLine({ installDir, settingsPath }), "kept-yours");
   assert.equal(JSON.parse(fs.readFileSync(settingsPath, "utf8")).statusLine.command, "~/bin/my-line.sh");
   fs.writeFileSync(settingsPath, "{ not json");
-  assert.equal(installClaudeStatusLine({ installDir: "/opt/nomarmy", settingsPath }), "skipped", "an unreadable settings file is never rewritten");
+  assert.equal(installClaudeStatusLine({ installDir, settingsPath }), "skipped", "an unreadable settings file is never rewritten");
 });
 
 test("runAdmissionProblems: jobs still running count toward the run's job limit", () => {
@@ -136,12 +138,14 @@ test("statusLineText: stays short -- suffixes dropped, models only for one job, 
 
 test("statusLineText: this repo's jobs in detail, other repos' only as a count", () => {
   const root = tmp();
-  writeLease(path.join(root, "leases"), "senti-job", { lane: "remote", agent: "codex", role: "sr-dev", repo: "/r/rayson-senti" });
-  writeLease(path.join(root, "leases"), "other-job", { lane: "local", repo: "/r/stable-dry" });
+  const repos = path.join(path.sep, "r");
+  const sentiRepo = path.join(repos, "rayson-senti");
+  writeLease(path.join(root, "leases"), "senti-job", { lane: "remote", agent: "codex", role: "sr-dev", repo: sentiRepo });
+  writeLease(path.join(root, "leases"), "other-job", { lane: "local", repo: path.join(repos, "stable-dry") });
   writeLease(path.join(root, "leases"), "old-lease", { lane: "local" });
-  const nomarmy = statusLineText({ session: { workspace: { current_dir: "/r/nomarmy" } }, stateRoot: root });
+  const nomarmy = statusLineText({ session: { workspace: { current_dir: path.join(repos, "nomarmy") } }, stateRoot: root });
   assert.equal(nomarmy, "nomarmy │ 🍪 idle · 3 in other repos");
-  const senti = statusLineText({ session: { workspace: { current_dir: "/r/rayson-senti/lambda" } }, stateRoot: root });
+  const senti = statusLineText({ session: { workspace: { current_dir: path.join(sentiRepo, "lambda") } }, stateRoot: root });
   assert.match(senti, /🍪 sr-dev codex \S+ · 2 in other repos$/, "a session in a subdirectory still counts as the repo");
 });
 

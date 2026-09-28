@@ -18,5 +18,7 @@ LICENSE   text eol=lf
 NOTICE    text eol=lf
 
 *.png binary
+*.ico binary
+*.icns binary
 *.jpg binary
 *.gguf binary

@@ -64,7 +64,7 @@ test("checkNodeVersion fails on unparseable input with a fix", () => {
 // injected PATH, PATHEXT and file-existence predicate so it never touches
 // the real filesystem.
 
-test("findExecutable finds a *nix-style binary with no extension appended", () => {
+test("findExecutable finds a *nix-style binary with no extension appended", { skip: process.platform === "win32" ? "extensionless executable lookup is POSIX-only" : false }, () => {
   // findExecutable joins with node:path and path.delimiter, which are
   // platform-native rather than posix-specific (as they should be - doctor
   // only ever runs against the real host's own PATH), so this builds the
@@ -174,6 +174,7 @@ test("checkEndpoint (local) fails with a concrete fix when unreachable", () => {
   const result = checkEndpoint({
     execution: "local",
     endpoint: { mode: "local", url: "http://127.0.0.1:8080/health", healthy: false, error: "connect ECONNREFUSED" },
+    platform: "linux",
   });
   assert.equal(result.ok, false);
   assert.match(result.message, /ECONNREFUSED/);

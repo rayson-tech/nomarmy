@@ -18,11 +18,13 @@ import { buildConfigProposal } from "../lib/propose.mjs";
 import { detectHardware } from "../lib/hardware.mjs";
 import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf.mjs";
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
-import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv, defaultInstallDir, installMcpCopy, SCOPES, claudeUserScoped, portableServerLaunch } from "../lib/connect.mjs";
+import { windowsFrontEnd, dropWindowsPath, pickDistro, resolveWslNomarmy, mcpBridgeLaunch, writeWindowsSettings } from "../lib/wsl.mjs";
+import { windowsPlan, windowsForward, windowsSetup, windowsDoctor } from "../lib/wsl-cli.mjs";
+import { connectViaWsl, connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv, defaultInstallDir, installMcpCopy, SCOPES, claudeUserScoped, portableServerLaunch } from "../lib/connect.mjs";
 import { compareVersions, readPackageVersion, readInstallVersions, copyIsStale } from "../lib/install-freshness.mjs";
 import { loadJobRecords, computeStats, formatStats, formatStatsSummary, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
 import { requestJobStop } from "../lib/openclaw-run.mjs";
-import { loadValidators, saveJevKey, removeJev, jevSettings, askJev, validatorsPath, JEV_CHECKS, saveJudge, removeJudge, judgeSettings } from "../lib/validators.mjs";
+import { loadValidators, saveJevKey, removeJev, jevSettings, askJev, validatorsPath, JEV_CHECKS, saveJudge, removeJudge, judgeSettings, judgeAgentChoices, chooseJudgeAgent, confirmJudgeHostTools } from "../lib/validators.mjs";
 import { probeModel } from "../lib/model-probe.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
 import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, agentProviderId, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
@@ -42,8 +44,18 @@ import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalo
 import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
 import { fileURLToPath } from "node:url";
+// Inside WSL, only the distro's own tools (see lib/wsl.mjs).
+dropWindowsPath();
 // OpenClaw in ~/.npm-global/bin (no writable npm prefix) is found without the operator editing PATH.
 ensureOpenClawOnPath();
+// Windows starts the engine as `wsl.exe --exec <node> nomarmy.mjs`, with no
+// login shell, so an nvm Node's directory isn't on PATH. Children that need
+// `node` (install.sh, OpenClaw's `#!/usr/bin/env node`) get the one running.
+{
+  const nodeDir = path.dirname(process.execPath);
+  const entries = (process.env.PATH ?? "").split(path.delimiter);
+  if (!entries.includes(nodeDir)) process.env.PATH = [nodeDir, ...entries.filter(Boolean)].join(path.delimiter);
+}
 
 // Add a new coordinator: add its name here, teach commandExists/connectTarget
 // about it below (a JSON-file target like Cursor has no PATH binary to check
@@ -254,7 +266,9 @@ Usage: nomarmy <command> [options]
                   and review flags. From verified records, never reports.
   validators <list|add jev|test jev|remove jev|add judge|test judge|remove judge>
                   Optional semantic checks from a model you configure with
-                  your own key. Today: Jev (TypeSafe). \`add jev\` asks for the
+                  your own key. Jev checks focused claims with TypeSafe;
+                  Judge reviews diffs with one of your configured agents.
+                  Setup asks for any consent it needs. \`add jev\` asks for the
                   key without echoing it (or reads --key-stdin), saves it
                   where only you can read it, and makes one test call. Its
                   answers only add review flags, and it sends excerpts of
@@ -657,6 +671,13 @@ function cmdInstall() {
 }
 
 async function cmdSetup() {
+  if (windowsFrontEnd()) {
+    process.exitCode = await windowsSetup(argv, { ask: async (prompt) => {
+      const rl = createInterface({ input, output });
+      try { return await rl.question(prompt); } finally { rl.close(); }
+    } });
+    return;
+  }
   if (flag("status") || (!flag("choose") && !flag("hosted") && !flag("llama-url") && !json)) {
     if (flag("status") || !process.stdin.isTTY) {
       const steps = setupChecklist();
@@ -1874,6 +1895,9 @@ async function cmdConnect() {
   const requested = argv.slice(1).filter((a, i) => !a.startsWith("--") && !flagValues.has(i + 1));
   const scope = value("scope", "user");
   if (!SCOPES.includes(scope)) throw new Error(`--scope must be one of ${SCOPES.join(", ")}, got "${scope}".`);
+  const nativeWindows = windowsFrontEnd();
+  if (nativeWindows && scope !== "user") throw new Error("per-repo registration on Windows isn't supported yet; use the default --scope user");
+  if (nativeWindows && flag("copy-only")) throw new Error("Windows runs nomArmy inside WSL; run nomarmy connect <target> instead of --copy-only");
   let projectDir = null;
   if (scope !== "user") {
     try { projectDir = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: repoDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
@@ -1908,6 +1932,17 @@ async function cmdConnect() {
     }
     try {
       if (!json) console.log(c.bold(`\n🍪 Connecting nomArmy to ${target}...`));
+      if (nativeWindows) {
+        const capture = (cmd, args, opts = {}) => execFileSync(cmd, args, { stdio: ["ignore", "pipe", "pipe"], ...opts });
+        const distro = pickDistro({ run: capture });
+        const resolved = resolveWslNomarmy({ distro, run: capture });
+        const launch = mcpBridgeLaunch({ distro, ...resolved });
+        const result = connectViaWsl({ target, distro, launch, run, nomarmyRoot });
+        writeWindowsSettings({ distro, ...resolved });
+        results.push({ target, connected: true, ...result });
+        if (!json) console.log(c.green(`✓ Registered nomArmy with ${target}, running inside WSL (${distro})`));
+        continue;
+      }
       const result = connectTarget(target, { nomarmyRoot, run, scope, projectDir });
       results.push({ target, connected: true, ...result });
       if (!json) console.log(c.green(`✓ Registered nomarmy-local-worker with ${target}${scope === "user" ? "." : scope === "local" ? ` for ${projectDir} only (not committed).` : ` in ${path.relative(projectDir, result.configPath ?? path.join(projectDir, ".mcp.json"))}, for everyone who clones this repository.`}`));
@@ -2891,16 +2926,58 @@ async function cmdValidatorsJudge(sub) {
   const resolve = () => judgeSettings({ agents, providerOf: agentProviderId, runsOnHost: agentRunsToolsOnHost });
   const probe = async (settings) => probeModel({ provider: settings.provider, model: settings.model, stateRoot: process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents") });
   if (sub === "add") {
-    const agent = value("agent"), model = value("model");
-    if (!agent || !model) throw new Error("Usage: nomarmy validators add judge --agent <name> --model <model> [--host-tools]");
+    let agent = value("agent"), model = value("model"), dominantBuilderVendor = null;
+    let rl = null;
+    const question = async (prompt) => {
+      rl ??= createInterface({ input, output });
+      return rl.question(c.bold(prompt));
+    };
+    if (!agent) {
+      if (!process.stdin.isTTY || json) throw new Error("Usage: nomarmy validators add judge --agent <name> --model <model> [--host-tools]");
+      const roles = loadArmy({ projectDir: repoDir }).army.roles;
+      const guided = judgeAgentChoices({ agents, roles, providerOf: agentProviderId, runsOnHost: agentRunsToolsOnHost });
+      dominantBuilderVendor = guided.dominantBuilderVendor;
+      if (!guided.choices.length) throw new Error("No api or subscription agents are configured in agents.yml.");
+      agent = (await chooseJudgeAgent({ choices: guided.choices, ask: question, write: (line) => console.log(line) })).name;
+    }
     if (!agents[agent]) throw new Error(`"${agent}" isn't an agent in agents.yml. Agents: ${Object.keys(agents).join(", ") || "(none)"}`);
-    if (agentRunsToolsOnHost(agents[agent]) && !flag("host-tools")) throw new Error(`agent "${agent}" runs its tools on this machine, and a judge reads text the worker wrote. Pass --host-tools to accept that, or pick a sandboxed agent (an api key, Codex, Muse).`);
-    const saved = saveJudge({ agent, model, hostTools: flag("host-tools") });
+    if (!model) {
+      if (!process.stdin.isTTY || json) throw new Error("Usage: nomarmy validators add judge --agent <name> --model <model> [--host-tools]");
+      const listed = catalogModelsFor(agentProviderId(agents[agent]));
+      if (listed.length) {
+        console.log(`Models for ${agent}:`);
+        listed.forEach((item, index) => console.log(`  ${index + 1}. ${item}`));
+      }
+      const fallback = agents[agent].model ?? "";
+      const answer = String(await question(`Model id${fallback ? ` [${fallback}]` : ""}: `)).trim();
+      model = /^\d+$/.test(answer) && listed[Number(answer) - 1] ? listed[Number(answer) - 1] : answer || fallback;
+      if (!model) { rl?.close(); throw new Error("A model id is required."); }
+    }
+    let hostTools = flag("host-tools");
+    if (agentRunsToolsOnHost(agents[agent]) && !hostTools) {
+      if (!process.stdin.isTTY || json) {
+        const quote = (arg) => /^[A-Za-z0-9_./:-]+$/.test(arg) ? arg : `'${arg.replaceAll("'", `'\\''`)}'`;
+        const rerun = ["nomarmy", ...argv, "--host-tools"].map(quote).join(" ");
+        throw new Error(`agent "${agent}" runs its tools on this machine, and a judge reads text the worker wrote. Refusing without explicit consent. Re-run: ${rerun}`);
+      }
+      const allowed = await confirmJudgeHostTools({ agent, ask: question, write: (line) => console.log(line) });
+      if (!allowed) { rl?.close(); console.log(c.dim("Canceled; nothing written.")); return; }
+      hostTools = true;
+    }
+    rl?.close();
+    const saved = saveJudge({ agent, model, hostTools });
     const settings = resolve();
     if (settings?.problem) throw new Error(settings.problem);
     const test = await probe(settings);
     if (json) return out({ saved: true, configPath: saved.configPath, test: test.ok ? "pass" : test.refused ? "refused" : "inconclusive", reason: test.reason });
     console.log(c.green(`✓ The judge is ${agent}/${model}, in ${saved.configPath}.`));
+    if (dominantBuilderVendor === null) {
+      try {
+        const roles = loadArmy({ projectDir: repoDir }).army.roles;
+        dominantBuilderVendor = judgeAgentChoices({ agents, roles, providerOf: agentProviderId, runsOnHost: agentRunsToolsOnHost }).dominantBuilderVendor;
+      } catch { /* no readable army means there is no builder comparison */ }
+    }
+    if (dominantBuilderVendor && agentProviderId(agents[agent]) === dominantBuilderVendor) console.log(c.yellow("Note: this judge uses the same vendor as most build roles, so its verdicts are not independent of those builders."));
     console.log(test.ok ? c.green("✓ Test call answered. New implement jobs use it; restart open coordinator sessions to pick it up.") : c.red(`✗ Test call ${test.refused ? "refused" : "didn't answer"}: ${test.reason ?? "no answer"}`));
     if (!test.ok) process.exitCode = 1;
     return;
@@ -2934,11 +3011,18 @@ function cmdMcp() {
 const commands = { stats: cmdStats, validators: cmdValidators, mcp: cmdMcp, scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, install: cmdInstall, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, sandbox: cmdSandbox, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
+  if (windowsFrontEnd()) {
+    process.exitCode = windowsDoctor({ json, argv });
+    return;
+  }
   // Import lazily to avoid circular dependencies
   const { runDoctor } = await import("../lib/doctor.mjs");
   await runDoctor({ json, exit: true, env: installEnv() });
 }
 commands.doctor = cmdDoctor;
+if (windowsFrontEnd() && windowsPlan(argv) === "FORWARD") {
+  process.exit(windowsForward(argv));
+}
 if (!command && !flag("help")) {
   // New users typed `nomarmy` and got the whole command reference.
   console.log(`${c.bold("nomArmy")}: bounded coding workers with independently verified results.\n\n  New here?   ${c.cyan("nomarmy setup")}   walks you through it, one step at a time\n  All commands: ${c.cyan("nomarmy help")}\n  Docs: https://github.com/rayson-tech/nomarmy`);

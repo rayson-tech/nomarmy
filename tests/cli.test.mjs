@@ -2,6 +2,7 @@
 // Spawns the real CLI as a subprocess against temporary scratch directories.
 
 import "./helpers/isolate-global-config.mjs";
+import { linkDir } from "./helpers/symlinks.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -169,7 +170,7 @@ test("sizing --noms an unreasonable count reports fits:false, not a crash or a s
 function scratchNomarmyRoot() {
   const dir = mkdtempSync(path.join(tmpdir(), "nomarmy-providers-cli-"));
   const repoRoot = path.join(here, "..");
-  fs.symlinkSync(path.join(repoRoot, "node_modules"), path.join(dir, "node_modules"));
+  linkDir(path.join(repoRoot, "node_modules"), path.join(dir, "node_modules"));
   fs.cpSync(path.join(repoRoot, "bin"), path.join(dir, "bin"), { recursive: true });
   fs.cpSync(path.join(repoRoot, "lib"), path.join(dir, "lib"), { recursive: true });
   fs.copyFileSync(path.join(repoRoot, "package.json"), path.join(dir, "package.json"));
@@ -356,7 +357,7 @@ test("agents add --json: one of each kind lands in one agents.yml, with each kin
     assert.deepEqual(Object.keys(agents), ["local", "local-gpt", "grok", "codex"]);
     assert.equal(agents.grok.max_concurrent, 2);
     assert.equal(agents.codex.max_concurrent, 1, "a personal subscription defaults to one job at a time");
-    assert.equal((fs.statSync(path.join(root, "config", "agents.yml")).mode & 0o077), 0, "agents.yml is written private to this account");
+    if (process.platform !== "win32") assert.equal((fs.statSync(path.join(root, "config", "agents.yml")).mode & 0o077), 0, "Unix mode bits keep agents.yml private");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -379,7 +380,7 @@ test("agents add --json refuses a missing field, a reserved name, and an api/sub
   }
 });
 
-test("agents add --json --register (native api provider, e.g. xai) pipes the REAL key via stdin, never argv", () => {
+test("agents add --json --register (native api provider, e.g. xai) pipes the REAL key via stdin, never argv", { skip: process.platform === "win32" ? "executes a POSIX shebang stub directly" : false }, () => {
   const root = scratchNomarmyRoot();
   const fake = withFakeOpenclaw(root);
   try {
@@ -399,7 +400,7 @@ test("agents add --json --register (native api provider, e.g. xai) pipes the REA
   }
 });
 
-test("agents add --json --register (custom endpoint) onboards with the REAL model/base_url, then pipes the key via stdin", () => {
+test("agents add --json --register (custom endpoint) onboards with the REAL model/base_url, then pipes the key via stdin", { skip: process.platform === "win32" ? "executes a POSIX shebang stub directly" : false }, () => {
   const root = scratchNomarmyRoot();
   const fake = withFakeOpenclaw(root);
   try {
@@ -664,7 +665,7 @@ process.exit(0);
   return { NOMARMY_OPENCLAW_CMD: scriptPath };
 }
 
-test("army assign checks a named model: listed is accepted, unlisted-and-failing is refused without writing, --no-check skips", () => {
+test("army assign checks a named model: listed is accepted, unlisted-and-failing is refused without writing, --no-check skips", { skip: process.platform === "win32" ? "executes a POSIX shebang stub directly" : false }, () => {
   const root = scratchNomarmyRoot();
   const repo = mkdtempSync(path.join(tmpdir(), "nomarmy-army-repo-"));
   try {
