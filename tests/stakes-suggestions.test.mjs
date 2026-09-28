@@ -31,7 +31,8 @@ test("computeSuggestions: a failing pairing, empty scouts, a lighter model, spen
     ...Array.from({ length: 6 }, (_, i) => impl({ jobId: `a${i}`, labels: { role: "sr-dev" }, outcome: i < 2 ? "WORKER_DONE" : "WORKER_TIMEOUT" })),
     ...Array.from({ length: 6 }, (_, i) => impl({ jobId: `b${i}`, labels: { role: "jr-dev" }, metrics: { worker_provider: "openai", worker_model: "gpt-5.6-sol", worker_tokens_in: 25_000, worker_tokens_out: 5_000 } })),
     ...Array.from({ length: 4 }, (_, i) => scout({ jobId: `c${i}`, labels: { role: "pm" }, outcome: i < 2 ? "SCOUT_UNSUPPORTED" : "SCOUT_DONE", metrics: { worker_provider: "xai", worker_model: "grok-4.7", worker_cost_usd: 3 } })),
-    impl({ jobId: "h1", stakes: "high", labels: { role: "sr-dev" } }),
+    impl({ jobId: "h1", stakes: "high", labels: { role: "sr-dev" }, commit: { created: true } }),
+    impl({ jobId: "h2", stakes: "high", labels: { role: "ui-ux" }, outcome: "WORKER_PARTIAL" }),
   ];
   const list = computeSuggestions(records, { agentFor: (p) => ({ openai: "codex", xai: "grok" })[p] ?? null });
   const byKey = (prefix) => list.find((s) => s.key.startsWith(prefix));
@@ -44,7 +45,8 @@ test("computeSuggestions: a failing pairing, empty scouts, a lighter model, spen
   assert.equal(byKey("scout-unsupported:pm").command, "nomarmy army assign pm grok <another model>");
   assert.equal(byKey("lighter:"), undefined, "gpt-5.6-sol did jr-dev work: across roles the numbers don't compare");
   assert.match(byKey("spend:grok-4.7").title, /grok-4\.7 is 100% of API spend \(\$12\.00/);
-  assert.match(byKey("unreviewed:").title, /1 high-stakes job\(s\) without an independent review: h1/);
+  assert.match(byKey("unreviewed:").title, /1 high-stakes job\(s\) committed without an independent review: h1$/, "an uncommitted partial isn't accepted work");
+  assert.equal(list[0].level, "act", "what needs the operator comes first");
   // Too few jobs: no verdict.
   assert.equal(computeSuggestions(records.slice(0, 3)).filter((s) => s.key.startsWith("low-success")).length, 0);
   assert.match(formatSuggestions([]).join("\n"), /nothing in the records suggests a routing change/);
@@ -54,8 +56,11 @@ test("recentSuggestions uses only this repo's last 14 days, and stats reports hi
   const old = new Date(Date.now() - 30 * 86400000).toISOString();
   const records = [impl({ jobId: "h1", stakes: "high", startedAt: old }), impl({ jobId: "h2", stakes: "high", projectDir: "/other" })];
   assert.equal(recentSuggestions(records, { projectDir: "/r" }).length, 0, "the old one is out of the window, the other repo's isn't ours");
-  const s = computeStats([impl({ jobId: "h3", stakes: "high" }), scout({ jobId: "s3", reviews: "h3" })], { repo: "/r" });
+  const s = computeStats([impl({ jobId: "h3", stakes: "high", commit: { created: true } }), scout({ jobId: "s3", reviews: "h3" })], { repo: "/r" });
   assert.deepEqual(s.highStakes, { jobs: 1, reviewed: 1 });
+  // From Senti: a review scout that timed out was counted as a review.
+  const failedReview = computeStats([impl({ jobId: "h4", stakes: "high", commit: { created: true } }), scout({ jobId: "s4", reviews: "h4", outcome: "WORKER_FAILED" })], { repo: "/r" });
+  assert.deepEqual(failedReview.highStakes, { jobs: 1, reviewed: 0 });
   assert.equal(agentLookup({ codex: { provider: "openai" }, grok: { provider: "xai" }, other: { provider: "openai" } }, (a) => a.provider)("xai"), "grok");
   assert.equal(agentLookup({ codex: { provider: "openai" }, other: { provider: "openai" } }, (a) => a.provider)("openai"), null, "ambiguous: name no agent");
 });
@@ -95,4 +100,33 @@ test("stats: a done claim with nothing changed has its own row, and untracked to
   const s = computeStats([empty], { repo: "/r" });
   assert.equal(s.claimVsEvidence.changedNothing, 1);
   assert.equal(s.tokens.untracked, 1);
+});
+
+test("suggestions about pairings not used lately are counted, not listed", () => {
+  const old = new Date(Date.now() - 6 * 86400000).toISOString();
+  const stale = Array.from({ length: 6 }, (_, i) => impl({ jobId: `o${i}`, startedAt: old, labels: { role: "sr-dev" }, outcome: "WORKER_TIMEOUT" }));
+  const list = computeSuggestions(stale);
+  assert.equal(list.filter((s) => s.key.startsWith("low-success")).length, 0);
+  assert.match(list.find((s) => s.key === "stale").title, /^2 more about role and model pairings you haven't used in 3 days/);
+  assert.ok(computeSuggestions(stale, { includeStale: true }).some((s) => s.key.startsWith("low-success")));
+});
+
+import { formatStatsSummary } from "../lib/stats.mjs";
+
+test("the default stats view leads with what was caught and what needs review, on one screen", () => {
+  const done = (over) => impl({ reportValidation: { status: "done", tests: "pass" }, independentVerification: { status: "pass" }, regressionCheck: { status: "pass" }, commit: { created: true }, ...over });
+  const records = [
+    ...Array.from({ length: 6 }, (_, i) => done({ jobId: `d${i}`, testChanges: { new_tests_added: ["t.test.js"], existing_tests_modified: [], existing_tests_deleted: [], production_files_changed: [] } })),
+    done({ jobId: "f1", independentVerification: { status: "fail" } }),
+    done({ jobId: "r1", regressionCheck: { status: "fail" } }),
+    done({ jobId: "h1", stakes: "high" }),
+  ];
+  const text = formatStatsSummary(computeStats(records, { repo: "/r" }));
+  const lines = text.split("\n");
+  assert.match(lines[2], /^CAUGHT +█+░+  7 of 9 "done, tests pass" claims held up · 2 didn't$/);
+  assert.match(text, /1 failed when nomArmy ran the tests itself · 1 had tests that pass with the change reverted/);
+  assert.match(text, /PROVEN +✓ 6 new test files fail without their change/);
+  assert.match(text, /⚠ REVIEW BEFORE MERGING  1 high-stakes job\(s\) committed without an independent review\n   h1\n/);
+  assert.match(text, /nomarmy stats --details/);
+  assert.ok(lines.length < 30, "one screen");
 });
