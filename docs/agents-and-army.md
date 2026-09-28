@@ -34,7 +34,7 @@ agents:
 **Which model runs**, first to last: the job's own `model` (the General's choice), then the role's model unless it's `auto`, then the agent's default. No model at all is refused, never guessed, and nothing picks between agents at random. A job with no role and no agent runs on `local`.
 
 **Settings**:
-- `max_concurrent`: how many jobs run on this agent at once, counted across every session on the machine. Defaults are 1 for a subscription and 2 for an api key; raising it spends your plan's usage limits faster. Api and subscription jobs together are also capped by `NOMARMY_MAX_POOL_WORKERS` (default 4), separately from local workers.
+- `max_concurrent`: how many jobs run on this agent at once, counted across every session on the machine. Defaults are 1 for a subscription and 2 for an api key; raising it spends your plan's usage limits faster. Api and subscription jobs together are also capped machine-wide, across every session, by `nomarmy config max-jobs` (default 4), separately from local workers. Each running job needs a sandbox in the Podman VM, about 1.5 GiB apiece: `nomarmy sandbox` shows how many fit, and `nomarmy sandbox --memory <GiB>` resizes it.
 - `thinking`: `true` follows the job's level, `false` is off, or a fixed `low`, `medium` or `high`.
 - `context_window`: overrides OpenClaw's catalog for a model newer than it knows.
 
