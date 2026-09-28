@@ -73,8 +73,8 @@ nomarmy validators remove judge
 
 After each implement job it answers three questions about the diff, in one call: does it meet each acceptance criterion, does it match the worker's report, and did any changed test get weaker? An "unmet", "contradicts" or "weakened" answer raises review.
 
-- **Pick a different vendor** than the workers it judges, so its review is independent. Move to a newer model by running `add judge` again.
-- **Host tools need consent.** The judge runs through OpenClaw in an empty folder, told not to use tools, but OpenClaw can't turn an agent's tools off, and a Claude subscription's tools run on your machine. So a judge on that agent needs `--host-tools`, the same consent `allow_host_tools` asks for a build job. An api key, Codex or Muse agent needs none.
+- **Pick an agent independent of the builders.** The terminal lists independent agents first and marks agents that use the same vendor as builders. Move to a newer model by running `add judge` again.
+- **Host tools need consent.** When `nomarmy validators add judge` selects an agent whose tools run on your machine, it explains the boundary and asks for consent in an interactive terminal. The judge runs through OpenClaw in an empty folder and is told not to use tools, but OpenClaw can't turn an agent's tools off. Pass `--host-tools` to give the same consent in a scripted command. An api key, Codex or Muse agent needs none.
 - It sends the diff and report to that agent's vendor, like any job on it. The local model can't be a judge (too little context for a diff).
 
 **What we measured** with Claude Haiku 4.5 as judge on 12 real jobs: it flagged none against their own diffs, caught 8 of 12 reports paired with another job's diff and a worker's false claim, and never called a real job's acceptance criterion unmet (it said "unclear" when it couldn't tell). About 13 seconds a job.
