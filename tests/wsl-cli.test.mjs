@@ -99,7 +99,7 @@ test("forwarding treats a failed spawn as exit 1", () => {
 for (const [name, listing, message] of [["WSL missing", null, WSL_FIX], ["no distro", "", DISTRO_FIX]]) {
   test(`setup: ${name} gives the exact fix`, async () => {
     const f = fixture({ listing });
-    assert.equal(await windowsSetup(f), 1);
+    assert.equal(await windowsSetup(["setup"], f), 1);
     assert.deepEqual(f.printed, [message]);
     assert.deepEqual(f.prompts, []);
     assert.deepEqual(f.writes, []);
@@ -109,7 +109,7 @@ for (const [name, listing, message] of [["WSL missing", null, WSL_FIX], ["no dis
 for (const node of [null, "v22.20.0\n", "v24.15.9\n", "unrecognized\n"]) {
   test(`setup rejects missing or old Node: ${node}`, async () => {
     const f = fixture({ installed: false, node });
-    assert.equal(await windowsSetup(f), 1);
+    assert.equal(await windowsSetup(["setup"], f), 1);
     assert.deepEqual(f.printed, [NODE_FIX]);
     assert.deepEqual(f.prompts, []);
     assert.deepEqual(f.calls.at(-1), ["wsl.exe", ["-d", "Ubuntu", "--", "bash", "-lic", "node --version"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }]);
@@ -119,7 +119,7 @@ for (const node of [null, "v22.20.0\n", "v24.15.9\n", "unrecognized\n"]) {
 for (const answer of ["", "y", "Yes"]) {
   test(`setup accepts install prompt: ${JSON.stringify(answer)}`, async () => {
     const f = fixture({ installed: false, answer, shaped: true });
-    assert.equal(await windowsSetup(f), 0);
+    assert.equal(await windowsSetup(["setup"], f), 0);
     assert.deepEqual(f.prompts, ["Install nomArmy inside Ubuntu now? [Y/n]"]);
     const setup = { command: "wsl.exe", args: ["-d", "Ubuntu", "--", "/usr/bin/node", "/usr/lib/node_modules/nomarmy/bin/nomarmy.mjs", "setup"] };
     assert.deepEqual(f.calls.filter((call) => call[2].stdio === "inherit"), [
@@ -136,7 +136,7 @@ for (const answer of ["", "y", "Yes"]) {
 
 test("setup declining install does not run install or engine setup", async () => {
   const f = fixture({ installed: false, answer: "n" });
-  assert.equal(await windowsSetup(f), 1);
+  assert.equal(await windowsSetup(["setup"], f), 1);
   assert.deepEqual(f.prompts, ["Install nomArmy inside Ubuntu now? [Y/n]"]);
   assert.deepEqual(f.printed, []);
   assert.deepEqual(f.calls.filter((call) => call[2].stdio === "inherit"), []);
@@ -144,7 +144,7 @@ test("setup declining install does not run install or engine setup", async () =>
 
 test("setup stops on installation failure", async () => {
   const f = fixture({ installed: false, installStatus: 3 });
-  assert.equal(await windowsSetup(f), 3);
+  assert.equal(await windowsSetup(["setup"], f), 3);
   assert.deepEqual(f.printed, []);
   assert.deepEqual(f.calls.filter((call) => call[2].stdio === "inherit"), [
     ["wsl.exe", ["-d", "Ubuntu", "--", "bash", "-lic", "npm install -g nomarmy@alpha"], { stdio: "inherit" }],
@@ -153,12 +153,19 @@ test("setup stops on installation failure", async () => {
 
 test("setup already installed skips Node and install and propagates engine failure", async () => {
   const f = fixture({ status: 4 });
-  assert.equal(await windowsSetup(f), 4);
+  assert.equal(await windowsSetup(["setup"], f), 4);
   assert.deepEqual(f.prompts, []);
   assert.deepEqual(f.printed, []);
   assert.equal(f.calls.length, 4);
   const setup = { command: "wsl.exe", args: ["-d", "Ubuntu", "--", "/usr/bin/node", "/usr/lib/node_modules/nomarmy/bin/nomarmy.mjs", "setup"] };
   assert.deepEqual(f.calls.at(-1), [setup.command, setup.args, { stdio: "inherit" }]);
+});
+
+test("setup forwards llama server arguments to the engine", async () => {
+  const f = fixture();
+  const argv = ["setup", "--llama-url", "http://192.168.1.5:8080"];
+  assert.equal(await windowsSetup(argv, f), 0);
+  assert.deepEqual(f.calls.at(-1), ["wsl.exe", ["-d", "Ubuntu", "--", "/usr/bin/node", "/usr/lib/node_modules/nomarmy/bin/nomarmy.mjs", ...argv], { stdio: "inherit" }]);
 });
 
 test("doctor reports missing WSL with exact check shape", () => {
@@ -242,7 +249,7 @@ test("forwarding uses saved executable argv verbatim without a shell", () => {
 
 test("setup saves resolved executables for subsequent forwarding", async () => {
   const f = fixture();
-  assert.equal(await windowsSetup(f), 0);
+  assert.equal(await windowsSetup(["setup"], f), 0);
   assert.deepEqual(JSON.parse(f.writes.at(-1)[2]), {
     distro: "Ubuntu", node: "/usr/bin/node", script: "/usr/lib/node_modules/nomarmy/bin/nomarmy.mjs",
   });
