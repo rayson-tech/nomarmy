@@ -1926,7 +1926,7 @@ async function cmdConnect() {
         const resolved = resolveWslNomarmy({ distro, run: capture });
         const launch = mcpBridgeLaunch({ distro, ...resolved });
         const result = connectViaWsl({ target, distro, launch, run, nomarmyRoot });
-        writeWindowsSettings({ distro });
+        writeWindowsSettings({ distro, ...resolved });
         results.push({ target, connected: true, ...result });
         if (!json) console.log(c.green(`✓ Registered nomArmy with ${target}, running inside WSL (${distro})`));
         continue;
