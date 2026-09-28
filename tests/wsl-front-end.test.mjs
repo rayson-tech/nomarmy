@@ -35,7 +35,8 @@ test("NOMARMY_WINDOWS_ENGINE=native disables all Windows front-end decisions, an
   ]) assert.equal(wsl.windowsFrontEnd({ platform, env }), expected);
   const cli = fs.readFileSync(path.join(root, "bin/nomarmy.mjs"), "utf8");
   assert.equal(cli.includes("isNativeWindows"), false);
-  assert.equal((cli.match(/windowsFrontEnd\(\)/g) ?? []).length, 4);
+  // setup, connect, doctor, forwarding, and marking the coordinators as Windows'.
+  assert.equal((cli.match(/windowsFrontEnd\(\)/g) ?? []).length, 5);
   // The test isolation helper runs every test native (the runner has no nomArmy in WSL).
   assert.match(fs.readFileSync(path.join(root, "tests/helpers/isolate-global-config.mjs"), "utf8"), /NOMARMY_WINDOWS_ENGINE = "native"/);
 });
