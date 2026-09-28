@@ -19,6 +19,7 @@ import { detectHardware } from "../lib/hardware.mjs";
 import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf.mjs";
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
 import { isNativeWindows, pickDistro, resolveWslNomarmy, mcpBridgeLaunch, writeWindowsSettings } from "../lib/wsl.mjs";
+import { windowsPlan, windowsForward, windowsSetup, windowsDoctor } from "../lib/wsl-cli.mjs";
 import { connectViaWsl, connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv, defaultInstallDir, installMcpCopy, SCOPES, claudeUserScoped, portableServerLaunch } from "../lib/connect.mjs";
 import { compareVersions, readPackageVersion, readInstallVersions, copyIsStale } from "../lib/install-freshness.mjs";
 import { loadJobRecords, computeStats, formatStats, formatStatsSummary, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
@@ -658,6 +659,13 @@ function cmdInstall() {
 }
 
 async function cmdSetup() {
+  if (isNativeWindows()) {
+    process.exitCode = await windowsSetup({ ask: async (prompt) => {
+      const rl = createInterface({ input, output });
+      try { return await rl.question(prompt); } finally { rl.close(); }
+    } });
+    return;
+  }
   if (flag("status") || (!flag("choose") && !flag("hosted") && !flag("llama-url") && !json)) {
     if (flag("status") || !process.stdin.isTTY) {
       const steps = setupChecklist();
@@ -2949,11 +2957,18 @@ function cmdMcp() {
 const commands = { stats: cmdStats, validators: cmdValidators, mcp: cmdMcp, scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, install: cmdInstall, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, sandbox: cmdSandbox, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
+  if (isNativeWindows()) {
+    process.exitCode = windowsDoctor({ json, argv });
+    return;
+  }
   // Import lazily to avoid circular dependencies
   const { runDoctor } = await import("../lib/doctor.mjs");
   await runDoctor({ json, exit: true, env: installEnv() });
 }
 commands.doctor = cmdDoctor;
+if (isNativeWindows() && windowsPlan(argv) === "FORWARD") {
+  process.exit(windowsForward(argv));
+}
 if (!command && !flag("help")) {
   // New users typed `nomarmy` and got the whole command reference.
   console.log(`${c.bold("nomArmy")}: bounded coding workers with independently verified results.\n\n  New here?   ${c.cyan("nomarmy setup")}   walks you through it, one step at a time\n  All commands: ${c.cyan("nomarmy help")}\n  Docs: https://github.com/rayson-tech/nomarmy`);
