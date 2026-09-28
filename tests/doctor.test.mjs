@@ -177,7 +177,7 @@ test("checkEndpoint (local) fails with a concrete fix when unreachable", () => {
   });
   assert.equal(result.ok, false);
   assert.match(result.message, /ECONNREFUSED/);
-  assert.match(result.fix, /start-inference\.sh/);
+  assert.match(result.fix, /nomarmy setup --choose.*nomarmy start <profile>/);
 });
 
 test("checkEndpoint (hosted) passes because there is no local model by design", () => {
@@ -394,4 +394,16 @@ test("runDoctor does not call process.exit when exit is not requested", async ()
     console.log = originalLog;
     process.exit = originalExit;
   }
+});
+
+
+import { installPodmanHint } from "../lib/doctor.mjs";
+test("doctor's Podman and local-model advice fits the platform (Windows got brew and a bash script)", () => {
+  assert.match(installPodmanHint("win32"), /winget install RedHat\.Podman.*podman machine init --memory 8192.*WSL2/);
+  assert.match(installPodmanHint("darwin"), /brew install podman.*podman machine init --memory 8192/);
+  assert.match(installPodmanHint("linux"), /package manager/);
+  const r = checkEndpoint({ execution: "local", endpoint: { url: "http://127.0.0.1:8080", healthy: false, error: "fetch failed" }, platform: "win32" });
+  assert.match(r.fix, /nomarmy setup --choose/);
+  assert.match(r.fix, /docs\/install\.md#windows/);
+  assert.doesNotMatch(r.fix, /\.sh/);
 });

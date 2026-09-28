@@ -4,8 +4,11 @@ import { stdin as input, stdout as output } from "node:process";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { userCommonPath } from "../lib/user-config.mjs";
+import { fileURLToPath } from "node:url";
 
-const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+// fileURLToPath, not URL.pathname: on Windows that gave "/C:/Users/Jason%20Pugh/...",
+// a stray slash and an encoded space, and connect failed copying from C:\\C:\\...
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
 let query = "";
 let repo = "";
