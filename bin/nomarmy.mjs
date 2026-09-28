@@ -201,7 +201,7 @@ Usage: nomarmy <command> [options]
   config paths    where agents.yml and the three army layers live
   config max-jobs [n]
                   how many api and subscription jobs run at once, across
-                  every session (default 4); with n, sets it in config.yml.
+                  every session (default 4); with n, sets it in limits.yml.
                   Warns when the Podman VM is too small for that many.
   jobs [--watch|--events [--until-done]|--prune|--wait <jobId>|--stop <jobId> [--reason <text>]] [--interval N] [--older-than DAYS]
                   what's running across every session (agent, model, phase,
@@ -2460,6 +2460,8 @@ async function cmdConfigPaths() {
   if (json) return out({ globalDir: globalConfigDir(), agents: { path: agentsPath, exists: fs.existsSync(agentsPath) }, army });
   console.log(c.bold("nomArmy config") + c.dim(`  (global dir: ${globalConfigDir()})`));
   console.log(`  ${fs.existsSync(agentsPath) ? c.green("●") : c.dim("○")} ${"agents".padEnd(8)} ${c.dim(agentsPath)}`);
+  const { limitsPath } = await import("../lib/limits.mjs");
+  console.log(`  ${fs.existsSync(limitsPath()) ? c.green("●") : c.dim("○")} ${"limits".padEnd(8)} ${c.dim(limitsPath())}`);
   console.log(c.bold("\nArmy layers"));
   for (const a of army) console.log(`  ${a.exists ? c.green("●") : c.dim("○")} ${a.layer.padEnd(8)} ${c.dim(a.path)}`);
 }
@@ -2475,8 +2477,9 @@ async function cmdConfigMaxJobs() {
   const limit = maxJobs();
   const machine = process.platform === "linux" ? null : pickMachine(spawnSync("podman", ["machine", "inspect"], { encoding: "utf8" }).stdout);
   const fit = jobsThatFit(machine?.memoryMb);
-  if (json) return out({ maxJobs: limit.value, source: limit.source, path: limit.path, podmanVmMemoryMb: machine?.memoryMb ?? null, jobsThatFit: fit });
-  const from = { config: `set in ${limit.path}`, env: "from NOMARMY_MAX_POOL_WORKERS in this shell (config.yml doesn't set it)", default: "the default" }[limit.source];
+  if (json) return out({ maxJobs: limit.value, source: limit.source, path: limit.path, problem: limit.problem, podmanVmMemoryMb: machine?.memoryMb ?? null, jobsThatFit: fit });
+  const from = { file: `set in ${limit.path}`, env: "from NOMARMY_MAX_POOL_WORKERS in this shell (limits.yml doesn't set it)", default: "the default" }[limit.source];
+  if (limit.problem) console.log(c.yellow(`⚠ ${limit.problem}`));
   console.log(`${given !== undefined ? c.green("✓ ") : ""}Up to ${c.bold(String(limit.value))} api and subscription jobs at once, across every session (${from}).`);
   console.log(c.dim("Each agent's max_concurrent in agents.yml also applies, and local-model jobs have their own limit."));
   if (given !== undefined) console.log(c.dim("Applies to the next job in every session on this version, no restart."));
