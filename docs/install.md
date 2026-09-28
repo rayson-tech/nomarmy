@@ -126,11 +126,28 @@ A repository on a Windows drive works. Jobs are much faster when the repository 
 
 WSL2 uses about half of the computer's RAM by default. Raise its memory limit in `%UserProfile%\.wslconfig` when local models or concurrent jobs need more.
 
-For a local model, run llama.cpp inside WSL with NVIDIA GPU passthrough. You can instead run llama.cpp natively on Windows as a shared model server, then point setup at it:
+For a local model, run llama.cpp inside WSL with NVIDIA GPU passthrough. You can instead run llama.cpp natively on Windows as a shared model server. WSL2's default NAT networking gives WSL its own loopback, so `127.0.0.1` inside WSL does not reach Windows. Use either of these approaches:
 
-```powershell
-nomarmy setup --llama-url http://127.0.0.1:8080
-```
+* Turn on mirrored networking by adding this to `%UserProfile%\.wslconfig`:
+  ```ini
+  [wsl2]
+  networkingMode=mirrored
+  ```
+  Then apply the change in PowerShell and point setup at loopback:
+  ```powershell
+  wsl --shutdown
+  nomarmy setup --llama-url http://127.0.0.1:8080
+  ```
+* With the default NAT networking, find the Windows host address from inside the distro:
+  ```bash
+  ip route show default | awk '{print $3}'
+  ```
+  Start llama-server on Windows with `--host 0.0.0.0`, and allow it through Windows Firewall for private networks. Then run this in Windows PowerShell, replacing `<address>` with the address reported above:
+  ```powershell
+  nomarmy setup --llama-url http://<address>:8080
+  ```
+
+The Windows front end passes `--llama-url` through to setup inside WSL.
 
 ### Windows troubleshooting
 

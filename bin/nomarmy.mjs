@@ -662,7 +662,7 @@ function cmdInstall() {
 
 async function cmdSetup() {
   if (isNativeWindows()) {
-    process.exitCode = await windowsSetup({ ask: async (prompt) => {
+    process.exitCode = await windowsSetup(argv, { ask: async (prompt) => {
       const rl = createInterface({ input, output });
       try { return await rl.question(prompt); } finally { rl.close(); }
     } });
