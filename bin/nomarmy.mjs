@@ -24,7 +24,7 @@ import { connectViaWsl, connectClaude, connectCodex, connectCursor, cursorAlread
 import { compareVersions, readPackageVersion, readInstallVersions, copyIsStale } from "../lib/install-freshness.mjs";
 import { loadJobRecords, computeStats, formatStats, formatStatsSummary, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
 import { requestJobStop } from "../lib/openclaw-run.mjs";
-import { loadValidators, saveJevKey, removeJev, jevSettings, askJev, validatorsPath, JEV_CHECKS, saveJudge, removeJudge, judgeSettings } from "../lib/validators.mjs";
+import { loadValidators, saveJevKey, removeJev, jevSettings, askJev, validatorsPath, JEV_CHECKS, saveJudge, removeJudge, judgeSettings, judgeAgentChoices, chooseJudgeAgent, confirmJudgeHostTools } from "../lib/validators.mjs";
 import { probeModel } from "../lib/model-probe.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
 import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, agentProviderId, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
@@ -256,7 +256,9 @@ Usage: nomarmy <command> [options]
                   and review flags. From verified records, never reports.
   validators <list|add jev|test jev|remove jev|add judge|test judge|remove judge>
                   Optional semantic checks from a model you configure with
-                  your own key. Today: Jev (TypeSafe). \`add jev\` asks for the
+                  your own key. Jev checks focused claims with TypeSafe;
+                  Judge reviews diffs with one of your configured agents.
+                  Setup asks for any consent it needs. \`add jev\` asks for the
                   key without echoing it (or reads --key-stdin), saves it
                   where only you can read it, and makes one test call. Its
                   answers only add review flags, and it sends excerpts of
@@ -2914,16 +2916,58 @@ async function cmdValidatorsJudge(sub) {
   const resolve = () => judgeSettings({ agents, providerOf: agentProviderId, runsOnHost: agentRunsToolsOnHost });
   const probe = async (settings) => probeModel({ provider: settings.provider, model: settings.model, stateRoot: process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents") });
   if (sub === "add") {
-    const agent = value("agent"), model = value("model");
-    if (!agent || !model) throw new Error("Usage: nomarmy validators add judge --agent <name> --model <model> [--host-tools]");
+    let agent = value("agent"), model = value("model"), dominantBuilderVendor = null;
+    let rl = null;
+    const question = async (prompt) => {
+      rl ??= createInterface({ input, output });
+      return rl.question(c.bold(prompt));
+    };
+    if (!agent) {
+      if (!process.stdin.isTTY || json) throw new Error("Usage: nomarmy validators add judge --agent <name> --model <model> [--host-tools]");
+      const roles = loadArmy({ projectDir: repoDir }).army.roles;
+      const guided = judgeAgentChoices({ agents, roles, providerOf: agentProviderId, runsOnHost: agentRunsToolsOnHost });
+      dominantBuilderVendor = guided.dominantBuilderVendor;
+      if (!guided.choices.length) throw new Error("No api or subscription agents are configured in agents.yml.");
+      agent = (await chooseJudgeAgent({ choices: guided.choices, ask: question, write: (line) => console.log(line) })).name;
+    }
     if (!agents[agent]) throw new Error(`"${agent}" isn't an agent in agents.yml. Agents: ${Object.keys(agents).join(", ") || "(none)"}`);
-    if (agentRunsToolsOnHost(agents[agent]) && !flag("host-tools")) throw new Error(`agent "${agent}" runs its tools on this machine, and a judge reads text the worker wrote. Pass --host-tools to accept that, or pick a sandboxed agent (an api key, Codex, Muse).`);
-    const saved = saveJudge({ agent, model, hostTools: flag("host-tools") });
+    if (!model) {
+      if (!process.stdin.isTTY || json) throw new Error("Usage: nomarmy validators add judge --agent <name> --model <model> [--host-tools]");
+      const listed = catalogModelsFor(agentProviderId(agents[agent]));
+      if (listed.length) {
+        console.log(`Models for ${agent}:`);
+        listed.forEach((item, index) => console.log(`  ${index + 1}. ${item}`));
+      }
+      const fallback = agents[agent].model ?? "";
+      const answer = String(await question(`Model id${fallback ? ` [${fallback}]` : ""}: `)).trim();
+      model = /^\d+$/.test(answer) && listed[Number(answer) - 1] ? listed[Number(answer) - 1] : answer || fallback;
+      if (!model) { rl?.close(); throw new Error("A model id is required."); }
+    }
+    let hostTools = flag("host-tools");
+    if (agentRunsToolsOnHost(agents[agent]) && !hostTools) {
+      if (!process.stdin.isTTY || json) {
+        const quote = (arg) => /^[A-Za-z0-9_./:-]+$/.test(arg) ? arg : `'${arg.replaceAll("'", `'\\''`)}'`;
+        const rerun = ["nomarmy", ...argv, "--host-tools"].map(quote).join(" ");
+        throw new Error(`agent "${agent}" runs its tools on this machine, and a judge reads text the worker wrote. Refusing without explicit consent. Re-run: ${rerun}`);
+      }
+      const allowed = await confirmJudgeHostTools({ agent, ask: question, write: (line) => console.log(line) });
+      if (!allowed) { rl?.close(); console.log(c.dim("Canceled; nothing written.")); return; }
+      hostTools = true;
+    }
+    rl?.close();
+    const saved = saveJudge({ agent, model, hostTools });
     const settings = resolve();
     if (settings?.problem) throw new Error(settings.problem);
     const test = await probe(settings);
     if (json) return out({ saved: true, configPath: saved.configPath, test: test.ok ? "pass" : test.refused ? "refused" : "inconclusive", reason: test.reason });
     console.log(c.green(`✓ The judge is ${agent}/${model}, in ${saved.configPath}.`));
+    if (dominantBuilderVendor === null) {
+      try {
+        const roles = loadArmy({ projectDir: repoDir }).army.roles;
+        dominantBuilderVendor = judgeAgentChoices({ agents, roles, providerOf: agentProviderId, runsOnHost: agentRunsToolsOnHost }).dominantBuilderVendor;
+      } catch { /* no readable army means there is no builder comparison */ }
+    }
+    if (dominantBuilderVendor && agentProviderId(agents[agent]) === dominantBuilderVendor) console.log(c.yellow("Note: this judge uses the same vendor as most build roles, so its verdicts are not independent of those builders."));
     console.log(test.ok ? c.green("✓ Test call answered. New implement jobs use it; restart open coordinator sessions to pick it up.") : c.red(`✗ Test call ${test.refused ? "refused" : "didn't answer"}: ${test.reason ?? "no answer"}`));
     if (!test.ok) process.exitCode = 1;
     return;
