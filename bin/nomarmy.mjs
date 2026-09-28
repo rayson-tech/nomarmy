@@ -18,7 +18,8 @@ import { buildConfigProposal } from "../lib/propose.mjs";
 import { detectHardware } from "../lib/hardware.mjs";
 import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf.mjs";
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
-import { connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv, defaultInstallDir, installMcpCopy, SCOPES, claudeUserScoped, portableServerLaunch } from "../lib/connect.mjs";
+import { isNativeWindows, pickDistro, resolveWslNomarmy, mcpBridgeLaunch, writeWindowsSettings } from "../lib/wsl.mjs";
+import { connectViaWsl, connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv, defaultInstallDir, installMcpCopy, SCOPES, claudeUserScoped, portableServerLaunch } from "../lib/connect.mjs";
 import { compareVersions, readPackageVersion, readInstallVersions, copyIsStale } from "../lib/install-freshness.mjs";
 import { loadJobRecords, computeStats, formatStats, formatStatsSummary, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
 import { requestJobStop } from "../lib/openclaw-run.mjs";
@@ -1874,6 +1875,9 @@ async function cmdConnect() {
   const requested = argv.slice(1).filter((a, i) => !a.startsWith("--") && !flagValues.has(i + 1));
   const scope = value("scope", "user");
   if (!SCOPES.includes(scope)) throw new Error(`--scope must be one of ${SCOPES.join(", ")}, got "${scope}".`);
+  const nativeWindows = isNativeWindows();
+  if (nativeWindows && scope !== "user") throw new Error("per-repo registration on Windows isn't supported yet; use the default --scope user");
+  if (nativeWindows && flag("copy-only")) throw new Error("Windows runs nomArmy inside WSL; run nomarmy connect <target> instead of --copy-only");
   let projectDir = null;
   if (scope !== "user") {
     try { projectDir = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: repoDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
@@ -1908,6 +1912,17 @@ async function cmdConnect() {
     }
     try {
       if (!json) console.log(c.bold(`\n🍪 Connecting nomArmy to ${target}...`));
+      if (nativeWindows) {
+        const capture = (cmd, args, opts = {}) => execFileSync(cmd, args, { stdio: ["ignore", "pipe", "pipe"], ...opts });
+        const distro = pickDistro({ run: capture });
+        const resolved = resolveWslNomarmy({ distro, run: capture });
+        const launch = mcpBridgeLaunch({ distro, ...resolved });
+        const result = connectViaWsl({ target, distro, launch, run, nomarmyRoot });
+        writeWindowsSettings({ distro });
+        results.push({ target, connected: true, ...result });
+        if (!json) console.log(c.green(`✓ Registered nomArmy with ${target}, running inside WSL (${distro})`));
+        continue;
+      }
       const result = connectTarget(target, { nomarmyRoot, run, scope, projectDir });
       results.push({ target, connected: true, ...result });
       if (!json) console.log(c.green(`✓ Registered nomarmy-local-worker with ${target}${scope === "user" ? "." : scope === "local" ? ` for ${projectDir} only (not committed).` : ` in ${path.relative(projectDir, result.configPath ?? path.join(projectDir, ".mcp.json"))}, for everyone who clones this repository.`}`));
