@@ -130,10 +130,16 @@ if nomarmy_has_local_model; then openclaw plugins install @openclaw/llama-cpp-pr
 # Bedrock credential unless the coder sandbox is already network-isolated.
 "$ROOT/scripts/setup-sandbox.sh"
 "$ROOT/scripts/configure-openclaw.sh" "$NOMARMY_PROFILE"
-if [[ "$WITH_CLAUDE" == 1 ]]; then
-  if command -v claude >/dev/null 2>&1; then node "$ROOT/bin/nomarmy.mjs" connect claude; else echo 'NOTE: Claude Code not found; worker stack installed. Install Claude Code then run: nomarmy connect claude'; fi
+if [[ "${NOMARMY_COORDINATOR_OS:-}" == windows ]]; then
+  # Run from the Windows front end: the coordinators are Windows programs,
+  # registered from Windows, not looked for inside this distro.
+  echo 'NOTE: register your coordinators from Windows PowerShell: nomarmy connect claude (or codex, cursor)'
+else
+  if [[ "$WITH_CLAUDE" == 1 ]]; then
+    if command -v claude >/dev/null 2>&1; then node "$ROOT/bin/nomarmy.mjs" connect claude; else echo 'NOTE: Claude Code not found; worker stack installed. Install Claude Code then run: nomarmy connect claude'; fi
+  fi
+  if command -v codex >/dev/null 2>&1; then node "$ROOT/bin/nomarmy.mjs" connect codex; else echo 'NOTE: Codex not found; run: nomarmy connect codex (after installing Codex)'; fi
 fi
-if command -v codex >/dev/null 2>&1; then node "$ROOT/bin/nomarmy.mjs" connect codex; else echo 'NOTE: Codex not found; run: nomarmy connect codex (after installing Codex)'; fi
 "$ROOT/scripts/verify-install.sh" "$NOMARMY_PROFILE"
 if nomarmy_is_cloud && [[ "${NOMARMY_ORCHESTRATOR_RUNTIME:-}" == "claude-code" ]]; then
   echo

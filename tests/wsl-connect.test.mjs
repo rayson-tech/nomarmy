@@ -198,6 +198,16 @@ test("resolveWslNomarmy refuses the Windows install reached through WSL's append
   }
 });
 
+test("markWindowsCoordinator tells the engine in WSL its coordinators are on Windows, once", () => {
+  const env = { WSLENV: "CLAUDE_PROJECT_DIR/pu" };
+  wsl.markWindowsCoordinator(env);
+  wsl.markWindowsCoordinator(env);
+  assert.deepEqual(env, { WSLENV: "CLAUDE_PROJECT_DIR/pu:NOMARMY_COORDINATOR_OS/u", NOMARMY_COORDINATOR_OS: "windows" });
+  const bare = {};
+  wsl.markWindowsCoordinator(bare);
+  assert.equal(bare.WSLENV, "NOMARMY_COORDINATOR_OS/u");
+});
+
 test("dropWindowsPath keeps only the distro's own PATH entries, and only inside WSL", () => {
   const PATH = "/home/j/.nvm/versions/node/v24/bin:/usr/bin:/mnt/c/Users/J/AppData/Roaming/npm:/mnt/c/Program Files/nodejs:/mnt/c/WINDOWS/system32:/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/:/mnt/d/tools:/mnt/data/bin";
   const env = { PATH, WSL_DISTRO_NAME: "Ubuntu" };

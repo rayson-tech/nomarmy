@@ -199,6 +199,14 @@ test("doctor reports missing nomArmy", () => {
   ]);
 });
 
+test("doctor gives the Node fix first when the distro has no Node 24.16+ either", () => {
+  for (const node of ["", "v22.12.0\n", "v24.15.1\n"]) {
+    assert.deepEqual(windowsDoctorChecks(fixture({ installed: false, node })), [wslCheck, distroCheck,
+      { id: "wsl-nomarmy", ok: false, message: "Node 24.16+ and nomArmy aren't installed in Ubuntu.", fix: NODE_FIX }, driveCheck,
+    ]);
+  }
+});
+
 test("doctor accepts a Windows drive with the performance guidance", () => {
   assert.deepEqual(windowsDoctorChecks(fixture({ shaped: true })), [wslCheck, distroCheck, nomarmyCheck, driveCheck]);
 });
