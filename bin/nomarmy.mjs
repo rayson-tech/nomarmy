@@ -32,12 +32,16 @@ import { setupSteps, formatSetupSteps, runSetupPlaybook } from "../lib/setup-ste
 import { readUsageSnapshots } from "../lib/usage-limits.mjs";
 import { pickMachine, planResize } from "../lib/sandbox-vm.mjs";
 import { listProcesses, staleSessions, formatStaleSessions } from "../lib/stale-sessions.mjs";
+import { readSetting, writeSetting, writeEnvLine, userCommonPath, userProfilePath, profilePathFor, tildePath } from "../lib/user-config.mjs";
 import { MIN_PODMAN_VM_MB } from "../lib/doctor.mjs";
 import { liveLeases } from "../lib/slots.mjs";
 import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
 import { recordProbeSuccess } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
 import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
+import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
+// OpenClaw in ~/.npm-global/bin (no writable npm prefix) is found without the operator editing PATH.
+ensureOpenClawOnPath();
 
 // Add a new coordinator: add its name here, teach commandExists/connectTarget
 // about it below (a JSON-file target like Cursor has no PATH binary to check
@@ -468,15 +472,9 @@ function readEnvValue(filePath, key) {
   return m ? m[1].trim() : null;
 }
 
-/** Read-modify-write one KEY=VALUE line, replacing it if present, appending if not -- the exact pattern scripts/select-model.mjs already uses for config/common.env. */
-function writeEnvLine(filePath, key, value) {
-  const existingText = fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : "";
-  const line = `${key}=${value}`;
-  const updated = new RegExp(`^${key}=.*$`, "m").test(existingText)
-    ? existingText.replace(new RegExp(`^${key}=.*$`, "m"), line)
-    : `${existingText.trimEnd()}\n${line}\n`.replace(/^\n/, "");
-  fs.writeFileSync(filePath, updated);
-}
+// Your settings live in ~/.config/nomarmy/, over the package's config/
+// defaults, so an update can't reset them (lib/user-config.mjs).
+const setting = (key) => readSetting(key, { nomarmyRoot });
 
 // Each entry's repo/quant/alias is verified against this project's own real
 // usage (downloaded, loaded, dispatched against), not guessed from a model
@@ -495,6 +493,14 @@ function writeEnvLine(filePath, key, value) {
  * not left to fail only at the very end via schema validation with no
  * indication of which of several answers was the problem.
  */
+/** A numbered choice, asked again until it's one of 1..count (an empty or mistyped answer used to end the whole flow). */
+async function askChoice(rl, count) {
+  const answer = await askUntilValid(rl, "Choice: ", { pattern: new RegExp(`^([1-9]|[1-9][0-9])$`), invalidMessage: `Choose a number from 1 to ${count}.` });
+  if (Number(answer) >= 1 && Number(answer) <= count) return Number(answer) - 1;
+  console.log(c.red(`  ✗ Choose a number from 1 to ${count}.`));
+  return askChoice(rl, count);
+}
+
 async function askUntilValid(rl, prompt, { pattern, invalidMessage, allowEmpty = false, fallback = "" }) {
   for (;;) {
     const answer = (await rl.question(c.bold(prompt))).trim();
@@ -527,15 +533,15 @@ async function askSecret(rl, prompt) {
 
 const KNOWN_MODELS = {
   default: {
-    label: "Qwen3-Coder-Next (shipped default; no thinking mode -- 0 failures across every case tested tonight)",
+    label: "Qwen3-Coder-Next · 48 GB download · the most reliable in our tests (recommended)",
     repo: "Qwen/Qwen3-Coder-Next-GGUF", quant: "Q4_K_M", alias: "qwen3-coder-next", thinking: false, recommended: true,
   },
   "gpt-oss-20b": {
-    label: "gpt-oss-20b (thinking, use reasoning: medium -- fastest of every model tested on the hardest case: 62s/0 failures; reasoning: high on the SAME ticket was the worst result measured: 318s/4 failures)",
+    label: "gpt-oss-20b · 12 GB download · the fastest; keep reasoning at medium",
     repo: "ggml-org/gpt-oss-20b-GGUF", quant: "MXFP4", alias: "gpt-oss-20b", thinking: true,
   },
   "qwen3.6-27b": {
-    label: "Qwen3.6-27B (thinking, use reasoning: medium -- best measured reliability, noticeably slower per-token; reasoning: high caused a full timeout on an open-ended task)",
+    label: "Qwen3.6-27B · 17 GB download · very reliable, slower; keep reasoning at medium",
     repo: "unsloth/Qwen3.6-27B-GGUF", quant: "Q4_K_M", alias: "qwen3.6-27b", thinking: true,
   },
 };
@@ -588,14 +594,14 @@ function defaultLocalProfile() {
 // `install`: the one setup recorded, else the install marker's, else the
 // execution mode's, else (a working local install) install.sh's default.
 function setupProfileState() {
-  const common = path.join(nomarmyRoot, "config", "common.env");
-  const chosen = readEnvValue(common, "NOMARMY_SETUP_PROFILE");
+  const common = userCommonPath();
+  const chosen = setting("NOMARMY_SETUP_PROFILE");
   const probeCommand = (binary, args) => {
     const result = spawnSync(binary, args, { encoding: "utf8", timeout: 10000 });
     return result.status === 0 ? result.stdout.trim() : "";
   };
-  const profileFile = chosen ? path.join(nomarmyRoot, "config", "profiles", `${chosen}.env`) : null;
-  const root = (process.env.NOMARMY_INSTALL_ROOT || (profileFile && readEnvValue(profileFile, "NOMARMY_INSTALL_ROOT")) || readEnvValue(common, "NOMARMY_INSTALL_ROOT") || "$HOME/.local/share/nomarmy-local-agents").replace(/\$HOME|\$\{HOME\}/g, os.homedir());
+  const profileFile = profilePathFor(chosen, { nomarmyRoot });
+  const root = (process.env.NOMARMY_INSTALL_ROOT || (profileFile && readEnvValue(profileFile, "NOMARMY_INSTALL_ROOT")) || setting("NOMARMY_INSTALL_ROOT") || "$HOME/.local/share/nomarmy-local-agents").replace(/\$HOME|\$\{HOME\}/g, os.homedir());
   let marker = null;
   try { marker = JSON.parse(fs.readFileSync(path.join(root, "install.json"), "utf8")); } catch (error) { if (error.code !== "ENOENT") marker = {}; }
   const version = probeCommand("openclaw", ["--version"]);
@@ -603,7 +609,7 @@ function setupProfileState() {
   const registered = !marker && Boolean(version) && ["claude", "codex"].some((name) => spawnSync(name, ["mcp", "get", "nomarmy-local-worker"], { stdio: "ignore", timeout: 10000 }).status === 0);
   // An install from before setup recorded its profile: the marker's, else the
   // execution mode's, else (a working local install) install.sh's default.
-  const execution = readEnvValue(common, "NOMARMY_EXECUTION");
+  const execution = setting("NOMARMY_EXECUTION");
   const profile = chosen ?? marker?.profile
     ?? (["hosted", "remote", "bedrock"].includes(execution) ? execution : null)
     ?? (registered ? defaultLocalProfile() : null);
@@ -614,7 +620,7 @@ function setupChecklist() {
   const { common, profile, marker, version, registered } = setupProfileState();
   const project = setupProjectDir();
   return setupSteps({
-    mode: () => ({ profile, host: readEnvValue(common, "NOMARMY_LLAMA_HOST"), port: readEnvValue(common, "NOMARMY_LLAMA_PORT") }),
+    mode: () => ({ profile, host: setting("NOMARMY_LLAMA_HOST"), port: setting("NOMARMY_LLAMA_PORT") }),
     install: () => ({ marker, version, registered }),
     agents: () => Object.keys(loadAgents(globalConfigDir()).agents),
     army: () => {
@@ -652,6 +658,15 @@ async function cmdSetup() {
       const steps = setupChecklist();
       return json ? out(steps) : console.log(formatSetupSteps(steps));
     }
+    // What's ahead, before the first question: a practice run found setup
+    // felt heavy mostly because nothing said how much of it there was.
+    if (setupChecklist().find((step) => step.status === "todo")?.id === "mode") {
+      console.log(`${c.bold("🍪 nomArmy setup")}\n\nAbout 10 to 20 minutes, one step at a time; stop any time and ${c.cyan("nomarmy setup")} picks up where you left off.`);
+      console.log(c.dim("  1. Where models run: your API and subscription agents, or a model on this machine"));
+      console.log(c.dim("  2. Install: OpenClaw (runs the models) and Podman (the sandbox every job runs in; on macOS a small VM, about a 1 GB download)"));
+      console.log(c.dim("  3. Agents: log in to your subscription or add an API key"));
+      console.log(c.dim("  4. Roles, this repo's checks, and a final health check\n"));
+    }
     process.exitCode = await runSetupPlaybook({
       evaluate: setupChecklist, print: console.log, run: runSetupChild,
       ask: async (prompt) => {
@@ -670,10 +685,8 @@ async function cmdSetup() {
       if (choice === "1") argv.push("--hosted");
       if (choice === "3") argv.push("--llama-url", (await rl.question("Server URL: ")).trim());
       if (choice === "4") {
-        const common = path.join(nomarmyRoot, "config", "common.env");
-        fs.mkdirSync(path.dirname(common), { recursive: true });
-        writeEnvLine(common, "NOMARMY_EXECUTION", "bedrock");
-        writeEnvLine(common, "NOMARMY_SETUP_PROFILE", "bedrock");
+        writeSetting("NOMARMY_EXECUTION", "bedrock");
+        writeSetting("NOMARMY_SETUP_PROFILE", "bedrock");
         console.log("Next: nomarmy install");
         return;
       }
@@ -684,7 +697,7 @@ async function cmdSetup() {
   if (hosted && hasLlamaUrl) throw new Error("--hosted and --llama-url cannot be used together.");
 
   if (hosted || hasLlamaUrl) {
-    const commonPath = path.join(nomarmyRoot, "config", "common.env");
+    const commonPath = userCommonPath();
 
     if (hosted) {
       const next = [
@@ -692,11 +705,10 @@ async function cmdSetup() {
         "nomarmy agents add",
         "nomarmy army init --agent <name>",
       ];
-      fs.mkdirSync(path.dirname(commonPath), { recursive: true });
       writeEnvLine(commonPath, "NOMARMY_EXECUTION", "hosted");
       writeEnvLine(commonPath, "NOMARMY_SETUP_PROFILE", "hosted");
       if (json) return out({ written: commonPath, execution: "hosted", next });
-      console.log(c.green(`✓ Wrote NOMARMY_EXECUTION=hosted to ${path.relative(nomarmyRoot, commonPath)}.`));
+      console.log(c.green(`✓ Jobs will run on your API and subscription agents (saved in ${tildePath(commonPath)}).`));
       console.log(c.dim("\nNext:"));
       for (const step of next) console.log(`  ${c.bold(step)}`);
       return;
@@ -724,7 +736,7 @@ async function cmdSetup() {
     console.log(reachable
       ? c.green(`✓ llama-server is reachable at ${healthUrl}.`)
       : c.yellow(`⚠ llama-server is not reachable at ${healthUrl} right now; configuration was still written.`));
-    console.log(c.green(`✓ Wrote the remote llama-server settings to ${path.relative(nomarmyRoot, commonPath)}.`));
+    console.log(c.green(`✓ Wrote the remote llama-server settings to ${tildePath(commonPath)}.`));
     console.log(c.dim("\nNext:"));
     console.log(`  ${c.bold(next)}`);
     return;
@@ -753,10 +765,10 @@ async function cmdSetup() {
       console.log(isCloud
         ? `Execution is '${execution}' -- hosted inference, local hardware does not bound this.\n`
         : `Hardware: ${c.cyan(`${hardware.platform}/${hardware.arch}`)}, ${hardware.cpu?.logicalCores ?? "?"} logical cores, ${(hardware.memory?.totalBytes / 1024 ** 3).toFixed(1)} GiB RAM\n`);
-      console.log(`More noms ${c.dim(`(confidence: ${res.confidence})`)}: ${c.green(res.summary ?? JSON.stringify(res.env))}`);
-      if (res.nominal && !res.nominal.sameAsRecommended) {
-        console.log(`Nominal: ${res.nominal.fits ? c.dim(res.nominal.summary) : c.red(`${res.nominal.summary} DOES NOT FIT either -- nothing on this machine does.`)}`);
-      }
+      // Plain words; the exact settings are shown before anything is written.
+      const plain = (env) => { const n = Number(env?.NOMARMY_MAX_WORKERS ?? env?.NOMARMY_LLAMA_PARALLEL ?? 1), ctx = Math.round(Number(env?.NOMARMY_LLAMA_CONTEXT ?? 0) / Math.max(1, Number(env?.NOMARMY_LLAMA_PARALLEL ?? 1)) / 1024); return `${n} local job${n === 1 ? "" : "s"} at a time${ctx ? `, ${ctx}K tokens of context each` : ""}`; };
+      console.log(`This machine fits ${c.green(plain(res.env))}${res.confidence === "low" ? c.dim(" (an estimate)") : ""}.`);
+      if (res.nominal && !res.nominal.fits) console.log(c.red("Even one local job doesn't fit in this machine's memory: choose hosted instead (nomarmy setup --choose)."));
     }
 
     // "More noms" fits as many noms as memory allows; "nominal" is 1 worker
@@ -774,8 +786,8 @@ async function cmdSetup() {
         if (sizingTier !== "more" && sizingTier !== "nominal") throw new Error('--tier must be "more" or "nominal".');
       } else {
         console.log(`\n${c.bold("Which sizing?")}`);
-        console.log(`  ${c.cyan("1.")} More noms -- as many as fit in memory`);
-        console.log(`  ${c.cyan("2.")} Nominal -- 1 nom, matching this project's own shipped profiles`);
+        console.log(`  ${c.cyan("1.")} As many at once as fit in memory`);
+        console.log(`  ${c.cyan("2.")} One at a time (lighter on the machine)`);
         const choice = (await rl.question(c.bold("Choice [1]: "))).trim() || "1";
         sizingTier = choice === "2" ? "nominal" : "more";
       }
@@ -794,8 +806,8 @@ async function cmdSetup() {
     }
 
     const profileName = nonInteractive ? value("profile-name") : (await rl.question(`\nProfile name [${hardware?.appleSilicon ? "macbook-pro" : "custom"}]: `)).trim() || (hardware?.appleSilicon ? "macbook-pro" : "custom");
-    const profilePath = path.join(nomarmyRoot, "config", "profiles", `${profileName}.env`);
-    const commonPath = path.join(nomarmyRoot, "config", "common.env");
+    const profilePath = userProfilePath(profileName);
+    const commonPath = userCommonPath();
 
     const profileWrites = { ...sizingEnv };
     if (!isCloud) {
@@ -808,10 +820,10 @@ async function cmdSetup() {
     }
 
     if (!json) {
-      console.log(c.bold(`\nAbout to write ${path.relative(nomarmyRoot, profilePath)}:`));
+      console.log(c.bold(`\nAbout to write ${tildePath(profilePath)}:`));
       for (const [k, v] of Object.entries(profileWrites)) console.log(c.dim(`  ${k}=${v}`));
       if (model?.kind === "known") {
-        console.log(c.bold(`\nAnd ${path.relative(nomarmyRoot, commonPath)}:`));
+        console.log(c.bold(`\nAnd ${tildePath(commonPath)}:`));
         console.log(c.dim(`  NOMARMY_MODEL_REPO=${model.repo}`));
         console.log(c.dim(`  NOMARMY_MODEL_QUANT=${model.quant}`));
         console.log(c.dim(`  NOMARMY_MODEL_ALIAS=${model.alias}`));
@@ -819,8 +831,9 @@ async function cmdSetup() {
         console.log(c.dim(`  NOMARMY_MODEL_THINKING=${model.thinking}`));
       }
       if (!nonInteractive) {
-        const answer = (await rl.question(c.bold("\nWrite this configuration? [y/N] "))).trim().toLowerCase();
-        if (answer !== "y") { console.log(c.dim("Canceled; nothing written.")); return; }
+        // Yes by default: someone who accepted every suggestion shouldn't lose it all at the last Enter.
+        const answer = (await rl.question(c.bold("\nWrite this configuration? [Y/n] "))).trim().toLowerCase();
+        if (answer === "n" || answer === "no") { console.log(c.dim("Canceled; nothing written.")); return; }
       }
     }
 
@@ -842,7 +855,7 @@ async function cmdSetup() {
       writeEnvLine(commonPath, "NOMARMY_WORKER_MODEL", model.alias);
       writeEnvLine(commonPath, "NOMARMY_MODEL_THINKING", String(model.thinking));
     } else if (model?.kind === "search") {
-      const searchedAlias = readEnvValue(commonPath, "NOMARMY_MODEL_ALIAS");
+      const searchedAlias = setting("NOMARMY_MODEL_ALIAS");
       if (searchedAlias) {
         writeEnvLine(commonPath, "NOMARMY_WORKER_MODEL", searchedAlias);
         writeEnvLine(commonPath, "NOMARMY_MODEL_THINKING", String(model.thinking));
@@ -851,7 +864,7 @@ async function cmdSetup() {
 
     const installCmd = "nomarmy install";
     if (json) return out({ written: { profile: profilePath, common: model?.kind === "known" ? commonPath : null }, env: profileWrites, sizingTier, installCommand: installCmd });
-    console.log(c.green(`\n✓ Wrote ${path.relative(nomarmyRoot, profilePath)}${model?.kind === "known" ? ` and ${path.relative(nomarmyRoot, commonPath)}` : ""}.`));
+    console.log(c.green(`\n✓ Wrote ${tildePath(profilePath)}${model?.kind === "known" ? ` and ${tildePath(commonPath)}` : ""}.`));
     console.log(c.dim("\nThis proposes; it does not install. Run:\n"));
     console.log(`  ${c.bold(installCmd)}\n`);
   } finally {
@@ -880,7 +893,7 @@ function restartInference() {
   runScript("start-inference.sh", []);
 }
 async function cmdModel() {
-  const commonPath = path.join(nomarmyRoot, "config", "common.env");
+  const commonPath = userCommonPath();
   if (json) {
     const which = value("model");
     if (!KNOWN_MODELS[which]) throw new Error(`--json requires --model one of ${Object.keys(KNOWN_MODELS).join(", ")} (Hugging Face search is interactive-only).`);
@@ -904,17 +917,17 @@ async function cmdModel() {
     const model = await chooseModel(rl);
     let alias;
     if (model.kind === "search") {
-      console.log(c.green("\n✓ Done") + " -- config/common.env was already updated by the search above.");
-      alias = readEnvValue(commonPath, "NOMARMY_MODEL_ALIAS");
+      console.log(c.green("\n✓ Done") + ` -- ${tildePath(commonPath)} was already updated by the search above.`);
+      alias = setting("NOMARMY_MODEL_ALIAS");
     } else {
-      console.log(c.bold(`\nAbout to write ${path.relative(nomarmyRoot, commonPath)}:`));
+      console.log(c.bold(`\nAbout to write ${tildePath(commonPath)}:`));
       console.log(c.dim(`  NOMARMY_MODEL_REPO=${model.repo}\n  NOMARMY_MODEL_QUANT=${model.quant}\n  NOMARMY_MODEL_ALIAS=${model.alias}`));
       const answer = (await rl.question(c.bold("\nApply this model configuration? [y/N] "))).trim().toLowerCase();
       if (answer !== "y") { console.log(c.dim("Canceled; nothing changed.")); return; }
       writeEnvLine(commonPath, "NOMARMY_MODEL_REPO", model.repo);
       writeEnvLine(commonPath, "NOMARMY_MODEL_QUANT", model.quant);
       writeEnvLine(commonPath, "NOMARMY_MODEL_ALIAS", model.alias);
-      console.log(c.green(`✓ Wrote ${path.relative(nomarmyRoot, commonPath)}.`));
+      console.log(c.green(`✓ Wrote ${tildePath(commonPath)}.`));
       alias = model.alias;
     }
     if (alias) {
@@ -1371,8 +1384,7 @@ async function cmdAgentsAdd() {
       console.log(`  ${c.cyan("1.")} local         ${c.dim("the local model on this machine (no per-token bill, private; slower)")}`);
       console.log(`  ${c.cyan("2.")} api           ${c.dim("a metered API key (xAI, OpenAI, Anthropic, DeepSeek, ...)")}`);
       console.log(`  ${c.cyan("3.")} subscription  ${c.dim("your own Claude, ChatGPT or Muse Code plan (never shared)")}`);
-      kind = AGENT_KINDS[Number((await rl.question(c.bold("Choice: "))).trim()) - 1];
-      if (!kind) throw new Error("Not a valid choice.");
+      kind = AGENT_KINDS[await askChoice(rl, AGENT_KINDS.length)];
     }
     if (kind === "local") return await addLocalAgent(rl, agents);
     if (kind === "api") return await addApiAgent(rl, agents);
@@ -1409,8 +1421,7 @@ async function addLocalAgent(rl, agents) {
 async function addApiAgent(rl, agents) {
   console.log("\n" + c.bold("Which provider?"));
   API_PROVIDER_TYPES.forEach((t, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${KNOWN_PROVIDERS[t]?.label ?? t}`));
-  const provider = API_PROVIDER_TYPES[Number((await rl.question(c.bold("Choice: "))).trim()) - 1];
-  if (!provider) throw new Error("Not a valid choice.");
+  const provider = API_PROVIDER_TYPES[await askChoice(rl, API_PROVIDER_TYPES.length)];
   const info = KNOWN_PROVIDERS[provider] ?? {};
   const agent = { kind: "api", provider };
 
@@ -1485,8 +1496,7 @@ async function addSubscriptionAgent(rl, agents) {
   if (!SUBSCRIPTION_VENDORS[vendorKey]) {
     console.log("\n" + c.bold("Which subscription?"));
     vendorKeys.forEach((k, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${SUBSCRIPTION_VENDORS[k].label}`));
-    vendorKey = vendorKeys[Number((await rl.question(c.bold("Choice: "))).trim()) - 1];
-    if (!vendorKey) throw new Error(`Not a valid choice. Supported: ${vendorKeys.join(", ")}. DeepSeek and others without a plan are api agents.`);
+    vendorKey = vendorKeys[await askChoice(rl, vendorKeys.length)];
   }
   const vendor = SUBSCRIPTION_VENDORS[vendorKey];
 
@@ -2045,7 +2055,7 @@ async function maybeRemoveAgentsDir({ force }) {
  * needs manual cleanup -- an honest, bounded scope beats guessing at which
  * cache entries are "ours". */
 function resolveConfiguredModelRepos() {
-  const repo = readEnvValue(path.join(nomarmyRoot, "config", "common.env"), "NOMARMY_MODEL_REPO");
+  const repo = setting("NOMARMY_MODEL_REPO");
   return repo ? [repo] : [];
 }
 
@@ -2905,7 +2915,12 @@ async function cmdDoctor() {
   await runDoctor({ json, exit: true, env: installEnv() });
 }
 commands.doctor = cmdDoctor;
-if (!command || flag("help") || !commands[command]) usage(command && !commands[command] ? 2 : 0);
+if (!command && !flag("help")) {
+  // New users typed `nomarmy` and got the whole command reference.
+  console.log(`${c.bold("nomArmy")}: bounded coding workers with independently verified results.\n\n  New here?   ${c.cyan("nomarmy setup")}   walks you through it, one step at a time\n  All commands: ${c.cyan("nomarmy help")}\n  Docs: https://github.com/rayson-tech/nomarmy`);
+  process.exit(0);
+}
+if (flag("help") || !commands[command]) usage(command && !commands[command] ? 2 : 0);
 
 try {
   await commands[command]();

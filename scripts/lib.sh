@@ -19,9 +19,13 @@ nomarmy_compat_prefix(){
   done
 }
 
+# Your settings live here, over the package's config/ defaults, so an update
+# can't reset them (lib/user-config.mjs does the same for the CLI).
+nomarmy_user_config_dir(){ echo "${NOMARMY_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/nomarmy}"; }
+
 nomarmy_available_profiles(){
   local root; root="$(nomarmy_root)"
-  find "$root/config/profiles" -name '*.env' -exec basename {} .env \; | sort | tr '\n' ' '
+  { find "$root/config/profiles" -name '*.env' -exec basename {} .env \; ; find "$(nomarmy_user_config_dir)/profiles" -name '*.env' -exec basename {} .env \; 2>/dev/null; } | sort -u | tr '\n' ' '
 }
 
 # Where this install's models run (lib/execution.mjs is the same logic for the
@@ -129,7 +133,8 @@ load_profile(){
     elif command -v nvidia-smi >/dev/null 2>&1; then profile=nvidia-linux
     else profile=cpu-linux; fi
   fi
-  profile_file="$root/config/profiles/$profile.env"
+  profile_file="$(nomarmy_user_config_dir)/profiles/$profile.env"
+  [[ -f "$profile_file" ]] || profile_file="$root/config/profiles/$profile.env"
   if [[ ! -f "$profile_file" ]]; then
     echo "ERROR: unknown profile '$profile'. Available: $(nomarmy_available_profiles)" >&2
     exit 2
@@ -137,6 +142,8 @@ load_profile(){
   set -a
   # shellcheck disable=SC1091
   source "$root/config/common.env"
+  # shellcheck disable=SC1091
+  [[ -f "$(nomarmy_user_config_dir)/common.env" ]] && source "$(nomarmy_user_config_dir)/common.env"
   # shellcheck disable=SC1090
   source "$profile_file"
   set +a

@@ -87,7 +87,9 @@ echo '==> Installing nomArmy dependencies'
 
 # Put `nomarmy` on PATH. Non-fatal by design: linking needs a writable npm
 # global prefix, and the CLI is equally usable as `node bin/nomarmy.mjs`.
-if (cd "$ROOT" && npm link >/dev/null 2>&1); then
+if [[ "$ROOT" == */node_modules/* ]]; then
+  : # Installed from npm: `nomarmy` is already on PATH.
+elif (cd "$ROOT" && npm link >/dev/null 2>&1); then
   echo '==> Linked the nomarmy CLI onto PATH'
 else
   echo 'NOTE: could not link the nomarmy CLI (npm global prefix not writable).'
@@ -115,6 +117,9 @@ if ! command -v openclaw >/dev/null 2>&1; then
   else
     # No writable global prefix: install for this user, as OpenClaw's own installer does.
     npm install -g --prefix "$HOME/.npm-global" "openclaw@$OPENCLAW_VERSION" --no-audit --no-fund
+    # nomArmy finds it there on its own (lib/openclaw-path.mjs); your shell won't until PATH has it.
+    echo "NOTE: OpenClaw is in ~/.npm-global/bin. nomArmy finds it there; to run openclaw yourself, add it to PATH:"
+    echo '      echo '"'"'export PATH="$HOME/.npm-global/bin:$PATH"'"'"' >> ~/.profile'
   fi
   export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 fi

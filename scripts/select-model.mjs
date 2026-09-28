@@ -3,12 +3,14 @@ import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { userCommonPath } from "../lib/user-config.mjs";
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const args = process.argv.slice(2);
 let query = "";
 let repo = "";
-let configPath = path.join(root, "config", "common.env");
+// Your settings file, not the package's config/ (an update would reset it): lib/user-config.mjs.
+let configPath = userCommonPath();
 
 for (let index = 0; index < args.length; index += 1) {
   const value = args[index];
@@ -70,16 +72,18 @@ try {
   const alias = (await rl.question(`Local model alias [${defaultAlias}]: `)).trim() || defaultAlias;
   if (!/^[A-Za-z0-9._-]+$/.test(alias)) throw new Error("Alias may contain only letters, numbers, dots, underscores, and hyphens.");
 
-  console.log(`\nReady to update ${path.relative(root, configPath)}:`);
+  console.log(`\nReady to update ${configPath}:`);
   console.log(`  NOMARMY_MODEL_REPO=${repo}`);
   console.log(`  NOMARMY_MODEL_QUANT=${requestedQuant}`);
   console.log(`  NOMARMY_MODEL_ALIAS=${alias}`);
-  if ((await rl.question("Apply this model configuration? [y/N] ")).trim().toLowerCase() !== "y") {
+  if (["n", "no"].includes((await rl.question("Apply this model configuration? [Y/n] ")).trim().toLowerCase())) {
     console.log("Canceled; no model configuration changed.");
     process.exit(0);
   }
 
-  const existing = await readFile(configPath, "utf8");
+  // Your settings file may not exist yet: start it rather than fail.
+  const existing = await readFile(configPath, "utf8").catch(() => "");
+  await import("node:fs").then((fs) => fs.mkdirSync(path.dirname(configPath), { recursive: true }));
   const replace = (key, value, text) => {
     const line = `${key}=${value}`;
     return new RegExp(`^${key}=.*$`, "m").test(text) ? text.replace(new RegExp(`^${key}=.*$`, "m"), line) : `${text.trimEnd()}\n${line}\n`;
