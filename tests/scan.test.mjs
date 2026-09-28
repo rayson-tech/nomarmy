@@ -8,7 +8,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { scanRepository, parseYamlSubset } from "../lib/scan.mjs";
+import { scanRepository, parseYamlSubset, isFixturePath } from "../lib/scan.mjs";
 import {
   CATEGORIES,
   EVIDENCE_VERSION,
@@ -41,6 +41,11 @@ const PLANTED_VALUES = [
   "py-fixture-secret-7c1a",
   "make-fixture-secret-3b9d",
 ];
+
+test("fixture detection accepts a Windows relative path", () => {
+  assert.equal(isFixturePath("tests\\fixtures\\node-stack\\compose.yaml"), true);
+  assert.equal(isFixturePath("tests\\integration\\compose.yaml"), false);
+});
 
 // ---------------------------------------------------------------------------
 // Compose extraction
