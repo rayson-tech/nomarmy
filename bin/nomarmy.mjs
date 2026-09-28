@@ -41,6 +41,7 @@ import { pruneJobRuntime } from "../lib/prune.mjs";
 import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
 import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
+import { fileURLToPath } from "node:url";
 // OpenClaw in ~/.npm-global/bin (no writable npm prefix) is found without the operator editing PATH.
 ensureOpenClawOnPath();
 
@@ -464,7 +465,9 @@ async function cmdInit() {
 // This file's own location, not --repo (the target repo being scanned) --
 // setup/model need to find THIS package's config/ and scripts/ as siblings
 // of bin/, the same way select-model.mjs resolves its own root.
-const nomarmyRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+// fileURLToPath, not URL.pathname: on Windows that gave "/C:/Users/Jason%20Pugh/...",
+// a stray slash and an encoded space, and connect failed copying from C:\\C:\\...
+const nomarmyRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 /** Read one KEY=VALUE line's value, or null if the file or key doesn't exist. */
 function readEnvValue(filePath, key) {
