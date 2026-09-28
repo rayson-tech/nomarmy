@@ -2,6 +2,7 @@
 // Spawns the real CLI as a subprocess against temporary scratch directories.
 
 import "./helpers/isolate-global-config.mjs";
+import { linkDir } from "./helpers/symlinks.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -169,7 +170,7 @@ test("sizing --noms an unreasonable count reports fits:false, not a crash or a s
 function scratchNomarmyRoot() {
   const dir = mkdtempSync(path.join(tmpdir(), "nomarmy-providers-cli-"));
   const repoRoot = path.join(here, "..");
-  fs.symlinkSync(path.join(repoRoot, "node_modules"), path.join(dir, "node_modules"));
+  linkDir(path.join(repoRoot, "node_modules"), path.join(dir, "node_modules"));
   fs.cpSync(path.join(repoRoot, "bin"), path.join(dir, "bin"), { recursive: true });
   fs.cpSync(path.join(repoRoot, "lib"), path.join(dir, "lib"), { recursive: true });
   fs.copyFileSync(path.join(repoRoot, "package.json"), path.join(dir, "package.json"));

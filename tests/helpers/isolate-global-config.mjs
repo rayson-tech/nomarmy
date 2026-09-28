@@ -16,6 +16,14 @@ for (const name of ["NOMARMY_CLAUDE_COMMANDS_DIR", "NOMARMY_CODEX_SKILLS_DIR", "
 // Job leases and agent slots are machine-wide, under nomArmy's state
 // directory; tests get their own, never the developer's live one.
 process.env.NOMARMY_AGENT_STATE = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-test-state-"));
+// On Windows, test the commands themselves rather than their forwarding into
+// WSL (tests/wsl-cli.test.mjs covers that with injected launchers).
+process.env.NOMARMY_WINDOWS_ENGINE = "native";
+// Git for Windows installs with core.autocrlf=true system-wide, which turns
+// the "\n" a test wrote into "\r\n" in every checkout it reads back.
+process.env.GIT_CONFIG_COUNT = "1";
+process.env.GIT_CONFIG_KEY_0 = "core.autocrlf";
+process.env.GIT_CONFIG_VALUE_0 = "false";
 // No desktop notifications from a test run.
 process.env.NOMARMY_NOTIFY = "0";
 // ...and never touch the developer's real Claude Code settings.

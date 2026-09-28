@@ -26,18 +26,18 @@ test("Windows routes only engine commands, leaving repository commands native", 
   assert.equal(windowsPlan([]), "LOCAL");
 });
 
-test("NOMARMY_NATIVE disables all Windows front-end decisions and Windows CI opts out", () => {
+test("NOMARMY_WINDOWS_ENGINE=native disables all Windows front-end decisions, and tests run native", () => {
   for (const [platform, env, expected] of [
-    ["win32", {}, true], ["win32", { NOMARMY_NATIVE: "1" }, false],
-    ["win32", { NOMARMY_NATIVE: "0" }, true], ["win32", { NOMARMY_NATIVE: "true" }, true],
+    ["win32", {}, true], ["win32", { NOMARMY_WINDOWS_ENGINE: "native" }, false],
+    ["win32", { NOMARMY_WINDOWS_ENGINE: "wsl" }, true], ["win32", { NOMARMY_WINDOWS_ENGINE: "" }, true],
     ["linux", {}, false], ["darwin", {}, false],
     ["win32", { WSL_DISTRO_NAME: "Ubuntu" }, false], ["win32", { WSL_INTEROP: "/run/WSL/1_interop" }, false],
   ]) assert.equal(wsl.windowsFrontEnd({ platform, env }), expected);
   const cli = fs.readFileSync(path.join(root, "bin/nomarmy.mjs"), "utf8");
   assert.equal(cli.includes("isNativeWindows"), false);
   assert.equal((cli.match(/windowsFrontEnd\(\)/g) ?? []).length, 4);
-  const windowsJob = fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8").split("  windows:")[1];
-  assert.match(windowsJob, /- run: npm test\r?\n        env:\r?\n          NOMARMY_NATIVE: "1"/);
+  // The test isolation helper runs every test native (the runner has no nomArmy in WSL).
+  assert.match(fs.readFileSync(path.join(root, "tests/helpers/isolate-global-config.mjs"), "utf8"), /NOMARMY_WINDOWS_ENGINE = "native"/);
 });
 
 for (const target of ["claude", "codex", "cursor"]) {

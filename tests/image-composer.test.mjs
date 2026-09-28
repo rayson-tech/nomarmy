@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import * as images from "../lib/sandbox-images.mjs";
 import { loadHarnesses } from "../lib/harnesses.mjs";
+import { linkDir } from "./helpers/symlinks.mjs";
 
 function repo(t, files) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-compose-"));
@@ -260,7 +261,7 @@ test("Go metadata is retained when the repository root is a symlink", (t) => {
   const dir = repo(t, { "go.mod": "module example.com/linked\n", "go.sum": "sum\n" });
   const parent = repo(t, {});
   const linked = path.join(parent, "linked");
-  fs.symlinkSync(dir, linked, "dir");
+  linkDir(dir, linked);
   const original = images.composeSandboxImage(dir);
   const composed = images.composeSandboxImage(linked);
   assert.deepEqual(composed.files, [

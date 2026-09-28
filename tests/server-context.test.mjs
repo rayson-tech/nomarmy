@@ -10,6 +10,7 @@ import { test } from "node:test";
 import { createServerContext, projectDirProblem } from "../lib/server-context.mjs";
 
 test("createServerContext: NOMARMY_PROJECT_DIR, then CLAUDE_PROJECT_DIR, then the start folder; an unexpanded placeholder counts as unset", () => {
+  // Resolved, so Windows fixtures carry a drive letter as the resolved result does.
   const cwd = path.resolve(path.sep, "home", "someone");
   const claudeDir = path.resolve(path.sep, "r", "claude");
   const cursorDir = path.resolve(path.sep, "r", "cursor");

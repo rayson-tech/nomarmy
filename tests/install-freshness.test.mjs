@@ -88,13 +88,14 @@ test("restartNotice: only when the copy on disk changed after this server starte
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { copyIsStale } from "../lib/install-freshness.mjs";
+import { linkDir } from "./helpers/symlinks.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 test("the installed copy loads every harness the checkout has (connect used to leave harnesses/ behind)", async (t) => {
   const installDir = fs.realpathSync(tmp(t, "nomarmy-fresh-harness-"));
   installMcpCopy({ nomarmyRoot: REPO_ROOT, installDir, run: () => {} });
-  fs.symlinkSync(path.join(REPO_ROOT, "node_modules"), path.join(installDir, "node_modules"), "dir");
+  linkDir(path.join(REPO_ROOT, "node_modules"), path.join(installDir, "node_modules"));
   const installed = await import(pathToFileURL(path.join(installDir, "lib", "harnesses.mjs")).href);
   const fromCheckout = await import("../lib/harnesses.mjs");
   assert.equal(installed.HARNESS_ROOT, path.join(installDir, "harnesses") + path.sep);

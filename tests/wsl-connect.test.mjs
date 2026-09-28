@@ -82,6 +82,18 @@ test("pickDistro gives actionable errors and rejects invalid distro names", (t) 
   assert.throws(() => wsl.pickDistro({ run: () => "* Ubuntu;evil    Running    2\n", env, fs }), /Invalid WSL distro name/);
 });
 
+test("pickDistro never chooses Docker Desktop, Rancher Desktop or Podman machine distros", (t) => {
+  const { env } = fixture(t);
+  // Docker Desktop alone, as its default distro: the user still needs a real distro.
+  assert.throws(() => wsl.pickDistro({ run: () => "* docker-desktop    Running    2\n  docker-desktop-data    Stopped    2\n", env, fs }),
+    { message: "install a Linux distro: `wsl --install -d Ubuntu`" });
+  // Docker Desktop is the default but Ubuntu is installed: pick Ubuntu.
+  assert.equal(wsl.pickDistro({ run: () => "* docker-desktop    Running    2\n  Ubuntu    Stopped    2\n  podman-machine-default    Stopped    2\n  rancher-desktop    Stopped    2\n", env, fs }), "Ubuntu");
+  // A saved utility distro is ignored too.
+  wsl.writeWindowsSettings({ distro: "docker-desktop" }, { env });
+  assert.equal(wsl.pickDistro({ run: () => "* docker-desktop    Running    2\n  Debian    Stopped    2\n", env, fs }), "Debian");
+});
+
 for (const target of ["claude", "codex", "cursor"]) {
   test(`connectViaWsl registers ${target} and installs only Windows playbooks`, (t) => {
     const { home } = fixture(t);
@@ -171,7 +183,7 @@ test("Windows connect persists resolved executable paths in windows.json", (t) =
     await import(${JSON.stringify(cli)});
   `;
   const result = spawnSync(process.execPath, ["--input-type=module", "-e", code], {
-    encoding: "utf8", env: { ...process.env, ...env, NOMARMY_NATIVE: "", WSL_DISTRO_NAME: "", WSL_INTEROP: "" },
+    encoding: "utf8", env: { ...process.env, ...env, NOMARMY_WINDOWS_ENGINE: "", WSL_DISTRO_NAME: "", WSL_INTEROP: "" },
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, ".config", "nomarmy", "windows.json"), "utf8")),
