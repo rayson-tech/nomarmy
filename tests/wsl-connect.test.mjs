@@ -199,10 +199,10 @@ test("resolveWslNomarmy refuses the Windows install reached through WSL's append
 });
 
 test("dropWindowsPath keeps only the distro's own PATH entries, and only inside WSL", () => {
-  const PATH = "/home/j/.nvm/versions/node/v24/bin:/usr/bin:/mnt/c/Users/J/AppData/Roaming/npm:/mnt/d/tools:/mnt/data/bin";
+  const PATH = "/home/j/.nvm/versions/node/v24/bin:/usr/bin:/mnt/c/Users/J/AppData/Roaming/npm:/mnt/c/Program Files/nodejs:/mnt/c/WINDOWS/system32:/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/:/mnt/d/tools:/mnt/data/bin";
   const env = { PATH, WSL_DISTRO_NAME: "Ubuntu" };
   wsl.dropWindowsPath(env, { platform: "linux" });
-  assert.equal(env.PATH, "/home/j/.nvm/versions/node/v24/bin:/usr/bin:/mnt/data/bin");
+  assert.equal(env.PATH, "/home/j/.nvm/versions/node/v24/bin:/usr/bin:/mnt/c/WINDOWS/system32:/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/:/mnt/data/bin", "the Windows directory stays for powershell.exe toasts");
   const plain = { PATH };
   wsl.dropWindowsPath(plain, { platform: "linux" });
   assert.equal(plain.PATH, PATH, "plain Linux is untouched");
