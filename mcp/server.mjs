@@ -34,6 +34,7 @@ import { agentDispatchFields, resolveAgentModel, agentProviderId, describeAgent 
 import { OUTCOMES, COORDINATOR_STATUS_BY_OUTCOME } from "../lib/outcomes.mjs";
 import { readUsageSnapshots, usageStatus } from "../lib/usage-limits.mjs";
 import { modelRefusals } from "../lib/health.mjs";
+import { retryRefusedModelsInBackground } from "../lib/refusal-retry.mjs";
 import { podmanProblem, podmanVmStartedAt } from "../lib/podman-health.mjs";
 import { restartNotice } from "../lib/install-freshness.mjs";
 import { requestJobStop } from "../lib/openclaw-run.mjs";
@@ -583,6 +584,7 @@ server.tool("army", "Who you, the General, are and who you call for what in this
     const catalog = await modelCatalogReady();
     // A model its vendor refused on a job is listed apart, so a role on
     // "auto" isn't sent to it (the catalog lists what a plan may refuse).
+    retryRefusedModelsInBackground(stateRoot, { probeModel });
     const refusals = modelRefusals(stateRoot);
     summary.agents = Object.fromEntries(Object.entries(agents).map(([name, agent]) => {
       const provider = agentProviderId(agent);
