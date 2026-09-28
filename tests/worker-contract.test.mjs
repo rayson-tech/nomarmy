@@ -3614,3 +3614,21 @@ test("isDocumentationPath: prose files skip the revert check; code, config and t
   for (const doc of ["CONTRIBUTING.md", "docs/plans/split.md", "README.mdx", "guide.rst", "notes.txt", "LICENSE", "CHANGELOG.md", "site/page.markdown"]) assert.equal(isDocumentationPath(doc), true, doc);
   for (const code of ["lib/admission.mjs", "mcp/server.mjs", "package.json", ".nomarmy.yml", "tests/a.test.mjs", "requirements.txt", "lambda/requirements-dev.txt", "constraints.txt", "src/md.js", "Dockerfile"]) assert.equal(isDocumentationPath(code), false, code);
 });
+
+test("CI configuration skips the revert check while real code remains planned", async () => {
+  const { isCiConfigPath, planRegressionProductionFiles } = await import("../lib/diff-checks.mjs");
+  const ciPaths = [
+    ".github/workflows/ci.yml",
+    ".github/actions/setup/action.yml",
+    ".github/dependabot.yml",
+    ".gitlab-ci.yml",
+    ".circleci/config.yml",
+    "azure-pipelines.yml",
+    ".buildkite/pipeline.yml",
+    "Jenkinsfile",
+    "bitbucket-pipelines.yml",
+  ];
+  for (const file of ciPaths) assert.equal(isCiConfigPath(file), true, file);
+  for (const file of ["lib/x.mjs", "scripts/build.sh", "src/.github-helpers.js"]) assert.equal(isCiConfigPath(file), false, file);
+  assert.deepEqual(planRegressionProductionFiles([".github/workflows/ci.yml", "lib/x.mjs"]), ["lib/x.mjs"]);
+});
