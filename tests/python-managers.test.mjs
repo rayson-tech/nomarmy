@@ -24,7 +24,7 @@ for (const [manager, manifest, lock, dev] of [
   ["poetry", poetry, null, false],
   ["pyproject", project, null, false],
 ]) {
-  test(`Python ${manager} composition (${lock ?? "unlocked"}, dev=${dev}) installs offline runtime dependencies`, { skip: manager !== "uv" && noPython311 }, (t) => {
+  test(`Python ${manager} composition (${lock ?? "unlocked"}, dev=${dev}) installs offline runtime dependencies`, { skip: manager !== "uv" && (process.platform === "win32" ? "runs Python tooling natively (Windows Python prints CRLF); on Windows the engine runs it inside WSL" : noPython311) }, (t) => {
     const inputs = { "pyproject.toml": manifest, ...(lock ? { [lock]: "# fixture lock\n" } : {}) };
     const dir = repo(t, inputs);
     const result = images.composeSandboxImage(dir);
