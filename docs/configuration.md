@@ -12,7 +12,7 @@ Local inference is configured in two files, and a shell-exported variable overri
 | `NOMARMY_LLAMA_CONTEXT` | profile | `65536` | **Total** context across all slots |
 | `NOMARMY_LLAMA_PARALLEL` | profile | `1` | Inference slots (the context is divided across them) |
 | `NOMARMY_MAX_WORKERS` | profile | `1` | How many local jobs run at once |
-| `limits.max_jobs` | `~/.config/nomarmy/config.yml` (`nomarmy config max-jobs <n>`) | `4` | How many api and subscription jobs run at once, across every session. `NOMARMY_MAX_POOL_WORKERS` still works when config.yml doesn't set it |
+| `max_jobs` | `~/.config/nomarmy/limits.yml` (`nomarmy config max-jobs <n>`) | `4` | How many api and subscription jobs run at once, across every session. `NOMARMY_MAX_POOL_WORKERS` still works when limits.yml doesn't set it |
 | `NOMARMY_EXECUTION` | common.env | `local` | `local` or `bedrock` |
 | `NOMARMY_ORCHESTRATOR_TRUST` | common.env | `frontier` | `frontier` or `degraded`: see `policies/reviewer.md` |
 

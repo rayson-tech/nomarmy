@@ -10,35 +10,41 @@ import { checkPodmanVmFitsJobs } from "../lib/doctor.mjs";
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-limits-"));
 
-test("max_jobs: config.yml wins, then NOMARMY_MAX_POOL_WORKERS, then the default", () => {
-  const filePath = path.join(tmp(), "config.yml");
-  assert.deepEqual(maxJobs({ env: {}, filePath }), { value: DEFAULT_MAX_JOBS, source: "default", path: null });
+test("max_jobs: limits.yml wins, then NOMARMY_MAX_POOL_WORKERS, then the default", () => {
+  const filePath = path.join(tmp(), "limits.yml");
+  assert.deepEqual(maxJobs({ env: {}, filePath }), { value: DEFAULT_MAX_JOBS, source: "default", path: null, problem: null });
   assert.equal(maxJobs({ env: { NOMARMY_MAX_POOL_WORKERS: "6" }, filePath }).source, "env");
   assert.equal(maxJobs({ env: { NOMARMY_MAX_POOL_WORKERS: "99" }, filePath }).value, 32);
   setMaxJobs(8, { filePath });
-  assert.deepEqual(maxJobs({ env: { NOMARMY_MAX_POOL_WORKERS: "6" }, filePath }), { value: 8, source: "config", path: filePath },
+  assert.deepEqual(maxJobs({ env: { NOMARMY_MAX_POOL_WORKERS: "6" }, filePath }), { value: 8, source: "file", path: filePath, problem: null },
     "a stale value left in a registration can't override the one setting");
 });
 
-test("setMaxJobs keeps the rest of config.yml, comments included, and the file still loads", () => {
-  const filePath = path.join(tmp(), "config.yml");
-  fs.writeFileSync(filePath, "# mine\narmy:\n  general: claude  # the General\n");
+test("setMaxJobs keeps the rest of limits.yml, and a bad file is reported, not obeyed", () => {
+  const filePath = path.join(tmp(), "limits.yml");
+  fs.writeFileSync(filePath, "# mine\nmax_jobs: 3\nsomething_newer: true\n");
   setMaxJobs(8, { filePath });
   const text = fs.readFileSync(filePath, "utf8");
-  assert.match(text, /# mine/); assert.match(text, /general: claude +# the General/); assert.match(text, /limits:\n  max_jobs: 8/);
-  assert.equal(readArmyFile(filePath, { armyOnly: true }).general, "claude");
+  assert.match(text, /# mine/); assert.match(text, /max_jobs: 8/); assert.match(text, /something_newer: true/, "a key from a newer version survives");
+  assert.equal(maxJobs({ env: {}, filePath }).value, 8, "unknown keys don't break an older reader");
   assert.throws(() => setMaxJobs(0, { filePath }), /whole number from 1 to 32/);
   assert.throws(() => setMaxJobs(33, { filePath }), /whole number from 1 to 32/);
+  fs.writeFileSync(filePath, "max_jobs: 100\n");
+  const bad = maxJobs({ env: {}, filePath });
+  assert.equal(bad.value, DEFAULT_MAX_JOBS);
+  assert.match(bad.problem, /max_jobs must be a whole number from 1 to 32; ignored/);
+  assert.equal(checkPodmanVmFitsJobs({ podmanMachineMemoryMb: 16384, maxJobs: bad }).ok, false);
 });
 
-test("limits belong in the global config only, and a bad value is a clear error", () => {
+test("limits stay out of config.yml: an older copy validates that file strictly and refused it whole", () => {
   const dir = tmp();
-  const local = path.join(dir, ".nomarmy.local.yml");
-  fs.writeFileSync(local, "limits:\n  max_jobs: 8\n");
-  assert.throws(() => readArmyFile(local, { armyOnly: true }), /unexpected field\(s\) "limits"/);
   const global = path.join(dir, "config.yml");
-  fs.writeFileSync(global, "limits:\n  max_jobs: 100\n");
-  assert.throws(() => readArmyFile(global, { armyOnly: true }), /limits\.max_jobs/);
+  fs.writeFileSync(global, "army:\n  general: claude\nlimits:\n  max_jobs: 8\n");
+  assert.throws(() => readArmyFile(global, { armyOnly: true }), /unexpected field\(s\) "limits"/);
+  const filePath = path.join(dir, "limits.yml");
+  setMaxJobs(8, { filePath });
+  fs.writeFileSync(global, "army:\n  general: claude\n");
+  assert.equal(readArmyFile(global, { armyOnly: true }).general, "claude", "setting the limit never touches config.yml");
 });
 
 test("how many sandboxes a Podman VM fits, and the doctor check", () => {
