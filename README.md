@@ -4,6 +4,7 @@
   <a href="https://github.com/rayson-tech/nomarmy/actions/workflows/ci.yml"><img src="https://github.com/rayson-tech/nomarmy/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://www.npmjs.com/package/nomarmy"><img src="https://img.shields.io/npm/v/nomarmy/alpha?label=npm%40alpha" alt="npm"></a>
   <a href="https://github.com/rayson-tech/nomarmy/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
+  <a href="https://github.com/rayson-tech/nomarmy/blob/main/docs/feature-runs.md"><img src="https://raw.githubusercontent.com/rayson-tech/nomarmy/main/.github/nomarmy-badge.svg" alt="nomArmy: AI worker claims checked on this repository"></a>
 </p>
 
 <p align="center"><em>Every byte verified.</em> 🍪</p>
