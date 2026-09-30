@@ -980,6 +980,59 @@ test("agents add --json rejects invalid --owner naming the flag", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("agents update codex --probe uses the first assigned role model without an agent default", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    assert.equal(runAgentsCLI(root, ["add", "--json", "--name", "codex", "--kind", "subscription", "--provider", "openai", "--owner", "you@example.com"]).exitCode, 0);
+    writeConfig(root, "army:\n  roles:\n    sr-dev:\n      agent: codex\n      model: gpt-6-sol\n");
+    const marker = path.join(root, "probed-model");
+    const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2); if(a[0]==="agent") { fs.writeFileSync(${JSON.stringify(marker)}, a[a.indexOf("--model")+1]); console.log(JSON.stringify({ok:true,final:"ok"})); }`);
+    const result = runAgentsCLI(root, ["update", "codex", "--probe"], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+    assert.equal(result.exitCode, 0, result.stdout);
+    assert.match(result.stdout, /^✓ codex  openai\/gpt-6-sol \(sr-dev's model\)  answered in [0-9.]+s\n$/);
+    assert.equal(fs.readFileSync(marker, "utf8"), "openai/gpt-6-sol");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents update --probe uses the vendor default when no role assigns a model", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    assert.equal(runAgentsCLI(root, ["add", "--json", "--name", "codex", "--kind", "subscription", "--provider", "openai", "--owner", "you@example.com"]).exitCode, 0);
+    const marker = path.join(root, "probed-model");
+    const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2); if(a[0]==="agent") { fs.writeFileSync(${JSON.stringify(marker)}, a[a.indexOf("--model")+1]); console.log(JSON.stringify({ok:true,final:"ok"})); }`);
+    const result = runAgentsCLI(root, ["update", "--probe"], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+    assert.equal(result.exitCode, 0, result.stdout);
+    assert.match(result.stdout, /^✓ codex  openai\/gpt-6-astra \(vendor default\)  answered in [0-9.]+s\n$/);
+    assert.equal(fs.readFileSync(marker, "utf8"), "openai/gpt-6-astra");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents update --probe uses the first catalog model when no role or vendor default exists", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    assert.equal(runAgentsCLI(root, ["add", "--json", "--name", "claude", "--kind", "subscription", "--provider", "claude-cli", "--owner", "you@example.com"]).exitCode, 0);
+    const marker = path.join(root, "probed-model");
+    const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2); if(a[0]==="models") console.log("claude-cli/sonnet   text\\nclaude-cli/opus   text"); if(a[0]==="agent") { fs.writeFileSync(${JSON.stringify(marker)}, a[a.indexOf("--model")+1]); console.log(JSON.stringify({ok:true,final:"ok"})); }`);
+    const result = runAgentsCLI(root, ["update", "claude", "--probe"], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+    assert.equal(result.exitCode, 0, result.stdout);
+    assert.match(result.stdout, /^✓ claude  claude-cli\/sonnet \(first catalog model\)  answered in [0-9.]+s\n$/);
+    assert.equal(fs.readFileSync(marker, "utf8"), "claude-cli/sonnet");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents update --probe fails with a model-setting command only when no model can be found", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    assert.equal(runAgentsCLI(root, ["add", "--json", "--name", "claude", "--kind", "subscription", "--provider", "claude-cli", "--owner", "you@example.com"]).exitCode, 0);
+    const marker = path.join(root, "probed-model");
+    const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2); if(a[0]==="agent") fs.writeFileSync(${JSON.stringify(marker)}, "called");`);
+    const result = runAgentsCLI(root, ["update", "claude", "--probe"], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+    assert.equal(result.exitCode, 1, result.stdout);
+    assert.equal(result.stdout, "✗ claude  claude-cli/no model  no model available; set one with `nomarmy agents update claude --model <m>`\n");
+    assert.equal(fs.existsSync(marker), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("agents update --probe probes every configured agent, prints outcomes and fails on any failure", () => {
   const root = scratchNomarmyRoot();
   try {
