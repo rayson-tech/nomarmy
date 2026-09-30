@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import YAML from "yaml";
-import { contractSchema, loadContract, loadContracts, checkContract } from "../lib/acceptance.mjs";
+import { contractSchema, loadContract, loadContracts, checkContract, contractDisplayPath } from "../lib/acceptance.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const cli = path.join(root, "bin/nomarmy.mjs");
@@ -99,7 +99,7 @@ test("acceptance detects failing tests and zero executed tests", (t) => {
     assert.deepEqual(Object.keys(result.failures[0]).sort(), ["detail", "file", "test"]);
     assert.equal(result.failures[0].file, ref(name).file);
     assert.equal(result.failures[0].test, name);
-    if (name === "fails") assert.match(result.failures[0].detail, /not ok 1 - fails/);
+    if (name === "fails") assert.match(result.failures[0].detail, /not ok \d+ - fails/);
     else assert.equal(result.failures[0].detail, "no tests passed (zero tests ran or all were skipped/todo)");
   }
   const [mixed] = checkContract(contract([criterion("ACC-1", [ref(literal), ref("fails")])]), f);
@@ -163,22 +163,24 @@ test("acceptance batches node references once per criterion and exposes spawn fa
 });
 
 test("acceptance CLI JSON and plain output agree; strict fails on unproven", (t) => {
+  assert.equal(contractDisplayPath(root, path.join(root, "acceptance\\example.yml")), "acceptance/example.yml");
   const f = fixture(t);
   const data = contract([criterion("ACC-1", [ref(literal)]), criterion("ACC-2", [], { note: "manual review" }), criterion("ACC-3", [], { status: "retired" })]);
   f.write(data);
   const json = f.invoke("--json");
   assert.equal(json.status, 0, json.stderr || json.stdout);
-  const report = { contracts: [{ file: path.join("acceptance", "example.yml"), feature: "Example", criteria: [expected("ACC-1", "met"), expected("ACC-2", "unproven"), expected("ACC-3", "retired")] }], totals: totals({ met: 1, unproven: 1, retired: 1 }) };
+  const report = { contracts: [{ file: "acceptance/example.yml", feature: "Example", criteria: [expected("ACC-1", "met"), expected("ACC-2", "unproven"), expected("ACC-3", "retired")] }], totals: totals({ met: 1, unproven: 1, retired: 1 }) };
   assert.deepEqual(JSON.parse(json.stdout), report);
   const plain = f.invoke();
   assert.equal(plain.status, 0, plain.stderr);
-  assert.equal(plain.stdout, `${path.join("acceptance", "example.yml")}: Example\nACC-1  met\nACC-2  unproven  manual review\nACC-3  retired\nTotal: 1 met, 0 broken, 0 missing, 1 unproven, 1 retired\n`);
+  assert.equal(plain.stdout, `acceptance/example.yml: Example\nACC-1  met\nACC-2  unproven  manual review\nACC-3  retired\nTotal: 1 met, 0 broken, 0 missing, 1 unproven, 1 retired\n`);
   const strict = f.invoke("--strict", "--json");
   assert.equal(strict.status, 1);
   assert.deepEqual(JSON.parse(strict.stdout), report);
 });
 
 test("acceptance CLI aligns status columns per contract without non-TTY colors", (t) => {
+  assert.equal(contractDisplayPath(root, path.join(root, "acceptance\\first.yml")), "acceptance/first.yml");
   const f = fixture(t);
   f.write(contract([criterion("A-1", [ref(literal)]), criterion("LONG-22", [])]), "first.yml");
   f.write(contract([criterion("SECOND-1", [ref(literal)]), criterion("B-2", [])]), "second.yml");
@@ -189,12 +191,13 @@ test("acceptance CLI aligns status columns per contract without non-TTY colors",
 });
 
 test("acceptance CLI fails broken and missing criteria and honors explicit files", (t) => {
+  assert.equal(contractDisplayPath(root, path.join(root, "acceptance\\good.yml")), "acceptance/good.yml");
   const f = fixture(t);
   f.write(contract([criterion("BAD-1", [ref("fails")])]), "broken.yml");
   f.write(contract([criterion("MISS-1", [ref("renamed")])]), "missing.yml");
   f.write(contract([criterion("GOOD-1", [ref(literal)])]), "good.yml");
   for (const [file, id, name, status] of [["broken.yml", "BAD-1", "fails", "broken"], ["missing.yml", "MISS-1", "renamed", "missing"]]) {
-    const selected = path.join("acceptance", file);
+    const selected = `acceptance/${file}`;
     const result = f.invoke(selected, "--json");
     assert.equal(result.status, 1);
     const report = JSON.parse(result.stdout);
@@ -213,7 +216,7 @@ test("acceptance CLI fails broken and missing criteria and honors explicit files
   }
   const good = f.invoke("acceptance/good.yml", "--strict", "--json");
   assert.equal(good.status, 0);
-  assert.deepEqual(JSON.parse(good.stdout), { contracts: [{ file: path.join("acceptance", "good.yml"), feature: "Example", criteria: [expected("GOOD-1", "met")] }], totals: totals({ met: 1 }) });
+  assert.deepEqual(JSON.parse(good.stdout), { contracts: [{ file: "acceptance/good.yml", feature: "Example", criteria: [expected("GOOD-1", "met")] }], totals: totals({ met: 1 }) });
 });
 
 test("acceptance CLI handles empty repos and validation errors", (t) => {
