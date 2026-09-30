@@ -353,7 +353,7 @@ function cmdScan() {
   const notes = evidence.notes?.items ?? [];
   if (notes.length) {
     console.log("\nNotes:");
-    for (const n of notes) console.log(`  ${n.message ?? n}`);
+    for (const n of notes) console.log(`  ${typeof n === "string" ? n : n.message ?? JSON.stringify(n)}`);
   }
   console.log("\nThis is deterministic evidence only - nothing here was executed.");
   console.log("Describe the environment in .nomarmy.yml, then run 'nomarmy validate'.");
@@ -376,12 +376,12 @@ function scanCheck(evidence) {
     process.exit(1);
   }
   console.log(`Comparing ${path.basename(loaded.path)} against repository evidence\n`);
-  if (drift.summary) console.log(`${drift.summary}\n`);
+  if (drift.summary) console.log(`Drift: ${drift.summary.missingFromConfig} missing from config, ${drift.summary.missingFromRepo} missing from repo (${drift.summary.total} total)\n`);
   for (const section of ["services", "ports", "environment", "commandKinds"]) {
     const d = drift[section];
     if (!d) continue;
-    for (const m of d.missingFromConfig ?? []) console.log(`  repo has, config omits:  ${section}: ${m}`);
-    for (const m of d.missingFromRepo ?? []) console.log(`  config has, repo lacks:  ${section}: ${m}`);
+    for (const m of d.missingFromConfig ?? []) console.log(`  repo has, config omits:  ${section}: ${typeof m === "object" ? JSON.stringify(m) : m}`);
+    for (const m of d.missingFromRepo ?? []) console.log(`  config has, repo lacks:  ${section}: ${typeof m === "object" ? JSON.stringify(m) : m}`);
   }
   process.exit(drift.ok ? 0 : 1);
 }
@@ -2319,9 +2319,15 @@ function armyLayerFlag(fallback = "global") {
   return chosen[0] ?? fallback;
 }
 
-function loadArmyForCli() {
+function loadArmyForCli({ globalOnly = false } = {}) {
   const agents = loadAgentsOrExit().agents;
-  const loaded = loadArmy({ projectDir: repoDir });
+  const loaded = globalOnly
+    ? (() => {
+        const filePath = armyLayerPath("global", { projectDir: repoDir });
+        const army = readArmyFile(filePath, { armyOnly: true });
+        return { ...mergeArmy([{ layer: "global", army }]), layers: [{ layer: "global", path: filePath, exists: fs.existsSync(filePath), hasArmy: Boolean(army) }] };
+      })()
+    : loadArmy({ projectDir: repoDir });
   const usageSnapshots = readUsageSnapshots(process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents"));
   return { loaded, agents, summary: describeArmy(loaded, { agents, describeAgent: describeAgentLabel, usageSnapshots, agentProviderId }) };
 }
@@ -2349,11 +2355,23 @@ function usageLine(usage, indent) {
   return usage.level === "over" ? c.red(`${text} (at the limit)`) : usage.level === "high" ? c.yellow(text) : c.dim(text);
 }
 
+function repositoryHere(dir) {
+  let current = path.resolve(dir);
+  while (true) {
+    if (fs.existsSync(path.join(current, ".git"))) return true;
+    const parent = path.dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
+}
+
 async function cmdArmyShow() {
-  const { summary } = loadArmyForCli();
+  const inRepository = repositoryHere(repoDir);
+  const { summary } = loadArmyForCli({ globalOnly: !inRepository });
   if (json) return out(summary);
   const g = summary.general;
-  console.log(c.bold("🪖 nomArmy") + c.dim(`  (${repoDir})`));
+  console.log(c.bold("🪖 nomArmy") + (inRepository ? c.dim(`  (${repoDir})`) : ""));
+  if (!inRepository) console.log(c.dim("no repository here: showing global settings"));
   console.log(`\n${c.bold("General")}  ${g.agent ? agentCell(g.agent, g.agentRunsOn) : ""}${g.setBy ? c.dim(`  [${g.setBy}]`) : ""}`);
   console.log(c.dim(`  ${g.who}`));
   for (const line of g.responsibilities) console.log(c.dim(`  - ${line}`));
@@ -2383,7 +2401,7 @@ async function cmdArmyShow() {
     }
   }
   console.log(`\n${c.bold("Layers")}  ${c.dim("(later ones win)")}`);
-  for (const layer of summary.layers) {
+  for (const layer of summary.layers.filter((entry) => inRepository || entry.layer === "global")) {
     const state = layer.hasArmy ? c.green("● army section") : layer.exists ? c.dim("○ file exists, no army section") : c.dim("○ no file");
     console.log(`  ${layer.layer.padEnd(8)} ${state.padEnd(40)} ${c.dim(layer.path)}`);
   }
@@ -2433,14 +2451,31 @@ async function cmdArmyInit() {
   }
 }
 
+function armyPositionals() {
+  const result = [];
+  const args = argv.slice(2);
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (["--repo", "--agent", "--model"].includes(arg)) {
+      if (!args[i + 1] || args[i + 1].startsWith("--")) throw new Error(`${arg} requires a value`);
+      i++;
+    } else if (["--global", "--project", "--local", "--json", "--no-check"].includes(arg)) {
+      continue;
+    } else if (arg.startsWith("--")) {
+      throw new Error(`Unknown army option ${arg}`);
+    } else result.push(arg);
+  }
+  return result;
+}
+
 async function cmdArmyAssign() {
-  // Positionals only: argv also holds flags, and `--json` must never be read as a model.
-  const positional = argv.slice(2);
-  const firstFlag = positional.findIndex((a) => a.startsWith("--"));
-  const [roleName, agentName, model] = firstFlag === -1 ? positional : positional.slice(0, firstFlag);
-  if (!roleName || !agentName) throw new Error("Usage: nomarmy army assign <role> <agent|none> [model|auto] [--global|--project|--local]");
+  const positional = armyPositionals();
+  const [roleName, agentName, model] = positional;
+  if (!roleName || !agentName || positional.length > 3) throw new Error("Usage: nomarmy army assign <role> <agent|none> [model|auto] [--global|--project|--local]");
   const layer = armyLayerFlag("global");
   const filePath = armyLayerPath(layer, { projectDir: repoDir });
+  const defined = Object.prototype.hasOwnProperty.call(loadArmy({ projectDir: repoDir }).army.roles, roleName);
+  if (!defined) throw new Error(`Role "${roleName}" is not defined in any army roster. Run nomarmy army init first.`);
   const target = parseTargetSpec(agentName, model);
   const check = flag("no-check") ? { status: "skipped" } : checkRoleModel(agentName, model);
   if (check.status === "failed") {
@@ -2496,8 +2531,9 @@ function checkRoleModel(agentName, model) {
 // Which agent the General is. Global or local only: it describes the
 // person's own coordinator session, which a committed project file can't know.
 async function cmdArmyGeneral() {
-  const agentName = argv[2];
-  if (!agentName) throw new Error("Usage: nomarmy army general <agent> [--global|--local]");
+  const positional = armyPositionals();
+  const [agentName] = positional;
+  if (!agentName || positional.length !== 1) throw new Error("Usage: nomarmy army general <agent> [--global|--local]");
   const layer = armyLayerFlag("global");
   if (layer === "project") throw new Error("The General is your own coordinator session, so it's set in --global or --local, never in a committed project file.");
   const agents = loadAgentsOrExit().agents;
