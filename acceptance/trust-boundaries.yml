@@ -1,0 +1,143 @@
+# Acceptance contract for the deterministic trust floor and its human gate.
+feature: Trust boundaries, phase 1
+criteria:
+  - id: TRUST-1
+    text: trust.sensitive and trust.codeowners validate in .nomarmy.yml; bad entries name the rule
+    proven_by:
+      - file: tests/trust.test.mjs
+        test: trust schema accepts the floor and rejects malformed rules with index and reason
+    status: met
+    security: true
+  - id: TRUST-2
+    text: A diff touching a sensitive path is human-gated with the rule's reason and the file
+    proven_by:
+      - file: tests/trust.test.mjs
+        test: trust path globs span directories only with ** and normalize changed backslash paths
+      - file: tests/trust.test.mjs
+        test: trust paths and CODEOWNERS casefold both paths and patterns
+      - file: tests/trust.test.mjs
+        test: trust paths and CODEOWNERS normalize repeated separators and dot prefixes
+      - file: tests/trust.test.mjs
+        test: trust path braces are literal like CODEOWNERS braces
+      - file: tests/trust.test.mjs
+        test: trust and CODEOWNERS stars match newline filenames
+      - file: tests/trust.test.mjs
+        test: raw snapshots gate untracked renamed and deleted content and old paths
+    status: met
+    security: true
+  - id: TRUST-3
+    text: Content rules scan raw and committed bytes, changed lines and whole-file occurrence changes, normalizing invisible controls and Unicode spaces
+    proven_by:
+      - file: tests/trust.test.mjs
+        test: content rules inspect added and removed lines, not context or file headers
+      - file: tests/trust.test.mjs
+        test: raw trust content survives attributes ${attributes}
+      - file: tests/trust.test.mjs
+        test: committed trust content gates UTF-16LE BOM conversion failures
+      - file: tests/trust.test.mjs
+        test: committed trust content unions raw and clean-filter views and gates failures
+      - file: tests/trust.test.mjs
+        test: trust process input preserves the safely captured bytes
+      - file: tests/trust.test.mjs
+        test: content occurrence normalization gates ${label}
+      - file: tests/trust.test.mjs
+        test: whole-file occurrence counts locate new matches after unchanged context
+      - file: tests/trust.test.mjs
+        test: raw trust content scans NUL and invalid UTF-8 bytes on both sides
+      - file: tests/trust.test.mjs
+        test: raw process output preserves invalid bytes and whitespace
+      - file: tests/trust.test.mjs
+        test: content literals collapse whitespace across added and removed lines as multisets
+      - file: tests/trust.test.mjs
+        test: raw snapshots gate untracked renamed and deleted content and old paths
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots compare an outside symlink target string without reading sensitive target content
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots gate a symlink whose target string contains sensitive content
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots compare base symlink blobs like for like
+    status: met
+    security: true
+  - id: TRUST-4
+    text: "codeowners: true treats paths owned in CODEOWNERS as sensitive"
+    proven_by:
+      - file: tests/trust.test.mjs
+        test: CODEOWNERS follows root anchoring, bare names, directories, wildcards and last-match ownership
+      - file: tests/trust.test.mjs
+        test: implement gates owner changes, new-file content, and sensitive diffs from failed workers
+      - file: tests/trust.test.mjs
+        test: trust paths and CODEOWNERS casefold both paths and patterns
+      - file: tests/trust.test.mjs
+        test: trust paths and CODEOWNERS normalize repeated separators and dot prefixes
+      - file: tests/trust.test.mjs
+        test: trust and CODEOWNERS stars match newline filenames
+    status: met
+    security: true
+  - id: TRUST-5
+    text: A gated job is review-required, its first issue says HUMAN REVIEW REQUIRED with the reasons, and the record carries trust
+    proven_by:
+      - file: tests/trust.test.mjs
+        test: implement jobs enforce checkout trust, retain normal records, and leave unconfigured repos unchanged
+      - file: tests/trust.test.mjs
+        test: implement gates owner changes, new-file content, and sensitive diffs from failed workers
+    status: met
+    security: true
+  - id: TRUST-6
+    text: Rules come from the operator's checkout; a worker can't relax them, and changing the trust rules or CODEOWNERS is itself gated
+    proven_by:
+      - file: tests/trust.test.mjs
+        test: changing the trust contract or any CODEOWNERS file is itself human-level
+      - file: tests/trust.test.mjs
+        test: implement jobs enforce checkout trust, retain normal records, and leave unconfigured repos unchanged
+      - file: tests/trust.test.mjs
+        test: missing and malformed trust snapshots fail closed
+    status: met
+    security: true
+  - id: TRUST-7
+    text: /feature stops before integrating a human-gated job and asks the operator; run_finish lists gated jobs
+    proven_by:
+      - file: tests/trust-surface.test.mjs
+        test: trust feature playbook stops before integration and coordinator repeats the hard gate
+      - file: tests/trust-surface.test.mjs
+        test: trust run_finish lists only its human-gated jobs with exact reasons
+      - file: tests/trust-surface.test.mjs
+        test: trust report view places exact trust immediately after outcome when present
+    status: met
+    security: true
+  - id: TRUST-8
+    text: The PR block shows a Needs human review row with the reasons; stats counts gated jobs
+    proven_by:
+      - file: tests/trust-surface.test.mjs
+        test: trust PR block shows gated count and short reasons only for scoped jobs
+      - file: tests/trust-surface.test.mjs
+        test: trust stats counts human-gated jobs in summary and details
+    status: met
+    security: true
+  - id: TRUST-9
+    text: A repo without trust rules behaves exactly as before
+    proven_by:
+      - file: tests/trust.test.mjs
+        test: implement jobs enforce checkout trust, retain normal records, and leave unconfigured repos unchanged
+    status: met
+    security: true
+  - id: TRUST-10
+    text: Worktree snapshots never follow symlinks or open special files; unchecked content, oversized files, symlinked parents and base gitlinks require human review
+    proven_by:
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots gate an untracked symlink to /dev/zero promptly without reading it
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots compare an outside symlink target string without reading sensitive target content
+      # This platform-dependent probe may skip only when mkfifo is denied.
+      # Command evidence preserves its exit status without treating that skip as failure.
+      - command: node --test --test-name-pattern="^safe trust snapshots gate a FIFO made with mkfifo without opening it$" tests/trust.test.mjs
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots gate files under symlinked parent directories
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots gate oversized files before opening and accept the size boundary
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots gate directories and sockets without opening them
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots gate base gitlinks without cat-file blob even when deleted
+    status: met
+    note: the FIFO and socket tests skip on Windows; FIFO creation skips only for EACCES or EPERM in a restricted sandbox
+    security: true
