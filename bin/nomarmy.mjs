@@ -38,7 +38,7 @@ import { readSetting, writeSetting, writeEnvLine, userCommonPath, userProfilePat
 import { MIN_PODMAN_VM_MB } from "../lib/doctor.mjs";
 import { liveLeases } from "../lib/slots.mjs";
 import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
-import { recordProbeSuccess } from "../lib/health.mjs";
+import { recordProbeSuccess, parseOpenclawAuthProfiles } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
 import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
 import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
@@ -1178,10 +1178,11 @@ async function ensureVendorAuth(rl, vendorKey) {
   let status = readLoginStatus(vendorKey);
   if (!status.loggedIn) {
     console.log(c.yellow(`You're not logged in to ${vendor.cli.bin} yet -- this opens its own login (a browser or a device code).`));
-    if (!(await confirm(rl, "Log in now?"))) return { ok: false };
-    runInteractive(vendor.cli.bin, vendor.cli.loginArgs);
+    if (!(await confirm(rl, "Log in now?"))) { console.log(c.red(`✗ Sign-in canceled. Retry with \`nomarmy agents add subscription ${vendorKey}\`.`)); return { ok: false }; }
+    const loginOk = runInteractive(vendor.cli.bin, vendor.cli.loginArgs);
+    if (!loginOk) { console.log(c.red(`✗ ${vendor.cli.bin} sign-in failed or was canceled. Retry with \`nomarmy agents add subscription ${vendorKey}\`.`)); return { ok: false }; }
     status = readLoginStatus(vendorKey);
-    if (!status.loggedIn) { console.log(c.red(`✗ Still not logged in to ${vendor.cli.bin}.`)); return { ok: false }; }
+    if (!status.loggedIn) { console.log(c.red(`✗ Still not logged in to ${vendor.cli.bin}. Retry with \`nomarmy agents add subscription ${vendorKey}\`.`)); return { ok: false }; }
   }
   console.log(c.green(`✓ Logged in to ${vendor.cli.bin}${status.email ? ` as ${status.email}` : ""}${status.subscriptionType ? ` (${status.subscriptionType})` : ""}.`));
 
@@ -1225,11 +1226,24 @@ async function ensureVendorAuth(rl, vendorKey) {
   return { ok: true, email: status.email };
 }
 
+function hasUsableOpenclawAuthProfile(provider) {
+  // Same OpenClaw command and JSON shape used by health's login-expiry check.
+  const result = runQuiet(openclawCmd(), ["models", "auth", "list", "--json"]);
+  if (!result.ok) return false;
+  const profiles = parseOpenclawAuthProfiles(result.stdout);
+  return profiles?.some((profile) => {
+    if (profile.provider !== provider) return false;
+    if (profile.expiresAt == null) return true;
+    const expires = Date.parse(profile.expiresAt);
+    return Number.isFinite(expires) && expires > Date.now();
+  }) ?? false;
+}
+
 function catalogModelsFor(provider) {
   return parseCatalogModels(runQuiet(openclawCmd(), ["models", "list", "--refresh"]).out, provider);
 }
 
-/** One real, one-token completion through OpenClaw -- the only proof a credential actually works. */
+/** One real, one-token completion through OpenClaw to test a model. */
 // Why the last probeWorker() call failed, in the vendor's words when it said.
 let lastProbeFailure = null;
 function probeWorker(provider, model) {
@@ -1279,8 +1293,8 @@ function reapProbeSandbox(stateDir) {
 /**
  * OpenClaw's own provider login, for the vendors whose plugin wants one on
  * top of the vendor CLI's login (Claude doesn't: OpenClaw reuses the CLI
- * session directly). Only ever run when a probe or catalog lookup has
- * already shown it's needed -- never preemptively.
+ * session directly). Run when the catalog or auth-profile check shows
+ * linking is needed, never preemptively.
  */
 function openclawProviderLogin(vendor) {
   const provider = vendor.credential.loginProvider ?? vendor.provider;
@@ -1295,8 +1309,9 @@ function openclawProviderLogin(vendor) {
 // One list in ~/.config/nomarmy/agents.yml (lib/agents.mjs): the local
 // model, api keys, and individual subscriptions. `add` walks through what
 // each kind needs -- a key registered with OpenClaw, or the vendor's own
-// login -- and proves it with a real test call before saving. Changes apply
-// to the next job; the MCP server re-reads the file when it changes.
+// login -- and tests the selected model before saving, with an explicit
+// opt-in to save after a failed model call. Changes apply to the next job;
+// the MCP server re-reads the file when it changes.
 
 function loadAgentsOrExit() {
   try { return loadAgents(globalConfigDir()); }
@@ -1514,6 +1529,14 @@ async function addApiAgent(rl, agents) {
   console.log(c.dim(`Use it with \`nomarmy army assign <role> ${name}\` or agent: "${name}" on a job.`));
 }
 
+const OWNER_EMAIL_RE = /^[^@\s]+@[^@\s]+$/;
+function validOwnerEmail(email) { return typeof email === "string" && OWNER_EMAIL_RE.test(email); }
+function gitUserEmail() {
+  const result = spawnSync("git", ["config", "user.email"], { cwd: repoDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  const email = result.status === 0 ? result.stdout.trim() : "";
+  return validOwnerEmail(email) ? email : "";
+}
+
 const SUBSCRIPTION_AGENT_DEFAULT_NAMES = { claude: "claude", codex: "codex", meta: "muse" };
 
 async function addSubscriptionAgent(rl, agents) {
@@ -1537,7 +1560,7 @@ async function addSubscriptionAgent(rl, agents) {
   }
 
   const auth = await ensureVendorAuth(rl, vendorKey);
-  if (!auth.ok) { console.log(c.dim("\nStopped; nothing was written.")); return; }
+  if (!auth.ok) { console.log(c.dim("\nStopped; nothing was written.")); process.exitCode = 1; return; }
 
   console.log(`\n${c.bold("→")} Models`);
   const needsOpenclawLogin = vendor.credential.kind === "openclaw-login";
@@ -1545,7 +1568,18 @@ async function addSubscriptionAgent(rl, agents) {
   let models = catalogModelsFor(vendor.provider);
   if (!models.length && needsOpenclawLogin) {
     linkedOpenclaw = openclawProviderLogin(vendor);
+    if (!linkedOpenclaw) { console.log(c.red(`✗ Sign-in failed or was canceled. Retry with \`nomarmy agents add subscription ${vendorKey}\`.`)); process.exitCode = 1; return; }
     models = catalogModelsFor(vendor.provider);
+  }
+  // Catalog entries can be cached, and a particular model can refuse a
+  // working login. Check OpenClaw's auth profile before asking for details.
+  if (needsOpenclawLogin && !hasUsableOpenclawAuthProfile(vendor.provider)) {
+    if (linkedOpenclaw || !openclawProviderLogin(vendor) || !hasUsableOpenclawAuthProfile(vendor.provider)) {
+      console.log(c.red(`✗ Sign-in has no usable auth profile. Retry with \`nomarmy agents add subscription ${vendorKey}\`.`));
+      process.exitCode = 1;
+      return;
+    }
+    linkedOpenclaw = true;
   }
   // The agent is the account; the model is only a default. Roles pick
   // their own model (or "auto" for the General to choose per job).
@@ -1554,27 +1588,29 @@ async function addSubscriptionAgent(rl, agents) {
   const pick = (await rl.question(c.bold(`Default model, optional${models.length ? " (a number or an id)" : ""}; blank = pick per role: `))).trim();
   const model = /^\d+$/.test(pick) && models.length ? models[Number(pick) - 1] : pick || null;
   if (pick && !model) throw new Error(`Not a valid choice: "${pick}".`);
-  // The test call needs some model; it proves the login, not the choice.
+  // The test call needs some model; it checks the model, not the login.
   const probeModel = model ?? models[0] ?? vendor.defaultModel;
 
-  const knownOwners = [...new Set(Object.values(agents).filter((a) => a.kind === "subscription").map((a) => a.owner))];
-  const ownerDefault = auth.email ?? (knownOwners.length === 1 ? knownOwners[0] : "");
-  const owner = (await rl.question(c.bold(`Whose subscription is this${ownerDefault ? ` [${ownerDefault}]` : ""}: `))).trim() || ownerDefault;
-  if (!owner) throw new Error("An owner is required -- every job on this agent must name them in on_behalf_of.");
+  const ownerDefault = validOwnerEmail(auth.email) ? auth.email : gitUserEmail();
+  const owner = await askUntilValid(rl, `Whose subscription is this${ownerDefault ? ` [${ownerDefault}]` : ""}: `, {
+    allowEmpty: Boolean(ownerDefault), fallback: ownerDefault, pattern: OWNER_EMAIL_RE,
+    invalidMessage: "enter an email address (one @, no spaces).",
+  });
 
   const name = await askAgentName(rl, agents, SUBSCRIPTION_AGENT_DEFAULT_NAMES[vendorKey] ?? vendorKey);
   if (!name) { console.log(c.dim("Stopped; nothing was written.")); return; }
 
   console.log(`\n${c.bold("→")} Test call`);
-  let works = probeModel ? probeWorker(vendor.provider, probeModel) : false;
-  if (!works && needsOpenclawLogin && !linkedOpenclaw && probeModel) {
-    openclawProviderLogin(vendor);
-    works = probeWorker(vendor.provider, probeModel);
-  }
+  const works = probeModel ? probeWorker(vendor.provider, probeModel) : false;
   if (works) console.log(c.green(`✓ ${vendor.provider}/${probeModel} answered a real test prompt.`));
   else {
-    console.log(c.red(probeModel ? `✗ A real test prompt to ${vendor.provider}/${probeModel} didn't come back.` : "✗ No model to make a test call with."));
-    if (!(await confirm(rl, "Save the agent anyway?", { defaultYes: false }))) { console.log(c.dim("Stopped; nothing was written.")); return; }
+    console.log(c.yellow(probeModel ? `⚠ The login works, but ${vendor.provider}/${probeModel} didn't answer a real test prompt.` : "⚠ The login works, but no model is available for a test call."));
+    console.log(c.dim(`You can retry later with \`nomarmy agents update ${name} --probe\`.`));
+    if (!(await confirm(rl, "Save the agent anyway?", { defaultYes: false }))) {
+      console.log(c.dim("Stopped; nothing was written."));
+      process.exitCode = 1;
+      return;
+    }
   }
   const written = saveAgents({ ...agents, [name]: { kind: "subscription", provider: vendor.provider, owner, ...(model ? { model } : {}) } });
   savedAgentMessage(name, written);
@@ -1587,6 +1623,7 @@ async function cmdAgentsAddJson() {
   const kind = value("kind") ?? (AGENT_KINDS.includes(argv[2]) ? argv[2] : null);
   if (!name || !kind) throw new Error(`--json requires --name <agent> and --kind <${AGENT_KINDS.join("|")}>, plus that kind's fields (see \`nomarmy help\`).`);
   if (RESERVED_AGENT_NAMES.includes(name)) throw new Error(`"${name}" is a reserved name.`);
+  if (kind === "subscription" && value("owner") !== null && !validOwnerEmail(value("owner"))) throw new Error("--owner must be an email address (one @, no spaces).");
   const agent = { kind };
   const num = (flagName) => (value(flagName) !== null ? Number(value(flagName)) : undefined);
   if (kind === "local") {
@@ -1612,6 +1649,29 @@ async function cmdAgentsAddJson() {
   return out({ written: agentsConfigPath(globalConfigDir()), name, agent: saved, ...(kind === "api" ? { registered, mcpUpdated } : {}) });
 }
 
+// A probe-only update checks credentials without changing agents.yml.
+function probeConfiguredAgent(name, agent) {
+  const provider = agentProviderId(agent);
+  const model = agent.model;
+  if (!provider || !model) {
+    console.log(c.red(`✗ ${name}  ${provider ?? agent.kind}/${model ?? "no default model"}  cannot probe without a provider and default model`));
+    process.exitCode = 1;
+    return;
+  }
+  const start = performance.now();
+  const ok = probeWorker(provider, model);
+  const elapsed = ((performance.now() - start) / 1000).toFixed(1);
+  console.log(ok ? c.green(`✓ ${name}  ${provider}/${model}  answered in ${elapsed}s`)
+    : c.red(`✗ ${name}  ${provider}/${model}  failed: ${lastProbeFailure ?? "no answer"}`));
+  if (!ok) process.exitCode = 1;
+}
+
+function cmdAgentsProbeAll() {
+  const agents = fileAgentsOrExit();
+  if (!Object.keys(agents).length) { console.log("No configured agents to probe."); return; }
+  for (const [name, agent] of Object.entries(agents)) probeConfiguredAgent(name, agent);
+}
+
 // --- update ---
 
 // Kind, provider and owner are fixed: changing any of them is a different
@@ -1620,7 +1680,8 @@ async function cmdAgentsAddJson() {
 // test call `add` makes (interactive always; --json only with --probe,
 // since it spends a real request on the subscription).
 async function cmdAgentsUpdate() {
-  const name = argv[2];
+  const name = argv[2]?.startsWith("--") ? null : argv[2];
+  if (!name && flag("probe")) return cmdAgentsProbeAll();
   if (!name) throw new Error("Usage: nomarmy agents update <name> [--model <m>|--no-model] [--slot coder|gpt] [--auth-env <NAME>] [--base-url <url>] [--max-concurrent <n>] [--context-window <tokens>] [--thinking [low|medium|high]|--no-thinking] [--probe]");
   const agents = fileAgentsOrExit();
   const current = Object.prototype.hasOwnProperty.call(agents, name) ? agents[name] : name === "local" ? { ...BUILTIN_LOCAL_AGENT } : undefined;
@@ -1646,7 +1707,7 @@ async function cmdAgentsUpdate() {
       throw new Error("Kind, provider and owner can't be changed -- that's a different agent. Use `nomarmy agents add`.");
     }
     probe = flag("probe") && current.kind === "subscription";
-    if (!Object.keys(changes).length) throw new Error("Nothing to update -- pass at least one field flag (see `nomarmy agents update` usage).");
+    if (!Object.keys(changes).length && !probe) throw new Error("Nothing to update -- pass at least one field flag (see `nomarmy agents update` usage).");
   } else {
     if (!process.stdin.isTTY) throw new Error("nomarmy agents update needs an interactive terminal, or the flags to change (e.g. --max-concurrent 3).");
     const rl = createInterface({ input, output });
@@ -1693,6 +1754,7 @@ async function cmdAgentsUpdate() {
     if (!Object.keys(changes).length) { console.log(c.dim("\nNothing changed.")); return; }
   }
 
+  if (probe && !Object.keys(changes).length) { probeConfiguredAgent(name, current); return; }
   if (probe && changes.model && !probeWorker(current.provider, changes.model)) {
     out({ error: `a real test prompt to ${current.provider}/${changes.model} didn't come back -- nothing was written` });
     process.exit(1);
