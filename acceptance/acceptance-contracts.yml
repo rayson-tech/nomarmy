@@ -1,0 +1,52 @@
+# Phase 1 promises for acceptance contracts.
+feature: "Acceptance contracts: each feature's promises in the repo, checked per criterion"
+criteria:
+  - id: ACC-1
+    text: A contract is validated against a schema, and errors name the contract file and the criterion id
+    proven_by:
+      - file: tests/acceptance.test.mjs
+        test: acceptance schema validates fields and reports file and criterion IDs
+    status: met
+
+  - id: ACC-2
+    text: nomarmy acceptance check runs only each criterion's tests and reports met, broken (with the failing test) or unproven per criterion; --json gives the same as data
+    proven_by:
+      - file: tests/acceptance.test.mjs
+        test: acceptance runs literal names with punctuation and loop prefixes only
+      - file: tests/acceptance.test.mjs
+        test: acceptance detects failing tests and zero executed tests
+      - file: tests/acceptance.test.mjs
+        test: acceptance CLI JSON and plain output agree; strict fails on unproven
+    status: met
+
+  - id: ACC-3
+    text: A referenced test that was renamed or deleted is reported as missing, naming the criterion and the old name, and fails the check
+    proven_by:
+      - file: tests/acceptance.test.mjs
+        test: acceptance detects renamed tests and deleted files before running
+      - file: tests/acceptance.test.mjs
+        test: acceptance CLI fails broken and missing criteria and honors explicit files
+    status: met
+
+  - id: ACC-4
+    text: The check exits 1 on broken or missing; unproven passes unless --strict
+    proven_by:
+      - file: tests/acceptance.test.mjs
+        test: acceptance CLI fails broken and missing criteria and honors explicit files
+      - file: tests/acceptance.test.mjs
+        test: acceptance CLI JSON and plain output agree; strict fails on unproven
+    status: met
+
+  - id: ACC-5
+    text: CI runs the check on every platform job
+    proven_by:
+      - file: tests/acceptance.test.mjs
+        test: acceptance CI checks every platform job
+    status: met
+
+  - id: ACC-6
+    text: The Windows feature's contract checks as 13 met and 1 unproven
+    proven_by:
+      - file: tests/acceptance.test.mjs
+        test: acceptance real Windows contract returns 13 met and only WIN-12 unproven
+    status: met
