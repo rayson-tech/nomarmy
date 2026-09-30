@@ -496,6 +496,20 @@ test("scan --json against empty temp directory returns evidence with zero counts
   }
 });
 
+test("scan --check renders drift as human text without object coercion", () => {
+  const repo = mkdtempSync(path.join(tmpdir(), "nomarmy-scan-drift-"));
+  try {
+    writeConfig(repo, 'verification:\n  quick:\n    commands: ["echo ok"]\n');
+    fs.writeFileSync(path.join(repo, "package.json"), '{"name":"scan-drift","scripts":{"test":"node --test"}}\n');
+    const result = runCLI(["scan", "--check", "--repo", repo]);
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.stdout, "Comparing .nomarmy.yml against repository evidence\n\nDrift: 1 missing from config, 0 missing from repo (1 total)\n\n  repo has, config omits:  commandKinds: test\n");
+    assert.doesNotMatch(result.stdout, /\[object Object\]/);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 // --------------------------------------------------------------------------
 // nomarmy army <init|assign|show>
 // --------------------------------------------------------------------------
@@ -512,6 +526,61 @@ function runArmyCLI(root, repo, args, extraEnv = {}) {
     return { exitCode: error.status ?? 1, stdout: error.stdout ?? "", stderr: error.stderr ?? "" };
   }
 }
+
+test("army show outside a repository reports global settings without a root project layer", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const shown = runArmyCLI(root, "/", ["show"]);
+    assert.equal(shown.exitCode, 0, shown.stderr);
+    assert.match(shown.stdout, /^🪖 nomArmy\nno repository here: showing global settings\n/);
+    assert.doesNotMatch(shown.stdout, /🪖 nomArmy\s+\(\/\)/);
+    assert.doesNotMatch(shown.stdout, /^  (project|local)\s/m);
+    const machine = runArmyCLI(root, "/", ["show", "--json"]);
+    assert.equal(machine.exitCode, 0, machine.stderr);
+    assert.deepEqual(JSON.parse(machine.stdout).layers.map((layer) => layer.layer), ["global"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("army assign rejects roles absent from all rosters and allows cross-layer overrides", () => {
+  const root = scratchNomarmyRoot();
+  const repo = mkdtempSync(path.join(tmpdir(), "nomarmy-army-assign-empty-"));
+  try {
+    for (const layer of ["--local", "--project"]) {
+      const result = runArmyCLI(root, repo, ["assign", "sr-dev", "codex", layer]);
+      assert.equal(result.exitCode, 1);
+      assert.match(result.stderr, /Role "sr-dev" is not defined in any army roster\. Run nomarmy army init first\./);
+    }
+    assert.equal(fs.existsSync(path.join(repo, ".nomarmy.local.yml")), false);
+    assert.equal(fs.existsSync(path.join(repo, ".nomarmy.yml")), false);
+    assert.equal(runArmyCLI(root, repo, ["init", "--json"]).exitCode, 0);
+    const override = runArmyCLI(root, repo, ["assign", "sr-dev", "codex", "--project"]);
+    assert.equal(override.exitCode, 0, override.stderr);
+    assert.match(fs.readFileSync(path.join(repo, ".nomarmy.yml"), "utf8"), /sr-dev:\n\s+agent: codex/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("army usage errors exit 1 and assignment flags may precede positionals", () => {
+  const root = scratchNomarmyRoot();
+  const repo = mkdtempSync(path.join(tmpdir(), "nomarmy-army-usage-"));
+  try {
+    for (const args of [["assign", "sr-dev"], ["assign", "sr-dev", "codex", "extra"], ["general"], ["assign", "--bogus", "sr-dev", "codex"]]) {
+      const result = runArmyCLI(root, repo, args);
+      assert.equal(result.exitCode, 1, args.join(" "));
+    }
+    assert.equal(runArmyCLI(root, repo, ["init", "--json"]).exitCode, 0);
+    const assigned = runArmyCLI(root, repo, ["assign", "--local", "sr-dev", "codex"]);
+    assert.equal(assigned.exitCode, 0, assigned.stderr);
+    assert.match(fs.readFileSync(path.join(repo, ".nomarmy.local.yml"), "utf8"), /sr-dev:\n\s+agent: codex/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
 
 test("army show prints each agent's usage reading", () => {
   const root = scratchNomarmyRoot();
@@ -670,6 +739,10 @@ test("army assign checks a named model: listed is accepted, unlisted-and-failing
   const repo = mkdtempSync(path.join(tmpdir(), "nomarmy-army-repo-"));
   try {
     runAgentsCLI(root, ["add", "--json", "--name", "codex", "--kind", "subscription", "--provider", "openai", "--owner", "you@example.com"]);
+    const absent = runArmyCLI(root, repo, ["assign", "sr-dev", "codex", "--no-check", "--json"]);
+    assert.equal(absent.exitCode, 1);
+    assert.match(JSON.parse(absent.stdout).error, /Role "sr-dev" is not defined in any army roster/);
+    assert.equal(runArmyCLI(root, repo, ["init", "--json"]).exitCode, 0);
     const fake = withCatalogOpenclaw(root);
     const ok = runArmyCLI(root, repo, ["assign", "sr-dev", "codex", "gpt-6-astra", "--json"], fake);
     assert.equal(ok.exitCode, 0, ok.stdout);
@@ -682,7 +755,7 @@ test("army assign checks a named model: listed is accepted, unlisted-and-failing
     const listedButBroken = runArmyCLI(root, repo, ["assign", "pm", "codex", "gpt-6-broken", "--json"], fake);
     assert.notEqual(listedButBroken.exitCode, 0);
     assert.match(JSON.parse(listedButBroken.stdout).error, /is listed in OpenClaw's catalog, but a real test call to it failed/);
-    assert.equal(JSON.parse(runArmyCLI(root, repo, ["show", "--json"]).stdout).roles.po, undefined, "the refused assignment wrote nothing");
+    assert.equal(JSON.parse(runArmyCLI(root, repo, ["show", "--json"]).stdout).roles.po.agent, "local", "the refused assignment wrote nothing");
     assert.equal(runArmyCLI(root, repo, ["assign", "po", "codex", "gpt-6-sol", "--no-check", "--json"], fake).exitCode, 0);
     assert.equal(JSON.parse(runArmyCLI(root, repo, ["assign", "pm", "codex", "auto", "--json"], fake).stdout).modelCheck.status, "none");
   } finally {
