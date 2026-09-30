@@ -11,6 +11,7 @@ import http from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import test from "node:test";
+import { PINNED_OPENCLAW_VERSION } from "../lib/openclaw-install.mjs";
 
 import { fileURLToPath } from "node:url";
 
@@ -919,13 +920,17 @@ function runInteractiveAgents(root, args, replies, env = {}) {
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "", stderr = "", sent = 0;
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`Interactive agents stalled after ${sent}/${replies.length} replies. Output: ${stdout}`));
+    }, 12000);
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
       if (sent < replies.length && stdout.includes(replies[sent][0])) child.stdin.write(replies[sent++][1] + "\n");
     });
     child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ exitCode: code, stdout, stderr, sent }));
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
+    child.on("close", (code) => { clearTimeout(timer); resolve({ exitCode: code, stdout, stderr, sent }); });
   });
 }
 
@@ -993,11 +998,32 @@ test("agents update --probe probes every configured agent, prints outcomes and f
 function fakeCodexSubscription(root, profiles, probeOk = false) {
   fakeExecutable(root, "codex", `const a=process.argv.slice(2).join(" "); if(a==="--version") process.exit(0); if(a==="login status") console.log("Logged in using ChatGPT");`);
   const probeMarker = path.join(root, "probed");
-  const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2).join(" "); if(a==="--version") console.log("OpenClaw 2026.9.5"); if(a.startsWith("plugins inspect")) process.exit(0); if(a.startsWith("models list")) console.log("openai/gpt-6-astra   text"); if(a==="models auth list --json") console.log(JSON.stringify({profiles:${JSON.stringify(profiles)}})); if(a.startsWith("models auth login")) process.exit(0); if(a.startsWith("agent exec")) { fs.writeFileSync(${JSON.stringify(probeMarker)}, "called"); console.log(JSON.stringify(${JSON.stringify(probeOk ? {ok:true,final:"ok"} : {ok:false,message:"model refused"})})); }`);
+  const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2).join(" "); if(a==="--version") console.log("OpenClaw ${PINNED_OPENCLAW_VERSION}"); if(a.startsWith("plugins inspect")) console.log(JSON.stringify({plugin:{enabled:true,builtWithOpenClawVersion:"${PINNED_OPENCLAW_VERSION}"}})); if(a==="update status --json") console.log(JSON.stringify({migrationWarnings:[]})); if(a.startsWith("models list")) console.log("openai/gpt-6-astra   text"); if(a==="models auth list --json") console.log(JSON.stringify({profiles:${JSON.stringify(profiles)}})); if(a.startsWith("models auth login")) process.exit(0); if(a.startsWith("agent exec")) { fs.writeFileSync(${JSON.stringify(probeMarker)}, "called"); console.log(JSON.stringify(${JSON.stringify(probeOk ? {ok:true,final:"ok"} : {ok:false,message:"model refused"})})); }`);
   return { env: { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") }, probeMarker };
 }
 
 const codexDetails = [["Default model", ""], ["Whose subscription is this", "person@example.com"], ["Agent name", ""]];
+
+test("agents add subscription declines an older OpenClaw without running npm or writing config", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    fakeExecutable(root, "codex", `const a=process.argv.slice(2).join(" "); if(a==="--version") process.exit(0); if(a==="login status") console.log("Logged in using ChatGPT");`);
+    const openclaw = fakeExecutable(root, "fake-openclaw", `if(process.argv.slice(2).join(" ")==="--version") console.log("OpenClaw 2026.9.5");`);
+    const npmMarker = path.join(root, "npm-called");
+    fakeExecutable(root, "npm", `import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(npmMarker)}, process.argv.slice(2).join(" "));`);
+    const result = await runInteractiveAgents(root, ["add", "subscription", "codex"], [["Apply these changes?", "no"]], {
+      NOMARMY_OPENCLAW_CMD: openclaw,
+    });
+    assert.equal(result.exitCode, 1, result.stdout);
+    assert.equal(result.sent, 1, result.stdout);
+    assert.match(result.stdout, /Upgrade OpenClaw to 2026\.9\.6/);
+    assert.match(result.stdout, /Apply these changes\? \[y\/N\]/);
+    assert.match(result.stdout, /No changes made\./);
+    assert.doesNotMatch(result.stdout, /Default model|Whose subscription|Agent name/);
+    assert.equal(fs.existsSync(npmMarker), false);
+    assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("agents add subscription codex stops before prompts when OpenClaw auth profile is missing", ttyOnly, async () => {
   const root = scratchNomarmyRoot();
