@@ -38,7 +38,7 @@ import { readSetting, writeSetting, writeEnvLine, userCommonPath, userProfilePat
 import { MIN_PODMAN_VM_MB } from "../lib/doctor.mjs";
 import { liveLeases } from "../lib/slots.mjs";
 import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
-import { recordProbeSuccess } from "../lib/health.mjs";
+import { recordProbeSuccess, parseOpenclawAuthProfiles } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
 import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
 import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
@@ -1226,11 +1226,24 @@ async function ensureVendorAuth(rl, vendorKey) {
   return { ok: true, email: status.email };
 }
 
+function hasUsableOpenclawAuthProfile(provider) {
+  // Same OpenClaw command and JSON shape used by health's login-expiry check.
+  const result = runQuiet(openclawCmd(), ["models", "auth", "list", "--json"]);
+  if (!result.ok) return false;
+  const profiles = parseOpenclawAuthProfiles(result.stdout);
+  return profiles?.some((profile) => {
+    if (profile.provider !== provider) return false;
+    if (profile.expiresAt == null) return true;
+    const expires = Date.parse(profile.expiresAt);
+    return Number.isFinite(expires) && expires > Date.now();
+  }) ?? false;
+}
+
 function catalogModelsFor(provider) {
   return parseCatalogModels(runQuiet(openclawCmd(), ["models", "list", "--refresh"]).out, provider);
 }
 
-/** One real, one-token completion through OpenClaw -- the only proof a credential actually works. */
+/** One real, one-token completion through OpenClaw to test a model. */
 // Why the last probeWorker() call failed, in the vendor's words when it said.
 let lastProbeFailure = null;
 function probeWorker(provider, model) {
@@ -1280,8 +1293,8 @@ function reapProbeSandbox(stateDir) {
 /**
  * OpenClaw's own provider login, for the vendors whose plugin wants one on
  * top of the vendor CLI's login (Claude doesn't: OpenClaw reuses the CLI
- * session directly). Only ever run when a probe or catalog lookup has
- * already shown it's needed -- never preemptively.
+ * session directly). Run when the catalog or auth-profile check shows
+ * linking is needed, never preemptively.
  */
 function openclawProviderLogin(vendor) {
   const provider = vendor.credential.loginProvider ?? vendor.provider;
@@ -1296,8 +1309,9 @@ function openclawProviderLogin(vendor) {
 // One list in ~/.config/nomarmy/agents.yml (lib/agents.mjs): the local
 // model, api keys, and individual subscriptions. `add` walks through what
 // each kind needs -- a key registered with OpenClaw, or the vendor's own
-// login -- and proves it with a real test call before saving. Changes apply
-// to the next job; the MCP server re-reads the file when it changes.
+// login -- and tests the selected model before saving, with an explicit
+// opt-in to save after a failed model call. Changes apply to the next job;
+// the MCP server re-reads the file when it changes.
 
 function loadAgentsOrExit() {
   try { return loadAgents(globalConfigDir()); }
@@ -1557,14 +1571,15 @@ async function addSubscriptionAgent(rl, agents) {
     if (!linkedOpenclaw) { console.log(c.red(`✗ Sign-in failed or was canceled. Retry with \`nomarmy agents add subscription ${vendorKey}\`.`)); process.exitCode = 1; return; }
     models = catalogModelsFor(vendor.provider);
   }
-  // Catalog entries can be cached without a usable auth profile. Prove the
-  // login before asking for model, owner or name.
-  if (needsOpenclawLogin) {
-    const loginModel = models[0] ?? vendor.defaultModel;
-    if (!loginModel || !probeWorker(vendor.provider, loginModel)) {
-      if (!linkedOpenclaw && openclawProviderLogin(vendor) && loginModel && probeWorker(vendor.provider, loginModel)) linkedOpenclaw = true;
-      else { console.log(c.red(`✗ Sign-in has no usable auth profile. Retry with \`nomarmy agents add subscription ${vendorKey}\`.`)); process.exitCode = 1; return; }
+  // Catalog entries can be cached, and a particular model can refuse a
+  // working login. Check OpenClaw's auth profile before asking for details.
+  if (needsOpenclawLogin && !hasUsableOpenclawAuthProfile(vendor.provider)) {
+    if (linkedOpenclaw || !openclawProviderLogin(vendor) || !hasUsableOpenclawAuthProfile(vendor.provider)) {
+      console.log(c.red(`✗ Sign-in has no usable auth profile. Retry with \`nomarmy agents add subscription ${vendorKey}\`.`));
+      process.exitCode = 1;
+      return;
     }
+    linkedOpenclaw = true;
   }
   // The agent is the account; the model is only a default. Roles pick
   // their own model (or "auto" for the General to choose per job).
@@ -1573,7 +1588,7 @@ async function addSubscriptionAgent(rl, agents) {
   const pick = (await rl.question(c.bold(`Default model, optional${models.length ? " (a number or an id)" : ""}; blank = pick per role: `))).trim();
   const model = /^\d+$/.test(pick) && models.length ? models[Number(pick) - 1] : pick || null;
   if (pick && !model) throw new Error(`Not a valid choice: "${pick}".`);
-  // The test call needs some model; it proves the login, not the choice.
+  // The test call needs some model; it checks the model, not the login.
   const probeModel = model ?? models[0] ?? vendor.defaultModel;
 
   const ownerDefault = validOwnerEmail(auth.email) ? auth.email : gitUserEmail();
@@ -1586,17 +1601,16 @@ async function addSubscriptionAgent(rl, agents) {
   if (!name) { console.log(c.dim("Stopped; nothing was written.")); return; }
 
   console.log(`\n${c.bold("→")} Test call`);
-  let works = probeModel ? probeWorker(vendor.provider, probeModel) : false;
-  if (!works && needsOpenclawLogin && !linkedOpenclaw && probeModel) {
-    if (!openclawProviderLogin(vendor)) { console.log(c.red(`✗ Sign-in failed or was canceled. Retry with \`nomarmy agents add subscription ${vendorKey}\`.`)); process.exitCode = 1; return; }
-    works = probeWorker(vendor.provider, probeModel);
-  }
+  const works = probeModel ? probeWorker(vendor.provider, probeModel) : false;
   if (works) console.log(c.green(`✓ ${vendor.provider}/${probeModel} answered a real test prompt.`));
   else {
-    console.log(c.red(probeModel ? `✗ A real test prompt to ${vendor.provider}/${probeModel} didn't come back.` : "✗ No model to make a test call with."));
-    console.log(c.red(`Sign-in is not usable. Retry with \`nomarmy agents add subscription ${vendorKey}\`.`));
-    process.exitCode = 1;
-    return;
+    console.log(c.yellow(probeModel ? `⚠ The login works, but ${vendor.provider}/${probeModel} didn't answer a real test prompt.` : "⚠ The login works, but no model is available for a test call."));
+    console.log(c.dim(`You can retry later with \`nomarmy agents update ${name} --probe\`.`));
+    if (!(await confirm(rl, "Save the agent anyway?", { defaultYes: false }))) {
+      console.log(c.dim("Stopped; nothing was written."));
+      process.exitCode = 1;
+      return;
+    }
   }
   const written = saveAgents({ ...agents, [name]: { kind: "subscription", provider: vendor.provider, owner, ...(model ? { model } : {}) } });
   savedAgentMessage(name, written);

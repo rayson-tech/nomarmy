@@ -917,17 +917,70 @@ test("agents update --probe probes every configured agent, prints outcomes and f
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("agents add subscription codex stops before prompts when OpenClaw sign-in has no usable profile", ttyOnly, async () => {
+function fakeCodexSubscription(root, profiles, probeOk = false) {
+  fakeExecutable(root, "codex", `const a=process.argv.slice(2).join(" "); if(a==="--version") process.exit(0); if(a==="login status") console.log("Logged in using ChatGPT");`);
+  const probeMarker = path.join(root, "probed");
+  const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2).join(" "); if(a==="--version") console.log("OpenClaw 2026.9.5"); if(a.startsWith("plugins inspect")) process.exit(0); if(a.startsWith("models list")) console.log("openai/gpt-6-astra   text"); if(a==="models auth list --json") console.log(JSON.stringify({profiles:${JSON.stringify(profiles)}})); if(a.startsWith("models auth login")) process.exit(0); if(a.startsWith("agent exec")) { fs.writeFileSync(${JSON.stringify(probeMarker)}, "called"); console.log(JSON.stringify(${JSON.stringify(probeOk ? {ok:true,final:"ok"} : {ok:false,message:"model refused"})})); }`);
+  return { env: { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") }, probeMarker };
+}
+
+const codexDetails = [["Default model", ""], ["Whose subscription is this", "person@example.com"], ["Agent name", ""]];
+
+test("agents add subscription codex stops before prompts when OpenClaw auth profile is missing", ttyOnly, async () => {
   const root = scratchNomarmyRoot();
   try {
-    fakeExecutable(root, "codex", `const a=process.argv.slice(2).join(" "); if(a==="--version") process.exit(0); if(a==="login status") console.log("Logged in using ChatGPT");`);
-    const openclaw = fakeExecutable(root, "fake-openclaw", `const a=process.argv.slice(2).join(" "); if(a==="--version") console.log("OpenClaw 2026.9.5"); if(a.startsWith("plugins inspect")) process.exit(0); if(a.startsWith("models list")) console.log("openai/gpt-6-astra   text"); if(a.startsWith("models auth login")) process.exit(0); if(a.startsWith("agent exec")) console.log(JSON.stringify({ok:false,message:"no auth profile"}));`);
-    const result = await runInteractiveAgents(root, ["add", "subscription", "codex"], [["Default model", ""], ["Whose subscription is this", "person@example.com"], ["Agent name", ""], ["Save the agent anyway?", "n"]], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+    const { env, probeMarker } = fakeCodexSubscription(root, []);
+    const result = await runInteractiveAgents(root, ["add", "subscription", "codex"], codexDetails, env);
     assert.equal(result.exitCode, 1, result.stdout);
     assert.equal(result.sent, 0);
     assert.match(result.stdout, /no usable auth profile.*nomarmy agents add subscription codex/);
-    assert.doesNotMatch(result.stdout, /Default model|Whose subscription|Agent name/);
+    assert.doesNotMatch(result.stdout, /Default model|Whose subscription|Agent name|Save the agent anyway/);
+    assert.equal(fs.existsSync(probeMarker), false);
     assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents add subscription codex stops before prompts when OpenClaw auth profile is expired", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { env, probeMarker } = fakeCodexSubscription(root, [{ id: "openai:expired", provider: "openai", type: "oauth", expiresAt: "2020-01-01T00:00:00.000Z" }]);
+    const result = await runInteractiveAgents(root, ["add", "subscription", "codex"], codexDetails, env);
+    assert.equal(result.exitCode, 1, result.stdout);
+    assert.equal(result.sent, 0);
+    assert.match(result.stdout, /no usable auth profile.*nomarmy agents add subscription codex/);
+    assert.doesNotMatch(result.stdout, /Default model|Whose subscription|Agent name|Save the agent anyway/);
+    assert.equal(fs.existsSync(probeMarker), false);
+    assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents add subscription codex offers default-no save when profile works but model fails", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { env, probeMarker } = fakeCodexSubscription(root, [{ id: "openai:working", provider: "openai", type: "oauth", expiresAt: "2099-01-01T00:00:00.000Z" }]);
+    const result = await runInteractiveAgents(root, ["add", "subscription", "codex"], [...codexDetails, ["Save the agent anyway?", ""]], env);
+    assert.equal(result.exitCode, 1, result.stdout);
+    assert.equal(result.sent, 4, result.stdout);
+    assert.match(result.stdout, /login works, but openai\/gpt-6-astra didn't answer/);
+    assert.match(result.stdout, /nomarmy agents update codex --probe/);
+    assert.match(result.stdout, /Save the agent anyway\? \[y\/N\]/);
+    assert.doesNotMatch(result.stdout, /Sign-in has no usable auth profile/);
+    assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
+    assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents add subscription codex saves on yes despite a failed model call", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { env, probeMarker } = fakeCodexSubscription(root, [{ id: "openai:working", provider: "openai", type: "oauth" }]);
+    const result = await runInteractiveAgents(root, ["add", "subscription", "codex"], [...codexDetails, ["Save the agent anyway?", "yes"]], env);
+    assert.equal(result.exitCode, 0, result.stdout);
+    assert.equal(result.sent, 4, result.stdout);
+    assert.match(result.stdout, /login works, but openai\/gpt-6-astra didn't answer/);
+    assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
+    assert.deepEqual(JSON.parse(runAgentsCLI(root, ["list", "--json"]).stdout).agents.codex,
+      { kind: "subscription", provider: "openai", owner: "person@example.com", max_concurrent: 1, thinking: true });
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
