@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { compareVersions, freshnessIssues, restartNotice, readInstallVersions, SOURCE_FILE } from "../lib/install-freshness.mjs";
 import { installMcpCopy } from "../lib/connect.mjs";
-import { runHealthChecks } from "../lib/health.mjs";
+import { runHealthChecks, readRegisteredInstall } from "../lib/health.mjs";
 
 function tmp(t, prefix) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -111,6 +111,58 @@ test("freshnessIssues: a copy with no harnesses is an error, with the fix", () =
   assert.match(issue.fix, /nomarmy connect claude/);
   assert.deepEqual(freshnessIssues({ copyVersion: "0.1.0-alpha.8", sourceVersion: "0.1.0-alpha.8", copyHarnesses: 6 }), []);
   assert.deepEqual(freshnessIssues({ copyVersion: null, copyHarnesses: 0 }), [], "no copy installed yet: nothing to say");
+});
+
+test("health checks only registered server copies and fixes their actual scope", async (t) => {
+  const base = tmp(t, "nomarmy-registered-health-");
+  const projectDir = path.join(base, "repo"), globalDir = path.join(base, "global"), localDir = path.join(base, "local");
+  for (const dir of [projectDir, globalDir, localDir]) fs.mkdirSync(path.join(dir, "mcp"), { recursive: true });
+  for (const dir of [globalDir, localDir]) {
+    fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ version: "0.1.0-alpha.8" }));
+    fs.writeFileSync(path.join(dir, "mcp", "server.mjs"), "// server");
+  }
+  fs.mkdirSync(path.join(localDir, "harnesses", "node"), { recursive: true });
+  fs.copyFileSync(path.join(REPO_ROOT, "harnesses", "node", "harness.yml"), path.join(localDir, "harnesses", "node", "harness.yml"));
+  const issuesFor = async (scope, serverPath) => {
+    const run = async (cmd, args, opts) => {
+      if (cmd !== "claude" || opts.cwd !== (scope === "user" ? os.homedir() : projectDir)) return { ok: false, stdout: "" };
+      return { ok: true, stdout: `nomarmy-local-worker:\n  Scope: ${scope} config\n  Command: node\n  Args: ${serverPath}\n` };
+    };
+    const install = await readRegisteredInstall({ projectDir, installDir: globalDir, run });
+    return install ? freshnessIssues(install) : [];
+  };
+  const localPath = path.join(localDir, "mcp", "server.mjs"), globalPath = path.join(globalDir, "mcp", "server.mjs");
+  assert.deepEqual((await issuesFor("local", localPath)).map((issue) => [issue.id, issue.fix]), []);
+  fs.rmSync(path.join(localDir, "harnesses"), { recursive: true });
+  assert.deepEqual((await issuesFor("local", localPath)).map((issue) => [issue.id, issue.fix]), [
+    ["nomarmy-harnesses:0.1.0-alpha.8", "nomarmy connect claude --scope local, then restart that session"],
+  ]);
+  assert.deepEqual((await issuesFor("user", globalPath)).map((issue) => [issue.id, issue.fix]), [
+    ["nomarmy-harnesses:0.1.0-alpha.8", "nomarmy connect claude (and codex, cursor), then restart those sessions"],
+  ]);
+  const projectRun = async (cmd, args, opts) => cmd === "claude" && opts.cwd === projectDir
+    ? { ok: true, stdout: "nomarmy-local-worker:\n  Scope: Project config\n  Command: nomarmy\n  Args: mcp\n" }
+    : { ok: false, stdout: "" };
+  const projectInstall = await readRegisteredInstall({ projectDir, installDir: globalDir, run: projectRun });
+  assert.deepEqual(freshnessIssues(projectInstall).map((issue) => [issue.id, issue.fix]), [
+    ["nomarmy-harnesses:0.1.0-alpha.8", "nomarmy connect claude --scope project, then restart that session"],
+  ]);
+  fs.mkdirSync(path.join(projectDir, ".cursor"), { recursive: true });
+  fs.writeFileSync(path.join(projectDir, ".cursor", "mcp.json"), JSON.stringify({ mcpServers: {
+    "nomarmy-local-worker": { command: "nomarmy", args: ["mcp"] },
+  } }));
+  const cursorInstall = await readRegisteredInstall({ projectDir, installDir: globalDir, run: async () => ({ ok: false, stdout: "" }) });
+  assert.deepEqual(freshnessIssues(cursorInstall).map((issue) => [issue.id, issue.fix]), [
+    ["nomarmy-harnesses:0.1.0-alpha.8", "nomarmy connect cursor --scope project, then restart that session"],
+  ]);
+  fs.rmSync(path.join(projectDir, ".cursor"), { recursive: true });
+  const codexRun = async (cmd) => cmd === "codex"
+    ? { ok: true, stdout: JSON.stringify({ transport: { command: "node", args: [globalPath] } }) }
+    : { ok: false, stdout: "" };
+  const codexInstall = await readRegisteredInstall({ projectDir, installDir: globalDir, run: codexRun });
+  assert.deepEqual(freshnessIssues(codexInstall).map((issue) => [issue.id, issue.fix]), [
+    ["nomarmy-harnesses:0.1.0-alpha.8", "nomarmy connect codex, then restart that session"],
+  ]);
 });
 
 test("copyIsStale: a git checkout that moved on without a version bump makes the copy stale", (t) => {
