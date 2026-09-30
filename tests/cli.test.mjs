@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = path.join(here, "..", "bin", "nomarmy.mjs");
+const posixStubOnly = { skip: process.platform === "win32" ? "executes a POSIX shebang stub directly" : false };
 
 function runCLI(args, options = {}) {
   const tmpDir = mkdtempSync(path.join(tmpdir(), "nomarmy-cli-test-"));
@@ -381,7 +382,7 @@ test("agents add --json refuses a missing field, a reserved name, and an api/sub
   }
 });
 
-test("agents add --json --register (native api provider, e.g. xai) pipes the REAL key via stdin, never argv", { skip: process.platform === "win32" ? "executes a POSIX shebang stub directly" : false }, () => {
+test("agents add --json --register (native api provider, e.g. xai) pipes the REAL key via stdin, never argv", posixStubOnly, () => {
   const root = scratchNomarmyRoot();
   const fake = withFakeOpenclaw(root);
   try {
@@ -401,7 +402,7 @@ test("agents add --json --register (native api provider, e.g. xai) pipes the REA
   }
 });
 
-test("agents add --json --register (custom endpoint) onboards with the REAL model/base_url, then pipes the key via stdin", { skip: process.platform === "win32" ? "executes a POSIX shebang stub directly" : false }, () => {
+test("agents add --json --register (custom endpoint) onboards with the REAL model/base_url, then pipes the key via stdin", posixStubOnly, () => {
   const root = scratchNomarmyRoot();
   const fake = withFakeOpenclaw(root);
   try {
@@ -735,7 +736,7 @@ process.exit(0);
   return { NOMARMY_OPENCLAW_CMD: scriptPath };
 }
 
-test("army assign checks a named model: listed is accepted, unlisted-and-failing is refused without writing, --no-check skips", { skip: process.platform === "win32" ? "executes a POSIX shebang stub directly" : false }, () => {
+test("army assign checks a named model: listed is accepted, unlisted-and-failing is refused without writing, --no-check skips", posixStubOnly, () => {
   const root = scratchNomarmyRoot();
   const repo = mkdtempSync(path.join(tmpdir(), "nomarmy-army-repo-"));
   try {
@@ -934,7 +935,7 @@ function runInteractiveAgents(root, args, replies, env = {}) {
   });
 }
 
-const ttyOnly = { skip: process.platform !== "linux" ? "requires Linux script PTY" : false };
+const ttyOnly = { skip: posixStubOnly.skip || (process.platform !== "linux" ? "requires Linux script PTY" : false) };
 
 test("agents add subscription vendor sign-in failure stops before model and writes nothing", ttyOnly, async () => {
   for (const vendor of ["claude", "codex", "meta"]) {
@@ -980,7 +981,7 @@ test("agents add --json rejects invalid --owner naming the flag", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("agents update codex --probe uses the first assigned role model without an agent default", () => {
+test("agents update codex --probe uses the first assigned role model without an agent default", posixStubOnly, () => {
   const root = scratchNomarmyRoot();
   try {
     assert.equal(runAgentsCLI(root, ["add", "--json", "--name", "codex", "--kind", "subscription", "--provider", "openai", "--owner", "you@example.com"]).exitCode, 0);
@@ -994,7 +995,7 @@ test("agents update codex --probe uses the first assigned role model without an 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("agents update --probe uses the vendor default when no role assigns a model", () => {
+test("agents update --probe uses the vendor default when no role assigns a model", posixStubOnly, () => {
   const root = scratchNomarmyRoot();
   try {
     assert.equal(runAgentsCLI(root, ["add", "--json", "--name", "codex", "--kind", "subscription", "--provider", "openai", "--owner", "you@example.com"]).exitCode, 0);
@@ -1007,7 +1008,7 @@ test("agents update --probe uses the vendor default when no role assigns a model
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("agents update --probe uses the first catalog model when no role or vendor default exists", () => {
+test("agents update --probe uses the first catalog model when no role or vendor default exists", posixStubOnly, () => {
   const root = scratchNomarmyRoot();
   try {
     assert.equal(runAgentsCLI(root, ["add", "--json", "--name", "claude", "--kind", "subscription", "--provider", "claude-cli", "--owner", "you@example.com"]).exitCode, 0);
@@ -1020,7 +1021,7 @@ test("agents update --probe uses the first catalog model when no role or vendor 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("agents update --probe fails with a model-setting command only when no model can be found", () => {
+test("agents update --probe fails with a model-setting command only when no model can be found", posixStubOnly, () => {
   const root = scratchNomarmyRoot();
   try {
     assert.equal(runAgentsCLI(root, ["add", "--json", "--name", "claude", "--kind", "subscription", "--provider", "claude-cli", "--owner", "you@example.com"]).exitCode, 0);
@@ -1033,7 +1034,7 @@ test("agents update --probe fails with a model-setting command only when no mode
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("agents update --probe probes every configured agent, prints outcomes and fails on any failure", () => {
+test("agents update --probe probes every configured agent, prints outcomes and fails on any failure", posixStubOnly, () => {
   const root = scratchNomarmyRoot();
   try {
     for (const [name, provider, model] of [["codex", "openai", "gpt-6-astra"], ["claude", "claude-cli", "sonnet"]]) {
@@ -1165,7 +1166,7 @@ test("agents add subscription codex rejects a nonzero login even when status loo
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("agents update --probe alone prints a passing line for every successful configured agent", () => {
+test("agents update --probe alone prints a passing line for every successful configured agent", posixStubOnly, () => {
   const root = scratchNomarmyRoot();
   try {
     for (const [name, provider, model] of [["codex", "openai", "gpt-6-astra"], ["claude", "claude-cli", "sonnet"]]) {
