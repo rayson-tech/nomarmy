@@ -13,7 +13,7 @@ import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { loadConfig, validateConfig, stringifyConfig, findConfigFile, parseYaml, CONFIG_FILENAMES } from "../lib/config.mjs";
-import { loadContract, loadContracts, checkContract } from "../lib/acceptance.mjs";
+import { loadContract, loadContracts, checkContract, contractDisplayPath } from "../lib/acceptance.mjs";
 import { scanRepository, compareEvidence } from "../lib/scan.mjs";
 import { buildConfigProposal } from "../lib/propose.mjs";
 import { detectHardware } from "../lib/hardware.mjs";
@@ -3025,7 +3025,7 @@ function cmdAcceptance() {
   }
   const contracts = files.length ? files.map((file) => loadContract(path.resolve(repoDir, file))) : loadContracts(repoDir);
   const results = contracts.map((contract) => ({
-    file: path.relative(repoDir, contract.file),
+    file: contractDisplayPath(repoDir, contract.file),
     feature: contract.feature,
     criteria: checkContract(contract, { repoDir }),
   }));
