@@ -42,10 +42,13 @@ criteria:
     proven_by:
       - file: tests/example.test.mjs
         test: command reports its result
+        platforms: [linux, darwin, posix]
     status: met
 ```
 
-Run `nomarmy acceptance check` to check all contracts, or pass one or more files to select them. The check runs each criterion's referenced tests: **met** means they pass, **broken** means one fails, **missing** means a named test or file is gone, and **unproven** means there are no references. A retired criterion is reported as **retired** without running tests. Broken and missing fail the command; unproven fails only with `--strict`. Use `--json` for the same report as data. CI runs the check on every platform job.
+Each `proven_by` entry, whether `{ file, test }` or `{ command }`, may have an optional `platforms` list of Node `process.platform` names or `posix` (every platform except `win32`). Entries outside the current platform are not run or counted. The human report marks how many proofs were not run, and `--json` lists their references under `notApplicable`. If none apply, the criterion is unproven with a `no proof applies on <platform>` note. An entry without `platforms` runs everywhere; an applicable test that passes zero times is broken.
+
+Run `nomarmy acceptance check` to check all contracts, or pass one or more files to select them. The check runs each criterion's referenced tests: **met** means they pass, **broken** means one fails, **missing** means a named test or file is gone, and **unproven** means there are no references applicable to the current platform. A retired criterion is reported as **retired** without running tests. Broken and missing fail the command; unproven fails only with `--strict`. Use `--json` for the same report as data. CI runs the check on every platform job.
 
 ## Watching what nomArmy is doing
 

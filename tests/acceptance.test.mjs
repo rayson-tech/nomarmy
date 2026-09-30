@@ -251,3 +251,81 @@ test("acceptance CI checks every platform job", () => {
     assert.equal(job.steps.filter((step) => step.run === "node bin/nomarmy.mjs acceptance check").length, 1, name);
   }
 });
+
+test("acceptance validates proof platforms for both reference types", (t) => {
+  const f = fixture(t);
+  const valid = contract([criterion("ACC-7", [
+    { ...ref(literal), platforms: ["darwin", "linux", "win32", "posix"] },
+    { command: "echo ok", platforms: ["aix"] },
+  ])]);
+  assert.deepEqual(contractSchema.parse(valid), valid);
+  for (const reference of [{ ...ref(literal), platforms: ["unknown"] }, { command: "echo ok", platforms: ["unknown"] }]) {
+    const file = f.write(contract([criterion("ACC-7", [reference])]));
+    assert.throws(() => loadContract(file), (error) => {
+      assert.match(error.message, /ACC-7/);
+      assert.equal(error.message.includes(file), true);
+      assert.match(error.message, /proven_by/);
+      return true;
+    });
+  }
+});
+
+test("acceptance skips out-of-platform proofs without reading or running them", (t) => {
+  const f = fixture(t);
+  const skippedTest = { file: "tests/absent.test.mjs", test: "absent", platforms: ["darwin"] };
+  const skippedCommand = { command: "exit 9", platforms: ["darwin"] };
+  const activeCommand = { command: "echo ok", platforms: ["linux"] };
+  const calls = [];
+  const run = (...args) => { calls.push(args[0]); return { status: 0, stdout: "" }; };
+  const result = checkContract(contract([criterion("ACC-7", [skippedTest, skippedCommand, activeCommand])]), { ...f, run, platform: "linux" });
+  assert.deepEqual(result, [{ ...expected("ACC-7", "met"), notApplicable: [skippedTest, skippedCommand] }]);
+  assert.deepEqual(calls, ["echo ok"]);
+});
+
+test("acceptance makes wholly scoped-out criteria unproven, including posix on win32", (t) => {
+  const f = fixture(t);
+  const reference = { ...ref("skipped"), platforms: ["posix"] };
+  const command = { command: "exit 9", platforms: ["posix"] };
+  const data = contract([criterion("ACC-7", [reference, command])]);
+  const run = () => assert.fail("out-of-platform proof must not run");
+  assert.deepEqual(checkContract(data, { ...f, run, platform: "win32" }), [{
+    ...expected("ACC-7", "unproven"), notApplicable: [reference, command], note: "no proof applies on win32",
+  }]);
+  const linux = checkContract(contract([criterion("ACC-7", [{ ...ref(literal), platforms: ["posix"] }])]), { ...f, platform: "linux" });
+  assert.deepEqual(linux, [expected("ACC-7", "met")]);
+});
+
+test("acceptance keeps unscoped and applicable zero-pass proofs broken", (t) => {
+  const f = fixture(t);
+  const skipped = { command: "exit 9", platforms: ["darwin"] };
+  const data = contract([criterion("ACC-7", [ref("skipped"), { ...ref("skipped"), platforms: ["linux"] }, skipped])]);
+  const result = checkContract(data, { ...f, platform: "linux" });
+  assert.deepEqual(result, [{ ...expected("ACC-7", "broken", [
+    { ...ref("skipped"), detail: "no tests passed (zero tests ran or all were skipped/todo)" },
+    { ...ref("skipped"), detail: "no tests passed (zero tests ran or all were skipped/todo)" },
+  ]), notApplicable: [skipped] }]);
+});
+
+test("acceptance CLI reports skipped proofs and strict rejects scoped-out criteria", (t) => {
+  const f = fixture(t);
+  const other = process.platform === "win32" ? "linux" : "win32";
+  const skipped = { command: "exit 9", platforms: [other] };
+  const data = contract([
+    criterion("ACC-7", [skipped]),
+    criterion("ACC-8", [ref(literal), skipped]),
+  ]);
+  f.write(data);
+  const report = { contracts: [{ file: "acceptance/example.yml", feature: "Example", criteria: [
+    { ...expected("ACC-7", "unproven"), notApplicable: [skipped], note: `no proof applies on ${process.platform}` },
+    { ...expected("ACC-8", "met"), notApplicable: [skipped] },
+  ] }], totals: totals({ met: 1, unproven: 1 }) };
+  const json = f.invoke("--json");
+  assert.equal(json.status, 0, json.stderr);
+  assert.deepEqual(JSON.parse(json.stdout), report);
+  const plain = f.invoke();
+  assert.equal(plain.status, 0, plain.stderr);
+  assert.equal(plain.stdout, `acceptance/example.yml: Example\nACC-7  unproven (1 proofs not run on ${process.platform})  no proof applies on ${process.platform}\nACC-8  met (1 proofs not run on ${process.platform})\nTotal: 1 met, 0 broken, 0 missing, 1 unproven, 0 retired\n`);
+  const strict = f.invoke("--strict", "--json");
+  assert.equal(strict.status, 1);
+  assert.deepEqual(JSON.parse(strict.stdout), report);
+});

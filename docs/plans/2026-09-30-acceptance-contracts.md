@@ -21,6 +21,7 @@ criteria:
     proven_by:
       - file: tests/wsl-connect.test.mjs
         test: "connectViaWsl registers ${target} and installs only Windows playbooks"
+        platforms: [win32] # optional; also accepts posix or other Node process.platform names
     status: met          # met | unproven | broken | retired
     security: false      # marks a criterion for trust boundaries
     note: optional context
@@ -28,6 +29,7 @@ criteria:
 
 - **Criteria are durable behavior, not job hygiene.** The backfill showed job acceptance items mix the two: "connect registers claude into WSL with no shell" is a promise; "npm test passes", "no em dashes" and "ci.yml is identical to the base commit" are instructions for one job. Only promises go in the contract.
 - **`proven_by` names tests by file and full name**, quoted: test names contain colons (`setup: ${name} gives the exact fix`), which broke the first draft's `file: name` shorthand. A test defined in a loop (a template-literal name) is matched on its fixed prefix.
+- **Platform-scoped proofs are optional.** A `{ file, test }` or `{ command }` reference may include `platforms`. Other-platform proofs are not run and appear in `notApplicable` in JSON; if all proofs are out of platform, the criterion is unproven with a platform note. Unscoped proofs run everywhere.
 - **`unproven` is a first-class status.** A criterion no test pins (docs matching behavior, say) is listed, not hidden, and shows in the PR block.
 - **IDs are stable** (`WIN-6`); text can be reworded without breaking references.
 
