@@ -1659,17 +1659,31 @@ async function cmdAgentsAddJson() {
 // A probe-only update checks credentials without changing agents.yml.
 function probeConfiguredAgent(name, agent) {
   const provider = agentProviderId(agent);
-  const model = agent.model;
+  let model = agent.model;
+  let source = "";
+  if (!model && provider) {
+    const role = agentAssignments()[name]?.roles.find((r) => r.model && r.model !== "auto");
+    if (role) { model = role.model; source = `${role.role}'s model`; }
+    if (!model) {
+      const vendor = Object.values(SUBSCRIPTION_VENDORS).find((v) => v.provider === provider);
+      if (vendor?.defaultModel) { model = vendor.defaultModel; source = "vendor default"; }
+    }
+    if (!model) {
+      model = catalogModelsFor(provider)[0];
+      if (model) source = "first catalog model";
+    }
+  }
   if (!provider || !model) {
-    console.log(c.red(`✗ ${name}  ${provider ?? agent.kind}/${model ?? "no default model"}  cannot probe without a provider and default model`));
+    console.log(c.red(`✗ ${name}  ${provider ?? agent.kind}/${model ?? "no model"}  no model available; set one with \`nomarmy agents update ${name} --model <m>\``));
     process.exitCode = 1;
     return;
   }
+  const selected = `${provider}/${model}${source ? ` (${source})` : ""}`;
   const start = performance.now();
   const ok = probeWorker(provider, model);
   const elapsed = ((performance.now() - start) / 1000).toFixed(1);
-  console.log(ok ? c.green(`✓ ${name}  ${provider}/${model}  answered in ${elapsed}s`)
-    : c.red(`✗ ${name}  ${provider}/${model}  failed: ${lastProbeFailure ?? "no answer"}`));
+  console.log(ok ? c.green(`✓ ${name}  ${selected}  answered in ${elapsed}s`)
+    : c.red(`✗ ${name}  ${selected}  failed: ${lastProbeFailure ?? "no answer"}`));
   if (!ok) process.exitCode = 1;
 }
 
