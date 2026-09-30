@@ -1,0 +1,78 @@
+# Acceptance contract for the deterministic trust floor and its human gate.
+feature: Trust boundaries, phase 1
+criteria:
+  - id: TRUST-1
+    text: trust.sensitive and trust.codeowners validate in .nomarmy.yml; bad entries name the rule
+    proven_by:
+      - file: tests/trust.test.mjs
+        test: trust schema accepts the floor and rejects malformed rules with index and reason
+    status: met
+    security: true
+  - id: TRUST-2
+    text: A diff touching a sensitive path is human-gated with the rule's reason and the file
+    proven_by:
+      - file: tests/trust.test.mjs
+        test: trust path globs span directories only with ** and normalize changed backslash paths
+    status: met
+    security: true
+  - id: TRUST-3
+    text: A content rule matches added or removed lines only, never unchanged context
+    proven_by:
+      - file: tests/trust.test.mjs
+        test: content rules inspect added and removed lines, not context or file headers
+    status: met
+    security: true
+  - id: TRUST-4
+    text: "codeowners: true treats paths owned in CODEOWNERS as sensitive"
+    proven_by:
+      - file: tests/trust.test.mjs
+        test: CODEOWNERS follows root anchoring, bare names, directories, wildcards and last-match ownership
+      - file: tests/trust.test.mjs
+        test: implement gates owner changes, new-file content, and sensitive diffs from failed workers
+    status: met
+    security: true
+  - id: TRUST-5
+    text: A gated job is review-required, its first issue says HUMAN REVIEW REQUIRED with the reasons, and the record carries trust
+    proven_by:
+      - file: tests/trust.test.mjs
+        test: implement jobs enforce checkout trust, retain normal records, and leave unconfigured repos unchanged
+      - file: tests/trust.test.mjs
+        test: implement gates owner changes, new-file content, and sensitive diffs from failed workers
+    status: met
+    security: true
+  - id: TRUST-6
+    text: Rules come from the operator's checkout; a worker can't relax them, and changing the trust rules or CODEOWNERS is itself gated
+    proven_by:
+      - file: tests/trust.test.mjs
+        test: changing the trust contract or any CODEOWNERS file is itself human-level
+      - file: tests/trust.test.mjs
+        test: implement jobs enforce checkout trust, retain normal records, and leave unconfigured repos unchanged
+    status: met
+    security: true
+  - id: TRUST-7
+    text: /feature stops before integrating a human-gated job and asks the operator; run_finish lists gated jobs
+    proven_by:
+      - file: tests/trust-surface.test.mjs
+        test: trust feature playbook stops before integration and coordinator repeats the hard gate
+      - file: tests/trust-surface.test.mjs
+        test: trust run_finish lists only its human-gated jobs with exact reasons
+      - file: tests/trust-surface.test.mjs
+        test: trust report view places exact trust immediately after outcome when present
+    status: met
+    security: true
+  - id: TRUST-8
+    text: The PR block shows a Needs human review row with the reasons; stats counts gated jobs
+    proven_by:
+      - file: tests/trust-surface.test.mjs
+        test: trust PR block shows gated count and short reasons only for scoped jobs
+      - file: tests/trust-surface.test.mjs
+        test: trust stats counts human-gated jobs in summary and details
+    status: met
+    security: true
+  - id: TRUST-9
+    text: A repo without trust rules behaves exactly as before
+    proven_by:
+      - file: tests/trust.test.mjs
+        test: implement jobs enforce checkout trust, retain normal records, and leave unconfigured repos unchanged
+    status: met
+    security: true

@@ -18,3 +18,5 @@ So nomArmy refuses **implement** jobs on a Claude subscription unless that agent
 Every model call, local, api or subscription, is made by OpenClaw on the host, never from inside the sandbox. A subscription is reached through the vendor's own logged-in session; nomArmy never reads or stores the token. What changes with a hosted agent or a Bedrock profile is where your code goes (to that vendor), not what the sandbox can reach.
 
 `on_behalf_of` is a self-reported attestation, not a verified identity: nomArmy has no caller-identity boundary. The secret scan catches known secret shapes, not steered content with no recognizable shape. Both are covered in [SECURITY.md](../SECURITY.md), which is also where to report a vulnerability.
+
+The `trust` rules in `.nomarmy.yml` are read from the operator's checkout, not a worker's worktree. Sensitive paths, changed-line content, and optionally CODEOWNERS paths trigger a human review gate; changing the rules or CODEOWNERS is itself gated. `/feature` stops before integrating such a job until the operator explicitly approves it.

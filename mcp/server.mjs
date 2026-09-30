@@ -38,7 +38,7 @@ import { retryRefusedModelsInBackground } from "../lib/refusal-retry.mjs";
 import { podmanProblem, podmanVmStartedAt } from "../lib/podman-health.mjs";
 import { restartNotice } from "../lib/install-freshness.mjs";
 import { requestJobStop } from "../lib/openclaw-run.mjs";
-import { loadJobRecords, computeStats, formatStats, formatStatsSummary, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
+import { loadJobRecords, gatedJobs, computeStats, formatStats, formatStatsSummary, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
 import { shareMarkdown } from "../lib/share.mjs";
 import { recentSuggestions } from "../lib/suggestions.mjs";
 import { probeModel } from "../lib/model-probe.mjs";
@@ -570,8 +570,13 @@ server.tool("run_finish", "Close a /feature run as complete or stopped, with a o
     if (activeRunId === run_id) activeRunId = null;
     // What nomArmy verified in this run, ready for the pull request's description (lib/share.mjs).
     let prBlock = null;
-    try { prBlock = shareMarkdown(computeStats(loadJobRecords(jobsRoot), { runId: run_id }), { scope: "this feature run" }); } catch { /* the totals stand without it */ }
-    return toolText(JSON.stringify({ id: run.id, status: run.status, ...runTotals(run), ...(prBlock ? { prBlock, prBlockNote: "Put prBlock in the pull request's description as it is: every number is from nomArmy's verified records." } : {}) }, null, 2));
+    let gated = [];
+    try {
+      const records = loadJobRecords(jobsRoot);
+      gated = gatedJobs(records, run_id);
+      prBlock = shareMarkdown(computeStats(records, { runId: run_id }), { scope: "this feature run" });
+    } catch { /* the totals stand without it */ }
+    return toolText(JSON.stringify({ id: run.id, status: run.status, ...runTotals(run), ...(gated.length ? { gated } : {}), ...(prBlock ? { prBlock, prBlockNote: "Put prBlock in the pull request's description as it is: every number is from nomArmy's verified records." } : {}) }, null, 2));
   } catch (error) { return toolText(error.message, true); }
 });
 server.tool("army", "Who you, the General, are and who you call for what in this repository: your fixed charter and the agent you're defined as, the army's workflow, then each role's description, phase (build, review, acceptance), suggested mode, and the agent it runs on, with which config layer set each value (global, project .nomarmy.yml, local .nomarmy.local.yml). Flags roles with no usable agent, and roles that share your model or subscription (not an independent review). Dispatch a role with `army_role`, or an agent directly with `agent`. Read-only, re-read on every call.", {}, async () => {

@@ -1,6 +1,6 @@
 # Plan: trust boundaries, the work that must reach a human
 
-**Status: design, after beta.** On a branch until beta ships; nothing here is built.
+**Status: phase 1 built (on this branch).** Later phases remain planned.
 
 ## Why
 
