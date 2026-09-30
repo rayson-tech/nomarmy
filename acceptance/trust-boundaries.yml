@@ -13,6 +13,16 @@ criteria:
     proven_by:
       - file: tests/trust.test.mjs
         test: trust path globs span directories only with ** and normalize changed backslash paths
+      - file: tests/trust.test.mjs
+        test: trust paths and CODEOWNERS casefold both paths and patterns
+      - file: tests/trust.test.mjs
+        test: trust paths and CODEOWNERS normalize repeated separators and dot prefixes
+      - file: tests/trust.test.mjs
+        test: trust path braces are literal like CODEOWNERS braces
+      - file: tests/trust.test.mjs
+        test: trust and CODEOWNERS stars match newline filenames
+      - file: tests/trust.test.mjs
+        test: raw snapshots gate untracked renamed and deleted content and old paths
     status: met
     security: true
   - id: TRUST-3
@@ -20,6 +30,16 @@ criteria:
     proven_by:
       - file: tests/trust.test.mjs
         test: content rules inspect added and removed lines, not context or file headers
+      - file: tests/trust.test.mjs
+        test: raw trust content survives attributes ${attributes}
+      - file: tests/trust.test.mjs
+        test: raw trust content scans NUL and invalid UTF-8 bytes on both sides
+      - file: tests/trust.test.mjs
+        test: raw process output preserves invalid bytes and whitespace
+      - file: tests/trust.test.mjs
+        test: content literals collapse whitespace across added and removed lines as multisets
+      - file: tests/trust.test.mjs
+        test: raw snapshots gate untracked renamed and deleted content and old paths
     status: met
     security: true
   - id: TRUST-4
@@ -29,6 +49,12 @@ criteria:
         test: CODEOWNERS follows root anchoring, bare names, directories, wildcards and last-match ownership
       - file: tests/trust.test.mjs
         test: implement gates owner changes, new-file content, and sensitive diffs from failed workers
+      - file: tests/trust.test.mjs
+        test: trust paths and CODEOWNERS casefold both paths and patterns
+      - file: tests/trust.test.mjs
+        test: trust paths and CODEOWNERS normalize repeated separators and dot prefixes
+      - file: tests/trust.test.mjs
+        test: trust and CODEOWNERS stars match newline filenames
     status: met
     security: true
   - id: TRUST-5
@@ -47,6 +73,8 @@ criteria:
         test: changing the trust contract or any CODEOWNERS file is itself human-level
       - file: tests/trust.test.mjs
         test: implement jobs enforce checkout trust, retain normal records, and leave unconfigured repos unchanged
+      - file: tests/trust.test.mjs
+        test: missing and malformed trust snapshots fail closed
     status: met
     security: true
   - id: TRUST-7

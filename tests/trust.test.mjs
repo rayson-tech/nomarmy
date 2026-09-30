@@ -8,6 +8,7 @@ import { parseCodeowners, codeownersPaths, evaluateTrust } from "../lib/trust.mj
 import { createExecutor } from "../lib/execute.mjs";
 import { createVerificationFlow } from "../lib/verification-flow.mjs";
 import { classifyTestChanges } from "../lib/diff-checks.mjs";
+import { createProcess } from "../lib/process.mjs";
 import { HIGH_STAKES_NOTE } from "../lib/outcome.mjs";
 
 const normal = { level: "normal", reasons: [] };
@@ -15,7 +16,7 @@ const sensitive = (file, rule = 0, reason = "access control and tenant data") =>
   rule, reason: `changes ${file}, which the repo marks sensitive: ${reason}`, file,
 });
 const ruleChange = (file) => ({ rule: "trust", reason: "changes the repository's trust rules", file });
-const patch = (file, before, after) => `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1,${before.length} +1,${after.length} @@\n${before.map((line) => `-${line}`).join("\n")}\n${after.map((line) => `+${line}`).join("\n")}\n`;
+const snapshot = (file, before, after) => ({ file, before: before.join("\n"), after: after.join("\n") });
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(process.cwd(), ".trust-test-"));
@@ -105,15 +106,15 @@ test("CODEOWNERS loading uses the first available file, including an empty first
 
 test("content rules inspect added and removed lines, not context or file headers", () => {
   const rules = [{ content: ["DROP TABLE", "TRUNCATE"], reason: "destructive SQL" }];
-  const diffText = "diff --git a/query.sql b/query.sql\n--- a/query.sql\n+++ b/query.sql\n@@ -10,3 +20,3 @@\n DROP TABLE context;\n-TRUNCATE old;\n+DROP TABLE new;\n select 1;\n";
-  assert.deepEqual(evaluateTrust({ rules, diffText }), { level: "human", reasons: [
+  const before = [...Array(9).fill("padding"), "DROP TABLE context;", "TRUNCATE old;", "select 1;"];
+  const after = [...Array(19).fill("padding"), "DROP TABLE context;", "DROP TABLE new;", "select 1;"];
+  assert.deepEqual(evaluateTrust({ rules, fileChanges: [{ file: "query.sql", before: before.join("\n"), after: after.join("\n") }] }), { level: "human", reasons: [
     { rule: 0, reason: "removes sensitive content at query.sql:11, which the repo marks sensitive: destructive SQL", file: "query.sql", line: 11 },
     { rule: 0, reason: "adds sensitive content at query.sql:21, which the repo marks sensitive: destructive SQL", file: "query.sql", line: 21 },
   ] });
-  const contextOnly = "--- a/DROP TABLE.sql\n+++ b/DROP TABLE.sql\n@@ -1,2 +1,2 @@\n TRUNCATE unchanged;\n-select old;\n+select new;\n";
-  assert.deepEqual(evaluateTrust({ rules, diffText: contextOnly }), normal);
-  assert.deepEqual(evaluateTrust({ rules, diffText: patch("query.sql", ["drop table lower;"], ["truncate lower;"]) }), normal);
-  assert.deepEqual(evaluateTrust({ rules: [{ content: ["++TRUNCATE"], reason: "destructive SQL" }], diffText: patch("query.sql", [], ["++TRUNCATE"]) }), {
+  assert.deepEqual(evaluateTrust({ rules, fileChanges: [snapshot("DROP TABLE.sql", ["TRUNCATE unchanged;", "select old;"], ["TRUNCATE unchanged;", "select new;"])] }), normal);
+  assert.deepEqual(evaluateTrust({ rules, fileChanges: [snapshot("query.sql", ["drop table lower;"], ["truncate lower;"])] }), normal);
+  assert.deepEqual(evaluateTrust({ rules: [{ content: ["++TRUNCATE"], reason: "destructive SQL" }], fileChanges: [snapshot("query.sql", [], ["++TRUNCATE"])] }), {
     level: "human", reasons: [{ rule: 0, reason: "adds sensitive content at query.sql:1, which the repo marks sensitive: destructive SQL", file: "query.sql", line: 1 }],
   });
 });
@@ -121,27 +122,27 @@ test("content rules inspect added and removed lines, not context or file headers
 test("changing the trust contract or any CODEOWNERS file is itself human-level", () => {
   const before = ["trust:", "  sensitive:", "    - paths: ['auth/**']", "      reason: tenant data", "policy:", "  require_verification: false"];
   const after = ["policy:", "  require_verification: false"];
-  assert.deepEqual(evaluateTrust({ diffText: patch(".nomarmy.yml", before, after) }), {
+  assert.deepEqual(evaluateTrust({ fileChanges: [snapshot(".nomarmy.yml", before, after)] }), {
     level: "human", reasons: [ruleChange(".nomarmy.yml")],
   });
-  assert.deepEqual(evaluateTrust({ diffText: patch(".nomarmy.yml", before, before.map((line) => line.replace("false", "true"))) }), normal);
-  assert.deepEqual(evaluateTrust({ diffText: patch(".nomarmy.yml", before, before.map((line) => line.replace("trust:", "trust: # same rules"))) }), normal);
+  assert.deepEqual(evaluateTrust({ fileChanges: [snapshot(".nomarmy.yml", before, before.map((line) => line.replace("false", "true")))] }), normal);
+  assert.deepEqual(evaluateTrust({ fileChanges: [snapshot(".nomarmy.yml", before, before.map((line) => line.replace("trust:", "trust: # same rules")))] }), normal);
   for (const file of [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"]) {
     assert.deepEqual(evaluateTrust({ changedFiles: [file] }), { level: "human", reasons: [ruleChange(file)] });
   }
   // Full snapshots settle a partial hunk whose header does not include trust:.
   assert.deepEqual(evaluateTrust({ changedFiles: [".nomarmy.yml"], diffText: "",
-    configChanges: [{ file: ".nomarmy.yml", before: before.join("\n"), after: after.join("\n") }] }), {
+    fileChanges: [{ file: ".nomarmy.yml", before: before.join("\n"), after: after.join("\n") }] }), {
     level: "human", reasons: [ruleChange(".nomarmy.yml")],
   });
 });
 
-async function implement(t, { config = null, workerConfig = config, changed = ["auth/check.py"], diffText = "", owners = null, workerOwners = null, untracked = false, workerFails = false } = {}) {
+async function implement(t, { config = null, workerConfig = config, changed = ["auth/check.py"], diffText = "", owners = null, workerOwners = null, untracked = false, workerFails = false, baseFiles = {}, newFiles = {}, entries = null } = {}) {
   const root = fixture(t), projectDir = path.join(root, "checkout"), jobsRoot = path.join(root, "jobs");
   fs.mkdirSync(projectDir);
   if (config !== null) write(projectDir, ".nomarmy.yml", config);
   if (owners !== null) write(projectDir, ".github/CODEOWNERS", owners);
-  const nameStatus = changed.map((file) => ({ path: file, status: untracked ? "A" : "M", oldPath: null, ...(untracked ? { untracked: true } : {}) }));
+  const nameStatus = entries ?? changed.map((file) => ({ path: file, status: untracked ? "A" : "M", oldPath: null, ...(untracked ? { untracked: true } : {}) }));
   const record = { repoStatusFiles: changed, changedFiles: untracked ? [] : changed, nameStatus,
     testChanges: classifyTestChanges(nameStatus), issues: ["existing issue"], ignoredRuntimeJunk: [], filesChanged: changed.length, additions: 1, deletions: 1 };
   const flow = createVerificationFlow({});
@@ -151,12 +152,24 @@ async function implement(t, { config = null, workerConfig = config, changed = ["
     assertRepo: async () => {}, ensureJobsRoot: () => fs.mkdirSync(jobsRoot, { recursive: true }),
     resolveBase: async () => ({ ref: "base", sha: "base-sha" }),
     sweepStaleSandboxContainers: async () => {},
-    run: async (command, args) => {
+    run: async (command, args, options) => {
       assert.equal(command, "git");
+      if (args[0] === "cat-file") {
+        assert.equal(options.cwd, projectDir);
+        assert.equal(options.encoding, null);
+        assert.equal(options.trim, false);
+        const file = args[2].slice("base-sha:".length);
+        assert.deepEqual(args, ["cat-file", "blob", `base-sha:${file}`]);
+        return { stdout: Buffer.from(file === ".nomarmy.yml" ? config ?? "" : baseFiles[file]) };
+      }
       assert.deepEqual(args.slice(0, 3), ["worktree", "add", "-b"]);
       write(args[4], ".git", "gitdir: synthetic-pointer\n");
     },
     gitRaw: async (args) => {
+      if (args[0] === "ls-tree") {
+        assert.deepEqual(args, ["ls-tree", "-r", "--name-only", "-z", "base-sha"]);
+        return [...Object.keys(baseFiles), ...(config === null ? [] : [".nomarmy.yml"])].join("\0") + "\0";
+      }
       if (args[0] === "show") { assert.equal(args[1], "base-sha:.nomarmy.yml"); return config ?? ""; }
       assert.equal(args[0], "diff");
       return diffText;
@@ -166,7 +179,10 @@ async function implement(t, { config = null, workerConfig = config, changed = ["
     runOpenClaw: async ({ cwd }) => {
       if (workerConfig !== null) write(cwd, ".nomarmy.yml", workerConfig);
       if (workerOwners !== null) write(cwd, ".github/CODEOWNERS", workerOwners);
-      for (const file of changed.filter((file) => file !== ".nomarmy.yml" && !(file === ".github/CODEOWNERS" && workerOwners !== null))) write(cwd, file, "TRUNCATE accounts;\n");
+      for (const file of changed.filter((file) => file !== ".nomarmy.yml" && !(file === ".github/CODEOWNERS" && workerOwners !== null))) {
+        if (Object.hasOwn(newFiles, file) && newFiles[file] === null) continue;
+        write(cwd, file, newFiles[file] ?? "TRUNCATE accounts;\n");
+      }
       if (workerFails) throw new Error("synthetic worker failure");
       return { final: "STATUS: done\nTESTS: pass\nNOT_DONE: none\nNOTE: implemented" };
     },
@@ -216,4 +232,125 @@ test("implement gates owner changes, new-file content, and sensitive diffs from 
   assert.deepEqual(failed.trust, { level: "human", reasons: [sensitive("auth/check.py")] });
   assert.equal(failed.issues[0], "HUMAN REVIEW REQUIRED (trust): changes auth/check.py, which the repo marks sensitive: access control and tenant data");
   assert.equal(failed.issues.includes(HIGH_STAKES_NOTE), true);
+});
+
+const sqlConfig = "trust:\n  sensitive:\n    - content: ['DROP TABLE']\n      reason: destructive SQL\n";
+const sqlReason = (file, verb = "adds", line = 2) => ({
+  rule: 0, reason: `${verb} sensitive content at ${file}:${line}, which the repo marks sensitive: destructive SQL`, file, line,
+});
+
+for (const attributes of ["* -diff", "* binary", "* working-tree-encoding=UTF-16LE", "* diff=hidden"]) {
+  test(`raw trust content survives attributes ${attributes}`, async (t) => {
+    // Model the exact name-status and hidden diff a tracked edit produces.
+    // The runner stub requires unfiltered cat-file bytes from the trusted repo.
+    const { manifest } = await implement(t, {
+      config: sqlConfig, changed: ["query.sql", ".gitattributes"],
+      baseFiles: { "query.sql": "select 1;\n" },
+      newFiles: { "query.sql": "select 1;\nDROP TABLE accounts;\n", ".gitattributes": `${attributes}\n` },
+      diffText: "Binary files a/query.sql and b/query.sql differ\n",
+    });
+    assert.deepEqual(manifest.trust, { level: "human", reasons: [sqlReason("query.sql")] });
+    assert.equal(manifest.reviewRequired, true);
+  });
+}
+
+test("raw trust content scans NUL and invalid UTF-8 bytes on both sides", async (t) => {
+  const { manifest } = await implement(t, {
+    config: sqlConfig, changed: ["query.bin"],
+    baseFiles: { "query.bin": Buffer.concat([Buffer.from([0xff, 0]), Buffer.from("\nDROP TABLE old;\n")]) },
+    newFiles: { "query.bin": Buffer.concat([Buffer.from([0xfe, 0]), Buffer.from("\nDROP TABLE new;\n")]) },
+    diffText: "Binary files a/query.bin and b/query.bin differ\n",
+  });
+  assert.deepEqual(manifest.trust, { level: "human", reasons: [sqlReason("query.bin", "removes"), sqlReason("query.bin")] });
+  // Latin1 fallback is observable, not just an ASCII match after replacement.
+  assert.deepEqual(evaluateTrust({ rules: [{ content: ["ÿ"], reason: "binary marker" }],
+    fileChanges: [{ file: "query.bin", before: Buffer.alloc(0), after: Buffer.from([0xff]) }] }), {
+    level: "human", reasons: [{ rule: 0, reason: "adds sensitive content at query.bin:1, which the repo marks sensitive: binary marker", file: "query.bin", line: 1 }],
+  });
+});
+
+test("raw process output preserves invalid bytes and whitespace", async () => {
+  const { run } = createProcess({ projectDir: process.cwd() });
+  const result = await run(process.execPath, ["-e", "process.stdout.write(Buffer.from([32, 255, 0, 10]))"], { encoding: null });
+  assert.deepEqual(result, { stdout: Buffer.from([32, 255, 0, 10]), stderr: "" });
+});
+
+test("content literals collapse whitespace across added and removed lines as multisets", () => {
+  const rules = [{ content: ["DROP\t TABLE"], reason: "destructive SQL" }];
+  assert.deepEqual(evaluateTrust({ rules, fileChanges: [snapshot("query.sql",
+    ["unchanged", "DROP", "TABLE old;"], ["unchanged", "DROP", "DROP", "TABLE new;"])] }), {
+    level: "human", reasons: [sqlReason("query.sql", "adds", 3)],
+  });
+  for (const verb of ["adds", "removes"]) {
+    const lines = ["DROP", "TABLE accounts;"];
+    assert.deepEqual(evaluateTrust({ rules: [{ content: ["DROP TABLE"], reason: "destructive SQL" }],
+      fileChanges: [snapshot("query.sql", verb === "removes" ? lines : [], verb === "adds" ? lines : [])] }), {
+      level: "human", reasons: [sqlReason("query.sql", verb, 1)],
+    });
+  }
+  assert.deepEqual(evaluateTrust({ rules, fileChanges: [snapshot("query.sql", ["DROP", "TABLE"], ["DROP", "TABLE"])] }), normal);
+  assert.deepEqual(evaluateTrust({ rules, fileChanges: [snapshot("query.sql", [], ["DROP", "  ", "\tTABLE accounts;"])] }), {
+    level: "human", reasons: [sqlReason("query.sql", "adds", 1)],
+  });
+});
+
+test("trust paths and CODEOWNERS casefold both paths and patterns", () => {
+  for (const [file, pattern] of [["Auth/check.py", "auth/**"], ["auth/check.py", "AUTH/**"]]) {
+    assert.deepEqual(evaluateTrust({ changedFiles: [file], rules: [{ paths: [pattern], reason: "access control and tenant data" }], codeowners: parseCodeowners(`${pattern} @security`) }), {
+      level: "human", reasons: [sensitive(file), { rule: "codeowners", reason: `changes ${file}, owned in CODEOWNERS by @security`, file }],
+    });
+  }
+});
+
+test("trust paths and CODEOWNERS normalize repeated separators and dot prefixes", () => {
+  for (const spelling of ["//auth/x", "././auth/x", "auth//x", "auth\\x"]) {
+    for (const [file, pattern] of [[spelling, "auth/**"], ["auth/x", spelling.replace(/x$/, "**")]]) {
+      assert.deepEqual(evaluateTrust({ changedFiles: [file], rules: [{ paths: [pattern], reason: "access control and tenant data" }], codeowners: parseCodeowners(`${pattern} @security`) }), {
+        level: "human", reasons: [sensitive("auth/x"), { rule: "codeowners", reason: "changes auth/x, owned in CODEOWNERS by @security", file: "auth/x" }],
+      });
+    }
+  }
+});
+
+test("trust path braces are literal like CODEOWNERS braces", () => {
+  const file = "config/{secret}.yml";
+  assert.deepEqual(evaluateTrust({ changedFiles: [file], rules: [{ paths: [file], reason: "access control and tenant data" }], codeowners: parseCodeowners(`${file} @security`) }), {
+    level: "human", reasons: [sensitive(file), { rule: "codeowners", reason: `changes ${file}, owned in CODEOWNERS by @security`, file }],
+  });
+});
+
+test("trust and CODEOWNERS stars match newline filenames", () => {
+  for (const [file, pattern] of [["auth/a\nb.py", "auth/**"], ["auth/a\nb.py", "auth/*"], ["a\nb/auth/x.py", "**/auth/**"], ["a\nb/auth/x.py", "auth/"]]) {
+    const codeowners = parseCodeowners(`${pattern} @security`);
+    const rules = pattern === "auth/" ? [] : [{ paths: [pattern], reason: "access control and tenant data" }];
+    assert.deepEqual(evaluateTrust({ changedFiles: [file], rules, codeowners }), {
+      level: "human", reasons: [...(rules.length ? [sensitive(file)] : []), { rule: "codeowners", reason: `changes ${file}, owned in CODEOWNERS by @security`, file }],
+    });
+  }
+});
+
+test("raw snapshots gate untracked renamed and deleted content and old paths", async (t) => {
+  const { manifest } = await implement(t, {
+    config: "trust:\n  sensitive:\n    - paths: ['auth/**']\n      content: ['DROP TABLE']\n      reason: destructive SQL\n",
+    changed: ["new.sql", "renamed.sql", "deleted.sql"],
+    entries: [
+      { path: "new.sql", status: "A", untracked: true },
+      { path: "renamed.sql", oldPath: "auth/old.sql", status: "R" },
+      { path: "deleted.sql", status: "D" },
+    ],
+    baseFiles: { "auth/old.sql": "select 1;\nDROP TABLE renamed;\n", "deleted.sql": "select 1;\nDROP TABLE deleted;\n" },
+    newFiles: { "new.sql": "select 1;\nDROP TABLE untracked;\n", "renamed.sql": "select 1;\nDROP TABLE renamed;\n", "deleted.sql": null },
+  });
+  assert.deepEqual(manifest.trust, { level: "human", reasons: [
+    sensitive("auth/old.sql", 0, "destructive SQL"), sqlReason("new.sql"), sqlReason("renamed.sql"),
+    sqlReason("deleted.sql", "removes"), sqlReason("auth/old.sql", "removes"),
+  ] });
+});
+
+test("missing and malformed trust snapshots fail closed", () => {
+  for (const fileChanges of [[], [snapshot(".nomarmy.yml", ["trust: {}"], ["trust: [broken"])]]) {
+    assert.deepEqual(evaluateTrust({ changedFiles: [".nomarmy.yml"], fileChanges }), {
+      level: "human", reasons: [ruleChange(".nomarmy.yml")],
+    });
+  }
 });
