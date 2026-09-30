@@ -52,10 +52,13 @@ criteria:
         test: raw snapshots gate untracked renamed and deleted content and old paths
       - file: tests/trust.test.mjs
         test: safe trust snapshots compare an outside symlink target string without reading sensitive target content
+        platforms: [posix]
       - file: tests/trust.test.mjs
         test: safe trust snapshots gate a symlink whose target string contains sensitive content
+        platforms: [posix]
       - file: tests/trust.test.mjs
         test: safe trust snapshots compare base symlink blobs like for like
+        platforms: [posix]
     status: met
     security: true
   - id: TRUST-4
@@ -125,19 +128,23 @@ criteria:
     proven_by:
       - file: tests/trust.test.mjs
         test: safe trust snapshots gate an untracked symlink to /dev/zero promptly without reading it
+        platforms: [posix]
       - file: tests/trust.test.mjs
         test: safe trust snapshots compare an outside symlink target string without reading sensitive target content
-      # This platform-dependent probe may skip only when mkfifo is denied.
-      # Command evidence preserves its exit status without treating that skip as failure.
-      - command: node --test --test-name-pattern="^safe trust snapshots gate a FIFO made with mkfifo without opening it$" tests/trust.test.mjs
+        platforms: [posix]
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots gate a FIFO made with mkfifo without opening it
+        platforms: [posix]
       - file: tests/trust.test.mjs
         test: safe trust snapshots gate files under symlinked parent directories
+        platforms: [posix]
       - file: tests/trust.test.mjs
         test: safe trust snapshots gate oversized files before opening and accept the size boundary
       - file: tests/trust.test.mjs
         test: safe trust snapshots gate directories and sockets without opening them
+        platforms: [posix]
       - file: tests/trust.test.mjs
         test: safe trust snapshots gate base gitlinks without cat-file blob even when deleted
     status: met
-    note: the FIFO and socket tests skip on Windows; FIFO creation skips only for EACCES or EPERM in a restricted sandbox
+    note: the symlink, FIFO and socket proofs apply on POSIX only (the engine runs in WSL on Windows). A sandbox that denies mkfifo skips the FIFO test, so this criterion reads broken there; check it on the host or in CI
     security: true
