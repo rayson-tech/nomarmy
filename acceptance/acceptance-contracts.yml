@@ -50,3 +50,18 @@ criteria:
       - file: tests/acceptance.test.mjs
         test: acceptance real Windows contract returns 13 met and only WIN-12 unproven
     status: met
+
+  - id: ACC-7
+    text: Proofs may be scoped to platforms; out-of-platform proofs are reported without running, while applicable zero-pass proofs remain broken
+    proven_by:
+      - file: tests/acceptance.test.mjs
+        test: acceptance validates proof platforms for both reference types
+      - file: tests/acceptance.test.mjs
+        test: acceptance skips out-of-platform proofs without reading or running them
+      - file: tests/acceptance.test.mjs
+        test: acceptance makes wholly scoped-out criteria unproven, including posix on win32
+      - file: tests/acceptance.test.mjs
+        test: acceptance keeps unscoped and applicable zero-pass proofs broken
+      - file: tests/acceptance.test.mjs
+        test: acceptance CLI reports skipped proofs and strict rejects scoped-out criteria
+    status: met
