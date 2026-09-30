@@ -3041,8 +3041,9 @@ function cmdAcceptance() {
         const label = failed ? c.red(criterion.status.toUpperCase())
           : criterion.status === "met" ? c.green("met") : c.yellow(criterion.status);
         const detail = criterion.failures.map((failure) => failure.command ?? `${failure.file}: ${failure.test}`).join("; ")
-          || (criterion.status === "unproven" ? contracts[index].criteria[criterionIndex].note ?? "" : "");
-        console.log(`${criterion.id.padEnd(idWidth)}  ${label}${detail ? `  ${detail}` : ""}`);
+          || (criterion.status === "unproven" ? criterion.note ?? contracts[index].criteria[criterionIndex].note ?? "" : "");
+        const skipped = criterion.notApplicable?.length ? ` (${criterion.notApplicable.length} proofs not run on ${process.platform})` : "";
+        console.log(`${criterion.id.padEnd(idWidth)}  ${label}${skipped}${detail ? `  ${detail}` : ""}`);
       });
     });
     console.log(`Total: ${Object.entries(totals).map(([status, count]) => `${count} ${status}`).join(", ")}`);
