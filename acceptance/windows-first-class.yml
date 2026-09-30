@@ -1,0 +1,162 @@
+# Acceptance contract: what the Windows feature promises, and the tests that
+# prove each promise. Backfilled from the job records of
+# run-windows-first-class-wsl2-engine-a9ffdd (PR #118), keeping only durable
+# behavior: job hygiene such as "npm test passes" or "no em dashes" isn't a
+# regression contract and was left out. The format is a draft; see
+# docs/plans/2026-09-30-acceptance-contracts.md.
+feature: Windows as a first-class front end, with the engine in WSL2
+run: run-windows-first-class-wsl2-engine-a9ffdd
+pr: 118
+criteria:
+  - id: WIN-1
+    text: The Git-root check accepts one folder however Windows spells it (case, slash direction, trailing slash, 8.3 short names)
+    proven_by:
+      - file: tests/path-utils.test.mjs
+        test: "samePath canonicalizes an existing folder and trailing slash"
+      - file: tests/path-utils.test.mjs
+        test: "samePath compares Windows slash and case spellings case-insensitively"
+    status: met
+    note: the 8.3 short-name case is only exercised on a real Windows machine (CI and Lee Todd's Windows 11 run)
+
+  - id: WIN-2
+    text: Paths that git or a Linux container reads use forward slashes, on every platform (git exclude patterns, Dockerfile build-context paths, fixture detection)
+    proven_by:
+      - file: tests/connect-scope.test.mjs
+        test: "git exclude writes and removes a forward-slashed Windows relative path"
+      - file: tests/path-utils.test.mjs
+        test: "toPosix converts a Windows Docker context source exactly"
+      - file: tests/scan.test.mjs
+        test: "fixture detection accepts a Windows relative path"
+    status: met
+
+  - id: WIN-3
+    text: WSL's own output is read correctly, including UTF-16LE with a byte-order mark, the header row and the default-distro marker
+    proven_by:
+      - file: tests/wsl.test.mjs
+        test: "parseWslList handles BOM, NULs, UTF-8, headers and blank lines"
+      - file: tests/wsl.test.mjs
+        test: "listDistros invokes wsl.exe and returns null on missing or failed WSL"
+    status: met
+
+  - id: WIN-4
+    text: Windows and WSL paths translate both ways (drive paths, \\wsl$ and \\wsl.localhost), and network shares are refused
+    proven_by:
+      - file: tests/wsl.test.mjs
+        test: "windowsToWslPath translates drives and WSL UNC paths but rejects network shares"
+      - file: tests/wsl.test.mjs
+        test: "wslToWindowsPath translates absolute paths and round trips both path families"
+    status: met
+
+  - id: WIN-5
+    text: No value from a distro name, WSL output, a saved setting or the working folder can inject a command or an extra argument
+    proven_by:
+      - file: tests/wsl.test.mjs
+        test: "wslCommand builds a quoted login-shell launch and refuses invalid distro names"
+      - file: tests/wsl.test.mjs
+        test: "wslCommand validates cwd before creating a WSL option"
+      - file: tests/wsl-connect.test.mjs
+        test: "direct MCP bridge has no shell and validates both paths and the distro"
+      - file: tests/wsl-connect.test.mjs
+        test: "probe rejects duplicate markers, newline continuations, and unsafe paths without truncation"
+      - file: tests/wsl-connect.test.mjs
+        test: "pickDistro gives actionable errors and rejects invalid distro names"
+    status: met
+    security: true
+
+  - id: WIN-6
+    text: nomarmy connect on Windows registers Claude Code, Codex and Cursor to start nomArmy inside WSL with absolute node and script paths, no shell, and the project folder translated through WSLENV
+    proven_by:
+      - file: tests/wsl-connect.test.mjs
+        test: "connectViaWsl registers ${target} and installs only Windows playbooks"
+      - file: tests/wsl-connect.test.mjs
+        test: "Windows connect persists resolved executable paths in windows.json"
+      - file: tests/wsl-front-end.test.mjs
+        test: "Windows ${target} registration carries coordinator OS and translated paths"
+    status: met
+
+  - id: WIN-7
+    text: The distro chosen is a real Linux distro, never Docker Desktop's, Rancher Desktop's or Podman machine's, and the engine uses that distro's own tools, not Windows' through /mnt/c
+    proven_by:
+      - file: tests/wsl-connect.test.mjs
+        test: "pickDistro prefers saved choice, then default WSL 2, then the only distro"
+      - file: tests/wsl-connect.test.mjs
+        test: "pickDistro never chooses Docker Desktop, Rancher Desktop or Podman machine distros"
+      - file: tests/wsl-connect.test.mjs
+        test: "resolveWslNomarmy refuses the Windows install reached through WSL's appended Windows PATH"
+      - file: tests/wsl-connect.test.mjs
+        test: "dropWindowsPath keeps only the distro's own PATH entries, and only inside WSL"
+    status: met
+
+  - id: WIN-8
+    text: Only commands that need the engine run inside WSL; scan, init, validate and sizing run on Windows directly; NOMARMY_WINDOWS_ENGINE=native turns the front end off
+    proven_by:
+      - file: tests/wsl-cli.test.mjs
+        test: "windowsPlan forwards only engine commands"
+      - file: tests/wsl-front-end.test.mjs
+        test: "Windows routes only engine commands, leaving repository commands native"
+      - file: tests/wsl-front-end.test.mjs
+        test: "NOMARMY_WINDOWS_ENGINE=native disables all Windows front-end decisions, and tests run native"
+      - file: tests/wsl-cli.test.mjs
+        test: "forwarding uses saved executable argv verbatim without a shell"
+    status: met
+
+  - id: WIN-9
+    text: nomarmy setup on Windows walks through WSL, a distro, Node 24.16+ and nomArmy inside it, each failure with its exact fix, then runs setup inside WSL with the user's flags passed through
+    proven_by:
+      - file: tests/wsl-cli.test.mjs
+        test: "setup: ${name} gives the exact fix"
+      - file: tests/wsl-cli.test.mjs
+        test: "setup rejects missing or old Node: ${node}"
+      - file: tests/wsl-cli.test.mjs
+        test: "setup accepts install prompt: ${JSON.stringify(answer)}"
+      - file: tests/wsl-cli.test.mjs
+        test: "setup forwards llama server arguments to the engine"
+    status: met
+
+  - id: WIN-10
+    text: nomarmy doctor on Windows checks WSL, the distro's WSL version, nomArmy inside it and where the repo lives, then the engine checks inside WSL, and --json prints one document
+    proven_by:
+      - file: tests/wsl-cli.test.mjs
+        test: "doctor fails WSL version 1 with the conversion command"
+      - file: tests/wsl-cli.test.mjs
+        test: "doctor accepts a Windows drive with the performance guidance"
+      - file: tests/wsl-cli.test.mjs
+        test: "doctor emits one combined JSON document and uses worse status"
+    status: met
+
+  - id: WIN-11
+    text: A General running on Windows gets Windows spellings (\\wsl.localhost\...) next to every job path it's handed, and notifications from inside WSL arrive as Windows toasts
+    proven_by:
+      - file: tests/wsl-front-end.test.mjs
+        test: "Windows job paths decorate response records recursively only for Windows coordinators in WSL"
+      - file: tests/wsl-front-end.test.mjs
+        test: "WSL notifier builds an encoded Windows toast with safe literal text"
+      - file: tests/wsl-front-end.test.mjs
+        test: "WSL notifications swallow synchronous and asynchronous failures and fall back once"
+    status: met
+
+  - id: WIN-12
+    text: docs/install.md's Windows section matches what the commands actually do and print
+    proven_by: []
+    status: unproven
+    note: checked by reading at review, and by a real install on Windows 11; no test pins it
+
+  # From the same run, outside the Windows feature itself.
+  - id: JUDGE-1
+    text: validators add judge asks for host-tools consent in a terminal (default no), prints the exact rerun command without one, and lists agents independent of the builders first
+    proven_by:
+      - file: tests/validators-ux.test.mjs
+        test: "host-tools consent saves on yes and default no writes no validators file"
+      - file: tests/validators-ux.test.mjs
+        test: "non-TTY host-tools refusal includes the exact rerun command"
+      - file: tests/validators-ux.test.mjs
+        test: "guided judge agents put independent choices first and re-ask empty and invalid choices"
+    status: met
+    security: true
+
+  - id: REVERT-1
+    text: CI workflow files don't count as code in the revert check, while real code in the same change still does
+    proven_by:
+      - file: tests/worker-contract.test.mjs
+        test: "CI configuration skips the revert check while real code remains planned"
+    status: met
