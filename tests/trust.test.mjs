@@ -139,7 +139,7 @@ test("changing the trust contract or any CODEOWNERS file is itself human-level",
   });
 });
 
-async function implement(t, { config = null, workerConfig = config, changed = ["auth/check.py"], diffText = "", owners = null, workerOwners = null, untracked = false, workerFails = false, baseFiles = {}, newFiles = {}, entries = null, baseModes = {}, setupWorker = null } = {}) {
+async function implement(t, { config = null, workerConfig = config, changed = ["auth/check.py"], diffText = "", owners = null, workerOwners = null, untracked = false, workerFails = false, baseFiles = {}, newFiles = {}, entries = null, baseModes = {}, setupWorker = null, conversion = null } = {}) {
   const root = fixture(t), projectDir = path.join(root, "checkout"), jobsRoot = path.join(root, "jobs");
   fs.mkdirSync(projectDir);
   if (config !== null) write(projectDir, ".nomarmy.yml", config);
@@ -150,16 +150,41 @@ async function implement(t, { config = null, workerConfig = config, changed = ["
   const flow = createVerificationFlow({});
   flow.registerVerificationRunner(async () => ({ status: "pass" }));
   let commitOutcome, setupError;
+  const hashCalls = [], blobs = new Map();
   const executor = createExecutor({ VERSION: "test", projectDir, jobsRoot,
     assertRepo: async () => {}, ensureJobsRoot: () => fs.mkdirSync(jobsRoot, { recursive: true }),
     resolveBase: async () => ({ ref: "base", sha: "base-sha" }),
     sweepStaleSandboxContainers: async () => {},
     run: async (command, args, options) => {
       assert.equal(command, "git");
+      if (args[0] === "hash-object") {
+        const file = args[3].slice("--path=".length);
+        assert.deepEqual(args, ["hash-object", "-w", "--stdin", `--path=${file}`]);
+        assert.equal(options.cwd, path.join(jobsRoot, "trust-job", "worktree"));
+        assert.equal(Buffer.isBuffer(options.input), true);
+        hashCalls.push(file);
+        let bytes = options.input;
+        if (conversion) bytes = conversion(file, bytes);
+        else if (file === "query.sql") {
+          const attributes = newFiles[".gitattributes"] ?? "";
+          if (/working-tree-encoding=UTF-16(?:LE|BE)/.test(attributes)) {
+            if (bytes.subarray(0, 2).equals(Buffer.from([0xff, 0xfe]))) throw new Error("BOM prohibited with UTF-16LE");
+            bytes = Buffer.from(/UTF-16BE/.test(attributes) ? Buffer.from(bytes).swap16().toString("utf16le") : bytes.toString("utf16le"));
+          }
+        }
+        const sha = String(blobs.size + 1).padStart(40, "0");
+        blobs.set(sha, bytes);
+        return { stdout: sha };
+      }
       if (args[0] === "cat-file") {
         assert.equal(options.cwd, projectDir);
         assert.equal(options.encoding, null);
         assert.equal(options.trim, false);
+        if (blobs.has(args[2])) {
+          assert.deepEqual(args, ["cat-file", "blob", args[2]]);
+          if (blobs.get(args[2]) === null) throw new Error("blob unavailable");
+          return { stdout: blobs.get(args[2]) };
+        }
         const file = args[2].slice("base-sha:".length);
         assert.deepEqual(args, ["cat-file", "blob", `base-sha:${file}`]);
         assert.notEqual(baseModes[file], "160000", "gitlinks must not be sent to cat-file blob");
@@ -204,7 +229,7 @@ async function implement(t, { config = null, workerConfig = config, changed = ["
   if (setupError) throw setupError;
   assert.equal(result.manifest.error, undefined, result.report);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(result.jobDir, "metadata.json"), "utf8")), result.manifest);
-  return { manifest: result.manifest, commitOutcome };
+  return { manifest: result.manifest, commitOutcome, hashCalls };
 }
 
 const trustConfig = "trust:\n  sensitive:\n    - paths: ['auth/**']\n      reason: access control and tenant data\n";
@@ -251,20 +276,57 @@ const sqlReason = (file, verb = "adds", line = 2) => ({
   rule: 0, reason: `${verb} sensitive content at ${file}:${line}, which the repo marks sensitive: destructive SQL`, file, line,
 });
 
-for (const attributes of ["* -diff", "* binary", "* working-tree-encoding=UTF-16LE", "* diff=hidden"]) {
+for (const attributes of ["* -diff", "* binary", "query.sql working-tree-encoding=UTF-16LE", "query.sql working-tree-encoding=UTF-16BE", "* diff=hidden"]) {
   test(`raw trust content survives attributes ${attributes}`, async (t) => {
-    // Model the exact name-status and hidden diff a tracked edit produces.
-    // The runner stub requires unfiltered cat-file bytes from the trusted repo.
-    const { manifest } = await implement(t, {
+    const text = attributes.includes("UTF-16") ? "DROP TABLE accounts;" : "select 1;\nDROP TABLE accounts;\n";
+    const bytes = attributes.includes("UTF-16") ? Buffer.from(text, "utf16le") : Buffer.from(text);
+    if (attributes.includes("UTF-16BE")) bytes.swap16();
+    const { manifest, hashCalls } = await implement(t, {
       config: sqlConfig, changed: ["query.sql", ".gitattributes"],
       baseFiles: { "query.sql": "select 1;\n" },
-      newFiles: { "query.sql": "select 1;\nDROP TABLE accounts;\n", ".gitattributes": `${attributes}\n` },
+      newFiles: { "query.sql": bytes, ".gitattributes": `${attributes}\n` },
       diffText: "Binary files a/query.sql and b/query.sql differ\n",
     });
-    assert.deepEqual(manifest.trust, { level: "human", reasons: [sqlReason("query.sql")] });
-    assert.equal(manifest.reviewRequired, true);
+    assert.deepEqual(hashCalls, ["query.sql", ".gitattributes"]);
+    assertGated(manifest, { level: "human", reasons: [sqlReason("query.sql", "adds", attributes.includes("UTF-16") ? 1 : 2)] });
   });
 }
+
+test("committed trust content gates UTF-16LE BOM conversion failures", async (t) => {
+  const { manifest, hashCalls } = await implement(t, {
+    config: sqlConfig, changed: ["query.sql", ".gitattributes"],
+    newFiles: { "query.sql": Buffer.from("\ufeffDROP TABLE accounts;", "utf16le"),
+      ".gitattributes": "query.sql working-tree-encoding=UTF-16LE\n" },
+  });
+  assert.deepEqual(hashCalls, ["query.sql", ".gitattributes"]);
+  assertGated(manifest, unchecked("query.sql", "could not be converted to committed bytes"));
+});
+
+test("committed trust content unions raw and clean-filter views and gates failures", async (t) => {
+  for (const kind of ["raw", "committed", "hash failure", "blob failure"]) {
+    const { manifest, hashCalls } = await implement(t, {
+      config: sqlConfig, changed: ["query.sql"],
+      newFiles: { "query.sql": kind === "raw" ? "DROP TABLE accounts;" : "select 1;" },
+      conversion(file, bytes) {
+        assert.equal(file, "query.sql");
+        assert.deepEqual(bytes, Buffer.from(kind === "raw" ? "DROP TABLE accounts;" : "select 1;"));
+        if (kind === "hash failure") throw new Error("required filter failed");
+        if (kind === "blob failure") return null;
+        return Buffer.from(kind === "raw" ? "select 1;" : "DROP TABLE accounts;");
+      },
+    });
+    assert.deepEqual(hashCalls, ["query.sql"]);
+    assertGated(manifest, kind.endsWith("failure") ? unchecked("query.sql", "could not be converted to committed bytes")
+      : { level: "human", reasons: [sqlReason("query.sql", "adds", 1)] });
+  }
+});
+
+test("trust process input preserves the safely captured bytes", async () => {
+  const { run } = createProcess({ projectDir: process.cwd() });
+  const bytes = Buffer.from([0xff, 0xfe, 68, 0, 10, 0]);
+  assert.deepEqual(await run(process.execPath, ["-e", "process.stdin.pipe(process.stdout)"], { input: bytes, encoding: null }),
+    { stdout: bytes, stderr: "" });
+});
 
 test("raw trust content scans NUL and invalid UTF-8 bytes on both sides", async (t) => {
   const { manifest } = await implement(t, {
@@ -459,18 +521,27 @@ test("safe trust snapshots gate a FIFO made with mkfifo without opening it", {
   skip: process.platform === "win32" ? "mkfifo is unavailable on Windows" : false,
 }, async (t) => {
   let check;
-  const { manifest } = await implement(t, {
+  const denied = new Error("mkfifo denied");
+  let result;
+  try { result = await implement(t, {
     config: sqlConfig, changed: ["pipe"], untracked: true, newFiles: { pipe: null },
     setupWorker(cwd) {
       const file = path.join(cwd, "pipe");
       const made = spawnSync("mkfifo", [file], { encoding: "utf8" });
-      assert.equal(made.status, 0, made.stderr);
+      const code = made.error?.code ?? (/Permission denied/i.test(made.stderr ?? "") ? "EACCES"
+        : /Operation not permitted/i.test(made.stderr ?? "") ? "EPERM" : null);
+      if (made.status !== 0 && ["EACCES", "EPERM"].includes(code)) {
+        t.skip(`mkfifo failed: ${code}`);
+        throw denied;
+      }
+      assert.equal(made.status, 0, made.error?.message ?? made.stderr);
       assert.equal(fs.lstatSync(file).isFIFO(), true);
       check = forbidContentReads(t, [file]);
     },
   });
+  } catch (error) { if (error === denied) return; throw error; }
   check();
-  assertGated(manifest, unchecked("pipe"));
+  assertGated(result.manifest, unchecked("pipe"));
 });
 
 test("safe trust snapshots gate files under symlinked parent directories", posixOnly, async (t) => {
@@ -552,4 +623,33 @@ test("safe trust snapshots gate base gitlinks without cat-file blob even when de
     check();
     assertGated(manifest, unchecked("submodule"));
   }
+});
+
+for (const [label, before, after, literal] of [
+  ["unchanged DROP and blank lines", "DROP\n\n", "DROP\n\nTABLE\n", "DROP TABLE"],
+  ["zero-width separator", "", "DROP\u200bTABLE", "DROP TABLE"],
+  ["soft hyphen", "", "DR\u00adOP TABLE", "DROP TABLE"],
+  ["embedded BOM", "", "DROP TA\ufeffBLE", "DROP TABLE"],
+  ["format control in literal", "", "DROP TABLE", "DR\u200dOP TABLE"],
+  ["NBSP and Unicode spaces", "DROP\n", "DROP\n\u00a0\u2003TABLE", "DROP TABLE"],
+]) {
+  test(`content occurrence normalization gates ${label}`, () => {
+    const rules = [{ content: [literal], reason: "destructive SQL" }];
+    for (const verb of ["adds", "removes"]) {
+      const change = { file: "query.sql", before: verb === "adds" ? before : after, after: verb === "adds" ? after : before };
+      assert.deepEqual(evaluateTrust({ rules, fileChanges: [change] }), {
+        level: "human", reasons: [sqlReason("query.sql", verb, 1)],
+      });
+    }
+    assert.deepEqual(evaluateTrust({ rules, fileChanges: [{ file: "query.sql", before: after, after }] }), normal);
+  });
+}
+
+test("whole-file occurrence counts locate new matches after unchanged context", () => {
+  const before = "DROP TABLE existing;\nDROP\n\n";
+  const after = before + "TABLE\n";
+  assert.deepEqual(evaluateTrust({ rules: [{ content: ["DROP TABLE"], reason: "destructive SQL" }],
+    fileChanges: [{ file: "query.sql", before, after }] }), {
+    level: "human", reasons: [sqlReason("query.sql", "adds", 2)],
+  });
 });

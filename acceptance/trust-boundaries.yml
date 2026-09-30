@@ -26,12 +26,22 @@ criteria:
     status: met
     security: true
   - id: TRUST-3
-    text: A content rule matches added or removed lines only, never unchanged context
+    text: Content rules scan raw and committed bytes, changed lines and whole-file occurrence changes, normalizing invisible controls and Unicode spaces
     proven_by:
       - file: tests/trust.test.mjs
         test: content rules inspect added and removed lines, not context or file headers
       - file: tests/trust.test.mjs
         test: raw trust content survives attributes ${attributes}
+      - file: tests/trust.test.mjs
+        test: committed trust content gates UTF-16LE BOM conversion failures
+      - file: tests/trust.test.mjs
+        test: committed trust content unions raw and clean-filter views and gates failures
+      - file: tests/trust.test.mjs
+        test: trust process input preserves the safely captured bytes
+      - file: tests/trust.test.mjs
+        test: content occurrence normalization gates ${label}
+      - file: tests/trust.test.mjs
+        test: whole-file occurrence counts locate new matches after unchanged context
       - file: tests/trust.test.mjs
         test: raw trust content scans NUL and invalid UTF-8 bytes on both sides
       - file: tests/trust.test.mjs
@@ -117,8 +127,9 @@ criteria:
         test: safe trust snapshots gate an untracked symlink to /dev/zero promptly without reading it
       - file: tests/trust.test.mjs
         test: safe trust snapshots compare an outside symlink target string without reading sensitive target content
-      - file: tests/trust.test.mjs
-        test: safe trust snapshots gate a FIFO made with mkfifo without opening it
+      # This platform-dependent probe may skip only when mkfifo is denied.
+      # Command evidence preserves its exit status without treating that skip as failure.
+      - command: node --test --test-name-pattern="^safe trust snapshots gate a FIFO made with mkfifo without opening it$" tests/trust.test.mjs
       - file: tests/trust.test.mjs
         test: safe trust snapshots gate files under symlinked parent directories
       - file: tests/trust.test.mjs
@@ -128,5 +139,5 @@ criteria:
       - file: tests/trust.test.mjs
         test: safe trust snapshots gate base gitlinks without cat-file blob even when deleted
     status: met
-    note: the FIFO and socket tests skip on Windows; a sandbox that denies mkfifo can't run the FIFO test, so run it on the host or in CI
+    note: the FIFO and socket tests skip on Windows; FIFO creation skips only for EACCES or EPERM in a restricted sandbox
     security: true
