@@ -16,11 +16,19 @@ Every platform needs Git and Podman. `nomarmy doctor` checks the host and prints
 
 **On macOS, give Podman's VM at least 4 GiB (8 is better).** Every sandbox, verification run and image build shares it, and Podman's 2 GiB default cuts workers' commands off with `Aborted`. Create it with `podman machine init --memory 8192`, or resize an existing one with `nomarmy sandbox --memory 8`. `nomarmy doctor` checks it. Windows uses WSL2 memory as described below.
 
-`install.sh` builds llama.cpp when you run a local model, installs a pinned [OpenClaw](https://github.com/openclaw/openclaw) release from npm (the host-side broker every model call goes through; set `NOMARMY_OPENCLAW_VERSION` to choose another) and configures it, builds the sandbox image, and registers the MCP server if Claude Code is installed. `nomarmy connect` (run by `install.sh`, or by hand for Codex and Cursor) also installs the `/feature` command, Claude Code's status line and, on macOS, nomArmy's notifier. The coordinator gets nomArmy's instructions from the MCP server itself, so there's nothing to copy into your projects.
+`install.sh` builds llama.cpp when you run a local model, installs a pinned [OpenClaw](https://github.com/openclaw/openclaw) release from npm (the host-side broker every model call goes through; the tested version is defined once in `lib/openclaw-install.mjs`) and configures it, builds the sandbox image, and registers the MCP server if Claude Code is installed. `nomarmy connect` (run by `install.sh`, or by hand for Codex and Cursor) also installs the `/feature` command, Claude Code's status line and, on macOS, nomArmy's notifier. The coordinator gets nomArmy's instructions from the MCP server itself, so there's nothing to copy into your projects.
 
 **From npm or a clone:** `npm install -g nomarmy@alpha` (or `git clone` and `npm install && npm link`) gives you the `nomarmy` command, and `nomarmy setup` does the rest. `nomarmy install` runs the bundled `install.sh` for the profile setup chose; the per-platform guides below show the same steps by hand.
 
 **Updating:** `nomarmy update` installs the latest alpha (or pulls, in a clone) and reconnects Claude Code, Codex and Cursor. Then restart every open coordinator session: each one runs the copy of nomArmy it started with. Until you do, `army` and `local_worker_capacity` tell that session to restart, and `nomarmy health` flags any coordinator still running an older copy.
+
+### OpenClaw repairs
+
+`nomarmy doctor --fix` prints the exact install or upgrade command before doing anything, asks once with a default of no in a terminal, and requires `--yes` without a terminal. It reports completed changes afterward. Setup, installation, and subscription setup all use the same tested OpenClaw release, not npm's latest tag. A newer installed OpenClaw is reported and left alone.
+
+Post-install checks use `openclaw plugins inspect <id> --json` for each configured subscription vendor and `openclaw update status --json` for pending migrations. A plugin must be enabled and built for the installed OpenClaw version (falling back to its version if the build version is absent). Missing or incompatible plugins report `openclaw plugins install <spec>`. Only entries in `migrationWarnings` indicate pending migrations; unrelated Doctor advisories do not fail this check. Failed status commands or invalid JSON fail verification with a command to run by hand.
+
+The printed plan lists install mutations and read-only postflight commands. nomArmy does not invoke ordinary OpenClaw doctor or delegate a broad `doctor --fix`. Migration findings are reported verbatim for a separate, operator-run `openclaw update repair` (add `--yes` for non-interactive use), not silently applied. The plan does not promise side-effect guarantees for upstream npm install scripts.
 
 ### Per-repository registration
 
