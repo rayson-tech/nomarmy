@@ -41,6 +41,7 @@ import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
 import { recordProbeSuccess } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
 import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
+import { PINNED_OPENCLAW_VERSION, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors } from "../lib/openclaw-install.mjs";
 import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
 import { fileURLToPath } from "node:url";
@@ -1188,13 +1189,13 @@ async function ensureVendorAuth(rl, vendorKey) {
   if (vendor.plugin) {
     step("OpenClaw plugin");
     const version = parseOpenclawVersion(runQuiet(openclawCmd(), ["--version"]).out);
-    if (!versionAtLeast(version, vendor.plugin.minOpenclaw)) {
-      console.log(c.yellow(`OpenClaw ${version ? version.join(".") : "(unknown version)"} is older than the ${vendor.plugin.minOpenclaw} this vendor's plugin needs.`));
-      if (!(await confirm(rl, "Update OpenClaw now (npm update -g openclaw)?"))) return { ok: false };
-      if (!runInteractive("npm", ["update", "-g", "openclaw"])) {
-        console.log(c.red("✗ Update failed. If npm reports EACCES, your global npm directory has root-owned files from an old sudo install: `sudo chown -R $(whoami) ~/.npm ~/.npm-global` fixes it."));
-        return { ok: false };
-      }
+    if (!versionAtLeast(version, PINNED_OPENCLAW_VERSION)) {
+      const repaired = await repairOpenclaw({
+        command: openclawCmd(),
+        vendors: configuredSubscriptionVendors(loadAgentsOrExit().agents, [vendorKey]),
+        isTTY: Boolean(input.isTTY), ask: (prompt) => rl.question(prompt),
+      });
+      if (!repaired.ok) return { ok: false };
     }
     if (!runQuiet(openclawCmd(), ["plugins", "inspect", vendor.plugin.id]).ok) {
       console.log(c.dim(`Installing ${vendor.plugin.spec}...`));
@@ -1203,6 +1204,12 @@ async function ensureVendorAuth(rl, vendorKey) {
         return { ok: false };
       }
       runQuiet(openclawCmd(), ["plugins", "registry", "--refresh"]);
+    }
+    const checks = verifyOpenclaw({ command: openclawCmd(), vendors: configuredSubscriptionVendors(loadAgentsOrExit().agents, [vendorKey]) });
+    const failed = checks.filter((check) => !check.ok);
+    if (failed.length) {
+      for (const check of failed) console.log(c.red(`✗ ${check.message} Fix: ${check.fix}`));
+      return { ok: false };
     }
     console.log(c.green(`✓ OpenClaw's ${vendor.plugin.id} plugin is ready.`));
   }
@@ -3019,7 +3026,23 @@ async function cmdDoctor() {
   }
   // Import lazily to avoid circular dependencies
   const { runDoctor } = await import("../lib/doctor.mjs");
-  await runDoctor({ json, exit: true, env: installEnv() });
+  const vendors = configuredSubscriptionVendors(loadAgentsOrExit().agents);
+  let checks;
+  if (flag("fix")) {
+    const repaired = await repairOpenclaw({
+      command: openclawCmd(), vendors, yes: flag("yes"), isTTY: Boolean(input.isTTY),
+      print: json ? console.error : console.log,
+      ask: async (prompt) => {
+        const rl = createInterface({ input, output: json ? process.stderr : output });
+        try { return await rl.question(prompt); } finally { rl.close(); }
+      },
+    });
+    checks = repaired.checks;
+    if (!repaired.ok && !checks.some((check) => !check.ok)) checks.push({ id: "openclaw-repair", ok: false, message: "OpenClaw repair was declined or failed.", fix: "nomarmy doctor --fix --yes" });
+  } else {
+    checks = verifyOpenclaw({ command: openclawCmd(), vendors });
+  }
+  await runDoctor({ json, exit: true, env: installEnv(), additionalChecks: checks });
 }
 commands.doctor = cmdDoctor;
 if (windowsFrontEnd() && windowsPlan(argv) === "FORWARD") {
