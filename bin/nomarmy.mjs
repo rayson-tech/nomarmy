@@ -13,6 +13,7 @@ import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { loadConfig, validateConfig, stringifyConfig, findConfigFile, parseYaml, CONFIG_FILENAMES } from "../lib/config.mjs";
+import { loadContract, loadContracts, checkContract } from "../lib/acceptance.mjs";
 import { scanRepository, compareEvidence } from "../lib/scan.mjs";
 import { buildConfigProposal } from "../lib/propose.mjs";
 import { detectHardware } from "../lib/hardware.mjs";
@@ -114,6 +115,9 @@ function usage(code = 0) {
 
 Usage: nomarmy <command> [options]
 
+  acceptance check [file...] [--json] [--strict]
+                  Check feature contracts in acceptance/*.yml.
+                  --strict fails on unproven criteria as well as broken or missing.
   scan            Inspect this repository and report its execution environment.
                   --check   compare the evidence against a committed .nomarmy.yml
   init            Propose a .nomarmy.yml from this repository's scan evidence
@@ -3010,7 +3014,42 @@ function cmdMcp() {
   child.on("exit", (code, signal) => { if (signal) process.kill(process.pid, signal); else process.exit(code ?? 1); });
 }
 
-const commands = { stats: cmdStats, validators: cmdValidators, mcp: cmdMcp, scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, install: cmdInstall, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, sandbox: cmdSandbox, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
+function cmdAcceptance() {
+  if (argv[1] !== "check") throw new Error("Usage: nomarmy acceptance check [file...] [--json] [--strict]");
+  const files = [];
+  for (let i = 2; i < argv.length; i++) {
+    if (argv[i] === "--repo") { i++; continue; }
+    if (["--json", "--strict"].includes(argv[i])) continue;
+    if (argv[i].startsWith("--")) throw new Error(`Unknown acceptance option: ${argv[i]}`);
+    files.push(argv[i]);
+  }
+  const contracts = files.length ? files.map((file) => loadContract(path.resolve(repoDir, file))) : loadContracts(repoDir);
+  const results = contracts.map((contract) => ({
+    file: path.relative(repoDir, contract.file),
+    feature: contract.feature,
+    criteria: checkContract(contract, { repoDir }),
+  }));
+  const totals = { met: 0, broken: 0, missing: 0, unproven: 0, retired: 0 };
+  for (const result of results) for (const criterion of result.criteria) totals[criterion.status]++;
+  if (json) out({ contracts: results, totals });
+  else {
+    results.forEach((result, index) => {
+      console.log(c.bold(`${result.file}: ${result.feature}`));
+      result.criteria.forEach((criterion, criterionIndex) => {
+        const failed = ["broken", "missing"].includes(criterion.status);
+        const label = failed ? c.red(criterion.status.toUpperCase())
+          : criterion.status === "met" ? c.green("met") : c.yellow(criterion.status);
+        const detail = criterion.failures.map((failure) => failure.command ?? `${failure.file}: ${failure.test}`).join("; ")
+          || (criterion.status === "unproven" ? contracts[index].criteria[criterionIndex].note ?? "" : "");
+        console.log(`${criterion.id}  ${label}${detail ? `  ${detail}` : ""}`);
+      });
+    });
+    console.log(`Total: ${Object.entries(totals).map(([status, count]) => `${count} ${status}`).join(", ")}`);
+  }
+  if (totals.broken || totals.missing || (flag("strict") && totals.unproven)) process.exitCode = 1;
+}
+
+const commands = { acceptance: cmdAcceptance, stats: cmdStats, validators: cmdValidators, mcp: cmdMcp, scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, install: cmdInstall, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, sandbox: cmdSandbox, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
   if (windowsFrontEnd()) {
