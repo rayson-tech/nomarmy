@@ -3035,13 +3035,14 @@ function cmdAcceptance() {
   else {
     results.forEach((result, index) => {
       console.log(c.bold(`${result.file}: ${result.feature}`));
+      const idWidth = Math.max(0, ...result.criteria.map((criterion) => criterion.id.length));
       result.criteria.forEach((criterion, criterionIndex) => {
         const failed = ["broken", "missing"].includes(criterion.status);
         const label = failed ? c.red(criterion.status.toUpperCase())
           : criterion.status === "met" ? c.green("met") : c.yellow(criterion.status);
         const detail = criterion.failures.map((failure) => failure.command ?? `${failure.file}: ${failure.test}`).join("; ")
           || (criterion.status === "unproven" ? contracts[index].criteria[criterionIndex].note ?? "" : "");
-        console.log(`${criterion.id}  ${label}${detail ? `  ${detail}` : ""}`);
+        console.log(`${criterion.id.padEnd(idWidth)}  ${label}${detail ? `  ${detail}` : ""}`);
       });
     });
     console.log(`Total: ${Object.entries(totals).map(([status, count]) => `${count} ${status}`).join(", ")}`);

@@ -178,6 +178,16 @@ test("acceptance CLI JSON and plain output agree; strict fails on unproven", (t)
   assert.deepEqual(JSON.parse(strict.stdout), report);
 });
 
+test("acceptance CLI aligns status columns per contract without non-TTY colors", (t) => {
+  const f = fixture(t);
+  f.write(contract([criterion("A-1", [ref(literal)]), criterion("LONG-22", [])]), "first.yml");
+  f.write(contract([criterion("SECOND-1", [ref(literal)]), criterion("B-2", [])]), "second.yml");
+  const plain = f.invoke();
+  assert.equal(plain.status, 0, plain.stderr);
+  assert.equal(plain.stdout, `acceptance/first.yml: Example\nA-1      met\nLONG-22  unproven\nacceptance/second.yml: Example\nSECOND-1  met\nB-2       unproven\nTotal: 2 met, 0 broken, 0 missing, 2 unproven, 0 retired\n`);
+  assert.equal(/\x1b\[/.test(plain.stdout), false);
+});
+
 test("acceptance CLI fails broken and missing criteria and honors explicit files", (t) => {
   const f = fixture(t);
   f.write(contract([criterion("BAD-1", [ref("fails")])]), "broken.yml");
@@ -228,4 +238,13 @@ test("acceptance real Windows contract returns 13 met and only WIN-12 unproven",
   })));
   assert.equal(results.filter((item) => item.status === "met").length, 13);
   assert.deepEqual(results.filter((item) => item.status === "unproven").map((item) => item.id), ["WIN-12"]);
+});
+
+test("acceptance CI checks every platform job", () => {
+  const workflow = YAML.parse(fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8"));
+  assert.deepEqual(Object.keys(workflow.jobs).sort(), ["test", "windows"]);
+  for (const [name, job] of Object.entries(workflow.jobs)) {
+    assert.equal(job["runs-on"], name === "windows" ? "windows-latest" : "ubuntu-latest");
+    assert.equal(job.steps.filter((step) => step.run === "node bin/nomarmy.mjs acceptance check").length, 1, name);
+  }
 });

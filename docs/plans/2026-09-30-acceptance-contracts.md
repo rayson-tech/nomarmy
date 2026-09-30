@@ -1,6 +1,6 @@
 # Plan: acceptance contracts, what a feature promises, kept in the repo
 
-**Status: design, after beta.** On a branch until beta ships. The first contract, `acceptance/windows-first-class.yml`, is backfilled and checked by a prototype; nothing else is built.
+**Status: phase 1 built (on this branch).**
 
 ## Why
 

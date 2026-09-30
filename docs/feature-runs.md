@@ -30,6 +30,23 @@ The General can lower these for one run, never raise them. When a vendor answers
 
 **Sharing it.** `run_finish` returns a `prBlock`, a "Verified by nomArmy" table for the pull request's description, scoped to that run; the playbook tells the General to use it as is. `nomarmy stats --share` prints the same block for any period or run, and `nomarmy stats --badge [path]` writes an SVG badge (default `.github/nomarmy-badge.svg`) plus the README line for it. Re-run it to refresh the numbers. If your README is also shown on npm, point the image at the file's raw GitHub URL, since npm doesn't resolve relative image paths (nomArmy's own README does this).
 
+## Acceptance contracts
+
+A contract records a feature's durable promises in `acceptance/<feature>.yml`. Each criterion has a stable ID, a description, a recorded status and `proven_by` references to the exact test file and full test name:
+
+```yaml
+feature: Example feature
+criteria:
+  - id: EX-1
+    text: The command reports its result
+    proven_by:
+      - file: tests/example.test.mjs
+        test: command reports its result
+    status: met
+```
+
+Run `nomarmy acceptance check` to check all contracts, or pass one or more files to select them. The check runs each criterion's referenced tests: **met** means they pass, **broken** means one fails, **missing** means a named test or file is gone, and **unproven** means there are no references. A retired criterion is reported as **retired** without running tests. Broken and missing fail the command; unproven fails only with `--strict`. Use `--json` for the same report as data. CI runs the check on every platform job.
+
 ## Watching what nomArmy is doing
 
 - **Claude Code's status line** shows what's running in this repo, a count for other repos, the open run, and the most serious health warning: `Opus 5.5 · rayson-senti │ 🍪 2: sr-dev codex 9m 10f · scout grok 1m │ run 3/14 $0.41`. `nomarmy connect claude` installs it unless you have your own; then `nomarmy statusline` prints nomArmy's part for you to add.
