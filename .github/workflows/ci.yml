@@ -23,6 +23,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - run: node bin/nomarmy.mjs acceptance check
       - run: node bin/nomarmy.mjs validate --json
 
   # Windows users hit bugs Linux CI can't see (a path built the Unix way broke
@@ -39,6 +40,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - run: node bin/nomarmy.mjs acceptance check
       # Native: check the command itself, not its forwarding into WSL (the
       # runner has no distro with nomArmy in it).
       - run: node bin/nomarmy.mjs validate --json
