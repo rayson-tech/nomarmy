@@ -40,6 +40,12 @@ criteria:
         test: content literals collapse whitespace across added and removed lines as multisets
       - file: tests/trust.test.mjs
         test: raw snapshots gate untracked renamed and deleted content and old paths
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots compare an outside symlink target string without reading sensitive target content
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots gate a symlink whose target string contains sensitive content
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots compare base symlink blobs like for like
     status: met
     security: true
   - id: TRUST-4
@@ -103,4 +109,24 @@ criteria:
       - file: tests/trust.test.mjs
         test: implement jobs enforce checkout trust, retain normal records, and leave unconfigured repos unchanged
     status: met
+    security: true
+  - id: TRUST-10
+    text: Worktree snapshots never follow symlinks or open special files; unchecked content, oversized files, symlinked parents and base gitlinks require human review
+    proven_by:
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots gate an untracked symlink to /dev/zero promptly without reading it
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots compare an outside symlink target string without reading sensitive target content
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots gate a FIFO made with mkfifo without opening it
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots gate files under symlinked parent directories
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots gate oversized files before opening and accept the size boundary
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots gate directories and sockets without opening them
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots gate base gitlinks without cat-file blob even when deleted
+    status: met
+    note: the FIFO and socket tests skip on Windows; a sandbox that denies mkfifo can't run the FIFO test, so run it on the host or in CI
     security: true

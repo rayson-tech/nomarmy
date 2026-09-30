@@ -3,6 +3,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import net from "node:net";
+import { spawnSync } from "node:child_process";
 import { validateConfig } from "../lib/config.mjs";
 import { parseCodeowners, codeownersPaths, evaluateTrust } from "../lib/trust.mjs";
 import { createExecutor } from "../lib/execute.mjs";
@@ -137,7 +139,7 @@ test("changing the trust contract or any CODEOWNERS file is itself human-level",
   });
 });
 
-async function implement(t, { config = null, workerConfig = config, changed = ["auth/check.py"], diffText = "", owners = null, workerOwners = null, untracked = false, workerFails = false, baseFiles = {}, newFiles = {}, entries = null } = {}) {
+async function implement(t, { config = null, workerConfig = config, changed = ["auth/check.py"], diffText = "", owners = null, workerOwners = null, untracked = false, workerFails = false, baseFiles = {}, newFiles = {}, entries = null, baseModes = {}, setupWorker = null } = {}) {
   const root = fixture(t), projectDir = path.join(root, "checkout"), jobsRoot = path.join(root, "jobs");
   fs.mkdirSync(projectDir);
   if (config !== null) write(projectDir, ".nomarmy.yml", config);
@@ -147,7 +149,7 @@ async function implement(t, { config = null, workerConfig = config, changed = ["
     testChanges: classifyTestChanges(nameStatus), issues: ["existing issue"], ignoredRuntimeJunk: [], filesChanged: changed.length, additions: 1, deletions: 1 };
   const flow = createVerificationFlow({});
   flow.registerVerificationRunner(async () => ({ status: "pass" }));
-  let commitOutcome;
+  let commitOutcome, setupError;
   const executor = createExecutor({ VERSION: "test", projectDir, jobsRoot,
     assertRepo: async () => {}, ensureJobsRoot: () => fs.mkdirSync(jobsRoot, { recursive: true }),
     resolveBase: async () => ({ ref: "base", sha: "base-sha" }),
@@ -160,6 +162,7 @@ async function implement(t, { config = null, workerConfig = config, changed = ["
         assert.equal(options.trim, false);
         const file = args[2].slice("base-sha:".length);
         assert.deepEqual(args, ["cat-file", "blob", `base-sha:${file}`]);
+        assert.notEqual(baseModes[file], "160000", "gitlinks must not be sent to cat-file blob");
         return { stdout: Buffer.from(file === ".nomarmy.yml" ? config ?? "" : baseFiles[file]) };
       }
       assert.deepEqual(args.slice(0, 3), ["worktree", "add", "-b"]);
@@ -167,8 +170,12 @@ async function implement(t, { config = null, workerConfig = config, changed = ["
     },
     gitRaw: async (args) => {
       if (args[0] === "ls-tree") {
-        assert.deepEqual(args, ["ls-tree", "-r", "--name-only", "-z", "base-sha"]);
-        return [...Object.keys(baseFiles), ...(config === null ? [] : [".nomarmy.yml"])].join("\0") + "\0";
+        const files = [...Object.keys(baseFiles), ...(config === null ? [] : [".nomarmy.yml"])];
+        // Accept the old listing as well so regression checks exercise the
+        // unsafe reader, not just a changed command signature.
+        if (args.includes("--name-only")) return files.join("\0") + "\0";
+        assert.deepEqual(args, ["ls-tree", "-r", "-z", "base-sha"]);
+        return files.map((file) => `${baseModes[file] ?? "100644"} ${baseModes[file] === "160000" ? "commit" : "blob"} ${"a".repeat(40)}\t${file}\0`).join("");
       }
       if (args[0] === "show") { assert.equal(args[1], "base-sha:.nomarmy.yml"); return config ?? ""; }
       assert.equal(args[0], "diff");
@@ -183,6 +190,10 @@ async function implement(t, { config = null, workerConfig = config, changed = ["
         if (Object.hasOwn(newFiles, file) && newFiles[file] === null) continue;
         write(cwd, file, newFiles[file] ?? "TRUNCATE accounts;\n");
       }
+      if (setupWorker) {
+        try { await setupWorker(cwd, root); }
+        catch (error) { setupError = error; throw error; }
+      }
       if (workerFails) throw new Error("synthetic worker failure");
       return { final: "STATUS: done\nTESTS: pass\nNOT_DONE: none\nNOTE: implemented" };
     },
@@ -190,6 +201,7 @@ async function implement(t, { config = null, workerConfig = config, changed = ["
     resolveReasoningApplied: () => "off", execution: {}, budgetState: { budgets: { report: { implement: 256 } } },
   });
   const result = await executor.executeJob({ task: "change access check", jobId: "trust-job" });
+  if (setupError) throw setupError;
   assert.equal(result.manifest.error, undefined, result.report);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(result.jobDir, "metadata.json"), "utf8")), result.manifest);
   return { manifest: result.manifest, commitOutcome };
@@ -352,5 +364,192 @@ test("missing and malformed trust snapshots fail closed", () => {
     assert.deepEqual(evaluateTrust({ changedFiles: [".nomarmy.yml"], fileChanges }), {
       level: "human", reasons: [ruleChange(".nomarmy.yml")],
     });
+  }
+});
+
+// Tripwires let regressions fail promptly instead of reading an endless device
+// or blocking on a FIFO. The filesystem inputs themselves are real, not mocks.
+function forbidContentReads(t, paths) {
+  const forbidden = new Set(paths);
+  const attempts = [];
+  for (const method of ["readFileSync", "openSync"]) {
+    const original = fs[method];
+    t.mock.method(fs, method, function (file, ...args) {
+      if (forbidden.has(String(file))) {
+        attempts.push({ method, file: String(file) });
+        throw new Error(`unsafe content read: ${file}`);
+      }
+      return original.call(this, file, ...args);
+    });
+  }
+  return () => assert.deepEqual(attempts, [], "no content read or open of a forbidden path");
+}
+const unchecked = (file, problem = "is not a regular file or symlink") => ({
+  level: "human", reasons: [{ rule: "trust", reason: `changes ${file}, which ${problem}, so its content can't be checked`, file }],
+});
+function assertGated(manifest, trust) {
+  assert.deepEqual(manifest.trust, trust);
+  assert.equal(manifest.reviewRequired, true);
+  assert.equal(manifest.issues[0], `HUMAN REVIEW REQUIRED (trust): ${trust.reasons.map(({ reason }) => reason).join("; ")}`);
+}
+const posixOnly = { skip: process.platform === "win32" ? "requires POSIX symlinks or special files" : false };
+
+test("safe trust snapshots gate an untracked symlink to /dev/zero promptly without reading it", posixOnly, async (t) => {
+  let check;
+  const started = performance.now();
+  const { manifest } = await implement(t, {
+    config: "trust:\n  sensitive:\n    - content: ['/dev/zero']\n      reason: device link\n",
+    changed: ["zero"], untracked: true, newFiles: { zero: null },
+    setupWorker(cwd) {
+      const file = path.join(cwd, "zero");
+      fs.symlinkSync("/dev/zero", file);
+      check = forbidContentReads(t, [file, "/dev/zero"]);
+    },
+  });
+  check();
+  assert.ok(performance.now() - started < 5000, "device link check must finish within five seconds");
+  assertGated(manifest, { level: "human", reasons: [{ rule: 0,
+    reason: "adds sensitive content at zero:1, which the repo marks sensitive: device link", file: "zero", line: 1 }] });
+});
+
+test("safe trust snapshots compare an outside symlink target string without reading sensitive target content", posixOnly, async (t) => {
+  let check;
+  const { manifest } = await implement(t, {
+    config: sqlConfig, changed: ["outside-link"], untracked: true, newFiles: { "outside-link": null },
+    setupWorker(cwd, root) {
+      const outside = path.join(root, "outside.txt"), link = path.join(cwd, "outside-link");
+      write(root, "outside.txt", "DROP TABLE private_data;\n");
+      fs.symlinkSync(outside, link);
+      check = forbidContentReads(t, [link, outside]);
+    },
+  });
+  check();
+  assert.deepEqual(manifest.trust, normal);
+  assert.equal(manifest.reviewRequired, false);
+});
+
+test("safe trust snapshots gate a symlink whose target string contains sensitive content", posixOnly, async (t) => {
+  let check;
+  const { manifest } = await implement(t, {
+    config: sqlConfig, changed: ["literal-link"], newFiles: { "literal-link": null },
+    setupWorker(cwd) {
+      const file = path.join(cwd, "literal-link");
+      fs.symlinkSync("missing/DROP TABLE accounts", file);
+      check = forbidContentReads(t, [file]);
+    },
+  });
+  check();
+  assertGated(manifest, { level: "human", reasons: [sqlReason("literal-link", "adds", 1)] });
+});
+
+test("safe trust snapshots compare base symlink blobs like for like", posixOnly, async (t) => {
+  for (const target of ["DROP TABLE old", "DROP TABLE new"]) {
+    const { manifest } = await implement(t, {
+      config: sqlConfig, changed: ["tracked-link"], baseFiles: { "tracked-link": "DROP TABLE old" },
+      baseModes: { "tracked-link": "120000" }, newFiles: { "tracked-link": null },
+      setupWorker(cwd) { fs.symlinkSync(target, path.join(cwd, "tracked-link")); },
+    });
+    assert.deepEqual(manifest.trust, target === "DROP TABLE old" ? normal : {
+      level: "human", reasons: [sqlReason("tracked-link", "removes", 1), sqlReason("tracked-link", "adds", 1)],
+    });
+  }
+});
+
+test("safe trust snapshots gate a FIFO made with mkfifo without opening it", {
+  skip: process.platform === "win32" ? "mkfifo is unavailable on Windows" : false,
+}, async (t) => {
+  let check;
+  const { manifest } = await implement(t, {
+    config: sqlConfig, changed: ["pipe"], untracked: true, newFiles: { pipe: null },
+    setupWorker(cwd) {
+      const file = path.join(cwd, "pipe");
+      const made = spawnSync("mkfifo", [file], { encoding: "utf8" });
+      assert.equal(made.status, 0, made.stderr);
+      assert.equal(fs.lstatSync(file).isFIFO(), true);
+      check = forbidContentReads(t, [file]);
+    },
+  });
+  check();
+  assertGated(manifest, unchecked("pipe"));
+});
+
+test("safe trust snapshots gate files under symlinked parent directories", posixOnly, async (t) => {
+  let check;
+  const { manifest } = await implement(t, {
+    config: sqlConfig, changed: ["nested/redirect/private.txt"], newFiles: { "nested/redirect/private.txt": null },
+    setupWorker(cwd, root) {
+      write(root, "outside/private.txt", "DROP TABLE private_data;\n");
+      fs.mkdirSync(path.join(cwd, "nested"));
+      fs.symlinkSync(path.join(root, "outside"), path.join(cwd, "nested/redirect"), "dir");
+      check = forbidContentReads(t, [path.join(cwd, "nested/redirect/private.txt"), path.join(root, "outside/private.txt")]);
+    },
+  });
+  check();
+  assertGated(manifest, unchecked("nested/redirect/private.txt", "has a symlinked parent directory"));
+});
+
+test("safe trust snapshots gate oversized files before opening and accept the size boundary", async (t) => {
+  const limit = 16 * 1024 * 1024;
+  for (const size of [limit + 1, limit]) {
+    let check = () => {};
+    const { manifest } = await implement(t, {
+      config: sqlConfig, changed: ["large.txt"], newFiles: { "large.txt": null },
+      setupWorker(cwd) {
+        const file = path.join(cwd, "large.txt");
+        const fd = fs.openSync(file, "w");
+        fs.ftruncateSync(fd, size);
+        fs.closeSync(fd);
+        if (size > limit) check = forbidContentReads(t, [file]);
+      },
+    });
+    check();
+    if (size > limit) assertGated(manifest, unchecked("large.txt", "exceeds the 16777216-byte content limit"));
+    else assert.deepEqual(manifest.trust, normal);
+  }
+});
+
+test("safe trust snapshots gate directories and sockets without opening them", posixOnly, async (t) => {
+  for (const kind of ["directory", "socket"]) {
+    let check;
+    const { manifest } = await implement(t, {
+      config: sqlConfig, changed: [kind], newFiles: { [kind]: null },
+      async setupWorker(cwd) {
+        const file = path.join(cwd, kind);
+        if (kind === "directory") fs.mkdirSync(file);
+        else {
+          const server = net.createServer();
+          t.after(() => new Promise((resolve) => server.close(resolve)));
+          // Unix socket paths are capped near 104 bytes; bind by a relative
+          // name so the fixture works however deep the checkout lives.
+          const previous = process.cwd();
+          process.chdir(cwd);
+          try { await new Promise((resolve, reject) => { server.once("error", reject); server.listen(kind, resolve); }); }
+          finally { process.chdir(previous); }
+          assert.equal(fs.lstatSync(file).isSocket(), true);
+        }
+        check = forbidContentReads(t, [file]);
+      },
+    });
+    check();
+    assertGated(manifest, unchecked(kind));
+  }
+});
+
+test("safe trust snapshots gate base gitlinks without cat-file blob even when deleted", async (t) => {
+  for (const exists of [false, true]) {
+    let check = () => {};
+    const { manifest } = await implement(t, {
+      config: sqlConfig, changed: ["submodule"], baseFiles: { submodule: "a".repeat(40) },
+      baseModes: { submodule: "160000" }, newFiles: { submodule: null },
+      setupWorker(cwd) {
+        if (exists) {
+          const file = path.join(cwd, "submodule");
+          fs.mkdirSync(file);
+          check = forbidContentReads(t, [file]);
+        }
+      },
+    });
+    check();
+    assertGated(manifest, unchecked("submodule"));
   }
 });
