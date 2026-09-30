@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { PINNED_OPENCLAW_VERSION, openclawInstallPlan, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors } from "../lib/openclaw-install.mjs";
+import { PINNED_OPENCLAW_VERSION, runOpenclawCommand, openclawInstallPlan, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors } from "../lib/openclaw-install.mjs";
 
 const action = { description: "Upgrade OpenClaw to 2026.9.6", command: "npm", args: ["install", "-g", "openclaw@2026.9.6"] };
 // Trimmed stdout supplied by the coordinator from OpenClaw 2026.9.6.
@@ -43,8 +43,8 @@ test("old-version repair installs exactly the one tested pin and verifies config
   assert.deepEqual(result, {
     ok: true, actions: [action], changed: [action.description], checks: [
       { id: "openclaw", ok: true, message: "OpenClaw 2026.9.6.", fix: "npm install -g openclaw@2026.9.6" },
-      { id: "openclaw-plugin:codex", ok: true, message: "OpenClaw plugin codex 2026.9.6 is ready.", fix: "openclaw plugins install clawhub:@openclaw/codex" },
-      { id: "openclaw-plugin:meta", ok: true, message: "OpenClaw plugin meta 2026.9.6 is ready.", fix: "openclaw plugins install clawhub:@openclaw/meta-provider" },
+      { id: "openclaw-plugin:codex", ok: true, message: "OpenClaw plugin codex 2026.9.6 is ready (built for 2026.9.6; OpenClaw is 2026.9.6).", fix: "openclaw plugins install clawhub:@openclaw/codex" },
+      { id: "openclaw-plugin:meta", ok: true, message: "OpenClaw plugin meta 2026.9.6 is ready (built for 2026.9.6; OpenClaw is 2026.9.6).", fix: "openclaw plugins install clawhub:@openclaw/meta-provider" },
       { id: "openclaw-migrations", ok: true, message: "No pending OpenClaw migrations.", fix: "openclaw update repair" },
     ],
   });
@@ -82,10 +82,10 @@ test("missing codex after install fails with the exact plugin fix command", asyn
   assert.equal(result.ok, false);
   assert.deepEqual(result.checks[1], {
     id: "openclaw-plugin:codex", ok: false,
-    message: "OpenClaw plugin codex is missing, disabled, or its compatibility with 2026.9.6 is unverified.",
+    message: "OpenClaw plugin codex is missing, disabled, unreadable, or built for a newer OpenClaw than 2026.9.6.",
     fix: "openclaw plugins install clawhub:@openclaw/codex",
   });
-  assert.equal(f.output.at(-2), "FAIL: OpenClaw plugin codex is missing, disabled, or its compatibility with 2026.9.6 is unverified. Fix: openclaw plugins install clawhub:@openclaw/codex");
+  assert.equal(f.output.at(-2), "FAIL: OpenClaw plugin codex is missing, disabled, unreadable, or built for a newer OpenClaw than 2026.9.6. Fix: openclaw plugins install clawhub:@openclaw/codex");
 });
 
 test("pending migrations even with a zero exit fail with the exact repair command", async () => {
@@ -161,11 +161,18 @@ test("failed or malformed migration status fails verification with a manual comm
   }
 });
 
-test("older plugin does not certify compatibility just because inspect succeeded", () => {
-  const f = fixture({ installed: "2026.9.6", pluginVersion: "2026.9.5" });
-  const checks = verifyOpenclaw({ ...f, vendors: ["codex"] });
-  assert.equal(checks[1].ok, false);
-  assert.equal(checks[1].fix, "openclaw plugins install clawhub:@openclaw/codex");
+test("older enabled meta plugin is ready and reports its build and installed versions", () => {
+  const f = fixture({ installed: "2026.9.6", pluginResult: {
+    ok: true, stdout: JSON.stringify({ ...pluginEvidence, plugin: {
+      ...pluginEvidence.plugin, id: "meta", enabled: true,
+      version: "2026.9.3", builtWithOpenClawVersion: "2026.9.3",
+    } }),
+  } });
+  assert.deepEqual(verifyOpenclaw({ ...f, vendors: ["meta"] })[1], {
+    id: "openclaw-plugin:meta", ok: true,
+    message: "OpenClaw plugin meta 2026.9.3 is ready (built for 2026.9.3; OpenClaw is 2026.9.6).",
+    fix: "openclaw plugins install clawhub:@openclaw/meta-provider",
+  });
 });
 
 test("a failed npm install is reported without a successful change or postflight", async () => {
@@ -222,31 +229,53 @@ test("plugin JSON accepts leading warnings and uses only stdout", () => {
     ok: true, stdout: warningEvidence + JSON.stringify(pluginEvidence), stderr: '{"plugin":{"enabled":false}}',
   } });
   assert.deepEqual(verifyOpenclaw({ ...f, vendors: ["codex"] })[1], {
-    id: "openclaw-plugin:codex", ok: true, message: "OpenClaw plugin codex 2026.9.6 is ready.",
+    id: "openclaw-plugin:codex", ok: true, message: "OpenClaw plugin codex 2026.9.6 is ready (built for 2026.9.6; OpenClaw is 2026.9.6).",
     fix: "openclaw plugins install clawhub:@openclaw/codex",
   });
   assert.deepEqual(f.calls, [["openclaw", ["--version"]], ["openclaw", ["plugins", "inspect", "codex", "--json"]], ["openclaw", ["update", "status", "--json"]]]);
 });
 
-test("plugin readiness requires boolean enabled and exact build version with absent-only fallback", () => {
-  for (const [overrides, ready] of [
-    [{version:"2026.9.5"}, true],
-    [{builtWithOpenClawVersion:undefined}, true],
-    [{builtWithOpenClawVersion:undefined, version:"2026.9.5"}, false],
-    [{builtWithOpenClawVersion:"2026.9.5"}, false],
-    [{builtWithOpenClawVersion:null}, false],
-    [{enabled:false}, false],
-    [{enabled:"true"}, false],
+test("plugin readiness accepts equal and older builds, but rejects newer, disabled, and unreadable builds", () => {
+  const ready = (version) => `OpenClaw plugin codex ${version} is ready (built for ${version}; OpenClaw is 2026.9.6).`;
+  const failed = "OpenClaw plugin codex is missing, disabled, unreadable, or built for a newer OpenClaw than 2026.9.6.";
+  for (const [overrides, expected] of [
+    [{}, ready("2026.9.6")],
+    [{version: "2026.9.5"}, ready("2026.9.6")],
+    [{builtWithOpenClawVersion: undefined, version: "2026.9.5"}, ready("2026.9.5")],
+    [{builtWithOpenClawVersion: "2026.9.7"}, failed],
+    [{builtWithOpenClawVersion: null}, failed],
+    [{enabled: false}, failed],
+    [{enabled: "true"}, failed],
   ]) {
     const f = fixture({ installed: "2026.9.6", pluginResult: {
       ok: true, stdout: JSON.stringify({ ...pluginEvidence, plugin: { ...pluginEvidence.plugin, ...overrides } }),
     } });
     assert.deepEqual(verifyOpenclaw({ ...f, vendors: ["codex"] })[1], {
-      id: "openclaw-plugin:codex", ok: ready,
-      message: ready ? "OpenClaw plugin codex 2026.9.6 is ready." : "OpenClaw plugin codex is missing, disabled, or its compatibility with 2026.9.6 is unverified.",
+      id: "openclaw-plugin:codex", ok: expected !== failed,
+      message: expected,
       fix: "openclaw plugins install clawhub:@openclaw/codex",
     });
   }
+});
+
+test("enabled plugin without version fields fails verification", () => {
+  const f = fixture({ installed: "2026.9.6", pluginResult: {
+    ok: true, stdout: JSON.stringify({ plugin: { id: "codex", enabled: true } }),
+  } });
+  assert.deepEqual(verifyOpenclaw({ ...f, vendors: ["codex"] })[1], {
+    id: "openclaw-plugin:codex", ok: false,
+    message: "OpenClaw plugin codex version could not be verified.",
+    fix: "openclaw plugins install clawhub:@openclaw/codex",
+  });
+});
+
+test("unreadable plugin JSON fails with the plugin fix command", () => {
+  const f = fixture({ installed: "2026.9.6", pluginResult: { ok: true, stdout: "not JSON" } });
+  assert.deepEqual(verifyOpenclaw({ ...f, vendors: ["meta"] })[1], {
+    id: "openclaw-plugin:meta", ok: false,
+    message: "OpenClaw plugin meta is missing, disabled, unreadable, or built for a newer OpenClaw than 2026.9.6.",
+    fix: "openclaw plugins install clawhub:@openclaw/meta-provider",
+  });
 });
 
 test("migration warnings are all reported verbatim without broad repairs", () => {
@@ -256,4 +285,15 @@ test("migration warnings are all reported verbatim without broad repairs", () =>
     id: "openclaw-migrations", ok: false, message: warnings.join("\n"), fix: "openclaw update repair",
   });
   assert.deepEqual(f.calls, [["openclaw", ["--version"]], ["openclaw", ["update", "status", "--json"]]]);
+});
+
+test("a timed-out OpenClaw command fails version verification with a timeout message", () => {
+  const command = process.execPath;
+  const result = runOpenclawCommand(command, ["-e", "setTimeout(() => {}, 10000)"], { timeoutMs: 30 });
+  assert.deepEqual(result, { ok: false, stdout: "", stderr: "Command timed out after 30 ms.", timedOut: true });
+  const checks = verifyOpenclaw({ command, run: () => result });
+  assert.deepEqual(checks, [{
+    id: "openclaw", ok: false, message: "OpenClaw version check timed out.",
+    fix: "npm install -g openclaw@2026.9.6",
+  }]);
 });
