@@ -1,4 +1,4 @@
-# Phase 1 and 2 promises for acceptance contracts.
+# Phase 1, 2 and 3 promises for acceptance contracts.
 feature: "Acceptance contracts: each feature's promises in the repo, checked per criterion"
 criteria:
   - id: ACC-1
@@ -104,4 +104,24 @@ criteria:
         test: run_finish delivers its real acceptance verdict including check errors and no-contract omission
       - file: tests/acceptance-fill.test.mjs
         test: PR Acceptance row runs real evidence for ${state}
+    status: met
+
+
+  - id: ACC-12
+    text: Later implement jobs run only affected operator-checkout contract criteria in a timed asynchronous child after verification and before commit, using a static relative import graph bounded to depth 8 and 2000 files; broken or missing proofs name the promise and require review, bounded traversal is recorded, and judge answers only add flags
+    proven_by:
+      - file: tests/acceptance-impact.test.mjs
+        test: contract impact follows static imports transitively with relative resolution and deleted files
+      - file: tests/acceptance-impact.test.mjs
+        test: unrelated changes and repositories without contracts run no contract child
+      - file: tests/acceptance-impact.test.mjs
+        test: affected checks use operator contracts and report met broken and missing references
+      - file: tests/acceptance-impact.test.mjs
+        test: contract graph bounds depth eight and two thousand files and records conservative selection
+      - file: tests/acceptance-impact.test.mjs
+        test: contract checks stay asynchronous and time out hung proofs into review issues
+      - file: tests/acceptance-impact.test.mjs
+        test: judge receives affected promises and only adds behavior change flags
+      - file: tests/acceptance-impact.test.mjs
+        test: implement completion checks contracts after verification before commit and retains broken review
     status: met
