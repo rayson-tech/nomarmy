@@ -408,3 +408,18 @@ test("doctor's Podman and local-model advice fits the platform (Windows got brew
   assert.match(r.fix, /docs\/install\.md#windows/);
   assert.doesNotMatch(r.fix, /\.sh/);
 });
+
+
+test("doctor JSON fails overall when an OpenClaw postflight check fails", async () => {
+  const originalLog = console.log;
+  let printed = null;
+  console.log = (text) => { printed = text; };
+  const check = { id: "openclaw-plugin:codex", ok: false, message: "Codex is missing.", fix: "openclaw plugins install clawhub:@openclaw/codex" };
+  try {
+    const result = await runDoctor({ json: true, facts: passingFacts(), additionalChecks: [check] });
+    assert.deepEqual(result, { ok: false, checks: [...evaluateChecks(passingFacts()), check] });
+    assert.deepEqual(JSON.parse(printed), result);
+  } finally {
+    console.log = originalLog;
+  }
+});

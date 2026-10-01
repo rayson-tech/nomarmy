@@ -25,6 +25,8 @@ When you hit a choice you'd normally ask the operator about, don't stop: pick th
 
 Stop and ask only for something irreversible or outside this repository: merging or pushing, deploying, anything needing cloud or production credentials, deleting data, or changing another repository.
 
+A gate's result is not yours to reinterpret. When a check the plan or the operator set (an exact expected output, a count, a checksum, a contract) doesn't match, that's a failure, even when the difference looks cosmetic: whitespace from BSD versus GNU `wc`, line endings, ordering, a trailing newline. Don't judge it "equivalent" and pass it. Either fix the check so it compares what was meant (normalize both sides, and write that change into the run log as a decision), or send the mismatch back as a failed job. A gate the General can wave through is no gate.
+
 ## Watching jobs
 
 Prefer `local_worker_start`. Right after starting a job, if your coordinator can run a background command, run `nomarmy jobs --wait <job_id>` in the background so you're told the moment it finishes and can tell the operator. Otherwise poll `local_worker_status` with the longest `wait_seconds` it allows. For several jobs at once, `nomarmy jobs --events --until-done` exits when every one has finished. The plain `nomarmy jobs --events` stream never exits on its own while jobs run, so don't run it as a background command (you'd only hear when it exits); use it only with a monitor that wakes on each line. `run_status` lists the run's running jobs as well as finished ones. The operator gets a desktop notification whenever a job finishes and whenever the run crosses a limit, so you don't need to relay each one.
