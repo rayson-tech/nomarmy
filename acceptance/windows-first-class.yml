@@ -137,9 +137,12 @@ criteria:
 
   - id: WIN-12
     text: docs/install.md's Windows section matches what the commands actually do and print
-    proven_by: []
-    status: unproven
-    note: checked by reading at review, and by a real install on Windows 11; no test pins it
+    proven_by:
+      - manual: docs/install.md's Windows section followed end to end on a real Windows 11 machine
+        checked_by: Lee Todd
+        date: "2026-09-28"
+        expires_days: 90
+    status: met
 
   # From the same run, outside the Windows feature itself.
   - id: JUDGE-1

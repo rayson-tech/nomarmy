@@ -45,10 +45,10 @@ criteria:
     status: met
 
   - id: ACC-6
-    text: The Windows feature's contract checks as 13 met and 1 unproven
+    text: The Windows feature's contract checks as 14 met, including manual WIN-12
     proven_by:
       - file: tests/acceptance.test.mjs
-        test: acceptance real Windows contract returns 13 met and only WIN-12 unproven
+        test: acceptance real Windows contract returns 14 met including manual WIN-12
     status: met
 
   - id: ACC-7
