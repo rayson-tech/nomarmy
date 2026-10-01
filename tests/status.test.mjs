@@ -186,7 +186,7 @@ test("statusLineText: records Claude session observations and expires idle sourc
   });
   assert.deepEqual(readUsageSnapshots(root)["claude-cli"], expected(85, now, [{ sourceId: "active", usedPercent: 85, observedAt: now }]));
   statusLineText({ session, stateRoot: root, now: now + 60000 });
-  assert.deepEqual(readUsageSnapshots(root)["claude-cli"], expected(85, now + 60000, [{ sourceId: "active", usedPercent: 85, observedAt: now + 60000 }]));
+  assert.deepEqual(readUsageSnapshots(root)["claude-cli"], expected(85, now, [{ sourceId: "active", usedPercent: 85, observedAt: now }]));
   statusLineText({ session: { ...session, session_id: "idle", rate_limits: { seven_day: { used_percentage: 89, resets_at: reset } } }, stateRoot: root, now: now + 120000 });
   const low = { ...session, rate_limits: { seven_day: { used_percentage: 6, resets_at: reset } } };
   assert.equal(statusLineText({ session: low, stateRoot: root, now: now + 180000 }), "x │ 🍪 idle │ ⚠ claude-cli 89% wk");
@@ -214,3 +214,36 @@ test("statusLineText: shows high and over usage after collapsing jobs and stays 
   assert.equal(line, "x │ 🍪 2: +2 │ ⛔ codex 100% wk");
   assert.ok([...line].length <= 48);
 });
+
+for (const refresh of [false, true]) {
+  test(`statusLineText: unchanged redraw ${refresh ? "after the interval writes and keeps the source fresh" : "within the interval does not write"}`, t => {
+    const root = tmp(), now = Date.parse("2026-09-25T12:00:00Z");
+    const reset = now + 3600000;
+    const session = { session_id: "active", workspace: { project_dir: "/r/x" },
+      rate_limits: { seven_day: { used_percentage: 85, resets_at: reset / 1000 } } };
+    const draw = at => statusLineText({ session, stateRoot: root, now: at });
+    draw(now);
+    const initial = readUsageSnapshots(root);
+    const writes = t.mock.method(fs, "writeFileSync");
+    const renames = t.mock.method(fs, "renameSync");
+    for (const offset of [1000, 60000, 299999]) draw(now + offset);
+    assert.equal(writes.mock.callCount(), 0);
+    assert.equal(renames.mock.callCount(), 0);
+    assert.deepEqual(readUsageSnapshots(root), initial);
+    if (refresh) {
+      const later = now + 5 * 60000;
+      assert.equal(draw(later), "x │ 🍪 idle │ ⚠ claude-cli 85% wk");
+      assert.equal(writes.mock.callCount(), 1);
+      assert.equal(renames.mock.callCount(), 1);
+      const expected = { "claude-cli": { source: "claude", plan: null, limitReached: false, observedAt: later,
+        windows: [{ name: "week", usedPercent: 85, windowMinutes: 10080, resetsAt: reset,
+          sources: [{ sourceId: "active", usedPercent: 85, observedAt: later }] }] } };
+      assert.deepEqual(readUsageSnapshots(root), expected);
+      // No new reading: the interval refresh alone extends visibility beyond the original TTL.
+      assert.equal(statusLineText({ session: { workspace: session.workspace }, stateRoot: root,
+        now: now + 31 * 60000 }), "x │ 🍪 idle │ ⚠ claude-cli 85% wk");
+      assert.equal(writes.mock.callCount(), 1);
+      assert.deepEqual(readUsageSnapshots(root), expected);
+    }
+  });
+}

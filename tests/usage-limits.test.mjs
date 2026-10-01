@@ -462,3 +462,20 @@ test("refresh regression: a newer job observation wins over an in-flight refresh
   assert.deepEqual(result, { called: true, ok: true, snapshots: { openai: newer }, error: null, failedProviders: [] });
   assert.deepEqual(readUsageSnapshots(root), { openai: newer });
 });
+
+test("Claude sources: unchanged redraw still drops a reset window and all its observations", () => {
+  const shortReset = now + 60000;
+  const incoming = { ...claude(15, "active"), windows: [win("5h", 80, shortReset, 300), win()] };
+  const first = mergeUsageSnapshot(null, incoming, now);
+  const previous = mergeUsageSnapshot(first, { ...incoming, sourceId: "idle" }, now);
+  assert.strictEqual(mergeUsageSnapshot(previous, { ...incoming, observedAt: now + 1000 }, now + 1000), previous);
+  for (const later of [shortReset, shortReset + 1]) {
+    const expected = mergedClaude(15, [observation("active", 15), observation("idle", 15)], later);
+    // Check both an omitted window and an incoming stale copy of the reset window.
+    for (const windows of [[win()], incoming.windows]) {
+      const result = mergeUsageSnapshot(previous, { ...incoming, windows, observedAt: later }, later);
+      assert.deepEqual(result, expected);
+      assert.deepEqual(result.windows.map(w => w.name), ["week"]);
+    }
+  }
+});
