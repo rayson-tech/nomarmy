@@ -40,7 +40,7 @@ import { podmanProblem, podmanVmStartedAt } from "../lib/podman-health.mjs";
 import { restartNotice } from "../lib/install-freshness.mjs";
 import { requestJobStop } from "../lib/openclaw-run.mjs";
 import { loadJobRecords, computeStats, formatStats, formatStatsSummary, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
-import { shareMarkdown } from "../lib/share.mjs";
+import { acceptanceSummary, shareMarkdown } from "../lib/share.mjs";
 import { recentSuggestions } from "../lib/suggestions.mjs";
 import { probeModel } from "../lib/model-probe.mjs";
 import { jevSettings, judgeSettings } from "../lib/validators.mjs";
@@ -572,7 +572,10 @@ server.tool("run_finish", "Close a /feature run as complete or stopped, with a o
     if (activeRunId === run_id) activeRunId = null;
     // What nomArmy verified in this run, ready for the pull request's description (lib/share.mjs).
     let prBlock = null;
-    try { prBlock = shareMarkdown(computeStats(loadJobRecords(jobsRoot), { runId: run_id }), { scope: "this feature run", repoDir: projectDir }); } catch { /* the totals stand without it */ }
+    try {
+      const acceptance = await acceptanceSummary(projectDir);
+      prBlock = shareMarkdown(computeStats(loadJobRecords(jobsRoot), { runId: run_id }), { scope: "this feature run", acceptance });
+    } catch { /* the totals stand without it */ }
     return toolText(JSON.stringify({ id: run.id, status: run.status, ...runTotals(run), ...(prBlock ? { prBlock, prBlockNote: "Put prBlock in the pull request's description as it is: every number is from nomArmy's verified records." } : {}) }, null, 2));
   } catch (error) { return toolText(error.message, true); }
 });

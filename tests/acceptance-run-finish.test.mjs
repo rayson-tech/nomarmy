@@ -29,7 +29,11 @@ test("run_finish delivers its real acceptance verdict including check errors and
     else fs.writeFileSync(file, state === "error" ? "criteria: [" : state === "unproven" ? source.replace('[{file: example.test.mjs, test: works}]', '[]') : source);
     fs.writeFileSync(path.join(root, "example.test.mjs"), `import test from "node:test"; test("works", () => { ${state === "broken" ? 'throw Error("failed")' : ''} });`);
     const run = createRun(runsRoot, { name: "acceptance", repo: root, limits: DEFAULT_RUN_LIMITS });
+    let timerFired = false;
+    const timer = setTimeout(() => { timerFired = true; }, 0);
     const response = await finish({ run_id: run.id, status: "complete", summary: "tested" });
+    clearTimeout(timer);
+    assert.equal(timerFired, true, "run_finish must yield the server event loop during acceptance");
     assert.deepEqual(Object.keys(response).sort(), ["content", "isError"]);
     assert.equal(response.isError, false);
     const data = JSON.parse(response.content[0].text);
