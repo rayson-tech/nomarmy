@@ -38,6 +38,7 @@ import { readSetting, writeSetting, writeEnvLine, userCommonPath, userProfilePat
 import { MIN_PODMAN_VM_MB } from "../lib/doctor.mjs";
 import { liveLeases } from "../lib/slots.mjs";
 import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
+import { linkCodex } from "../lib/codex-link.mjs";
 import { recordProbeSuccess, parseOpenclawAuthProfiles, codexImportRecovery } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
 import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, openclawSignInFailure, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
@@ -174,7 +175,12 @@ Usage: nomarmy <command> [options]
                             --model --auth-env [--base-url]
                             [--openclaw-provider --plugin] [--register]
                             [--update-mcp] (api); --provider --model
-                            --owner (subscription); and optionally
+                            --owner (subscription). Codex JSON setup can
+                            --link-openclaw after CLI login; removing a
+                            capturing email profile non-interactively needs
+                            --remove-email-profiles. Interactive Codex setup
+                            offers removal (default yes), then imports the
+                            CLI login. For any kind, optionally
                             --max-concurrent --context-window
                             --thinking [minimal|low|medium|high|xhigh|adaptive|max|ultra] --no-thinking
                   update <name>
@@ -186,7 +192,7 @@ Usage: nomarmy <command> [options]
                             --no-model clears the default model, so every
                             role or job names its own.
                             (--json with the matching flags; --probe to
-                            test-call a subscription's new model first)
+                            test-call the agent; without a name, all agents)
                   remove <name>
                             remove one agent
   army <show|init|assign|general>
@@ -1307,10 +1313,15 @@ function reapProbeSandbox(stateDir) {
 /**
  * OpenClaw's own provider login, for the vendors whose plugin wants one on
  * top of the vendor CLI's login (Claude doesn't: OpenClaw reuses the CLI
- * session directly). Run when the catalog or auth-profile check shows
- * linking is needed, never preemptively.
+ * session directly). Codex always refreshes its imported copy after CLI
+ * login is confirmed; other providers link when catalog or auth checks fail.
  */
-function openclawProviderLogin(vendor) {
+async function openclawProviderLogin(vendor, rl) {
+  if (vendor === SUBSCRIPTION_VENDORS.codex) return linkCodex({
+    run: runQuiet, command: openclawCmd(), isTTY: Boolean(input.isTTY),
+    removeEmailProfiles: flag("remove-email-profiles"),
+    confirm: (prompt, opts) => confirm(rl, prompt, opts), print: (message) => console.log(c.dim(message)),
+  });
   const provider = vendor.credential.loginProvider ?? vendor.provider;
   console.log(c.dim(`Linking OpenClaw to it (\`openclaw models auth login --provider ${provider}\`) -- follow its prompts:`));
   const ok = runInteractive(openclawCmd(), ["models", "auth", "login", "--provider", provider]);
@@ -1579,16 +1590,23 @@ async function addSubscriptionAgent(rl, agents) {
   console.log(`\n${c.bold("→")} Models`);
   const needsOpenclawLogin = vendor.credential.kind === "openclaw-login";
   let linkedOpenclaw = false;
+  if (vendorKey === "codex") {
+    linkedOpenclaw = await openclawProviderLogin(vendor, rl);
+    if (!linkedOpenclaw) {
+      console.log(c.red("✗ Sign-in has no usable auth profile. Retry with `nomarmy agents add subscription codex`."));
+      process.exitCode = 1; return;
+    }
+  }
   let models = catalogModelsFor(vendor.provider);
-  if (!models.length && needsOpenclawLogin) {
-    linkedOpenclaw = openclawProviderLogin(vendor);
+  if (!models.length && needsOpenclawLogin && !linkedOpenclaw) {
+    linkedOpenclaw = await openclawProviderLogin(vendor, rl);
     if (!linkedOpenclaw) { console.log(c.red(`✗ Sign-in failed or was canceled. Retry with \`nomarmy agents add subscription ${vendorKey}\`.`)); process.exitCode = 1; return; }
     models = catalogModelsFor(vendor.provider);
   }
   // Catalog entries can be cached, and a particular model can refuse a
   // working login. Check OpenClaw's auth profile before asking for details.
   if (needsOpenclawLogin && !hasUsableOpenclawAuthProfile(vendor.provider)) {
-    if (linkedOpenclaw || !openclawProviderLogin(vendor) || !hasUsableOpenclawAuthProfile(vendor.provider)) {
+    if (linkedOpenclaw || !(await openclawProviderLogin(vendor, rl)) || !hasUsableOpenclawAuthProfile(vendor.provider)) {
       console.log(c.red(`✗ Sign-in has no usable auth profile. Retry with \`nomarmy agents add subscription ${vendorKey}\`.`));
       process.exitCode = 1;
       return;
@@ -1660,6 +1678,15 @@ async function cmdAgentsAddJson() {
     }
     const thinking = resolveThinkingFlag();
     if (thinking !== undefined) agent.thinking = thinking;
+  }
+  if (kind === "subscription" && agent.provider === "openai" && (flag("link-openclaw") || flag("remove-email-profiles"))) {
+    if (!readLoginStatus("codex").loggedIn) throw new Error("Confirm Codex CLI login first: codex login");
+    const linked = await linkCodex({ run: runQuiet, command: openclawCmd(),
+      removeEmailProfiles: flag("remove-email-profiles"), print: (message) => console.error(message) });
+    if (!linked) throw new Error("Codex import failed; nothing was written.");
+    if (!probeWorker("openai", agent.model ?? SUBSCRIPTION_VENDORS.codex.defaultModel)) {
+      throw new Error(`Codex test call failed; nothing was written. Fix: ${codexImportRecovery()}`);
+    }
   }
   const written = saveAgents({ ...agents, [name]: agent });
   const saved = written[name];
@@ -1743,7 +1770,7 @@ async function cmdAgentsUpdate() {
     if (flag("owner") || value("owner") !== null || value("provider") !== null || value("kind") !== null) {
       throw new Error("Kind, provider and owner can't be changed -- that's a different agent. Use `nomarmy agents add`.");
     }
-    probe = flag("probe") && current.kind === "subscription";
+    probe = flag("probe");
     if (!Object.keys(changes).length && !probe) throw new Error("Nothing to update -- pass at least one field flag (see `nomarmy agents update` usage).");
   } else {
     if (!process.stdin.isTTY) throw new Error("nomarmy agents update needs an interactive terminal, or the flags to change (e.g. --max-concurrent 3).");
@@ -1792,7 +1819,7 @@ async function cmdAgentsUpdate() {
   }
 
   if (probe && !Object.keys(changes).length) { probeConfiguredAgent(name, current); return; }
-  if (probe && changes.model && !probeWorker(current.provider, changes.model)) {
+  if (probe && changes.model && !probeWorker(agentProviderId(current), changes.model)) {
     out({ error: `a real test prompt to ${current.provider}/${changes.model} didn't come back -- nothing was written` });
     process.exit(1);
   }
@@ -2933,6 +2960,7 @@ async function cmdHealth() {
   const { checkAndRecordHealth } = await import("../lib/health.mjs");
   const stateRoot = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
   const { result } = await checkAndRecordHealth({ projectDir: repoDir, stateRoot, configDir: globalConfigDir(), env: installEnv() });
+  if (result.issues.some((i) => i.severity === "error")) process.exitCode = 1;
   if (json) return out(result);
   console.log(c.bold("🍪 nomArmy health") + c.dim(`  ${new Date(result.checkedAt).toLocaleString()}`));
   if (!result.issues.length) { console.log(c.green("\n✓ Nothing to fix.")); return; }
@@ -3163,7 +3191,10 @@ async function cmdDoctor() {
   }
   // Import lazily to avoid circular dependencies
   const { runDoctor } = await import("../lib/doctor.mjs");
-  const vendors = configuredSubscriptionVendors(loadAgentsOrExit().agents);
+  const agents = loadAgentsOrExit().agents;
+  const vendors = configuredSubscriptionVendors(agents);
+  let armySummary = null;
+  try { armySummary = describeArmy(loadArmy({ projectDir: repoDir }), { agents }); } catch { /* other doctor checks still run */ }
   let checks;
   if (flag("fix")) {
     const repaired = await repairOpenclaw({
@@ -3179,7 +3210,8 @@ async function cmdDoctor() {
   } else {
     checks = verifyOpenclaw({ command: openclawCmd(), vendors });
   }
-  await runDoctor({ json, exit: true, env: installEnv(), additionalChecks: checks });
+  await runDoctor({ json, exit: true, env: installEnv(), additionalChecks: checks,
+    runtime: { agents, armySummary, openclawCmd: openclawCmd() } });
 }
 commands.doctor = cmdDoctor;
 if (windowsFrontEnd() && windowsPlan(argv) === "FORWARD") {

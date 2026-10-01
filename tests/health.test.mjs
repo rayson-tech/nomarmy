@@ -19,7 +19,7 @@ const AUTH = { profiles: [
   { id: "openai:account-1", provider: "openai", type: "oauth", expiresAt: "2026-10-03T21:10:37.000Z" },
 ] };
 
-const CODEX_RECOVERY = "openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --yes to re-import the Codex login (preview with `openclaw migrate plan codex --from ~/.codex --agent main --include-secrets --item auth:openai`), or `openclaw configure` (Model Setup, select Codex) in a terminal";
+const CODEX_RECOVERY = "openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --yes";
 
 test("loginExpiryIssues: quiet 9 days out, a warning inside 7, an error once expired", () => {
   assert.deepEqual(loginExpiryIssues(AUTH, { now: Date.parse("2026-09-24T12:00:00Z") }), []);
@@ -47,7 +47,7 @@ function authRun(profiles) {
   };
 }
 
-test("runHealthChecks names an expired Codex import beside a valid profile and gives migrate, configure, and logout", async () => {
+test("runHealthChecks names an expired Codex import beside a valid profile and gives the exact migrate recovery", async () => {
   const expired = { id: "openai:codex-import", provider: "openai", type: "oauth", label: "(Codex import)", expiresAt: "2020-01-02T00:00:00.000Z" };
   const valid = { id: "openai:working", provider: "openai", type: "oauth", expiresAt: "2099-01-01T00:00:00.000Z" };
   const { issues } = await runHealthChecks({ now: Date.parse("2026-06-01T00:00:00Z"), run: authRun([expired, valid]) });
@@ -58,13 +58,13 @@ test("runHealthChecks names an expired Codex import beside a valid profile and g
     severity: "error",
     title: "Codex (ChatGPT plan) login has expired: openai:codex-import (Codex import)",
     detail: "Auth profile openai:codex-import (Codex import) expired 2020-01-02. OpenClaw may still pick it.",
-    fix: `${CODEX_RECOVERY}; \`openclaw models auth logout openai:codex-import\``,
+    fix: CODEX_RECOVERY,
     short: "openai login expired",
   });
   assert.doesNotMatch(`${issues[0].title} ${issues[0].detail} ${issues[0].fix}`, /every job on it will fail|agents add/);
 });
 
-test("runHealthChecks with only an expired Codex import gives the migrate and configure fix", async () => {
+test("runHealthChecks with only an expired Codex import gives the exact migrate fix", async () => {
   const expired = { id: "openai:codex-import", provider: "openai", type: "oauth", label: "(Codex import)", expiresAt: "2020-01-02T00:00:00.000Z" };
   const { issues } = await runHealthChecks({ now: Date.parse("2026-06-01T00:00:00Z"), run: authRun([expired]) });
   assert.equal(issues.length, 1);
