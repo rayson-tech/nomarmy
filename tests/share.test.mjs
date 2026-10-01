@@ -33,3 +33,27 @@ test("the badge counts what nomArmy checked and caught, in a neutral color; gree
   assert.match(badgeSvg(computeStats([])), /nomArmy: verified/);
   assert.equal(badgeMarkdown(".github/nomarmy-badge.svg"), "[![nomArmy](.github/nomarmy-badge.svg)](https://github.com/rayson-tech/nomarmy)");
 });
+
+
+test("PR table cells escape backslashes before pipes and remove newlines", () => {
+  const value = "left\\|right\r\nnext\nend\\";
+  const escaped = String.raw`left\\\|right next end\\`;
+  const stats = computeStats(records, { runId: "run-x" });
+  // Exercise each data row, including interpolated values outside Acceptance.
+  stats.claimVsEvidence.verificationFailed = { valueOf: () => 1, toString: () => value };
+  stats.claimVsEvidence.provenTestFiles = value;
+  stats.code.committedJobs = value;
+  stats.code.linesAdded = value;
+  stats.code.linesRemoved = value;
+  stats.highStakes = { jobs: value, reviewed: 0 };
+  const rows = shareMarkdown(stats, { acceptance: value }).split("\n").filter(line => line.startsWith("|"));
+  assert.deepEqual(rows, [
+    "| | |",
+    "|---|---|",
+    `| Acceptance | ${escaped} |`,
+    `| Worker claims checked | 2 of 3 "done, tests pass" claims held up; 1 caught (${escaped} failed when nomArmy ran the tests itself) |`,
+    `| Tests proven | ${escaped} new test file(s) shown to fail without their change |`,
+    `| Work committed | ${escaped} verified job(s), +${escaped} / -${escaped} lines |`,
+    `| High-stakes changes | ${escaped}, 0 independently reviewed |`,
+  ]);
+});

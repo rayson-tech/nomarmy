@@ -259,7 +259,8 @@ for (const available of [true, false]) {
         assert.equal(input.timeoutMs, 4321);
         snapshot = input.acceptanceContractsDir;
         assert.equal(path.dirname(snapshot), f.dir);
-        assert.equal(fs.statSync(snapshot).mode & 0o777, 0o755);
+        // Windows does not expose POSIX permission bits; the mount below enforces read-only access.
+        if (process.platform !== "win32") assert.equal(fs.statSync(snapshot).mode & 0o777, 0o755);
         assert.deepEqual(JSON.parse(fs.readFileSync(path.join(snapshot, "0.yml"), "utf8")), {
           feature: f.contract.feature, criteria: [f.contract.criteria[0]],
         });
@@ -296,7 +297,7 @@ test("Podman acceptance executor forwards the read-only contract snapshot mount"
   assert.equal(calls[0][0], "podman");
   assert.deepEqual(calls[0][1], buildPodmanArgs(input));
   assert.equal(calls[0][1].includes("type=bind,source=/job/contracts,target=/nomarmy-contracts,readonly"), true);
-  assert.deepEqual(calls[0][1].filter(arg => arg.includes("target=/nomarmy-acceptance/")), ["bin", "lib", "node_modules"].map(dir => `type=bind,source=/installed/${dir},target=/nomarmy-acceptance/${dir},readonly`));
+  assert.deepEqual(calls[0][1].filter(arg => arg.includes("target=/nomarmy-acceptance/")), ["bin", "lib", "node_modules"].map(dir => `type=bind,source=${path.join(input.acceptanceToolDir, dir)},target=/nomarmy-acceptance/${dir},readonly`));
   assert.equal(calls[0][2].timeoutMs, 4321);
   assert.deepEqual(Object.keys(result).sort(), ["durationMs", "exitCode", "started", "stderr", "stdout", "timedOut"]);
   assert.deepEqual({ ...result, durationMs: 0 }, { started: true, timedOut: false, exitCode: 0, stdout: "{}", stderr: "", durationMs: 0 });

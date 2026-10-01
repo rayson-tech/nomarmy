@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 const CLI = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "nomarmy.mjs");
@@ -55,19 +56,39 @@ test("jobs --events --until-done scopes a run and a repository while another job
   const finishA = makeJob("job-a", "run-a", repoA);
   makeJob("job-b", "run-b", repoB);
   for (const filter of [["--run", "run-a"], ["--repo", repoA]]) {
-    const watcher = spawn(process.execPath, [CLI, "jobs", "--events", "--until-done", ...filter, "--interval", "1"], { env: { ...process.env, NOMARMY_AGENT_STATE: state } });
-    let output = "";
-    watcher.stdout.on("data", (d) => { output += d; });
-    const exited = new Promise((resolve) => watcher.on("exit", resolve));
-    await new Promise((r) => setTimeout(r, 1200));
-    finishA();
-    const code = await Promise.race([exited, new Promise((r) => setTimeout(() => r("still running"), 4500))]);
-    if (code === "still running") watcher.kill();
-    assert.equal(code, 0);
-    assert.match(output, /running\s+job-a/);
-    assert.match(output, /finished\s+job-a/);
-    assert.doesNotMatch(output, /job-b/);
-    assert.match(output, /done\s+every job seen running has finished/);
+    const watcher = spawn(process.execPath, [CLI, "jobs", "--events", "--until-done", "--json", ...filter, "--interval", "1"], { env: { ...process.env, NOMARMY_AGENT_STATE: state } });
+    t.after(() => watcher.kill());
+    const events = [];
+    let stderr = "";
+    watcher.stderr.on("data", data => { stderr += data; });
+    const lines = createInterface({ input: watcher.stdout });
+    const code = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        watcher.kill();
+        reject(new Error(`scoped watcher timed out: ${JSON.stringify(events)}; ${stderr}`));
+      }, 60_000);
+      const fail = error => { clearTimeout(timer); watcher.kill(); reject(error); };
+      watcher.once("error", fail);
+      // close, unlike exit, waits until stdout has been drained.
+      watcher.once("close", code => { clearTimeout(timer); resolve(code); });
+      lines.on("line", line => {
+        try {
+          const event = JSON.parse(line);
+          events.push(event);
+          // The CLI must observe running before we publish the finished record.
+          // No startup delay or polling interval can race this handshake.
+          if (event.event === "running" && event.jobId === "job-a") finishA();
+        } catch (error) { fail(error); }
+      });
+    });
+    assert.equal(code, 0, stderr);
+    assert.deepEqual(events.map(({ event, jobId }) => ({ event, jobId })), [
+      { event: "running", jobId: "job-a" },
+      { event: "finished", jobId: "job-a" },
+      { event: "done", jobId: undefined },
+    ]);
+    assert.equal(events[2].detail, "every job seen running has finished");
+    assert.equal(JSON.parse(fs.readFileSync(path.join(state, "jobs", "job-b", "status.json"), "utf8")).state, "running");
     // Restore the job for the next filter.
     if (filter[0] === "--run") makeJob("job-a", "run-a", repoA);
   }
