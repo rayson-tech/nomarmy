@@ -88,13 +88,14 @@ test("snapshot persistence recovers corrupt files and retains every provider ato
   assert.deepEqual(readUsageSnapshots(root).openai, snap());
 });
 
-function runtime(root) {
+function runtime(root, extra = {}) {
   const budgets = deriveBudgets({ env: {} });
   return createJobRuntime({ env: { NOMARMY_EXECUTION: "hosted" }, projectDir: root, projectDirProblem: () => null, stateRoot: root, jobsRoot: path.join(root, "jobs"),
     leasesRoot: path.join(root, "leases"), slotsRoot: path.join(root, "slots"),
     budgetState: { hardwareSnapshot: null, contextInfo: { slots: 3 }, budgets, refresh: async () => {} },
     currentMaxWorkers: () => 2, budgetsForJob: () => budgets, subscriptionJobFieldProblems: () => [], repoPolicy: () => ({}), modelCatalogReady: async () => {},
     agentsConfig: () => ({ agents: { coder: { kind: "subscription", provider: "openai" } } }),
+    usageRun: extra.usageRun, usageRefreshTimeoutMs: extra.usageRefreshTimeoutMs,
   });
 }
 
@@ -137,6 +138,142 @@ test("settled jobs record provider usage; write failures preserve both success a
   assert.deepEqual(fs.readdirSync(root).filter(name => name.endsWith(".tmp")), []);
 });
 
+const OPENCLAW_TEXT = "- openai usage: 168h 100% left ⏱6d 10h";
+const CLAUDE_TEXT = "- claude-cli usage: 5h 82% left ⏱3h 4m";
+const openclawReset = (at) => at + 6 * 86400000 + 10 * 3600000;
+function openclawSnapshot(at) {
+  return { source: "openclaw", plan: null, limitReached: false, observedAt: at,
+    windows: [{ name: "week", usedPercent: 0, windowMinutes: 10080, resetsAt: openclawReset(at) }] };
+}
+const hold = (label, age, extra = "") => `agent "coder" is held at its usage limit: 100% of week, resets ${label} (reading ${age} minutes old).${extra} Ask the operator before resubmitting with confirm_over_limit: true, or send the job to another agent.`;
+function writeSnapshot(root, snapshot) {
+  fs.writeFileSync(path.join(root, "usage-limits.json"), JSON.stringify({ openai: snapshot }));
+}
+
+test("OpenClaw captured usage text converts exact week and 5h windows without JSON", async () => {
+  const { parseOpenClawUsageOutput, fetchOpenClawUsage } = await import("../lib/usage-limits.mjs");
+  const expected = { openai: openclawSnapshot(now), "claude-cli": {
+    source: "openclaw", plan: null, limitReached: false, observedAt: now,
+    windows: [{ name: "5h", usedPercent: 18, windowMinutes: 300, resetsAt: now + 11040000 }],
+  } };
+  assert.equal(expected.openai.windows[0].resetsAt, now + 554400000);
+  const stdout = `${OPENCLAW_TEXT}\n${CLAUDE_TEXT}\n`;
+  assert.deepEqual(parseOpenClawUsageOutput(stdout, now), expected);
+  for (const [duration, milliseconds] of [["3h 20m", 12000000], ["45m", 2700000]]) {
+    assert.deepEqual(parseOpenClawUsageOutput(CLAUDE_TEXT.replace("3h 4m", duration), now), {
+      "claude-cli": { ...expected["claude-cli"], windows: [{ name: "5h", usedPercent: 18, windowMinutes: 300, resetsAt: now + milliseconds }] },
+    });
+  }
+  const calls = [];
+  const run = async (cmd, args) => {
+    calls.push([cmd, args]);
+    return { ok: true, stdout: args.includes("--json") ? '{"auth":{}}' : stdout };
+  };
+  assert.deepEqual(await fetchOpenClawUsage({ run, now, timeoutMs: 1000, openclawCmd: "openclaw" }), { ok: true, snapshots: expected, error: null });
+  assert.deepEqual(calls, [["openclaw", ["models", "status"]]]);
+});
+
+test("usage refresh is async: the event loop keeps running while OpenClaw is pending", async () => {
+  const { fetchOpenClawUsage } = await import("../lib/usage-limits.mjs");
+  let interleaved = false;
+  const run = () => new Promise((resolve) => {
+    setTimeout(() => resolve({ ok: true, stdout: OPENCLAW_TEXT }), 40);
+  });
+  const pending = fetchOpenClawUsage({ run, now, timeoutMs: 2000, openclawCmd: "openclaw" });
+  setTimeout(() => { interleaved = true; }, 5);
+  const result = await pending;
+  assert.equal(interleaved, true);
+  assert.equal(result.ok, true);
+  assert.equal(result.snapshots.openai.windows[0].usedPercent, 0);
+  assert.deepEqual(Object.keys(result.snapshots).sort(), ["openai"]);
+});
+
+test("a stale over-limit reading is refreshed before the hold; a fresh one is not", async (t) => {
+  t.mock.method(Date, "now", () => now);
+  const { staleUsageRefreshedNote } = await import("../lib/usage-limits.mjs");
+  const root = fixture(t);
+  const label = new Date(reset).toLocaleString("en-US", { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+  const job = { task: "t", agentName: "coder", subscription_worker: "coder", mode: "scout" };
+  const calls = [];
+  const run = async (cmd, args) => { calls.push([cmd, args]); return { ok: true, stdout: OPENCLAW_TEXT }; };
+  writeSnapshot(root, { ...snap([win("week", 100)]), observedAt: now });
+  assert.deepEqual((await runtime(root, { usageRun: run }).admit([job])).problems, [hold(label, 0)]);
+  assert.deepEqual(calls, []);
+  writeSnapshot(root, { ...snap([win("week", 100)]), observedAt: now - 9 * 60000 });
+  assert.deepEqual((await runtime(root, { usageRun: run }).admit([job])).problems, [hold(label, 9)]);
+  assert.deepEqual(calls, [], "a 9 minute old reading is still fresh");
+  writeSnapshot(root, { ...snap([win("week", 100)]), observedAt: now - 149 * 60000 });
+  const admitted = await runtime(root, { usageRun: run }).admit([job]);
+  assert.deepEqual(admitted.problems, []);
+  assert.deepEqual(admitted.admission.reasons.filter((line) => line.startsWith("stale usage reading ")), [staleUsageRefreshedNote("openai")]);
+  assert.equal(staleUsageRefreshedNote("openai"), "stale usage reading for openai was refreshed from OpenClaw");
+  assert.deepEqual(calls, [["openclaw", ["models", "status"]]]);
+  const saved = readUsageSnapshots(root).openai;
+  assert.deepEqual(saved, openclawSnapshot(now));
+  assert.deepEqual(Object.keys(saved).sort(), ["limitReached", "observedAt", "plan", "source", "windows"]);
+});
+
+test("a failed or timed-out usage refresh keeps the hold and says the refresh failed", async (t) => {
+  t.mock.method(Date, "now", () => now);
+  const root = fixture(t);
+  const label = new Date(reset).toLocaleString("en-US", { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+  const job = { task: "t", agentName: "coder", subscription_worker: "coder", mode: "scout" };
+  const stale = { ...snap([win("week", 100)]), observedAt: now - 149 * 60000 };
+  writeSnapshot(root, stale);
+  const failed = await runtime(root, { usageRun: async () => ({ ok: false, stdout: "" }) }).admit([job]);
+  assert.deepEqual(failed.problems, [hold(label, 149, " OpenClaw usage refresh failed.")]);
+  assert.deepEqual(readUsageSnapshots(root).openai, stale);
+  writeSnapshot(root, stale);
+  const timedOut = await runtime(root, { usageRun: () => new Promise(() => {}), usageRefreshTimeoutMs: 30 }).admit([job]);
+  assert.deepEqual(timedOut.problems, [hold(label, 149, " OpenClaw usage refresh failed (timed out).")]);
+  assert.deepEqual(readUsageSnapshots(root).openai, stale);
+});
+
+test("health, army, and capacity mark a stale over-limit reading and refresh it", async (t) => {
+  t.mock.method(Date, "now", () => now);
+  const { describeArmy } = await import("../lib/army.mjs");
+  const { runHealthChecks } = await import("../lib/health.mjs");
+  const root = fixture(t);
+  const label = new Date(reset).toLocaleString("en-US", { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+  const freshLabel = new Date(openclawReset(now)).toLocaleString("en-US", { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+  const stale = { ...snap([win("week", 100)]), observedAt: now - 149 * 60000 };
+  const loaded = { army: { general: null, workflow: null, roles: { coder: { agent: "coder" } } }, sources: { roles: { coder: {} } }, layers: [] };
+  const agents = { coder: { kind: "subscription", provider: "openai" } };
+  const marked = describeArmy(loaded, { agents, agentProviderId: (agent) => agent.provider, now, usageSnapshots: { openai: stale } });
+  assert.deepEqual(marked.roles.coder.usage, { level: "over", text: `100% of week, resets ${label}; possibly stale (149 minutes old)` });
+  const failedView = describeArmy(loaded, { agents, agentProviderId: (agent) => agent.provider, now, usageSnapshots: { openai: stale }, usageRefreshError: "OpenClaw usage refresh failed", usageRefreshFailed: ["openai"] });
+  assert.deepEqual(failedView.roles.coder.usage, { level: "over", text: `100% of week, resets ${label}; possibly stale (149 minutes old). OpenClaw usage refresh failed` });
+  writeSnapshot(root, stale);
+  const calls = [];
+  const run = async (cmd, args) => {
+    calls.push(args);
+    return args[0] === "models" && args[1] === "status" ? { ok: true, stdout: OPENCLAW_TEXT } : { ok: false, stdout: "" };
+  };
+  const health = await runHealthChecks({ now, run, stateRoot: root, usageSnapshots: { openai: stale }, openclawCmd: "openclaw" });
+  assert.deepEqual(health.issues.filter((issue) => String(issue.id).startsWith("usage:")), []);
+  assert.deepEqual(readUsageSnapshots(root).openai, openclawSnapshot(now));
+  assert.deepEqual(calls.filter((args) => args[0] === "models" && args[1] === "status"), [["models", "status"]]);
+  writeSnapshot(root, stale);
+  const held = await runHealthChecks({ now, run: async () => ({ ok: false, stdout: "" }), stateRoot: root, usageSnapshots: { openai: stale }, openclawCmd: "openclaw" });
+  assert.deepEqual(held.issues.filter((issue) => String(issue.id).startsWith("usage:")), [{
+    id: "usage:openai:over", severity: "warn", title: "openai is at its usage limit",
+    detail: `100% of week, resets ${label}; possibly stale (149 minutes old). OpenClaw usage refresh failed.`,
+    fix: "wait for the reset, or move its roles with nomarmy army assign", short: "openai 100% wk",
+  }]);
+  const quiet = [];
+  writeSnapshot(root, { ...snap([win("week", 100)]), observedAt: now });
+  const freshView = await runtime(root, { usageRun: async (cmd, args) => { quiet.push(args); return { ok: true, stdout: OPENCLAW_TEXT }; } }).displayedCapacity();
+  assert.deepEqual(quiet, []);
+  assert.equal(freshView.usageLimits.openai.level, "over");
+  assert.equal(freshView.usageLimits.openai.text, `100% of week, resets ${label}`);
+  writeSnapshot(root, stale);
+  const refreshedView = await runtime(root, { usageRun: run }).displayedCapacity();
+  assert.deepEqual(Object.keys(refreshedView.usageLimits.openai).sort(), ["ageMinutes", "level", "resetsAt", "short", "text"]);
+  assert.deepEqual(refreshedView.usageLimits.openai, { level: "ok", text: `0% of week, resets ${freshLabel}`, short: "0% wk", resetsAt: null, ageMinutes: 0 });
+  const army = describeArmy(loaded, { agents, agentProviderId: (agent) => agent.provider, now, usageSnapshots: readUsageSnapshots(root) });
+  assert.deepEqual(army.roles.coder.usage, { level: "ok", text: `0% of week, resets ${freshLabel}` });
+});
+
 test("mergeUsageSnapshot: an idle window's stale, lower reading never replaces a newer one", async () => {
   const { mergeUsageSnapshot } = await import("../lib/usage-limits.mjs");
   const now = Date.parse("2026-09-25T06:00:00Z"), week = now + 86400000, fiveHour = now + 3600000;
@@ -156,4 +293,96 @@ test("mergeUsageSnapshot: an idle window's stale, lower reading never replaces a
   const later = mergeUsageSnapshot(fresh, s([w("week", 93, week)]), fiveHour + 1);
   assert.deepEqual(later.windows.map((x) => x.name), ["week"]);
   assert.equal(mergeUsageSnapshot(null, fresh, now), fresh);
+});
+
+
+test("refresh regression: ANSI and box-drawing prefixes preserve captured usage", async () => {
+  const { fetchOpenClawUsage } = await import("../lib/usage-limits.mjs");
+  for (const stdout of [
+    OPENCLAW_TEXT,
+    `\x1b[32m${OPENCLAW_TEXT}\x1b[0m`,
+    `│ ${OPENCLAW_TEXT} │`,
+    "\x1b[32m│openai\x1b[0m usage: 168h \x1b[32m100%\x1b[0m left ⏱6d 10h│",
+  ]) {
+    const calls = [];
+    const result = await fetchOpenClawUsage({ now, run: async (cmd, args) => {
+      calls.push(args);
+      return { ok: true, stdout };
+    } });
+    assert.deepEqual(result, { ok: true, snapshots: { openai: openclawSnapshot(now) }, error: null });
+    assert.deepEqual(calls, [["models", "status"]]);
+  }
+});
+
+test("refresh regression: failed commands cannot clear a hold using partial stdout", async (t) => {
+  t.mock.method(Date, "now", () => now);
+  const root = fixture(t);
+  const stale = { ...snap([win("week", 100)]), observedAt: now - 149 * 60000 };
+  writeSnapshot(root, stale);
+  const calls = [];
+  const rt = runtime(root, { usageRun: async (cmd, args) => {
+    calls.push(args);
+    return { ok: false, stdout: OPENCLAW_TEXT };
+  } });
+  const label = new Date(reset).toLocaleString("en-US", { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+  const result = await rt.admit([{ task: "t", agentName: "coder", subscription_worker: "coder", mode: "scout" }]);
+  assert.deepEqual(result.problems, [hold(label, 149, " OpenClaw usage refresh failed.")]);
+  assert.deepEqual(readUsageSnapshots(root), { openai: stale });
+  assert.deepEqual(calls, [["models", "status"]]);
+});
+
+test("refresh regression: text command receives the timeout budget and empty usage fails", async () => {
+  const { fetchOpenClawUsage } = await import("../lib/usage-limits.mjs");
+  for (const stdout of [OPENCLAW_TEXT, '{"auth":{}}', "No usage available"]) {
+    const calls = [];
+    const result = await fetchOpenClawUsage({ now, timeoutMs: 100, run: async (cmd, args, options) => {
+      calls.push([args, options]);
+      return { ok: true, stdout };
+    } });
+    assert.deepEqual(result, stdout === OPENCLAW_TEXT
+      ? { ok: true, snapshots: { openai: openclawSnapshot(now) }, error: null }
+      : { ok: false, snapshots: {}, error: "OpenClaw usage refresh failed" });
+    assert.deepEqual(calls, [[["models", "status"], { timeoutMs: 100 }]]);
+  }
+});
+
+test("refresh regression: health reads and refreshes saved state without a supplied snapshot", async (t) => {
+  const { runHealthChecks } = await import("../lib/health.mjs");
+  const root = fixture(t);
+  writeSnapshot(root, { ...snap([win("week", 100)]), observedAt: now - 149 * 60000 });
+  const calls = [];
+  const result = await runHealthChecks({ now, stateRoot: root, run: async (cmd, args) => {
+    if (args[0] === "models" && args[1] === "status") {
+      calls.push(args);
+      return { ok: true, stdout: OPENCLAW_TEXT };
+    }
+    return { ok: false, stdout: "" };
+  } });
+  assert.deepEqual(result.issues.filter(issue => issue.id.startsWith("usage:")), []);
+  assert.deepEqual(readUsageSnapshots(root), { openai: openclawSnapshot(now) });
+  assert.deepEqual(calls, [["models", "status"]]);
+});
+
+test("refresh regression: persistence failure preserves the stale hold", async (t) => {
+  const { refreshStaleOverLimitReadings } = await import("../lib/usage-limits.mjs");
+  const root = fixture(t);
+  const stateRoot = path.join(root, "not-a-directory");
+  fs.writeFileSync(stateRoot, "occupied");
+  const snapshots = { openai: { ...snap([win("week", 100)]), observedAt: now - 149 * 60000 } };
+  assert.deepEqual(await refreshStaleOverLimitReadings(stateRoot, {
+    now, snapshots, run: async () => ({ ok: true, stdout: OPENCLAW_TEXT }),
+  }), { called: true, ok: false, snapshots, error: "OpenClaw usage refresh failed", failedProviders: ["openai"] });
+});
+
+test("refresh regression: a newer job observation wins over an in-flight refresh", async (t) => {
+  const { refreshStaleOverLimitReadings } = await import("../lib/usage-limits.mjs");
+  const root = fixture(t);
+  writeSnapshot(root, { ...snap([win("week", 100)]), observedAt: now - 149 * 60000 });
+  const newer = { ...snap([win("week", 100)]), observedAt: now + 1 };
+  const result = await refreshStaleOverLimitReadings(root, { now, run: async () => {
+    recordUsageSnapshot(root, "openai", newer);
+    return { ok: true, stdout: OPENCLAW_TEXT };
+  } });
+  assert.deepEqual(result, { called: true, ok: true, snapshots: { openai: newer }, error: null, failedProviders: [] });
+  assert.deepEqual(readUsageSnapshots(root), { openai: newer });
 });
