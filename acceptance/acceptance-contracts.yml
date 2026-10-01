@@ -145,6 +145,10 @@ criteria:
         test: changed contracts match moved IDs and report all criteria deleted everywhere
       - file: tests/acceptance-verification.test.mjs
         test: changed contract text rewording requires review but whitespace alone does not
+      - file: tests/acceptance-verification.test.mjs
+        test: whole contract sets handle the review paths and status laundering
+      - file: tests/acceptance-verification.test.mjs
+        test: whole contract comparison rejects duplicate IDs and retains issues after a bug
     status: met
 
   - id: ACC-13
