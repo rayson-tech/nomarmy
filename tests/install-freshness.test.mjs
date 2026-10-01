@@ -116,6 +116,26 @@ test("freshnessIssues: a copy with no harnesses is an error, with the fix", () =
 test("health checks only registered server copies and fixes their actual scope", async (t) => {
   const base = tmp(t, "nomarmy-registered-health-");
   const projectDir = path.join(base, "repo"), globalDir = path.join(base, "global"), localDir = path.join(base, "local");
+  const homeDir = path.join(base, "isolated-home"), registeredHome = path.join(base, "registered-home");
+  const cursorConfigPath = path.join(homeDir, ".cursor", "mcp.json");
+  const oldHome = process.env.HOME;
+  const oldCursorConfigPath = process.env.NOMARMY_CURSOR_CONFIG_PATH;
+  process.env.HOME = registeredHome;
+  delete process.env.NOMARMY_CURSOR_CONFIG_PATH;
+  t.after(() => {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    if (oldCursorConfigPath === undefined) delete process.env.NOMARMY_CURSOR_CONFIG_PATH; else process.env.NOMARMY_CURSOR_CONFIG_PATH = oldCursorConfigPath;
+  });
+  const registeredCursorPath = path.join(registeredHome, ".cursor", "mcp.json");
+  const staleDir = path.join(base, "stale");
+  fs.mkdirSync(path.join(staleDir, "mcp"), { recursive: true });
+  fs.writeFileSync(path.join(staleDir, "package.json"), JSON.stringify({ version: "0.1.0-alpha.1" }));
+  fs.writeFileSync(path.join(staleDir, "mcp", "server.mjs"), "// stale server");
+  fs.mkdirSync(path.dirname(registeredCursorPath), { recursive: true });
+  fs.writeFileSync(registeredCursorPath, JSON.stringify({ mcpServers: {
+    "nomarmy-local-worker": { command: "node", args: [path.join(staleDir, "mcp", "server.mjs")] },
+  } }));
+  const registrationPaths = { cursorConfigPath, homeDir };
   for (const dir of [projectDir, globalDir, localDir]) fs.mkdirSync(path.join(dir, "mcp"), { recursive: true });
   for (const dir of [globalDir, localDir]) {
     fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ version: "0.1.0-alpha.8" }));
@@ -125,10 +145,10 @@ test("health checks only registered server copies and fixes their actual scope",
   fs.copyFileSync(path.join(REPO_ROOT, "harnesses", "node", "harness.yml"), path.join(localDir, "harnesses", "node", "harness.yml"));
   const issuesFor = async (scope, serverPath) => {
     const run = async (cmd, args, opts) => {
-      if (cmd !== "claude" || opts.cwd !== (scope === "user" ? os.homedir() : projectDir)) return { ok: false, stdout: "" };
+      if (cmd !== "claude" || opts.cwd !== (scope === "user" ? homeDir : projectDir)) return { ok: false, stdout: "" };
       return { ok: true, stdout: `nomarmy-local-worker:\n  Scope: ${scope} config\n  Command: node\n  Args: ${serverPath}\n` };
     };
-    const install = await readRegisteredInstall({ projectDir, installDir: globalDir, run });
+    const install = await readRegisteredInstall({ projectDir, installDir: globalDir, run, ...registrationPaths });
     return install ? freshnessIssues(install) : [];
   };
   const localPath = path.join(localDir, "mcp", "server.mjs"), globalPath = path.join(globalDir, "mcp", "server.mjs");
@@ -143,7 +163,7 @@ test("health checks only registered server copies and fixes their actual scope",
   const projectRun = async (cmd, args, opts) => cmd === "claude" && opts.cwd === projectDir
     ? { ok: true, stdout: "nomarmy-local-worker:\n  Scope: Project config\n  Command: nomarmy\n  Args: mcp\n" }
     : { ok: false, stdout: "" };
-  const projectInstall = await readRegisteredInstall({ projectDir, installDir: globalDir, run: projectRun });
+  const projectInstall = await readRegisteredInstall({ projectDir, installDir: globalDir, run: projectRun, ...registrationPaths });
   assert.deepEqual(freshnessIssues(projectInstall).map((issue) => [issue.id, issue.fix]), [
     ["nomarmy-harnesses:0.1.0-alpha.8", "nomarmy connect claude --scope project, then restart that session"],
   ]);
@@ -151,7 +171,7 @@ test("health checks only registered server copies and fixes their actual scope",
   fs.writeFileSync(path.join(projectDir, ".cursor", "mcp.json"), JSON.stringify({ mcpServers: {
     "nomarmy-local-worker": { command: "nomarmy", args: ["mcp"] },
   } }));
-  const cursorInstall = await readRegisteredInstall({ projectDir, installDir: globalDir, run: async () => ({ ok: false, stdout: "" }) });
+  const cursorInstall = await readRegisteredInstall({ projectDir, installDir: globalDir, run: async () => ({ ok: false, stdout: "" }), ...registrationPaths });
   assert.deepEqual(freshnessIssues(cursorInstall).map((issue) => [issue.id, issue.fix]), [
     ["nomarmy-harnesses:0.1.0-alpha.8", "nomarmy connect cursor --scope project, then restart that session"],
   ]);
@@ -159,7 +179,7 @@ test("health checks only registered server copies and fixes their actual scope",
   const codexRun = async (cmd) => cmd === "codex"
     ? { ok: true, stdout: JSON.stringify({ transport: { command: "node", args: [globalPath] } }) }
     : { ok: false, stdout: "" };
-  const codexInstall = await readRegisteredInstall({ projectDir, installDir: globalDir, run: codexRun });
+  const codexInstall = await readRegisteredInstall({ projectDir, installDir: globalDir, run: codexRun, ...registrationPaths });
   assert.deepEqual(freshnessIssues(codexInstall).map((issue) => [issue.id, issue.fix]), [
     ["nomarmy-harnesses:0.1.0-alpha.8", "nomarmy connect codex, then restart that session"],
   ]);
