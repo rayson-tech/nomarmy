@@ -275,6 +275,24 @@ test("changed contract renames and copies preserve weakening results across comp
   }
 });
 
+test("contract comparison errors display Windows contract paths relative to the worktree", async () => {
+  const worktree = String.raw`C:\Users\RUNNER~1\AppData\Local\Temp\job\worktree`;
+  const contractFile = path.win32.join(worktree, "acceptance", "invalid.yml");
+  const result = await changedContractWeakening({
+    worktree, baseSha: "base", gitRaw: async () => "", nameStatus: [],
+    load: (root, { onError }) => {
+      if (root === worktree) onError(new Error(`${contractFile}: Flow sequence is not closed`));
+      else onError(new Error(`${path.join(root, "acceptance", "invalid.yml")}: invalid base contract`));
+      return [];
+    },
+  });
+  assert.deepEqual(result, {
+    files: [], weakened: [],
+    issues: ["CONTRACT CHECK ERROR: acceptance/invalid.yml: invalid base contract; acceptance/invalid.yml: Flow sequence is not closed"],
+  });
+  assert.doesNotMatch(result.issues[0], /[A-Za-z]:[\\/]|\\/);
+});
+
 test("changed contracts match moved IDs and report all criteria deleted everywhere", async t => {
   const moved = await job(t, {
     entries: [{ status: "M", path: "acceptance/a.yml" }, { status: "A", path: "acceptance/b.yml" }],
