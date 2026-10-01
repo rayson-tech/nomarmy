@@ -50,6 +50,10 @@ Each `proven_by` entry, whether `{ file, test }` or `{ command }`, may have an o
 
 Run `nomarmy acceptance check` to check all contracts, or pass one or more files to select them. The check runs each criterion's referenced tests: **met** means they pass, **broken** means one fails, **missing** means a named test or file is gone, and **unproven** means there are no references applicable to the current platform. A retired criterion is reported as **retired** without running tests. Broken and missing fail the command; unproven fails only with `--strict`. Use `--json` for the same report as data. CI runs the check on every platform job.
 
+The General writes the contract in the operator checkout during planning and gives each implement job its `criteria` IDs. Unknown IDs are refused at admission. A committed job whose revert check passed records proposed test references for all its criteria, including exact names and templates matched by their fixed prefix.
+
+After integrating accepted jobs, preview `nomarmy acceptance fill <run-id> --dry-run`, then run it without `--dry-run` to append proofs (or supply one job ID). Existing references and comments stay intact; duplicate references are skipped. An unproven criterion is marked met only when its updated proofs pass the real checker. The General reviews and prunes the broad mapping, since every changed test is proposed for every criterion its job carries. `--json` returns the additions as data. `run_finish` checks the checkout again and includes its acceptance verdict in the PR block; check errors are shown, not hidden.
+
 ## Watching what nomArmy is doing
 
 - **Claude Code's status line** shows what's running in this repo, a count for other repos, the open run, and the most serious health warning: `Opus 5.5 · rayson-senti │ 🍪 2: sr-dev codex 9m 10f · scout grok 1m │ run 3/14 $0.41`. `nomarmy connect claude` installs it unless you have your own; then `nomarmy statusline` prints nomArmy's part for you to add.

@@ -1,4 +1,4 @@
-# Phase 1 promises for acceptance contracts.
+# Phase 1 and 2 promises for acceptance contracts.
 feature: "Acceptance contracts: each feature's promises in the repo, checked per criterion"
 criteria:
   - id: ACC-1
@@ -64,4 +64,44 @@ criteria:
         test: acceptance keeps unscoped and applicable zero-pass proofs broken
       - file: tests/acceptance.test.mjs
         test: acceptance CLI reports skipped proofs and strict rejects scoped-out criteria
+    status: met
+
+  - id: ACC-8
+    text: Implement jobs carry contract IDs; unknown IDs are refused from the operator checkout with the searched files named, and records and reports retain the IDs
+    proven_by:
+      - file: tests/acceptance-fill.test.mjs
+        test: contract criteria schema, admission and report preserve IDs and name unknown IDs plus searched files
+      - file: tests/acceptance-fill.test.mjs
+        test: implement executor persists criterion IDs and proposals from its full-context precommit diff
+    status: met
+
+  - id: ACC-9
+    text: Only committed jobs with criteria and a passing revert check propose their added or changed literal and template-named tests for those criteria
+    proven_by:
+      - file: tests/acceptance-fill.test.mjs
+        test: diff proposals include changed bodies, exact and template names, excluding untouched or nonliteral tests
+      - file: tests/acceptance-fill.test.mjs
+        test: job proposals require criteria, a commit and a passing revert check
+    status: met
+
+  - id: ACC-10
+    text: Acceptance fill appends job or run proposals without rewriting existing proofs or comments, skips duplicates, previews without writing, and marks unproven criteria met only after their proofs pass
+    proven_by:
+      - file: tests/acceptance-fill.test.mjs
+        test: fill appends without rewriting comments or existing entries and flips only passing criteria
+      - file: tests/acceptance-fill.test.mjs
+        test: fill dry-run writes nothing and template prefix evidence passes the real checker
+      - file: tests/acceptance-fill.test.mjs
+        test: acceptance fill CLI gathers a job or run, supports dry-run and JSON, and refuses another repo
+      - file: tests/acceptance-fill.test.mjs
+        test: fill rechecks duplicate proofs after a failure without adding or rewriting entries
+    status: met
+
+  - id: ACC-11
+    text: The run finish PR block checks real acceptance evidence, includes criterion IDs for non-met states, omits the row only when no contracts exist, and displays check errors
+    proven_by:
+      - file: tests/acceptance-run-finish.test.mjs
+        test: run_finish delivers its real acceptance verdict including check errors and no-contract omission
+      - file: tests/acceptance-fill.test.mjs
+        test: PR Acceptance row runs real evidence for ${state}
     status: met
