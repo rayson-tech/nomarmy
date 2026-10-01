@@ -1,4 +1,9 @@
 import "./helpers/isolate-global-config.mjs";
+import { fixtureVerification, fixtureExecutor, assertChecker } from "./helpers/acceptance-sandbox.mjs";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import { createVerificationFlow } from "../lib/verification-flow.mjs";
+import { createPodmanExecutor, buildPodmanArgs } from "../lib/verify.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -32,7 +37,9 @@ function fixture(t) {
   write("lib/answer.mjs", "export const answer = 42;\n");
   // This would fail if the checker did not restrict criteria.
   write("tests/other.test.mjs", 'import test from "node:test"; test("other stays true", () => { throw Error("must not run"); });\n');
-  return { dir, projectDir, worktree, write, contract, save };
+  const verificationCalls = [], runner = fixtureVerification(projectDir);
+  const verify = context => { verificationCalls.push(context); return runner(context); };
+  return { dir, projectDir, worktree, write, contract, save, verify, verificationCalls };
 }
 const empty = { record: { affected: [], broken: [] }, criteria: [], issues: [] };
 
@@ -109,6 +116,7 @@ test("affected checks use operator contracts and report met broken and missing r
   assert.deepEqual(deleted.record.affected, ["EX-1"]);
   assert.deepEqual(deleted.issues, broken.issues);
   assert.match(deleted.record.broken[0].failures[0].detail, /ENOENT/);
+  assert.equal(f.verificationCalls.length, 4);
 });
 
 test("contract graph bounds depth eight and two thousand files and records conservative selection", async t => {
@@ -138,13 +146,13 @@ test("contract checks stay asynchronous and time out hung proofs into review iss
   f.write("tests/answer.test.mjs", 'import test from "node:test";\ntest("answer stays 42", async () => { await new Promise(() => { setInterval(() => {}, 1000); }); });\n');
   let ticked = false;
   const timer = setTimeout(() => { ticked = true; }, 10);
-  const checked = await checkJobContracts({ ...f, changedFiles: ["tests/answer.test.mjs"], timeoutMs: 400 });
+  const checked = await checkJobContracts({ ...f, changedFiles: ["tests/answer.test.mjs"], timeoutMs: 400, verify: fixtureVerification(f.projectDir, { commandTimeoutMs: 400, executor: { probe: async () => ({ available: true }), run: async input => { assertChecker(input); assert.equal(input.timeoutMs, 400); await new Promise(resolve => setTimeout(resolve, 20)); return { started: true, timedOut: true }; } } }) });
   clearTimeout(timer);
   assert.equal(ticked, true);
   assert.deepEqual(checked, {
-    record: { affected: ["EX-1"], broken: [{ id: "EX-1", file: "acceptance/example.yml", failures: [{ detail: "contract check timed out after 400ms" }] }] },
+    record: { affected: ["EX-1"], broken: [{ id: "EX-1", file: "acceptance/example.yml", failures: [{ detail: "couldn't run: timed out after 400ms" }] }] },
     criteria: [{ id: "EX-1", text: "The answer is 42", file: "acceptance/example.yml" }],
-    issues: ["CONTRACT BROKEN: EX-1 (acceptance/example.yml): contract check timed out after 400ms"],
+    issues: ["CONTRACT BROKEN: EX-1 (acceptance/example.yml): couldn't run: timed out after 400ms"],
   });
 });
 
@@ -192,7 +200,13 @@ test("implement completion checks contracts after verification before commit and
     gitRaw: async () => "", collectGitRecord: async () => record,
     runOpenClaw: async () => ({ final: "STATUS: done\nTESTS: pass\nNOT_DONE: none\nNOTE: changed answer" }),
     normalizeVerification: value => value, verificationFlow: { verificationRunner: true },
-    runIndependentVerification: async ({ cwd }) => {
+    runIndependentVerification: async context => {
+      const { cwd } = context;
+      if (context.acceptanceContractsDir) {
+        events.push("impact");
+        assert.equal(context.jobId, "job-example-contract-impact");
+        return f.verify(context);
+      }
       events.push("verification");
       fs.writeFileSync(path.join(cwd, "lib/answer.mjs"), "export const answer = 7;\n");
       // If the checker rereads the worker contract, no criterion can be affected.
@@ -216,7 +230,7 @@ test("implement completion checks contracts after verification before commit and
   });
   const result = await executor.executeJob({ task: "Change answer", verification: "quick", jobId: "job-example" });
   assert.equal(result.ok, true, JSON.stringify(result.manifest));
-  assert.deepEqual(events, ["verification", "judge", "commit"]);
+  assert.deepEqual(events, ["verification", "impact", "judge", "commit"]);
   assert.equal(result.manifest.reviewRequired, true);
   assert.deepEqual(result.manifest.issues, ["CONTRACT BROKEN: EX-1 (acceptance/example.yml): tests/answer.test.mjs: answer stays 42"]);
   assert.deepEqual(Object.keys(result.manifest.contract).sort(), ["affected", "broken"]);
@@ -225,4 +239,65 @@ test("implement completion checks contracts after verification before commit and
   assert.equal(result.manifest.contract.broken[0].file, "acceptance/example.yml");
   assert.equal(result.manifest.contract.broken[0].failures[0].test, "answer stays 42");
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(result.jobDir, "metadata.json"), "utf8")).contract, result.manifest.contract);
+});
+
+for (const available of [true, false]) {
+  test(`impact checks use a read-only operator snapshot in the sandbox: ${available}`, async t => {
+    const f = fixture(t), calls = [];
+    f.save({ ...f.contract, criteria: [] }, f.worktree);
+    const host = t.mock.method(childProcess, "spawn", () => { throw new Error("host spawn forbidden"); });
+    syncBuiltinESMExports();
+    t.after(() => { host.mock.restore(); syncBuiltinESMExports(); });
+    let snapshot;
+    const verify = fixtureVerification(f.projectDir, { commandTimeoutMs: 4321, executor: {
+      probe: async () => ({ available }),
+      run: async input => {
+        calls.push(input); assertChecker(input);
+        assert.equal(input.image, "fixture");
+        assert.equal(input.network, "none");
+        assert.equal(input.cwd, f.worktree);
+        assert.equal(input.timeoutMs, 4321);
+        snapshot = input.acceptanceContractsDir;
+        assert.equal(path.dirname(snapshot), f.dir);
+        assert.equal(fs.statSync(snapshot).mode & 0o777, 0o755);
+        assert.deepEqual(JSON.parse(fs.readFileSync(path.join(snapshot, "0.yml"), "utf8")), {
+          feature: f.contract.feature, criteria: [f.contract.criteria[0]],
+        });
+        assert.equal(input.command, "node /nomarmy-acceptance/bin/nomarmy.mjs acceptance check --json '/nomarmy-contracts/0.yml'");
+        assert.equal(buildPodmanArgs(input).includes(`type=bind,source=${snapshot},target=/nomarmy-contracts,readonly`), true);
+        return fixtureExecutor().run(input);
+      },
+    } });
+    const flow = createVerificationFlow({});
+    flow.registerVerificationRunner(verify);
+    const result = await checkJobContracts({ ...f, verify: flow.runIndependentVerification, jobDir: f.dir, changedFiles: ["lib/answer.mjs"] });
+    const failures = [{ detail: "couldn't run: sandbox unavailable" }];
+    assert.deepEqual(result, {
+      record: { affected: ["EX-1"], broken: available ? [] : [{ id: "EX-1", file: "acceptance/example.yml", failures }] },
+      criteria: [{ id: "EX-1", text: "The answer is 42", file: "acceptance/example.yml" }],
+      issues: available ? [] : ["CONTRACT BROKEN: EX-1 (acceptance/example.yml): couldn't run: sandbox unavailable"],
+    });
+    assert.equal(calls.length, available ? 1 : 0);
+    assert.equal(host.mock.callCount(), 0);
+    if (snapshot) assert.equal(fs.existsSync(snapshot), false);
+  });
+}
+
+test("Podman acceptance executor forwards the read-only contract snapshot mount", async () => {
+  const calls = [];
+  const executor = createPodmanExecutor({ collect: async (...args) => {
+    calls.push(args);
+    return { spawned: true, code: 0, stdout: "{}", stderr: "", timedOut: false };
+  } });
+  const input = { cwd: "/worker", image: "fixture", command: "check", jobId: "impact",
+    acceptanceToolDir: "/installed", acceptanceContractsDir: "/job/contracts", timeoutMs: 4321, maxOutputBytes: 1024 };
+  const result = await executor.run(input);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], "podman");
+  assert.deepEqual(calls[0][1], buildPodmanArgs(input));
+  assert.equal(calls[0][1].includes("type=bind,source=/job/contracts,target=/nomarmy-contracts,readonly"), true);
+  assert.deepEqual(calls[0][1].filter(arg => arg.includes("target=/nomarmy-acceptance/")), ["bin", "lib", "node_modules"].map(dir => `type=bind,source=/installed/${dir},target=/nomarmy-acceptance/${dir},readonly`));
+  assert.equal(calls[0][2].timeoutMs, 4321);
+  assert.deepEqual(Object.keys(result).sort(), ["durationMs", "exitCode", "started", "stderr", "stdout", "timedOut"]);
+  assert.deepEqual({ ...result, durationMs: 0 }, { started: true, timedOut: false, exitCode: 0, stdout: "{}", stderr: "", durationMs: 0 });
 });
