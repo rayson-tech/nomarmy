@@ -15,12 +15,13 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const exec = promisify(execFile);
 const contract = proof => JSON.stringify({ feature: "fixture", criteria: [{ id: "EX-1", text: "proof passes", status: "met", proven_by: [{ file: "tests/proof.test.mjs", test: proof }] }] });
 
-async function job(t, { proof = "good", code = false, timeout = false, profileStatus = "pass", baseContract = null, headContract = contract(proof) } = {}) {
+async function job(t, { proof = "good", code = false, timeout = false, profileStatus = "pass", baseContract = null, headContract = contract(proof), entries, baseFiles, headFiles, baseErrors = {} } = {}) {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-contract-verification-"));
   t.after(() => fs.rmSync(repo, { recursive: true, force: true }));
   const jobsRoot = path.join(repo, "jobs"), calls = [], regressions = [];
-  const files = ["acceptance/changed.yaml", "README.md", ".github/workflows/ci.yml", ...(code ? ["lib/code.mjs"] : [])];
-  const record = { repoStatusFiles: files, changedFiles: files, nameStatus: files.map(path => ({ status: "A", path })),
+  const contractEntries = entries ?? [{ path: "acceptance/changed.yaml", status: baseContract === null ? "A" : headContract === null ? "D" : "M" }];
+  const files = [...contractEntries.map(entry => entry.path), "README.md", ".github/workflows/ci.yml", ...(code ? ["lib/code.mjs"] : [])];
+  const record = { repoStatusFiles: files, changedFiles: files, nameStatus: [...contractEntries, ...files.filter(file => !contractEntries.some(entry => entry.path === file)).map(path => ({ status: "A", path }))],
     testChanges: { production_files_changed: files, new_tests_added: [], existing_tests_modified: [], existing_tests_deleted: [], reviewRequired: false },
     ignoredRuntimeJunk: [], issues: [], additions: 1, deletions: 0 };
   const runner = createVerificationRunner({
@@ -34,7 +35,7 @@ async function job(t, { proof = "good", code = false, timeout = false, profileSt
         // container mount path is translated for this sandbox-free unit test.
         const env = { ...process.env, NOMARMY_WINDOWS_ENGINE: "native" };
         delete env.NODE_TEST_CONTEXT;
-        const args = [path.join(input.acceptanceToolDir, "bin/nomarmy.mjs"), "acceptance", "check", "--json", ...(input.command.includes(" --strict") ? ["--strict"] : []), "acceptance/changed.yaml"];
+        const args = [path.join(input.acceptanceToolDir, "bin/nomarmy.mjs"), "acceptance", "check", "--json", ...(input.command.includes(" --strict") ? ["--strict"] : []), ...contractEntries.map(entry => entry.path)];
         try {
           const result = await exec(process.execPath, args, { cwd: input.cwd, env, timeout: input.timeoutMs });
           return { started: true, exitCode: 0, ...result };
@@ -52,12 +53,21 @@ async function job(t, { proof = "good", code = false, timeout = false, profileSt
       fs.mkdirSync(path.join(cwd, "acceptance"), { recursive: true });
       fs.mkdirSync(path.join(cwd, "tests"));
       fs.writeFileSync(path.join(cwd, ".git"), "gitdir: synthetic\n");
-      if (headContract !== null) fs.writeFileSync(path.join(cwd, "acceptance/changed.yaml"), headContract);
+      for (const [file, source] of Object.entries(headFiles ?? { "acceptance/changed.yaml": headContract })) {
+        if (source !== null) fs.writeFileSync(path.join(cwd, file), source);
+      }
       fs.writeFileSync(path.join(cwd, "acceptance/unrelated.yml"), "invalid: [");
       fs.writeFileSync(path.join(cwd, "tests/proof.test.mjs"), 'import { test } from "node:test"; import assert from "node:assert/strict"; test("good", () => assert.equal(2 + 2, 4)); test("bad", () => assert.fail("broken criterion"));');
       return { stdout: "" };
     },
-    gitRaw: async args => { if (args[0] === "show") { if (baseContract === null) throw new Error("not in base"); return baseContract; } return ""; }, collectGitRecord: async () => record,
+    gitRaw: async args => {
+      if (args[0] !== "show") return "";
+      const file = args[1].slice("base:".length);
+      if (baseErrors[file]) throw new Error(baseErrors[file]);
+      const source = (baseFiles ?? { "acceptance/changed.yaml": baseContract })[file];
+      if (source == null) throw new Error(`not in base: ${file}`);
+      return source;
+    }, collectGitRecord: async () => record,
     runOpenClaw: async () => ({ final: "STATUS: done\nTESTS: pass\nNOT_DONE: none\nNOTE: implemented" }),
     normalizeVerification: flow.normalizeVerification, verificationFlow: flow, runIndependentVerification: flow.runIndependentVerification,
     runRegressionCheck: async input => { regressions.push(input.productionFiles); return { status: "pass" }; },
@@ -220,3 +230,78 @@ for (const mode of ["changed", "summary", "snapshot"]) {
     assert.equal(invoked, "/usr/local/bin/node");
   });
 }
+
+
+test("changed contract renames and copies preserve weakening results across comparison errors", async t => {
+  for (const status of ["R100", "C100"]) {
+    const automatic = { ...promise, proven_by: [{ file: "tests/proof.test.mjs", test: "good" }] };
+    const second = { ...promise, id: "EX-2" };
+    const { manifest } = await job(t, {
+      entries: [
+        { status: "M", path: "acceptance/other.yml" },
+        { status, path: "acceptance/b.yml", oldPath: "acceptance/a.yml" },
+        { status: "M", path: "acceptance/invalid.yml" },
+        { status: "M", path: "acceptance/unreadable.yml" },
+      ],
+      baseFiles: { "acceptance/a.yml": declared([automatic]), "acceptance/other.yml": declared([second]), "acceptance/invalid.yml": declared([]) },
+      headFiles: { "acceptance/b.yml": declared([promise]), "acceptance/other.yml": declared([]), "acceptance/invalid.yml": "invalid: [", "acceptance/unreadable.yml": declared([]) },
+      baseErrors: { "acceptance/unreadable.yml": "cannot read base" },
+    });
+    assert.equal(manifest.reviewRequired, true);
+    assert.deepEqual(manifest.independentVerification.contractCheck.weakened, [
+      { id: "EX-2", file: "acceptance/other.yml", changes: ["criterion removed"] },
+      { id: "EX-1", file: "acceptance/b.yml", changes: ["proofs removed"] },
+    ]);
+    const issues = manifest.issues.filter(issue => /^CONTRACT (WEAKENED|CHECK ERROR):/.test(issue));
+    assert.equal(issues.length, 4);
+    assert.match(issues[0], /^CONTRACT CHECK ERROR: acceptance\/invalid.yml: head: /);
+    assert.deepEqual(issues.slice(1), [
+      "CONTRACT CHECK ERROR: acceptance/unreadable.yml: base: cannot read base",
+      "CONTRACT WEAKENED: EX-2 (acceptance/other.yml): criterion removed",
+      "CONTRACT WEAKENED: EX-1 (acceptance/b.yml): proofs removed",
+    ]);
+  }
+});
+
+test("changed contracts match moved IDs and report all criteria deleted everywhere", async t => {
+  const moved = await job(t, {
+    entries: [{ status: "M", path: "acceptance/a.yml" }, { status: "A", path: "acceptance/b.yml" }],
+    baseFiles: { "acceptance/a.yml": declared([promise]) },
+    headFiles: { "acceptance/a.yml": declared([]), "acceptance/b.yml": declared([promise]) },
+  });
+  assert.equal(moved.manifest.reviewRequired, false);
+  assert.equal(moved.manifest.independentVerification.status, "pass");
+  assert.deepEqual(moved.manifest.independentVerification.contractCheck.weakened, []);
+  assert.deepEqual(moved.manifest.issues.filter(issue => /^CONTRACT (WEAKENED|CHECK ERROR):/.test(issue)), []);
+  const removed = { ...promise, id: "EX-2" };
+  const deleted = [{ ...promise, id: "EX-3" }, { ...promise, id: "EX-4" }];
+  const { manifest } = await job(t, {
+    entries: [
+      { status: "M", path: "acceptance/a.yml" },
+      { status: "A", path: "acceptance/b.yml" },
+      { status: "D", path: "acceptance/deleted.yml" },
+    ],
+    baseFiles: { "acceptance/a.yml": declared([promise, removed]), "acceptance/deleted.yml": declared(deleted) },
+    headFiles: { "acceptance/a.yml": declared([]), "acceptance/b.yml": declared([promise]) },
+  });
+  assert.equal(manifest.reviewRequired, true);
+  const weakened = [
+    { id: "EX-2", file: "acceptance/a.yml", changes: ["criterion removed"] },
+    { id: "EX-3", file: "acceptance/deleted.yml", changes: ["criterion removed"] },
+    { id: "EX-4", file: "acceptance/deleted.yml", changes: ["criterion removed"] },
+  ];
+  assert.deepEqual(manifest.independentVerification.contractCheck.weakened, weakened);
+  assert.deepEqual(manifest.issues.filter(issue => /^CONTRACT (WEAKENED|CHECK ERROR):/.test(issue)), weakened.map(({ id, file }) => `CONTRACT WEAKENED: ${id} (${file}): criterion removed`));
+});
+
+test("changed contract text rewording requires review but whitespace alone does not", async t => {
+  for (const text of ["changes the promise", "  retains  the\n promise\t"]) {
+    const { manifest } = await job(t, { baseContract: declared([promise]), headContract: declared([{ ...promise, text }]) });
+    const reworded = text === "changes the promise";
+    assert.equal(manifest.reviewRequired, reworded);
+    assert.equal(manifest.independentVerification.status, "pass");
+    const changes = ['text changed from "retains the promise" to "changes the promise"'];
+    assert.deepEqual(manifest.independentVerification.contractCheck.weakened, reworded ? [{ id: "EX-1", file: "acceptance/changed.yaml", changes }] : []);
+    assert.deepEqual(manifest.issues.filter(issue => /^CONTRACT (WEAKENED|CHECK ERROR):/.test(issue)), reworded ? [`CONTRACT WEAKENED: EX-1 (acceptance/changed.yaml): ${changes[0]}`] : []);
+  }
+});

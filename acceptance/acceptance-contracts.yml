@@ -139,6 +139,12 @@ criteria:
         test: changed contracts without proofs fail strict verification and report unproven
       - file: tests/acceptance-verification.test.mjs
         test: "sandbox checker cannot be shadowed by a dependency node bin: ${mode}"
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contract renames and copies preserve weakening results across comparison errors
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contracts match moved IDs and report all criteria deleted everywhere
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contract text rewording requires review but whitespace alone does not
     status: met
 
   - id: ACC-13
