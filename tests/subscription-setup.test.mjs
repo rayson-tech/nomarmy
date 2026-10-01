@@ -12,6 +12,7 @@ import {
   parseCatalogModels,
   parseCliLoginStatus,
   probeSucceeded,
+  openclawSignInFailure,
   parseMuseAuthDescriptor,
   extractMintedKey,
 } from "../lib/subscription-setup.mjs";
@@ -109,5 +110,17 @@ test("probeSucceeded: true only for a real completion envelope", () => {
   assert.equal(probeSucceeded(REAL_PROBE_OK), true);
   assert.equal(probeSucceeded(REAL_PROBE_FAIL), false);
   assert.equal(probeSucceeded("not json"), false);
+});
+
+test("openclawSignInFailure: auth-shaped probe answers are sign-in failures, other failures are not", () => {
+  assert.equal(openclawSignInFailure("401"), true);
+  assert.equal(openclawSignInFailure("HTTP 401 Unauthorized"), true);
+  assert.equal(openclawSignInFailure("Missing bearer token"), true);
+  assert.equal(openclawSignInFailure("no usable profiles"), true);
+  assert.equal(openclawSignInFailure('Selected auth profile openai:codex is unavailable'), true);
+  assert.equal(openclawSignInFailure("model refused"), false);
+  assert.equal(openclawSignInFailure("rate limit"), false);
+  assert.equal(openclawSignInFailure("timeout"), false);
+  assert.equal(openclawSignInFailure(""), false);
 });
 

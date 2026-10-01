@@ -1049,10 +1049,11 @@ test("agents update --probe probes every configured agent, prints outcomes and f
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-function fakeCodexSubscription(root, profiles, probeOk = false) {
+function fakeCodexSubscription(root, profiles, probeOk = false, probeMessage = "model refused") {
   fakeExecutable(root, "codex", `const a=process.argv.slice(2).join(" "); if(a==="--version") process.exit(0); if(a==="login status") console.log("Logged in using ChatGPT");`);
   const probeMarker = path.join(root, "probed");
-  const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2).join(" "); if(a==="--version") console.log("OpenClaw ${PINNED_OPENCLAW_VERSION}"); if(a.startsWith("plugins inspect")) console.log(JSON.stringify({plugin:{enabled:true,builtWithOpenClawVersion:"${PINNED_OPENCLAW_VERSION}"}})); if(a==="update status --json") console.log(JSON.stringify({migrationWarnings:[]})); if(a.startsWith("models list")) console.log("openai/gpt-6-astra   text"); if(a==="models auth list --json") console.log(JSON.stringify({profiles:${JSON.stringify(profiles)}})); if(a.startsWith("models auth login")) process.exit(0); if(a.startsWith("agent exec")) { fs.writeFileSync(${JSON.stringify(probeMarker)}, "called"); console.log(JSON.stringify(${JSON.stringify(probeOk ? {ok:true,final:"ok"} : {ok:false,message:"model refused"})})); }`);
+  const probeBody = probeOk ? { ok: true, final: "ok" } : { ok: false, message: probeMessage };
+  const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2).join(" "); if(a==="--version") console.log("OpenClaw ${PINNED_OPENCLAW_VERSION}"); if(a.startsWith("plugins inspect")) console.log(JSON.stringify({plugin:{enabled:true,builtWithOpenClawVersion:"${PINNED_OPENCLAW_VERSION}"}})); if(a==="update status --json") console.log(JSON.stringify({migrationWarnings:[]})); if(a.startsWith("models list")) console.log("openai/gpt-6-astra   text"); if(a==="models auth list --json") console.log(JSON.stringify({profiles:${JSON.stringify(profiles)}})); if(a.startsWith("models auth login")) process.exit(0); if(a.startsWith("agent exec")) { fs.writeFileSync(${JSON.stringify(probeMarker)}, "called"); console.log(JSON.stringify(${JSON.stringify(probeBody)})); }`);
   return { env: { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") }, probeMarker };
 }
 
@@ -1105,6 +1106,40 @@ test("agents add subscription codex stops before prompts when OpenClaw auth prof
     assert.equal(fs.existsSync(probeMarker), false);
     assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents add subscription codex stops as a sign-in failure when a valid profile still probes 401", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { env, probeMarker } = fakeCodexSubscription(root, [{ id: "openai:working", provider: "openai", type: "oauth", expiresAt: "2099-01-01T00:00:00.000Z" }], false, "401 Unauthorized");
+    const result = await runInteractiveAgents(root, ["add", "subscription", "codex"], codexDetails, env);
+    assert.equal(result.exitCode, 1, result.stdout);
+    assert.equal(result.sent, 3, result.stdout);
+    assert.match(result.stdout, /Sign-in failed: 401 Unauthorized/);
+    assert.match(result.stdout, /fix: openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --yes to re-import the Codex login \(preview with `openclaw migrate plan codex --from ~\/\.codex --agent main --include-secrets --item auth:openai`\), or `openclaw configure` \(Model Setup, select Codex\) in a terminal/);
+    assert.doesNotMatch(result.stdout, /Save the agent anyway|login works|nomarmy agents add/);
+    assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
+    assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents add subscription codex treats missing bearer, no usable profiles, and an unavailable profile as sign-in failures", ttyOnly, async () => {
+  for (const message of ["Missing bearer", "no usable profiles", "Selected auth profile openai:codex is unavailable"]) {
+    const root = scratchNomarmyRoot();
+    try {
+      const { env, probeMarker } = fakeCodexSubscription(root, [{ id: "openai:working", provider: "openai", type: "oauth", expiresAt: "2099-01-01T00:00:00.000Z" }], false, message);
+      const result = await runInteractiveAgents(root, ["add", "subscription", "codex"], codexDetails, env);
+      assert.equal(result.exitCode, 1, `${message}\n${result.stdout}`);
+      assert.equal(result.sent, 3, result.stdout);
+      assert.match(result.stdout, new RegExp(`Sign-in failed: ${message.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+      assert.match(result.stdout, /openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --yes/);
+      assert.match(result.stdout, /openclaw migrate plan codex --from ~\/\.codex --agent main --include-secrets --item auth:openai/);
+      assert.match(result.stdout, /openclaw configure` \(Model Setup, select Codex\) in a terminal/);
+      assert.doesNotMatch(result.stdout, /Save the agent anyway|login works|nomarmy agents add/);
+      assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
+      assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
 });
 
 test("agents add subscription codex offers default-no save when profile works but model fails", ttyOnly, async () => {

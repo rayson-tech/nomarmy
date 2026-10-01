@@ -38,9 +38,9 @@ import { readSetting, writeSetting, writeEnvLine, userCommonPath, userProfilePat
 import { MIN_PODMAN_VM_MB } from "../lib/doctor.mjs";
 import { liveLeases } from "../lib/slots.mjs";
 import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
-import { recordProbeSuccess, parseOpenclawAuthProfiles } from "../lib/health.mjs";
+import { recordProbeSuccess, parseOpenclawAuthProfiles, codexImportRecovery } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
-import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
+import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, openclawSignInFailure, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
 import { PINNED_OPENCLAW_VERSION, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors } from "../lib/openclaw-install.mjs";
 import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
@@ -1256,6 +1256,7 @@ function catalogModelsFor(provider) {
 /** One real, one-token completion through OpenClaw to test a model. */
 // Why the last probeWorker() call failed, in the vendor's words when it said.
 let lastProbeFailure = null;
+let lastProbeText = "";
 function probeWorker(provider, model) {
   // The route a job takes: the ambient OpenClaw config and a state dir of
   // its own, never --isolated. --isolated skips that config, and with it the
@@ -1271,7 +1272,10 @@ function probeWorker(provider, model) {
       "--json", "--cwd", cwd, "--state-dir", stateDir, "--timeout", "90"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], cwd });
     // Streams kept apart: OpenClaw logs a "run ... ended" line to stderr
     // AFTER the JSON envelope, and the merged text doesn't parse.
-    const outcome = probeOutcome({ stdout: result.stdout ?? "", stderr: result.stderr ?? "" });
+    const stdout = result.stdout ?? "";
+    const stderr = result.stderr ?? "";
+    const outcome = probeOutcome({ stdout, stderr });
+    lastProbeText = `${stderr}\n${stdout}`;
     lastProbeFailure = outcome.ok ? null : outcome.reason;
     if (outcome.ok) recordProbeSuccess(agentStateRoot(), `${provider}/${model}`);
     return outcome.ok;
@@ -1598,7 +1602,8 @@ async function addSubscriptionAgent(rl, agents) {
   const pick = (await rl.question(c.bold(`Default model, optional${models.length ? " (a number or an id)" : ""}; blank = pick per role: `))).trim();
   const model = /^\d+$/.test(pick) && models.length ? models[Number(pick) - 1] : pick || null;
   if (pick && !model) throw new Error(`Not a valid choice: "${pick}".`);
-  // The test call needs some model; it checks the model, not the login.
+  // A usable profile is only a fast precondition. The test call is what
+  // proves sign-in: an unexpired Codex import can still answer 401.
   const probeModel = model ?? models[0] ?? vendor.defaultModel;
 
   const ownerDefault = validOwnerEmail(auth.email) ? auth.email : gitUserEmail();
@@ -1611,9 +1616,17 @@ async function addSubscriptionAgent(rl, agents) {
   if (!name) { console.log(c.dim("Stopped; nothing was written.")); return; }
 
   console.log(`\n${c.bold("→")} Test call`);
-  const works = probeModel ? probeWorker(vendor.provider, probeModel) : false;
+  const probed = Boolean(probeModel);
+  const works = probed ? probeWorker(vendor.provider, probeModel) : false;
   if (works) console.log(c.green(`✓ ${vendor.provider}/${probeModel} answered a real test prompt.`));
-  else {
+  else if (needsOpenclawLogin && probed && openclawSignInFailure(`${lastProbeFailure ?? ""}\n${lastProbeText}`)) {
+    const why = lastProbeFailure ? `: ${lastProbeFailure}` : "";
+    console.log(c.red(`✗ Sign-in failed${why}.`));
+    console.log(`  fix: ${codexImportRecovery()}`);
+    console.log(c.dim("Stopped; nothing was written."));
+    process.exitCode = 1;
+    return;
+  } else {
     console.log(c.yellow(probeModel ? `⚠ The login works, but ${vendor.provider}/${probeModel} didn't answer a real test prompt.` : "⚠ The login works, but no model is available for a test call."));
     console.log(c.dim(`You can retry later with \`nomarmy agents update ${name} --probe\`.`));
     if (!(await confirm(rl, "Save the agent anyway?", { defaultYes: false }))) {
