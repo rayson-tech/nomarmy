@@ -5,9 +5,9 @@ import path from "node:path";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { criteriaProblems, proposalsFromDiff, jobAcceptanceProposals, fillAcceptance, gatherAcceptanceProposals } from "../lib/acceptance-fill.mjs";
+import { criteriaProblems, proposalsFromDiff, jobAcceptanceProposals, fillAcceptance as runFill, gatherAcceptanceProposals } from "../lib/acceptance-fill.mjs";
 import { loadContract } from "../lib/acceptance.mjs";
-import { fixtureExecutor, fixtureWorktree } from "./helpers/acceptance-sandbox.mjs";
+import { fixtureExecutor, fixtureWorktree, fixtureVerification } from "./helpers/acceptance-sandbox.mjs";
 import { acceptanceSummary, shareMarkdown } from "../lib/share.mjs";
 import { computeStats } from "../lib/stats.mjs";
 import { reportView } from "../lib/job-format.mjs";
@@ -16,6 +16,11 @@ import { createJobRuntime } from "../lib/admission.mjs";
 import { deriveBudgets } from "../lib/budget.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
+const fillAcceptance = input => {
+  const pending = runFill(input);
+  assert.equal(pending instanceof Promise, true, "fill verification must be asynchronous");
+  return pending;
+};
 const fixture = t => {
   const repoDir = fs.mkdtempSync(path.join(root, ".acceptance-fill-"));
   t.after(() => fs.rmSync(repoDir, { recursive: true, force: true }));
@@ -25,7 +30,7 @@ const fixture = t => {
   const file = path.join(repoDir, "acceptance/example.yml");
   const source = '# keep header\nfeature: "Example" # keep quotes\ncriteria:\n  - id: ACC-1\n    text: first\n    proven_by:\n      # keep proof\n      - file: tests/example.test.mjs # keep inline\n        test: "old"\n    status: unproven # keep status\n  - id: ACC-2\n    text: second\n    proven_by: [] # keep empty\n    status: unproven\n';
   fs.writeFileSync(file, source);
-  return { repoDir, file, source };
+  return { repoDir, file, source, verify: fixtureVerification(repoDir) };
 };
 const proof = (criterion, name = "new") => ({ criterion, file: "tests/example.test.mjs", test: name });
 const result = (criterion, names, status) => ({ criterion, file: "acceptance/example.yml", added: names.map(test => ({ file: "tests/example.test.mjs", test })), status });
@@ -77,40 +82,40 @@ test("job proposals require criteria, a commit and a passing revert check", asyn
   }
 });
 
-test("fill appends without rewriting comments or existing entries and flips only passing criteria", t => {
+test("fill appends without rewriting comments or existing entries and flips only passing criteria", async t => {
   const f = fixture(t);
   const proposals = [proof("ACC-1"), proof("ACC-1"), proof("ACC-1", "old"), proof("ACC-2", "bad")];
-  assert.deepEqual(fillAcceptance({ ...f, proposals }), { dryRun: false, criteria: [result("ACC-1", ["new"], "met"), result("ACC-2", ["bad"], "unproven")] });
+  assert.deepEqual(await fillAcceptance({ ...f, proposals }), { dryRun: false, criteria: [result("ACC-1", ["new"], "met"), result("ACC-2", ["bad"], "unproven")] });
   const expected = f.source.replace('    status: unproven # keep status', '      - { file: "tests/example.test.mjs", test: "new" }\n    status: met # keep status')
     .replace('proven_by: []', 'proven_by: [ { file: "tests/example.test.mjs", test: "bad" }]');
   assert.equal(fs.readFileSync(f.file, "utf8"), expected);
-  assert.deepEqual(fillAcceptance({ ...f, proposals }), { dryRun: false, criteria: [] });
+  assert.deepEqual(await fillAcceptance({ ...f, proposals }), { dryRun: false, criteria: [] });
   assert.equal(fs.readFileSync(f.file, "utf8"), expected);
 });
 
-test("fill dry-run writes nothing and template prefix evidence passes the real checker", t => {
+test("fill dry-run writes nothing and template prefix evidence passes the real checker", async t => {
   const f = fixture(t);
   const proposals = [proof("ACC-2", "loop ${n}")];
-  assert.deepEqual(fillAcceptance({ ...f, proposals, dryRun: true }), { dryRun: true, criteria: [result("ACC-2", ["loop ${n}"], "met")] });
+  assert.deepEqual(await fillAcceptance({ ...f, proposals, dryRun: true }), { dryRun: true, criteria: [result("ACC-2", ["loop ${n}"], "met")] });
   assert.equal(fs.readFileSync(f.file, "utf8"), f.source);
-  assert.deepEqual(fillAcceptance({ ...f, proposals }), { dryRun: false, criteria: [result("ACC-2", ["loop ${n}"], "met")] });
+  assert.deepEqual(await fillAcceptance({ ...f, proposals }), { dryRun: false, criteria: [result("ACC-2", ["loop ${n}"], "met")] });
   assert.equal(loadContract(f.file).criteria[1].status, "met");
 });
 
-test("fill preserves flow entries, trailing commas, CRLF and retired statuses", t => {
+test("fill preserves flow entries, trailing commas, CRLF and retired statuses", async t => {
   const f = fixture(t);
   const source = 'feature: Example\r\ncriteria:\r\n  - id: ACC-1\r\n    text: first\r\n    proven_by: [{file: tests/example.test.mjs, test: old}, ] # tail\r\n    status: retired\r\n';
   fs.writeFileSync(f.file, source);
-  assert.deepEqual(fillAcceptance({ ...f, proposals: [proof("ACC-1")] }), { dryRun: false, criteria: [result("ACC-1", ["new"], "retired")] });
+  assert.deepEqual(await fillAcceptance({ ...f, proposals: [proof("ACC-1")] }), { dryRun: false, criteria: [result("ACC-1", ["new"], "retired")] });
   assert.equal(fs.readFileSync(f.file, "utf8"), source.replace(', ]', ',  { file: "tests/example.test.mjs", test: "new" }]'));
 });
 
-test("fill rejects unknown and ambiguous IDs before writing", t => {
+test("fill rejects unknown and ambiguous IDs before writing", async t => {
   const f = fixture(t);
-  assert.throws(() => fillAcceptance({ ...f, proposals: [proof("ACC-1"), proof("ACC-9")] }), { message: "Unknown acceptance criterion ACC-9" });
+  await assert.rejects(() => fillAcceptance({ ...f, proposals: [proof("ACC-1"), proof("ACC-9")] }), { message: "Unknown acceptance criterion ACC-9" });
   assert.equal(fs.readFileSync(f.file, "utf8"), f.source);
   fs.writeFileSync(path.join(f.repoDir, "acceptance/other.yml"), f.source);
-  assert.throws(() => fillAcceptance({ ...f, proposals: [proof("ACC-1")] }), { message: "Ambiguous acceptance criterion ACC-1" });
+  await assert.rejects(() => fillAcceptance({ ...f, proposals: [proof("ACC-1")] }), { message: "Ambiguous acceptance criterion ACC-1" });
   assert.equal(fs.readFileSync(f.file, "utf8"), f.source);
 });
 
@@ -124,19 +129,19 @@ test("acceptance fill CLI gathers a job or run, supports dry-run and JSON, and r
   fs.writeFileSync(path.join(runsRoot, "run-example.json"), JSON.stringify({ repo: f.repoDir, jobs: [{ jobId: "job-one" }, { jobId: "job-failed", outcome: "WORKER_FAILED" }] }));
   const input = { repoDir: f.repoDir, jobsRoot, runsRoot };
   assert.deepEqual(gatherAcceptanceProposals({ ...input, id: "run-example" }), [proof("ACC-1")]);
-  const env = { ...process.env, NOMARMY_AGENT_STATE: state, NOMARMY_WINDOWS_ENGINE: "native" };
+  const env = { ...process.env, NOMARMY_AGENT_STATE: state, NOMARMY_WINDOWS_ENGINE: "native", PATH: f.repoDir, NOMARMY_AGENT_IMAGE: "fixture" };
   delete env.NODE_TEST_CONTEXT;
   const invoke = (...args) => spawnSync(process.execPath, [path.join(root, "bin/nomarmy.mjs"), "acceptance", "fill", ...args], { cwd: f.repoDir, env, encoding: "utf8" });
   const dry = invoke("run-example", "--dry-run", "--json");
   assert.equal(dry.status, 0, dry.stdout + dry.stderr);
-  assert.deepEqual(JSON.parse(dry.stdout), { dryRun: true, criteria: [result("ACC-1", ["new"], "met")] });
+  assert.deepEqual(JSON.parse(dry.stdout), { dryRun: true, criteria: [result("ACC-1", ["new"], "unproven")], verificationError: "couldn't verify: sandbox unavailable" });
   assert.equal(fs.readFileSync(f.file, "utf8"), f.source);
   const filled = invoke("job-one");
   assert.equal(filled.status, 0, filled.stdout + filled.stderr);
-  assert.equal(filled.stdout, 'ACC-1: added 1 proof(s) in acceptance/example.yml; status met\n  tests/example.test.mjs: new\n');
+  assert.equal(filled.stdout, 'ACC-1: added 1 proof(s) in acceptance/example.yml; status unproven\n  tests/example.test.mjs: new\ncouldn\'t verify: sandbox unavailable\n');
   const duplicate = invoke("run-example", "--json");
   assert.equal(duplicate.status, 0);
-  assert.deepEqual(JSON.parse(duplicate.stdout), { dryRun: false, criteria: [] });
+  assert.deepEqual(JSON.parse(duplicate.stdout), { dryRun: false, criteria: [], verificationError: "couldn't verify: sandbox unavailable" });
   fs.writeFileSync(path.join(jobsRoot, "job-one/metadata.json"), JSON.stringify({ ...metadata, projectDir: path.join(f.repoDir, "other") }));
   assert.throws(() => gatherAcceptanceProposals({ ...input, id: "job-one" }), { message: "Job job-one belongs to another repository" });
 });
@@ -207,17 +212,79 @@ test("implement executor persists criterion IDs and proposals from its full-cont
 });
 
 
-test("fill rechecks duplicate proofs after a failure without adding or rewriting entries", t => {
+test("fill rechecks duplicate proofs after a failure without adding or rewriting entries", async t => {
   const f = fixture(t);
   const proposals = [proof("ACC-2", "bad")];
-  fillAcceptance({ ...f, proposals });
+  await fillAcceptance({ ...f, proposals });
   const failed = fs.readFileSync(f.file, "utf8");
-  assert.deepEqual(fillAcceptance({ ...f, proposals }), { dryRun: false, criteria: [] });
+  assert.deepEqual(await fillAcceptance({ ...f, proposals }), { dryRun: false, criteria: [] });
   assert.equal(fs.readFileSync(f.file, "utf8"), failed);
   const testFile = path.join(f.repoDir, "tests/example.test.mjs");
   fs.writeFileSync(testFile, fs.readFileSync(testFile, "utf8").replace('assert.fail("broken")', 'assert.equal(1, 1)'));
-  assert.deepEqual(fillAcceptance({ ...f, proposals, dryRun: true }), { dryRun: true, criteria: [result("ACC-2", [], "met")] });
+  assert.deepEqual(await fillAcceptance({ ...f, proposals, dryRun: true }), { dryRun: true, criteria: [result("ACC-2", [], "met")] });
   assert.equal(fs.readFileSync(f.file, "utf8"), failed);
-  assert.deepEqual(fillAcceptance({ ...f, proposals }), { dryRun: false, criteria: [result("ACC-2", [], "met")] });
+  assert.deepEqual(await fillAcceptance({ ...f, proposals }), { dryRun: false, criteria: [result("ACC-2", [], "met")] });
   assert.equal(fs.readFileSync(f.file, "utf8"), failed.replace('    status: unproven\n', '    status: met\n'));
 });
+
+test("fill unavailable sandbox appends proposals without executing host tests or changing status", async t => {
+  const f = fixture(t), marker = path.join(f.repoDir, "host-executed");
+  fs.writeFileSync(path.join(f.repoDir, "tests/example.test.mjs"),
+    `import fs from "node:fs"; import test from "node:test"; fs.writeFileSync(${JSON.stringify(marker)}, "unsafe"); test("old", () => {}); test("new", () => {});`);
+  const calls = [];
+  const verify = fixtureVerification(f.repoDir, { executor: {
+    probe: async () => { calls.push("probe"); return { available: false }; },
+    run: async () => assert.fail("unavailable sandbox cannot run"),
+  } });
+  assert.deepEqual(await runFill({ ...f, verify, proposals: [proof("ACC-1")] }), {
+    dryRun: false, criteria: [result("ACC-1", ["new"], "unproven")],
+    verificationError: "couldn't verify: sandbox unavailable",
+  });
+  assert.deepEqual(calls, ["probe"]);
+  assert.equal(fs.existsSync(marker), false);
+  assert.equal(fs.readFileSync(f.file, "utf8"), f.source.replace("    status: unproven # keep status",
+    '      - { file: "tests/example.test.mjs", test: "new" }\n    status: unproven # keep status'));
+});
+
+test("acceptance check help explicitly says tests run locally", () => {
+  const checked = spawnSync(process.execPath, [path.join(root, "bin/nomarmy.mjs"), "acceptance", "check", "--help"],
+    { encoding: "utf8", env: { ...process.env, NOMARMY_WINDOWS_ENGINE: "native" } });
+  assert.equal(checked.status, 0);
+  assert.equal(checked.stdout.includes("runs this repository's tests on this machine"), true);
+});
+
+for (const dryRun of [true, false]) {
+  test(`fill promotes status only from sandbox evidence: ${dryRun}`, async t => {
+    const f = fixture(t), marker = path.join(f.repoDir, "host-executed");
+    fs.writeFileSync(path.join(f.repoDir, "tests/example.test.mjs"),
+      `import fs from "node:fs"; import test from "node:test"; fs.writeFileSync(${JSON.stringify(marker)}, "unsafe"); test("old", () => { throw Error("host execution"); }); test("new", () => {});`);
+    let runs = 0, snapshot;
+    const verify = fixtureVerification(f.repoDir, { executor: {
+      probe: async () => ({ available: true }),
+      run: async input => {
+        runs++;
+        assert.equal(input.cwd, f.repoDir);
+        assert.equal(input.network, "none");
+        assert.equal(input.command, "/usr/local/bin/node /nomarmy-acceptance/bin/nomarmy.mjs acceptance check --json '/nomarmy-contracts/0.yml'");
+        snapshot = input.acceptanceContractsDir;
+        assert.deepEqual(JSON.parse(fs.readFileSync(path.join(snapshot, "0.yml"), "utf8")), {
+          feature: "Example", criteria: [{
+            id: "ACC-1", text: "first", status: "unproven",
+            proven_by: [{ file: "tests/example.test.mjs", test: "old" }, { file: "tests/example.test.mjs", test: "new" }],
+          }],
+        });
+        return { started: true, exitCode: 0, stdout: JSON.stringify({
+          contracts: [{ file: "/nomarmy-contracts/0.yml", criteria: [{ id: "ACC-1", status: "met" }] }],
+        }) };
+      },
+    } });
+    assert.deepEqual(await runFill({ ...f, verify, dryRun, proposals: [proof("ACC-1")] }), {
+      dryRun, criteria: [result("ACC-1", ["new"], "met")],
+    });
+    assert.equal(runs, 1);
+    assert.equal(fs.existsSync(marker), false);
+    assert.equal(fs.existsSync(snapshot), false);
+    assert.equal(fs.readFileSync(f.file, "utf8"), dryRun ? f.source : f.source.replace("    status: unproven # keep status",
+      '      - { file: "tests/example.test.mjs", test: "new" }\n    status: met # keep status'));
+  });
+}

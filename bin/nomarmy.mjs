@@ -119,7 +119,7 @@ Usage: nomarmy <command> [options]
   acceptance fill <run-id|job-id> [--dry-run] [--json]
                   Append proposed test proofs to feature contracts.
   acceptance check [file...] [--json] [--strict]
-                  Check feature contracts in acceptance/*.yml.
+                  Check feature contracts in acceptance/*.yml; runs this repository's tests on this machine.
                   --strict fails on unproven criteria as well as broken or missing.
   scan            Inspect this repository and report its execution environment.
                   --check   compare the evidence against a committed .nomarmy.yml
@@ -3017,7 +3017,7 @@ function cmdMcp() {
   child.on("exit", (code, signal) => { if (signal) process.kill(process.pid, signal); else process.exit(code ?? 1); });
 }
 
-function cmdAcceptance() {
+async function cmdAcceptance() {
   if (argv[1] === "fill") {
     const ids = [];
     for (let i = 2; i < argv.length; i++) {
@@ -3028,13 +3028,14 @@ function cmdAcceptance() {
     }
     if (ids.length !== 1) throw new Error("Usage: nomarmy acceptance fill <run-id|job-id> [--dry-run] [--json]");
     const proposals = gatherAcceptanceProposals({ id: ids[0], repoDir, jobsRoot: jobsRootDir(), runsRoot: path.join(agentStateRoot(), "runs") });
-    const result = fillAcceptance({ repoDir, proposals, dryRun: flag("dry-run") });
+    const result = await fillAcceptance({ repoDir, proposals, dryRun: flag("dry-run") });
     if (json) out(result);
     else if (!result.criteria.length) console.log("No new acceptance proofs.");
     else for (const item of result.criteria) {
       console.log(`${item.criterion}: ${result.dryRun ? "would add" : "added"} ${item.added.length} proof(s) in ${item.file}; status ${item.status}`);
       for (const ref of item.added) console.log(`  ${ref.file}: ${ref.test}`);
     }
+    if (!json && result.verificationError) console.log(result.verificationError);
     return;
   }
   if (argv[1] !== "check") throw new Error("Usage: nomarmy acceptance check [file...] [--json] [--strict]");

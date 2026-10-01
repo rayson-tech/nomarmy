@@ -10,7 +10,7 @@ const root = fileURLToPath(new URL("../../", import.meta.url));
 
 export function assertChecker(input) {
   assert.equal(input.acceptanceToolDir, root);
-  assert.equal(input.command.startsWith("node /nomarmy-acceptance/bin/nomarmy.mjs acceptance check --json"), true);
+  assert.equal(input.command.startsWith("/usr/local/bin/node /nomarmy-acceptance/bin/nomarmy.mjs acceptance check --json"), true);
   const mounts = buildPodmanArgs(input).filter(arg => arg.startsWith("type=bind,") && arg.includes("target=/nomarmy-acceptance/"));
   assert.deepEqual(mounts, ["bin", "lib", "node_modules"].map(dir => `type=bind,source=${path.join(root, dir)},target=/nomarmy-acceptance/${dir},readonly`));
 }

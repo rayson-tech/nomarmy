@@ -30,6 +30,7 @@ function fixture(t) {
 }
 for (const [name, stdout, code, expected] of cases) {
   test(`async acceptance summary: ${name}`, async t => {
+    t.mock.method(Date, "now", () => 1_000);
     const repo = fixture(t), calls = [], gitCalls = [];
     const actual = await acceptanceSummary(repo, { run: fixtureWorktree(repo, gitCalls), executor: {
       probe: async () => ({ available: true }),
@@ -40,7 +41,7 @@ for (const [name, stdout, code, expected] of cases) {
       },
     } });
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].command, "node /nomarmy-acceptance/bin/nomarmy.mjs acceptance check --json");
+    assert.equal(calls[0].command, "/usr/local/bin/node /nomarmy-acceptance/bin/nomarmy.mjs acceptance check --json");
     assert.equal(calls[0].timeoutMs, 300_000);
     assert.equal(calls[0].cwd, gitCalls[0][1][3]);
     assert.equal(fs.existsSync(calls[0].cwd), false);

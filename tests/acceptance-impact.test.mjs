@@ -263,7 +263,7 @@ for (const available of [true, false]) {
         assert.deepEqual(JSON.parse(fs.readFileSync(path.join(snapshot, "0.yml"), "utf8")), {
           feature: f.contract.feature, criteria: [f.contract.criteria[0]],
         });
-        assert.equal(input.command, "node /nomarmy-acceptance/bin/nomarmy.mjs acceptance check --json '/nomarmy-contracts/0.yml'");
+        assert.equal(input.command, "/usr/local/bin/node /nomarmy-acceptance/bin/nomarmy.mjs acceptance check --json '/nomarmy-contracts/0.yml'");
         assert.equal(buildPodmanArgs(input).includes(`type=bind,source=${snapshot},target=/nomarmy-contracts,readonly`), true);
         return fixtureExecutor().run(input);
       },
