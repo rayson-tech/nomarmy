@@ -31,7 +31,7 @@ import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgent
 import { loadArmy, mergeArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
 import { parseLlamaUrl } from "../lib/execution.mjs";
 import { setupSteps, formatSetupSteps, runSetupPlaybook } from "../lib/setup-steps.mjs";
-import { readUsageSnapshots } from "../lib/usage-limits.mjs";
+import { readUsageSnapshots, refreshStaleOverLimitReadings } from "../lib/usage-limits.mjs";
 import { pickMachine, planResize } from "../lib/sandbox-vm.mjs";
 import { listProcesses, staleSessions, formatStaleSessions } from "../lib/stale-sessions.mjs";
 import { readSetting, writeSetting, writeEnvLine, userCommonPath, userProfilePath, profilePathFor, tildePath } from "../lib/user-config.mjs";
@@ -2405,7 +2405,7 @@ function armyLayerFlag(fallback = "global") {
   return chosen[0] ?? fallback;
 }
 
-function loadArmyForCli({ globalOnly = false } = {}) {
+function loadArmyForCli({ globalOnly = false, usageRefresh = null } = {}) {
   const agents = loadAgentsOrExit().agents;
   const loaded = globalOnly
     ? (() => {
@@ -2414,8 +2414,8 @@ function loadArmyForCli({ globalOnly = false } = {}) {
         return { ...mergeArmy([{ layer: "global", army }]), layers: [{ layer: "global", path: filePath, exists: fs.existsSync(filePath), hasArmy: Boolean(army) }] };
       })()
     : loadArmy({ projectDir: repoDir });
-  const usageSnapshots = readUsageSnapshots(process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents"));
-  return { loaded, agents, summary: describeArmy(loaded, { agents, describeAgent: describeAgentLabel, usageSnapshots, agentProviderId }) };
+  const usageSnapshots = usageRefresh?.snapshots ?? readUsageSnapshots(process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents"));
+  return { loaded, agents, summary: describeArmy(loaded, { agents, describeAgent: describeAgentLabel, usageSnapshots, agentProviderId, usageRefreshError: usageRefresh?.error ?? null, usageRefreshFailed: usageRefresh?.failedProviders ?? null }) };
 }
 
 // Claude Code adds settings.local.json to .gitignore for the same reason:
@@ -2453,7 +2453,9 @@ function repositoryHere(dir) {
 
 async function cmdArmyShow() {
   const inRepository = repositoryHere(repoDir);
-  const { summary } = loadArmyForCli({ globalOnly: !inRepository });
+  const stateRoot = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
+  const usageRefresh = await refreshStaleOverLimitReadings(stateRoot);
+  const { summary } = loadArmyForCli({ globalOnly: !inRepository, usageRefresh });
   if (json) return out(summary);
   const g = summary.general;
   console.log(c.bold("🪖 nomArmy") + (inRepository ? c.dim(`  (${repoDir})`) : ""));
