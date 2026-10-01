@@ -1,3 +1,4 @@
+import { criterionIdSchema } from "../lib/acceptance.mjs";
 import { createJobRuntime, jobLane, currentMaxPoolWorkers, splitJobsByLane, toolText, refusalText } from "../lib/admission.mjs";
 export { jobLane, currentMaxPoolWorkers, splitJobsByLane, refusalText };
 import { createExecutor, sleep } from "../lib/execute.mjs";
@@ -319,6 +320,7 @@ export const jobSchema = z.object({
   task: z.string().min(1).max(maxTaskChars,
     `Objective exceeds the ${maxTaskChars}-character worker context budget. This length limit does not by itself mean the job is too broad: a single-purpose objective that inlines file contents can hit it just from being verbose. If that's the case here, reference exact paths and line ranges instead (the worker can read them, or use \`evidence\` to hand it the answer already resolved) rather than pasting the file into the brief. If the objective genuinely covers multiple files or concerns, split it into separate jobs.`
   ).describe("implement: the OBJECTIVE the worker must achieve, not the edit it should make. scout: the QUESTION to answer from the repository. decompose: the broad OBJECTIVE to propose a split for."),
+  criteria: z.array(criterionIdSchema).optional().describe("implement: contract IDs from acceptance/*.yml served by this job."),
   acceptance: z.array(z.string().min(1).max(maxAcceptanceItemChars,
     `Acceptance item exceeds ${maxAcceptanceItemChars} characters. Keep each criterion to one concrete, checkable statement.`
   )).max(20).optional().describe("implement: acceptance criteria the worker must satisfy. scout: points a complete answer must cover. decompose: constraints a good split must respect."),
@@ -385,7 +387,7 @@ export function repoPolicy(loadConfigFn = () => loadConfig(projectDir)) {
 // `pool` or `subscription_worker`.
 function jobArgs(args, workerId) {
   const subscriptionWorker = args.subscription_worker;
-  return { task: args.task, acceptance: args.acceptance, verification: args.verification, mode: args.mode, baseRef: args.base_ref,
+  return { task: args.task, acceptance: args.acceptance, criteria: args.criteria, verification: args.verification, mode: args.mode, baseRef: args.base_ref,
     timeoutSeconds: args.timeout_seconds, profile: args.profile, reasoning: args.reasoning, pool: args.pool,
     subscriptionWorker, onBehalfOf: args.on_behalf_of, model: args.model ?? null, reportSize: args.report ?? null, evidence: args.evidence,
     verifyRegression: resolveVerifyRegression(args), commitSubject: args.commit_subject ?? null, refactor: Boolean(args.refactor), continueFrom: args.continue_from ?? null, stakes: args.stakes ?? null, reviews: args.reviews ?? null, workerId };
@@ -570,7 +572,7 @@ server.tool("run_finish", "Close a /feature run as complete or stopped, with a o
     if (activeRunId === run_id) activeRunId = null;
     // What nomArmy verified in this run, ready for the pull request's description (lib/share.mjs).
     let prBlock = null;
-    try { prBlock = shareMarkdown(computeStats(loadJobRecords(jobsRoot), { runId: run_id }), { scope: "this feature run" }); } catch { /* the totals stand without it */ }
+    try { prBlock = shareMarkdown(computeStats(loadJobRecords(jobsRoot), { runId: run_id }), { scope: "this feature run", repoDir: projectDir }); } catch { /* the totals stand without it */ }
     return toolText(JSON.stringify({ id: run.id, status: run.status, ...runTotals(run), ...(prBlock ? { prBlock, prBlockNote: "Put prBlock in the pull request's description as it is: every number is from nomArmy's verified records." } : {}) }, null, 2));
   } catch (error) { return toolText(error.message, true); }
 });

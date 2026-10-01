@@ -28,6 +28,7 @@ Every command proposes before it writes: a `[y/N]` prompt, or an explicit flag u
 | `nomarmy sizing` | Recommends context, slots and workers. `--check` evaluates the loaded profile; `--noms N` sizes for a count. |
 | `nomarmy start` / `stop` | Starts or stops local inference. |
 | `nomarmy scan` | Reports the repo's execution environment. `--check` diffs it against `.nomarmy.yml`. |
+| `nomarmy acceptance fill <run-id\|job-id> [--dry-run] [--json]` | Appends verified jobs' proposed tests to contract proofs without removing existing entries or comments. Skips duplicates; marks unproven criteria met only after their check passes. `--dry-run` previews without writing. |
 | `nomarmy acceptance check [file...] [--json] [--strict]` | Runs the tests named by each criterion in the feature contracts under `acceptance/` (or selected files). Reports met, broken, missing or unproven per criterion; `--json` prints the report as data, and `--strict` also fails on unproven. |
 | `nomarmy validate` | Validates `.nomarmy.yml`. |
 | `nomarmy update` | Updates nomArmy and reconnects every coordinator it finds. From npm: installs the latest alpha. From a clone: pulls (fast-forward only). Then it names each open session still running an older nomArmy (app, terminal, start time) so you know which to restart; until you do, `army` and `local_worker_capacity` say so, and `nomarmy health` flags a coordinator still running an older copy. |
@@ -35,7 +36,7 @@ Every command proposes before it writes: a `[y/N]` prompt, or an explicit flag u
 
 ## MCP tools
 
-What the General uses. Every job takes the same shape: a `task`, optional `acceptance`, a `mode` and a timeout.
+What the General uses. Every job takes the same shape: a `task`, optional `acceptance` and contract `criteria` IDs (implement only), a `mode` and a timeout.
 
 | Tool | What it does |
 |---|---|

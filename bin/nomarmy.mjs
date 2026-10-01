@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { fillAcceptance, gatherAcceptanceProposals } from "../lib/acceptance-fill.mjs";
 // nomArmy CLI. Every command proposes before it writes anything -- init,
 // setup, model and update all show exactly what would change and write only
 // after explicit confirmation ([y/N]) or an explicit non-interactive flag
@@ -115,6 +116,8 @@ function usage(code = 0) {
 
 Usage: nomarmy <command> [options]
 
+  acceptance fill <run-id|job-id> [--dry-run] [--json]
+                  Append proposed test proofs to feature contracts.
   acceptance check [file...] [--json] [--strict]
                   Check feature contracts in acceptance/*.yml.
                   --strict fails on unproven criteria as well as broken or missing.
@@ -3015,6 +3018,25 @@ function cmdMcp() {
 }
 
 function cmdAcceptance() {
+  if (argv[1] === "fill") {
+    const ids = [];
+    for (let i = 2; i < argv.length; i++) {
+      if (argv[i] === "--repo") { i++; continue; }
+      if (["--json", "--dry-run"].includes(argv[i])) continue;
+      if (argv[i].startsWith("--")) throw new Error(`Unknown acceptance option: ${argv[i]}`);
+      ids.push(argv[i]);
+    }
+    if (ids.length !== 1) throw new Error("Usage: nomarmy acceptance fill <run-id|job-id> [--dry-run] [--json]");
+    const proposals = gatherAcceptanceProposals({ id: ids[0], repoDir, jobsRoot: jobsRootDir(), runsRoot: path.join(agentStateRoot(), "runs") });
+    const result = fillAcceptance({ repoDir, proposals, dryRun: flag("dry-run") });
+    if (json) out(result);
+    else if (!result.criteria.length) console.log("No new acceptance proofs.");
+    else for (const item of result.criteria) {
+      console.log(`${item.criterion}: ${result.dryRun ? "would add" : "added"} ${item.added.length} proof(s) in ${item.file}; status ${item.status}`);
+      for (const ref of item.added) console.log(`  ${ref.file}: ${ref.test}`);
+    }
+    return;
+  }
   if (argv[1] !== "check") throw new Error("Usage: nomarmy acceptance check [file...] [--json] [--strict]");
   const files = [];
   for (let i = 2; i < argv.length; i++) {
