@@ -105,3 +105,20 @@ criteria:
       - file: tests/acceptance-fill.test.mjs
         test: PR Acceptance row runs real evidence for ${state}
     status: met
+
+  - id: ACC-12
+    text: Changed acceptance YAML contracts skip the production revert check, run only their own acceptance checks asynchronously with a timeout, record the results and fail verification on broken or missing evidence; mixed changes still revert-check real code
+    proven_by:
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contracts skip reverting and run only their acceptance checks
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contract ${proof} criterion fails job verification
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contracts plus code revert-check only real code
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contract timeout fails verification and prevents committing
+      - file: tests/acceptance-verification.test.mjs
+        test: passing contracts do not mask unavailable code verification
+      - file: tests/acceptance-verification.test.mjs
+        test: contract classification is limited to top-level acceptance YAML and checker mounts are read-only
+    status: met

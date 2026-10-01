@@ -1,0 +1,31 @@
+# Backfilled from tests and plan docs; no job records were available.
+feature: Harness registry and matching
+pr: 50
+criteria:
+  - id: HARN-1
+    text: Harness schema refuses forbidden declarations
+    proven_by:
+      - file: tests/harnesses.test.mjs
+        test: "harness schema rejects forbidden declarations"
+    status: met
+
+  - id: HARN-2
+    text: A broken harness is reported and skipped independently, never half-loaded
+    proven_by:
+      - file: tests/harnesses.test.mjs
+        test: "registry reports and skips invalid graphs and YAML independently"
+    status: met
+
+  - id: HARN-3
+    text: Matching selects exact ecosystems in after order
+    proven_by:
+      - file: tests/harnesses.test.mjs
+        test: "matching fixtures selects exact ecosystems and respects after order"
+    status: met
+
+  - id: HARN-4
+    text: Generated harness docs match the committed page and detect stale metadata
+    proven_by:
+      - file: tests/harnesses.test.mjs
+        test: "generated harness docs match the committed page and detect stale metadata"
+    status: met
