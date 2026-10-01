@@ -189,7 +189,7 @@ test("implement executor persists criterion IDs and proposals from its full-cont
   const manifest = JSON.parse(fs.readFileSync(path.join(result.jobDir, "metadata.json"), "utf8"));
   assert.deepEqual(Object.keys(manifest).sort(), [
     "version", "jobId", "workerId", "mode", "projectDir", "worktree", "branch", "startedAt", "finishedAt",
-    "objective", "acceptance", "criteria", "acceptanceProposals", "verificationProfile", "outcome", "recovered", "recoveryAttempted",
+    "objective", "acceptance", "criteria", "contract", "acceptanceProposals", "verificationProfile", "outcome", "recovered", "recoveryAttempted",
     "reportRecoveryAttempted", "reportRecovered", "reviewRequired", "coordinatorStatus", "issues", "runnerNotes", "reportValidation",
     "independentVerification", "regressionCheck", "testSelectionRisk", "unwiredDefinitions", "testChanges", "metrics",
     "worktreePointerBefore", "worktreePointerAfterWorker", "worktreeRetained", "commit", "gitBeforeCoordinatorCommit", "git", "worker",
