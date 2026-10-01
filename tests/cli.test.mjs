@@ -1049,10 +1049,12 @@ test("agents update --probe probes every configured agent, prints outcomes and f
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-function fakeCodexSubscription(root, profiles, probeOk = false) {
+function fakeCodexSubscription(root, profiles, probeOk = false, probeMessage = "model refused") {
+  profiles = profiles.map((p) => p.id === "openai:working" ? { ...p, id: "openai:account-test", label: "(Codex import)" } : p);
   fakeExecutable(root, "codex", `const a=process.argv.slice(2).join(" "); if(a==="--version") process.exit(0); if(a==="login status") console.log("Logged in using ChatGPT");`);
   const probeMarker = path.join(root, "probed");
-  const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2).join(" "); if(a==="--version") console.log("OpenClaw ${PINNED_OPENCLAW_VERSION}"); if(a.startsWith("plugins inspect")) console.log(JSON.stringify({plugin:{enabled:true,builtWithOpenClawVersion:"${PINNED_OPENCLAW_VERSION}"}})); if(a==="update status --json") console.log(JSON.stringify({migrationWarnings:[]})); if(a.startsWith("models list")) console.log("openai/gpt-6-astra   text"); if(a==="models auth list --json") console.log(JSON.stringify({profiles:${JSON.stringify(profiles)}})); if(a.startsWith("models auth login")) process.exit(0); if(a.startsWith("agent exec")) { fs.writeFileSync(${JSON.stringify(probeMarker)}, "called"); console.log(JSON.stringify(${JSON.stringify(probeOk ? {ok:true,final:"ok"} : {ok:false,message:"model refused"})})); }`);
+  const probeBody = probeOk ? { ok: true, final: "ok" } : { ok: false, message: probeMessage };
+  const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2).join(" "); if(a==="--version") console.log("OpenClaw ${PINNED_OPENCLAW_VERSION}"); if(a.startsWith("plugins inspect")) console.log(JSON.stringify({plugin:{enabled:true,builtWithOpenClawVersion:"${PINNED_OPENCLAW_VERSION}"}})); if(a==="update status --json") console.log(JSON.stringify({migrationWarnings:[]})); if(a.startsWith("models list")) console.log("openai/gpt-6-astra   text"); if(a==="models auth list --json") console.log(JSON.stringify({profiles:${JSON.stringify(profiles)}})); if(a.startsWith("models auth login")) process.exit(0); if(a.startsWith("agent exec")) { fs.writeFileSync(${JSON.stringify(probeMarker)}, "called"); console.log(JSON.stringify(${JSON.stringify(probeBody)})); }`);
   return { env: { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") }, probeMarker };
 }
 
@@ -1105,6 +1107,40 @@ test("agents add subscription codex stops before prompts when OpenClaw auth prof
     assert.equal(fs.existsSync(probeMarker), false);
     assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents add subscription codex stops as a sign-in failure when a valid profile still probes 401", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { env, probeMarker } = fakeCodexSubscription(root, [{ id: "openai:working", provider: "openai", type: "oauth", expiresAt: "2099-01-01T00:00:00.000Z" }], false, "401 Unauthorized");
+    const result = await runInteractiveAgents(root, ["add", "subscription", "codex"], codexDetails, env);
+    assert.equal(result.exitCode, 1, result.stdout);
+    assert.equal(result.sent, 3, result.stdout);
+    assert.match(result.stdout, /Sign-in failed: 401 Unauthorized/);
+    assert.match(result.stdout, /fix: openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --yes[\r\n]/);
+    assert.doesNotMatch(result.stdout, /openclaw configure|migrate plan/);
+    assert.doesNotMatch(result.stdout, /Save the agent anyway|login works|nomarmy agents add/);
+    assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
+    assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents add subscription codex treats missing bearer, no usable profiles, and an unavailable profile as sign-in failures", ttyOnly, async () => {
+  for (const message of ["Missing bearer", "no usable profiles", "Selected auth profile openai:codex is unavailable"]) {
+    const root = scratchNomarmyRoot();
+    try {
+      const { env, probeMarker } = fakeCodexSubscription(root, [{ id: "openai:working", provider: "openai", type: "oauth", expiresAt: "2099-01-01T00:00:00.000Z" }], false, message);
+      const result = await runInteractiveAgents(root, ["add", "subscription", "codex"], codexDetails, env);
+      assert.equal(result.exitCode, 1, `${message}\n${result.stdout}`);
+      assert.equal(result.sent, 3, result.stdout);
+      assert.match(result.stdout, new RegExp(`Sign-in failed: ${message.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+      assert.match(result.stdout, /openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --yes/);
+      assert.doesNotMatch(result.stdout, /openclaw configure|migrate plan/);
+      assert.doesNotMatch(result.stdout, /Save the agent anyway|login works|nomarmy agents add/);
+      assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
+      assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
 });
 
 test("agents add subscription codex offers default-no save when profile works but model fails", ttyOnly, async () => {
@@ -1239,4 +1275,107 @@ test("jobs help names scoped waits and events", () => {
   assert.match(help, /--events --until-done --run <run-id>/);
   assert.match(help, /--events --repo <path>/);
   assert.match(help, /Unscoped\s+--until-done watches every job on this machine/);
+});
+
+test("named API probe runs the configured provider and model without rewriting agents", posixStubOnly, () => {
+  for (const provider of ["xai", "openclaw"]) {
+    const root = scratchNomarmyRoot();
+    try {
+      const added = runAgentsCLI(root, ["add", "--json", "--name", "grok", "--kind", "api", "--provider", provider, ...(provider === "openclaw" ? ["--openclaw-provider", "xai"] : []), "--model", "grok-4.7", "--auth-env", "XAI_API_KEY"]);
+      assert.equal(added.exitCode, 0, added.stdout);
+      const file = path.join(root, "config", "agents.yml");
+      const before = fs.readFileSync(file, "utf8");
+      const marker = path.join(root, "calls");
+      const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2); fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify(a)); console.log(JSON.stringify({ok:true,final:"ok"}));`);
+      const result = runAgentsCLI(root, ["update", "grok", "--probe"], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+      assert.equal(result.exitCode, 0, result.stdout);
+      assert.match(result.stdout, /^✓ grok  xai\/grok-4\.7  answered in [0-9.]+s\n$/);
+      const args = JSON.parse(fs.readFileSync(marker, "utf8"));
+      assert.deepEqual(args.slice(0, 6), ["agent", "exec", "Reply with exactly: ok", "--model", "xai/grok-4.7", "--no-auth-env-only"]);
+      assert.equal(fs.readFileSync(file, "utf8"), before);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
+test("Codex onboarding migrates after removing email and confirms import before real test", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { env } = fakeCodexSubscription(root, [], true);
+    const marker = path.join(root, "commands");
+    const profileFile = path.join(root, "profiles.json");
+    fs.writeFileSync(profileFile, JSON.stringify([{ id: "openai:person@example.com", provider: "openai", type: "oauth" }]));
+    const original = fs.readFileSync(env.NOMARMY_OPENCLAW_CMD, "utf8").replace('if(a==="models auth list --json") console.log(JSON.stringify({profiles:[]}));', '');
+    fs.writeFileSync(env.NOMARMY_OPENCLAW_CMD, original + `\nfs.appendFileSync(${JSON.stringify(marker)}, a+"\\n");
+const file=${JSON.stringify(profileFile)};
+if(a==="models auth list --json") console.log(JSON.stringify({profiles:JSON.parse(fs.readFileSync(file,"utf8"))}));
+if(a==="models auth logout openai:person@example.com") fs.writeFileSync(file,"[]");
+if(a.startsWith("migrate apply codex")) { fs.writeFileSync(file,JSON.stringify([{id:"openai:account-123",provider:"openai",type:"oauth",label:"(Codex import)",expiresAt:"2099-01-01T00:00:00.000Z"}])); console.log("SECRET_SENTINEL"); }
+`);
+    const result = await runInteractiveAgents(root, ["add", "subscription", "codex", "--remove-email-profiles"], codexDetails, env);
+    assert.equal(result.exitCode, 0, result.stdout);
+    assert.equal(result.sent, 3);
+    assert.match(result.stdout, /Confirmed an unexpired openai:account- \(Codex import\) profile/);
+    assert.doesNotMatch(result.stdout, /SECRET_SENTINEL|models auth login/);
+    const commands = fs.readFileSync(marker, "utf8").trim().split("\n");
+    const logout = commands.indexOf("models auth logout openai:person@example.com");
+    const migration = commands.findIndex((s) => s.startsWith("migrate apply codex --from "));
+    const probe = commands.findIndex((s) => s.startsWith("agent exec "));
+    assert.ok(logout >= 0 && logout < migration && migration < probe, commands.join("\n"));
+    assert.match(commands[migration], / --agent main --include-secrets --item auth:openai --yes$/);
+    assert.equal(commands[migration + 1], "models auth list --json");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Codex JSON linking requires email-removal flag and probes only after a verified import", posixStubOnly, () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { env } = fakeCodexSubscription(root, [], true);
+    const marker = path.join(root, "commands");
+    const state = path.join(root, "imported");
+    const openclaw = fakeExecutable(root, "json-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2); fs.appendFileSync(${JSON.stringify(marker)}, JSON.stringify(a)+"\\n");
+const state=${JSON.stringify(state)};
+if(a.join(" ")==="models auth list --json") console.log(JSON.stringify({profiles:fs.existsSync(state)?(fs.readFileSync(state,"utf8")==="imported"?[{id:"openai:account-123",provider:"openai",label:"(Codex import)",expiresAt:"2099-01-01T00:00:00.000Z"}]:[]):[{id:"openai:person@example.com",provider:"openai"}]}));
+if(a[2]==="logout") fs.writeFileSync(state,"removed");
+if(a[0]==="migrate") { fs.writeFileSync(state,"imported"); console.log("SECRET_SENTINEL"); }
+if(a[0]==="agent") console.log(JSON.stringify({ok:true,final:"ok"}));`);
+    const args = ["add", "--json", "--name", "codex", "--kind", "subscription", "--provider", "openai", "--owner", "person@example.com", "--link-openclaw"];
+    const testEnv = { ...env, NOMARMY_OPENCLAW_CMD: openclaw, PATH: `${path.join(root, "bin")}:${process.env.PATH}` };
+    const denied = runAgentsCLI(root, args, testEnv);
+    assert.equal(denied.exitCode, 1);
+    assert.equal(JSON.parse(denied.stdout).error, "Codex import failed; nothing was written.");
+    assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+    assert.deepEqual(fs.readFileSync(marker, "utf8").trim().split("\n").map(JSON.parse), [["models", "auth", "list", "--json"]]);
+    const passed = runAgentsCLI(root, [...args, "--remove-email-profiles"], testEnv);
+    assert.equal(passed.exitCode, 0, passed.stdout + passed.stderr);
+    assert.doesNotMatch(passed.stdout + passed.stderr, /SECRET_SENTINEL/);
+    assert.deepEqual(JSON.parse(passed.stdout).agent, {kind:"subscription",provider:"openai",owner:"person@example.com",max_concurrent:1,thinking:true});
+    const calls = fs.readFileSync(marker, "utf8").trim().split("\n").map(JSON.parse);
+    assert.deepEqual(calls.slice(1, 4), [["models", "auth", "list", "--json"], ["models", "auth", "logout", "openai:person@example.com"], ["models", "auth", "list", "--json"]]);
+    assert.deepEqual(calls[4].slice(0, 4), ["migrate", "apply", "codex", "--from"]);
+    assert.deepEqual(calls[5], ["models", "auth", "list", "--json"]);
+    assert.deepEqual(calls[6].slice(0, 6), ["agent", "exec", "Reply with exactly: ok", "--model", "openai/gpt-6-astra", "--no-auth-env-only"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("health and doctor CLI fail on Codex and model-policy runtime blockers", posixStubOnly, () => {
+  const root = scratchNomarmyRoot();
+  try {
+    assert.equal(runAgentsCLI(root, ["add", "--json", "--name", "codex", "--kind", "subscription", "--provider", "openai", "--model", "gpt-6-astra", "--owner", "person@example.com"]).exitCode, 0);
+    assert.equal(runAgentsCLI(root, ["add", "--json", "--name", "grok", "--kind", "api", "--provider", "xai", "--model", "grok-4.7", "--auth-env", "XAI_API_KEY"]).exitCode, 0);
+    const openclaw = fakeExecutable(root, "diagnostic-openclaw", `const a=process.argv.slice(2); if(a.join(" ")==="models auth list --json") console.log(JSON.stringify({profiles:[{id:"openai:person@example.com",provider:"openai",type:"oauth"}]})); if(a[0]==="config" && a[2]==="agents.entries.main.modelPolicy.allow") console.log(JSON.stringify(["openai/gpt-6-astra"]));`);
+    fakeExecutable(root, "npm", 'process.exit(1);');
+    for (const cmd of ["health", "doctor"]) {
+      const result = runCLI([cmd, "--json"], { cwd: root, env: { NOMARMY_CONFIG_DIR: path.join(root, "config"), NOMARMY_AGENT_STATE: path.join(root, "state"), NOMARMY_OPENCLAW_CMD: openclaw, PATH: `${path.join(root,"bin")}:${process.env.PATH}` } });
+      assert.equal(result.exitCode, 1, result.stdout);
+      const data = JSON.parse(result.stdout);
+      const issues = data.issues ?? data.checks;
+      const selected = issues.filter((i) => i.id.startsWith("codex-import:") || i.id.startsWith("model-policy:"));
+      assert.deepEqual(selected.map((i) => i.id), ["codex-import:missing", "codex-import:shadowed", "model-policy:agents.entries.main.modelPolicy.allow"]);
+      assert.deepEqual(selected.map((i) => i.fix), [
+        "openclaw models auth logout openai:person@example.com && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --yes",
+        "openclaw models auth logout openai:person@example.com && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --yes",
+        "openclaw config unset agents.entries.main.modelPolicy (or add the missing models to agents.entries.main.modelPolicy.allow)",
+      ]);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
