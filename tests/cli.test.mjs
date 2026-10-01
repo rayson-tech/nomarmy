@@ -6,16 +6,18 @@ import { linkDir } from "./helpers/symlinks.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import http from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import test from "node:test";
+import { PINNED_OPENCLAW_VERSION } from "../lib/openclaw-install.mjs";
 
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = path.join(here, "..", "bin", "nomarmy.mjs");
+const posixStubOnly = { skip: process.platform === "win32" ? "executes a POSIX shebang stub directly" : false };
 
 function runCLI(args, options = {}) {
   const tmpDir = mkdtempSync(path.join(tmpdir(), "nomarmy-cli-test-"));
@@ -371,7 +373,7 @@ test("agents add --json refuses a missing field, a reserved name, and an api/sub
     assert.match(JSON.parse(missing.stdout).errors.join("\n"), /auth_env: is required/);
     assert.notEqual(runAgentsCLI(root, ["add", "--json", "--name", "__proto__", "--kind", "local"]).exitCode, 0);
     runAgentsCLI(root, ["add", "--json", "--name", "grok", "--kind", "api", "--provider", "xai", "--model", "grok-4.7", "--auth-env", "NOMARMY_XAI_API_KEY"]);
-    const clash = runAgentsCLI(root, ["add", "--json", "--name", "grok-sub", "--kind", "subscription", "--provider", "xai", "--model", "grok-4.7", "--owner", "o"]);
+    const clash = runAgentsCLI(root, ["add", "--json", "--name", "grok-sub", "--kind", "subscription", "--provider", "xai", "--model", "grok-4.7", "--owner", "owner@example.com"]);
     assert.notEqual(clash.exitCode, 0);
     assert.match(JSON.parse(clash.stdout).errors.join("\n"), /OpenClaw provider "xai" is used by both api agent grok and subscription agent grok-sub/);
     assert.deepEqual(Object.keys(JSON.parse(runAgentsCLI(root, ["list", "--json"]).stdout).agents), ["local", "grok"]);
@@ -380,7 +382,7 @@ test("agents add --json refuses a missing field, a reserved name, and an api/sub
   }
 });
 
-test("agents add --json --register (native api provider, e.g. xai) pipes the REAL key via stdin, never argv", { skip: process.platform === "win32" ? "executes a POSIX shebang stub directly" : false }, () => {
+test("agents add --json --register (native api provider, e.g. xai) pipes the REAL key via stdin, never argv", posixStubOnly, () => {
   const root = scratchNomarmyRoot();
   const fake = withFakeOpenclaw(root);
   try {
@@ -400,7 +402,7 @@ test("agents add --json --register (native api provider, e.g. xai) pipes the REA
   }
 });
 
-test("agents add --json --register (custom endpoint) onboards with the REAL model/base_url, then pipes the key via stdin", { skip: process.platform === "win32" ? "executes a POSIX shebang stub directly" : false }, () => {
+test("agents add --json --register (custom endpoint) onboards with the REAL model/base_url, then pipes the key via stdin", posixStubOnly, () => {
   const root = scratchNomarmyRoot();
   const fake = withFakeOpenclaw(root);
   try {
@@ -496,6 +498,20 @@ test("scan --json against empty temp directory returns evidence with zero counts
   }
 });
 
+test("scan --check renders drift as human text without object coercion", () => {
+  const repo = mkdtempSync(path.join(tmpdir(), "nomarmy-scan-drift-"));
+  try {
+    writeConfig(repo, 'verification:\n  quick:\n    commands: ["echo ok"]\n');
+    fs.writeFileSync(path.join(repo, "package.json"), '{"name":"scan-drift","scripts":{"test":"node --test"}}\n');
+    const result = runCLI(["scan", "--check", "--repo", repo]);
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.stdout, "Comparing .nomarmy.yml against repository evidence\n\nDrift: 1 missing from config, 0 missing from repo (1 total)\n\n  repo has, config omits:  commandKinds: test\n");
+    assert.doesNotMatch(result.stdout, /\[object Object\]/);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 // --------------------------------------------------------------------------
 // nomarmy army <init|assign|show>
 // --------------------------------------------------------------------------
@@ -512,6 +528,61 @@ function runArmyCLI(root, repo, args, extraEnv = {}) {
     return { exitCode: error.status ?? 1, stdout: error.stdout ?? "", stderr: error.stderr ?? "" };
   }
 }
+
+test("army show outside a repository reports global settings without a root project layer", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const shown = runArmyCLI(root, "/", ["show"]);
+    assert.equal(shown.exitCode, 0, shown.stderr);
+    assert.match(shown.stdout, /^🪖 nomArmy\nno repository here: showing global settings\n/);
+    assert.doesNotMatch(shown.stdout, /🪖 nomArmy\s+\(\/\)/);
+    assert.doesNotMatch(shown.stdout, /^  (project|local)\s/m);
+    const machine = runArmyCLI(root, "/", ["show", "--json"]);
+    assert.equal(machine.exitCode, 0, machine.stderr);
+    assert.deepEqual(JSON.parse(machine.stdout).layers.map((layer) => layer.layer), ["global"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("army assign rejects roles absent from all rosters and allows cross-layer overrides", () => {
+  const root = scratchNomarmyRoot();
+  const repo = mkdtempSync(path.join(tmpdir(), "nomarmy-army-assign-empty-"));
+  try {
+    for (const layer of ["--local", "--project"]) {
+      const result = runArmyCLI(root, repo, ["assign", "sr-dev", "codex", layer]);
+      assert.equal(result.exitCode, 1);
+      assert.match(result.stderr, /Role "sr-dev" is not defined in any army roster\. Run nomarmy army init first\./);
+    }
+    assert.equal(fs.existsSync(path.join(repo, ".nomarmy.local.yml")), false);
+    assert.equal(fs.existsSync(path.join(repo, ".nomarmy.yml")), false);
+    assert.equal(runArmyCLI(root, repo, ["init", "--json"]).exitCode, 0);
+    const override = runArmyCLI(root, repo, ["assign", "sr-dev", "codex", "--project"]);
+    assert.equal(override.exitCode, 0, override.stderr);
+    assert.match(fs.readFileSync(path.join(repo, ".nomarmy.yml"), "utf8"), /sr-dev:\n\s+agent: codex/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("army usage errors exit 1 and assignment flags may precede positionals", () => {
+  const root = scratchNomarmyRoot();
+  const repo = mkdtempSync(path.join(tmpdir(), "nomarmy-army-usage-"));
+  try {
+    for (const args of [["assign", "sr-dev"], ["assign", "sr-dev", "codex", "extra"], ["general"], ["assign", "--bogus", "sr-dev", "codex"]]) {
+      const result = runArmyCLI(root, repo, args);
+      assert.equal(result.exitCode, 1, args.join(" "));
+    }
+    assert.equal(runArmyCLI(root, repo, ["init", "--json"]).exitCode, 0);
+    const assigned = runArmyCLI(root, repo, ["assign", "--local", "sr-dev", "codex"]);
+    assert.equal(assigned.exitCode, 0, assigned.stderr);
+    assert.match(fs.readFileSync(path.join(repo, ".nomarmy.local.yml"), "utf8"), /sr-dev:\n\s+agent: codex/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
 
 test("army show prints each agent's usage reading", () => {
   const root = scratchNomarmyRoot();
@@ -665,11 +736,15 @@ process.exit(0);
   return { NOMARMY_OPENCLAW_CMD: scriptPath };
 }
 
-test("army assign checks a named model: listed is accepted, unlisted-and-failing is refused without writing, --no-check skips", { skip: process.platform === "win32" ? "executes a POSIX shebang stub directly" : false }, () => {
+test("army assign checks a named model: listed is accepted, unlisted-and-failing is refused without writing, --no-check skips", posixStubOnly, () => {
   const root = scratchNomarmyRoot();
   const repo = mkdtempSync(path.join(tmpdir(), "nomarmy-army-repo-"));
   try {
     runAgentsCLI(root, ["add", "--json", "--name", "codex", "--kind", "subscription", "--provider", "openai", "--owner", "you@example.com"]);
+    const absent = runArmyCLI(root, repo, ["assign", "sr-dev", "codex", "--no-check", "--json"]);
+    assert.equal(absent.exitCode, 1);
+    assert.match(JSON.parse(absent.stdout).error, /Role "sr-dev" is not defined in any army roster/);
+    assert.equal(runArmyCLI(root, repo, ["init", "--json"]).exitCode, 0);
     const fake = withCatalogOpenclaw(root);
     const ok = runArmyCLI(root, repo, ["assign", "sr-dev", "codex", "gpt-6-astra", "--json"], fake);
     assert.equal(ok.exitCode, 0, ok.stdout);
@@ -682,7 +757,7 @@ test("army assign checks a named model: listed is accepted, unlisted-and-failing
     const listedButBroken = runArmyCLI(root, repo, ["assign", "pm", "codex", "gpt-6-broken", "--json"], fake);
     assert.notEqual(listedButBroken.exitCode, 0);
     assert.match(JSON.parse(listedButBroken.stdout).error, /is listed in OpenClaw's catalog, but a real test call to it failed/);
-    assert.equal(JSON.parse(runArmyCLI(root, repo, ["show", "--json"]).stdout).roles.po, undefined, "the refused assignment wrote nothing");
+    assert.equal(JSON.parse(runArmyCLI(root, repo, ["show", "--json"]).stdout).roles.po.agent, "local", "the refused assignment wrote nothing");
     assert.equal(runArmyCLI(root, repo, ["assign", "po", "codex", "gpt-6-sol", "--no-check", "--json"], fake).exitCode, 0);
     assert.equal(JSON.parse(runArmyCLI(root, repo, ["assign", "pm", "codex", "auto", "--json"], fake).stdout).modelCheck.status, "none");
   } finally {
@@ -826,4 +901,481 @@ test("jobs --wait exits 2 for an unknown job and a timeout", async () => {
   } finally {
     rmSync(state, { recursive: true, force: true });
   }
+});
+
+// A pseudo-terminal drives the real interactive wizard while every external
+// login and probe is a local stub. No vendor CLI or network is contacted.
+function fakeExecutable(root, name, body) {
+  const file = path.join(root, "bin", name);
+  fs.writeFileSync(file, `#!/usr/bin/env node\n${body}\n`);
+  fs.chmodSync(file, 0o755);
+  return file;
+}
+
+function runInteractiveAgents(root, args, replies, env = {}) {
+  return new Promise((resolve, reject) => {
+    const cli = path.join(root, "bin", "nomarmy.mjs");
+    const command = [process.execPath, cli, "agents", ...args].map((x) => `'${x.replaceAll("'", "'\\''")}'`).join(" ");
+    const child = spawn("script", ["-q", "-e", "-c", command, "/dev/null"], {
+      cwd: root, env: { ...process.env, PATH: `${path.join(root, "bin")}:${process.env.PATH}`, NOMARMY_CONFIG_DIR: path.join(root, "config"), ...env },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "", stderr = "", sent = 0;
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`Interactive agents stalled after ${sent}/${replies.length} replies. Output: ${stdout}`));
+    }, 12000);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+      if (sent < replies.length && stdout.includes(replies[sent][0])) child.stdin.write(replies[sent++][1] + "\n");
+    });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
+    child.on("close", (code) => { clearTimeout(timer); resolve({ exitCode: code, stdout, stderr, sent }); });
+  });
+}
+
+const ttyOnly = { skip: posixStubOnly.skip || (process.platform !== "linux" ? "requires Linux script PTY" : false) };
+
+test("agents add subscription vendor sign-in failure stops before model and writes nothing", ttyOnly, async () => {
+  for (const vendor of ["claude", "codex", "meta"]) {
+    const root = scratchNomarmyRoot();
+    const bin = { claude: "claude", codex: "codex", meta: "muse" }[vendor];
+    try {
+      fakeExecutable(root, bin, `const a=process.argv.slice(2).join(" "); if(a==="--version") process.exit(0); if(a==="auth status") console.log(JSON.stringify({loggedIn:false})); if(a==="login status") console.log("Not logged in"); if(a==="auth login"||a==="login") process.exit(1);`);
+      const result = await runInteractiveAgents(root, ["add", "subscription", vendor], [["Log in now?", "y"]]);
+      assert.equal(result.exitCode, 1, result.stdout);
+      assert.equal(result.sent, 1);
+      assert.match(result.stdout, new RegExp(`Retry with .nomarmy agents add subscription ${vendor}`));
+      assert.doesNotMatch(result.stdout, /Default model|Whose subscription|Agent name/);
+      assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
+test("agents add subscription owner defaults to signed-in email and re-asks invalid answer", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    fakeExecutable(root, "claude", `const a=process.argv.slice(2).join(" "); if(a==="--version") process.exit(0); if(a==="auth status") console.log(JSON.stringify({loggedIn:true,email:"signed@example.com"}));`);
+    const openclaw = fakeExecutable(root, "fake-openclaw", `const a=process.argv.slice(2).join(" "); if(a.startsWith("models list")) console.log("claude-cli/sonnet   text"); if(a.startsWith("agent exec")) console.log(JSON.stringify({ok:true,final:"ok"}));`);
+    const result = await runInteractiveAgents(root, ["add", "subscription", "claude"], [
+      ["Default model", ""], ["Whose subscription is this", "not-an-email"],
+      ["enter an email address", "signed@example.com"], ["Agent name", ""],
+    ], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+    assert.equal(result.exitCode, 0, result.stdout);
+    assert.equal(result.sent, 4, result.stdout);
+    assert.match(result.stdout, /Whose subscription is this \[signed@example.com\]/);
+    const agent = JSON.parse(runAgentsCLI(root, ["list", "--json"]).stdout).agents.claude;
+    assert.equal(agent.owner, "signed@example.com");
+    assert.equal(agent.provider, "claude-cli");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents add --json rejects invalid --owner naming the flag", () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const result = runAgentsCLI(root, ["add", "--json", "--name", "codex", "--kind", "subscription", "--provider", "openai", "--owner", "bad owner"]);
+    assert.equal(result.exitCode, 1);
+    assert.match(JSON.parse(result.stdout).error, /--owner must be an email address/);
+    assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents update codex --probe uses the first assigned role model without an agent default", posixStubOnly, () => {
+  const root = scratchNomarmyRoot();
+  try {
+    assert.equal(runAgentsCLI(root, ["add", "--json", "--name", "codex", "--kind", "subscription", "--provider", "openai", "--owner", "you@example.com"]).exitCode, 0);
+    writeConfig(root, "army:\n  roles:\n    sr-dev:\n      agent: codex\n      model: gpt-6-sol\n");
+    const marker = path.join(root, "probed-model");
+    const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2); if(a[0]==="agent") { fs.writeFileSync(${JSON.stringify(marker)}, a[a.indexOf("--model")+1]); console.log(JSON.stringify({ok:true,final:"ok"})); }`);
+    const result = runAgentsCLI(root, ["update", "codex", "--probe"], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+    assert.equal(result.exitCode, 0, result.stdout);
+    assert.match(result.stdout, /^✓ codex  openai\/gpt-6-sol \(sr-dev's model\)  answered in [0-9.]+s\n$/);
+    assert.equal(fs.readFileSync(marker, "utf8"), "openai/gpt-6-sol");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents update --probe uses the vendor default when no role assigns a model", posixStubOnly, () => {
+  const root = scratchNomarmyRoot();
+  try {
+    assert.equal(runAgentsCLI(root, ["add", "--json", "--name", "codex", "--kind", "subscription", "--provider", "openai", "--owner", "you@example.com"]).exitCode, 0);
+    const marker = path.join(root, "probed-model");
+    const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2); if(a[0]==="agent") { fs.writeFileSync(${JSON.stringify(marker)}, a[a.indexOf("--model")+1]); console.log(JSON.stringify({ok:true,final:"ok"})); }`);
+    const result = runAgentsCLI(root, ["update", "--probe"], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+    assert.equal(result.exitCode, 0, result.stdout);
+    assert.match(result.stdout, /^✓ codex  openai\/gpt-6-astra \(vendor default\)  answered in [0-9.]+s\n$/);
+    assert.equal(fs.readFileSync(marker, "utf8"), "openai/gpt-6-astra");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents update --probe uses the first catalog model when no role or vendor default exists", posixStubOnly, () => {
+  const root = scratchNomarmyRoot();
+  try {
+    assert.equal(runAgentsCLI(root, ["add", "--json", "--name", "claude", "--kind", "subscription", "--provider", "claude-cli", "--owner", "you@example.com"]).exitCode, 0);
+    const marker = path.join(root, "probed-model");
+    const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2); if(a[0]==="models") console.log("claude-cli/sonnet   text\\nclaude-cli/opus   text"); if(a[0]==="agent") { fs.writeFileSync(${JSON.stringify(marker)}, a[a.indexOf("--model")+1]); console.log(JSON.stringify({ok:true,final:"ok"})); }`);
+    const result = runAgentsCLI(root, ["update", "claude", "--probe"], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+    assert.equal(result.exitCode, 0, result.stdout);
+    assert.match(result.stdout, /^✓ claude  claude-cli\/sonnet \(first catalog model\)  answered in [0-9.]+s\n$/);
+    assert.equal(fs.readFileSync(marker, "utf8"), "claude-cli/sonnet");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents update --probe fails with a model-setting command only when no model can be found", posixStubOnly, () => {
+  const root = scratchNomarmyRoot();
+  try {
+    assert.equal(runAgentsCLI(root, ["add", "--json", "--name", "claude", "--kind", "subscription", "--provider", "claude-cli", "--owner", "you@example.com"]).exitCode, 0);
+    const marker = path.join(root, "probed-model");
+    const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2); if(a[0]==="agent") fs.writeFileSync(${JSON.stringify(marker)}, "called");`);
+    const result = runAgentsCLI(root, ["update", "claude", "--probe"], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+    assert.equal(result.exitCode, 1, result.stdout);
+    assert.equal(result.stdout, "✗ claude  claude-cli/no model  no model available; set one with `nomarmy agents update claude --model <m>`\n");
+    assert.equal(fs.existsSync(marker), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents update --probe probes every configured agent, prints outcomes and fails on any failure", posixStubOnly, () => {
+  const root = scratchNomarmyRoot();
+  try {
+    for (const [name, provider, model] of [["codex", "openai", "gpt-6-astra"], ["claude", "claude-cli", "sonnet"]]) {
+      assert.equal(runAgentsCLI(root, ["add", "--json", "--name", name, "--kind", "subscription", "--provider", provider, "--model", model, "--owner", "you@example.com"]).exitCode, 0);
+    }
+    const openclaw = fakeExecutable(root, "fake-openclaw", `const a=process.argv.slice(2).join(" "); if(a.includes("claude-cli/sonnet")) console.log(JSON.stringify({ok:false,message:"denied"})); else console.log(JSON.stringify({ok:true,final:"ok"}));`);
+    const result = runAgentsCLI(root, ["update", "--probe"], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+    assert.equal(result.exitCode, 1, result.stdout);
+    assert.match(result.stdout, /✓ codex  openai\/gpt-6-astra  answered in [0-9.]+s/);
+    assert.match(result.stdout, /✗ claude  claude-cli\/sonnet  failed: denied/);
+    assert.equal(result.stdout.trim().split("\n").length, 2);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+function fakeCodexSubscription(root, profiles, probeOk = false, probeMessage = "model refused") {
+  profiles = profiles.map((p) => p.id === "openai:working" ? { ...p, id: "openai:account-test", label: "(Codex import)" } : p);
+  fakeExecutable(root, "codex", `const a=process.argv.slice(2).join(" "); if(a==="--version") process.exit(0); if(a==="login status") console.log("Logged in using ChatGPT");`);
+  const probeMarker = path.join(root, "probed");
+  const probeBody = probeOk ? { ok: true, final: "ok" } : { ok: false, message: probeMessage };
+  const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2).join(" "); if(a==="--version") console.log("OpenClaw ${PINNED_OPENCLAW_VERSION}"); if(a.startsWith("plugins inspect")) console.log(JSON.stringify({plugin:{enabled:true,builtWithOpenClawVersion:"${PINNED_OPENCLAW_VERSION}"}})); if(a==="update status --json") console.log(JSON.stringify({migrationWarnings:[]})); if(a.startsWith("models list")) console.log("openai/gpt-6-astra   text"); if(a==="models auth list --json") console.log(JSON.stringify({profiles:${JSON.stringify(profiles)}})); if(a.startsWith("models auth login")) process.exit(0); if(a.startsWith("agent exec")) { fs.writeFileSync(${JSON.stringify(probeMarker)}, "called"); console.log(JSON.stringify(${JSON.stringify(probeBody)})); }`);
+  return { env: { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") }, probeMarker };
+}
+
+const codexDetails = [["Default model", ""], ["Whose subscription is this", "person@example.com"], ["Agent name", ""]];
+
+test("agents add subscription declines an older OpenClaw without running npm or writing config", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    fakeExecutable(root, "codex", `const a=process.argv.slice(2).join(" "); if(a==="--version") process.exit(0); if(a==="login status") console.log("Logged in using ChatGPT");`);
+    const openclaw = fakeExecutable(root, "fake-openclaw", `if(process.argv.slice(2).join(" ")==="--version") console.log("OpenClaw 2026.9.5");`);
+    const npmMarker = path.join(root, "npm-called");
+    fakeExecutable(root, "npm", `import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(npmMarker)}, process.argv.slice(2).join(" "));`);
+    const result = await runInteractiveAgents(root, ["add", "subscription", "codex"], [["Apply these changes?", "no"]], {
+      NOMARMY_OPENCLAW_CMD: openclaw,
+    });
+    assert.equal(result.exitCode, 1, result.stdout);
+    assert.equal(result.sent, 1, result.stdout);
+    assert.match(result.stdout, /Upgrade OpenClaw to 2026\.9\.6/);
+    assert.match(result.stdout, /Apply these changes\? \[y\/N\]/);
+    assert.match(result.stdout, /No changes made\./);
+    assert.doesNotMatch(result.stdout, /Default model|Whose subscription|Agent name/);
+    assert.equal(fs.existsSync(npmMarker), false);
+    assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents add subscription codex stops before prompts when OpenClaw auth profile is missing", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { env, probeMarker } = fakeCodexSubscription(root, []);
+    const result = await runInteractiveAgents(root, ["add", "subscription", "codex"], codexDetails, env);
+    assert.equal(result.exitCode, 1, result.stdout);
+    assert.equal(result.sent, 0);
+    assert.match(result.stdout, /no usable auth profile.*nomarmy agents add subscription codex/);
+    assert.doesNotMatch(result.stdout, /Default model|Whose subscription|Agent name|Save the agent anyway/);
+    assert.equal(fs.existsSync(probeMarker), false);
+    assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents add subscription codex stops before prompts when OpenClaw auth profile is expired", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { env, probeMarker } = fakeCodexSubscription(root, [{ id: "openai:expired", provider: "openai", type: "oauth", expiresAt: "2020-01-01T00:00:00.000Z" }]);
+    const result = await runInteractiveAgents(root, ["add", "subscription", "codex"], codexDetails, env);
+    assert.equal(result.exitCode, 1, result.stdout);
+    assert.equal(result.sent, 0);
+    assert.match(result.stdout, /no usable auth profile.*nomarmy agents add subscription codex/);
+    assert.doesNotMatch(result.stdout, /Default model|Whose subscription|Agent name|Save the agent anyway/);
+    assert.equal(fs.existsSync(probeMarker), false);
+    assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents add subscription codex stops as a sign-in failure when a valid profile still probes 401", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { env, probeMarker } = fakeCodexSubscription(root, [{ id: "openai:working", provider: "openai", type: "oauth", expiresAt: "2099-01-01T00:00:00.000Z" }], false, "401 Unauthorized");
+    const result = await runInteractiveAgents(root, ["add", "subscription", "codex"], codexDetails, env);
+    assert.equal(result.exitCode, 1, result.stdout);
+    assert.equal(result.sent, 3, result.stdout);
+    assert.match(result.stdout, /Sign-in failed: 401 Unauthorized/);
+    assert.match(result.stdout, /fix: openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --yes[\r\n]/);
+    assert.doesNotMatch(result.stdout, /openclaw configure|migrate plan/);
+    assert.doesNotMatch(result.stdout, /Save the agent anyway|login works|nomarmy agents add/);
+    assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
+    assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents add subscription codex treats missing bearer, no usable profiles, and an unavailable profile as sign-in failures", ttyOnly, async () => {
+  for (const message of ["Missing bearer", "no usable profiles", "Selected auth profile openai:codex is unavailable"]) {
+    const root = scratchNomarmyRoot();
+    try {
+      const { env, probeMarker } = fakeCodexSubscription(root, [{ id: "openai:working", provider: "openai", type: "oauth", expiresAt: "2099-01-01T00:00:00.000Z" }], false, message);
+      const result = await runInteractiveAgents(root, ["add", "subscription", "codex"], codexDetails, env);
+      assert.equal(result.exitCode, 1, `${message}\n${result.stdout}`);
+      assert.equal(result.sent, 3, result.stdout);
+      assert.match(result.stdout, new RegExp(`Sign-in failed: ${message.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+      assert.match(result.stdout, /openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --yes/);
+      assert.doesNotMatch(result.stdout, /openclaw configure|migrate plan/);
+      assert.doesNotMatch(result.stdout, /Save the agent anyway|login works|nomarmy agents add/);
+      assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
+      assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
+test("agents add subscription codex offers default-no save when profile works but model fails", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { env, probeMarker } = fakeCodexSubscription(root, [{ id: "openai:working", provider: "openai", type: "oauth", expiresAt: "2099-01-01T00:00:00.000Z" }]);
+    const result = await runInteractiveAgents(root, ["add", "subscription", "codex"], [...codexDetails, ["Save the agent anyway?", ""]], env);
+    assert.equal(result.exitCode, 1, result.stdout);
+    assert.equal(result.sent, 4, result.stdout);
+    assert.match(result.stdout, /login works, but openai\/gpt-6-astra didn't answer/);
+    assert.match(result.stdout, /nomarmy agents update codex --probe/);
+    assert.match(result.stdout, /Save the agent anyway\? \[y\/N\]/);
+    assert.doesNotMatch(result.stdout, /Sign-in has no usable auth profile/);
+    assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
+    assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents add subscription codex saves on yes despite a failed model call", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { env, probeMarker } = fakeCodexSubscription(root, [{ id: "openai:working", provider: "openai", type: "oauth" }]);
+    const result = await runInteractiveAgents(root, ["add", "subscription", "codex"], [...codexDetails, ["Save the agent anyway?", "yes"]], env);
+    assert.equal(result.exitCode, 0, result.stdout);
+    assert.equal(result.sent, 4, result.stdout);
+    assert.match(result.stdout, /login works, but openai\/gpt-6-astra didn't answer/);
+    assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
+    assert.deepEqual(JSON.parse(runAgentsCLI(root, ["list", "--json"]).stdout).agents.codex,
+      { kind: "subscription", provider: "openai", owner: "person@example.com", max_concurrent: 1, thinking: true });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents add subscription owner falls back to repo git email", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    fakeExecutable(root, "claude", `const a=process.argv.slice(2).join(" "); if(a==="--version") process.exit(0); if(a==="auth status") console.log(JSON.stringify({loggedIn:true}));`);
+    fakeExecutable(root, "git", `if(process.argv.slice(2).join(" ")==="config user.email") console.log("repo@example.com");`);
+    const openclaw = fakeExecutable(root, "fake-openclaw", `const a=process.argv.slice(2).join(" "); if(a.startsWith("models list")) console.log("claude-cli/sonnet   text"); if(a.startsWith("agent exec")) console.log(JSON.stringify({ok:true,final:"ok"}));`);
+    const result = await runInteractiveAgents(root, ["add", "subscription", "claude"], [
+      ["Default model", ""], ["Whose subscription is this", "repo@example.com"], ["Agent name", ""],
+    ], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+    assert.equal(result.exitCode, 0, result.stdout);
+    assert.equal(result.sent, 3);
+    assert.match(result.stdout, /Whose subscription is this \[repo@example.com\]/);
+    assert.equal(JSON.parse(runAgentsCLI(root, ["list", "--json"]).stdout).agents.claude.owner, "repo@example.com");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents add subscription codex rejects a nonzero login even when status looks signed in afterward", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const marker = path.join(root, "login-attempted");
+    fakeExecutable(root, "codex", `import fs from "node:fs"; const a=process.argv.slice(2).join(" "); if(a==="--version") process.exit(0); if(a==="login status") console.log(fs.existsSync(${JSON.stringify(marker)}) ? "Logged in using ChatGPT" : "Not logged in"); if(a==="login") { fs.writeFileSync(${JSON.stringify(marker)}, "attempted"); process.exit(1); }`);
+    const result = await runInteractiveAgents(root, ["add", "subscription", "codex"], [["Log in now?", "y"], ["Update OpenClaw now", "n"]]);
+    assert.equal(result.exitCode, 1, result.stdout);
+    assert.match(result.stdout, /codex sign-in failed or was canceled.*nomarmy agents add subscription codex/);
+    assert.doesNotMatch(result.stdout, /Models|Default model|Whose subscription|Agent name/);
+    assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents update --probe alone prints a passing line for every successful configured agent", posixStubOnly, () => {
+  const root = scratchNomarmyRoot();
+  try {
+    for (const [name, provider, model] of [["codex", "openai", "gpt-6-astra"], ["claude", "claude-cli", "sonnet"]]) {
+      assert.equal(runAgentsCLI(root, ["add", "--json", "--name", name, "--kind", "subscription", "--provider", provider, "--model", model, "--owner", "you@example.com"]).exitCode, 0);
+    }
+    const openclaw = fakeExecutable(root, "fake-openclaw", `console.log(JSON.stringify({ok:true,final:"ok"}));`);
+    const result = runAgentsCLI(root, ["update", "--probe"], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+    assert.equal(result.exitCode, 0, result.stdout);
+    assert.match(result.stdout, /^✓ codex  openai\/gpt-6-astra  answered in [0-9.]+s\n✓ claude  claude-cli\/sonnet  answered in [0-9.]+s\n$/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents add subscription cancellation exits nonzero before model prompts", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    fakeExecutable(root, "claude", `const a=process.argv.slice(2).join(" "); if(a==="--version") process.exit(0); if(a==="auth status") console.log(JSON.stringify({loggedIn:false}));`);
+    const result = await runInteractiveAgents(root, ["add", "subscription", "claude"], [["Log in now?", "n"]]);
+    assert.equal(result.exitCode, 1, result.stdout);
+    assert.match(result.stdout, /Sign-in canceled.*nomarmy agents add subscription claude/);
+    assert.doesNotMatch(result.stdout, /Default model|Whose subscription|Agent name/);
+    assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("jobs --wait reports multiple comma-separated and positional jobs as each finishes", async () => {
+  const state = mkdtempSync(path.join(tmpdir(), "nomarmy-wait-many-"));
+  try {
+    for (const id of ["first", "second", "third"]) {
+      const dir = path.join(state, "jobs", id);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify({ state: "running" }));
+    }
+    const finish = (id) => {
+      const dir = path.join(state, "jobs", id);
+      fs.writeFileSync(path.join(dir, "metadata.json"), JSON.stringify({ outcome: "WORKER_DONE", coordinatorStatus: "complete" }));
+      fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify({ state: "finished" }));
+    };
+    const pending = runJobsWait(state, "first,second", ["third", "--timeout", "8"]);
+    setTimeout(() => finish("second"), 200);
+    setTimeout(() => finish("first"), 2400);
+    setTimeout(() => finish("third"), 4600);
+    const result = await pending;
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout.trim(), "second WORKER_DONE complete\nfirst WORKER_DONE complete\nthird WORKER_DONE complete");
+  } finally { rmSync(state, { recursive: true, force: true }); }
+});
+
+test("jobs --wait rejects an unknown id in a list and returns failure after all known jobs finish", async () => {
+  const state = mkdtempSync(path.join(tmpdir(), "nomarmy-wait-many-errors-"));
+  try {
+    for (const [id, outcome, coordinatorStatus] of [["good", "WORKER_DONE", "complete"], ["bad", "NEEDS_REVIEW", "needs_review"]]) {
+      const dir = path.join(state, "jobs", id);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify({ state: "finished" }));
+      fs.writeFileSync(path.join(dir, "metadata.json"), JSON.stringify({ outcome, coordinatorStatus }));
+    }
+    const unknown = await runJobsWait(state, "good", ["missing", "bad"]);
+    assert.equal(unknown.exitCode, 2);
+    assert.equal(unknown.stderr.trim(), "nomarmy jobs: unknown job id: missing");
+    assert.equal(unknown.stdout, "");
+    const failed = await runJobsWait(state, "good", ["bad"]);
+    assert.equal(failed.exitCode, 1);
+    assert.equal(failed.stdout.trim(), "good WORKER_DONE complete\nbad NEEDS_REVIEW needs_review");
+  } finally { rmSync(state, { recursive: true, force: true }); }
+});
+
+test("jobs help names scoped waits and events", () => {
+  const help = execFileSync(process.execPath, [CLI_PATH, "help"], { encoding: "utf8" });
+  assert.match(help, /--wait <jobId> \[<jobId> \.\.\.\]/);
+  assert.match(help, /--events --until-done --run <run-id>/);
+  assert.match(help, /--events --repo <path>/);
+  assert.match(help, /Unscoped\s+--until-done watches every job on this machine/);
+});
+
+test("named API probe runs the configured provider and model without rewriting agents", posixStubOnly, () => {
+  for (const provider of ["xai", "openclaw"]) {
+    const root = scratchNomarmyRoot();
+    try {
+      const added = runAgentsCLI(root, ["add", "--json", "--name", "grok", "--kind", "api", "--provider", provider, ...(provider === "openclaw" ? ["--openclaw-provider", "xai"] : []), "--model", "grok-4.7", "--auth-env", "XAI_API_KEY"]);
+      assert.equal(added.exitCode, 0, added.stdout);
+      const file = path.join(root, "config", "agents.yml");
+      const before = fs.readFileSync(file, "utf8");
+      const marker = path.join(root, "calls");
+      const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2); fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify(a)); console.log(JSON.stringify({ok:true,final:"ok"}));`);
+      const result = runAgentsCLI(root, ["update", "grok", "--probe"], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+      assert.equal(result.exitCode, 0, result.stdout);
+      assert.match(result.stdout, /^✓ grok  xai\/grok-4\.7  answered in [0-9.]+s\n$/);
+      const args = JSON.parse(fs.readFileSync(marker, "utf8"));
+      assert.deepEqual(args.slice(0, 6), ["agent", "exec", "Reply with exactly: ok", "--model", "xai/grok-4.7", "--no-auth-env-only"]);
+      assert.equal(fs.readFileSync(file, "utf8"), before);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
+test("Codex onboarding migrates after removing email and confirms import before real test", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { env } = fakeCodexSubscription(root, [], true);
+    const marker = path.join(root, "commands");
+    const profileFile = path.join(root, "profiles.json");
+    fs.writeFileSync(profileFile, JSON.stringify([{ id: "openai:person@example.com", provider: "openai", type: "oauth" }]));
+    const original = fs.readFileSync(env.NOMARMY_OPENCLAW_CMD, "utf8").replace('if(a==="models auth list --json") console.log(JSON.stringify({profiles:[]}));', '');
+    fs.writeFileSync(env.NOMARMY_OPENCLAW_CMD, original + `\nfs.appendFileSync(${JSON.stringify(marker)}, a+"\\n");
+const file=${JSON.stringify(profileFile)};
+if(a==="models auth list --json") console.log(JSON.stringify({profiles:JSON.parse(fs.readFileSync(file,"utf8"))}));
+if(a==="models auth logout openai:person@example.com") fs.writeFileSync(file,"[]");
+if(a.startsWith("migrate apply codex")) { fs.writeFileSync(file,JSON.stringify([{id:"openai:account-123",provider:"openai",type:"oauth",label:"(Codex import)",expiresAt:"2099-01-01T00:00:00.000Z"}])); console.log("SECRET_SENTINEL"); }
+`);
+    const result = await runInteractiveAgents(root, ["add", "subscription", "codex", "--remove-email-profiles"], codexDetails, env);
+    assert.equal(result.exitCode, 0, result.stdout);
+    assert.equal(result.sent, 3);
+    assert.match(result.stdout, /Confirmed an unexpired openai:account- \(Codex import\) profile/);
+    assert.doesNotMatch(result.stdout, /SECRET_SENTINEL|models auth login/);
+    const commands = fs.readFileSync(marker, "utf8").trim().split("\n");
+    const logout = commands.indexOf("models auth logout openai:person@example.com");
+    const migration = commands.findIndex((s) => s.startsWith("migrate apply codex --from "));
+    const probe = commands.findIndex((s) => s.startsWith("agent exec "));
+    assert.ok(logout >= 0 && logout < migration && migration < probe, commands.join("\n"));
+    assert.match(commands[migration], / --agent main --include-secrets --item auth:openai --yes$/);
+    assert.equal(commands[migration + 1], "models auth list --json");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Codex JSON linking requires email-removal flag and probes only after a verified import", posixStubOnly, () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const { env } = fakeCodexSubscription(root, [], true);
+    const marker = path.join(root, "commands");
+    const state = path.join(root, "imported");
+    const openclaw = fakeExecutable(root, "json-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2); fs.appendFileSync(${JSON.stringify(marker)}, JSON.stringify(a)+"\\n");
+const state=${JSON.stringify(state)};
+if(a.join(" ")==="models auth list --json") console.log(JSON.stringify({profiles:fs.existsSync(state)?(fs.readFileSync(state,"utf8")==="imported"?[{id:"openai:account-123",provider:"openai",label:"(Codex import)",expiresAt:"2099-01-01T00:00:00.000Z"}]:[]):[{id:"openai:person@example.com",provider:"openai"}]}));
+if(a[2]==="logout") fs.writeFileSync(state,"removed");
+if(a[0]==="migrate") { fs.writeFileSync(state,"imported"); console.log("SECRET_SENTINEL"); }
+if(a[0]==="agent") console.log(JSON.stringify({ok:true,final:"ok"}));`);
+    const args = ["add", "--json", "--name", "codex", "--kind", "subscription", "--provider", "openai", "--owner", "person@example.com", "--link-openclaw"];
+    const testEnv = { ...env, NOMARMY_OPENCLAW_CMD: openclaw, PATH: `${path.join(root, "bin")}:${process.env.PATH}` };
+    const denied = runAgentsCLI(root, args, testEnv);
+    assert.equal(denied.exitCode, 1);
+    assert.equal(JSON.parse(denied.stdout).error, "Codex import failed; nothing was written.");
+    assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
+    assert.deepEqual(fs.readFileSync(marker, "utf8").trim().split("\n").map(JSON.parse), [["models", "auth", "list", "--json"]]);
+    const passed = runAgentsCLI(root, [...args, "--remove-email-profiles"], testEnv);
+    assert.equal(passed.exitCode, 0, passed.stdout + passed.stderr);
+    assert.doesNotMatch(passed.stdout + passed.stderr, /SECRET_SENTINEL/);
+    assert.deepEqual(JSON.parse(passed.stdout).agent, {kind:"subscription",provider:"openai",owner:"person@example.com",max_concurrent:1,thinking:true});
+    const calls = fs.readFileSync(marker, "utf8").trim().split("\n").map(JSON.parse);
+    assert.deepEqual(calls.slice(1, 4), [["models", "auth", "list", "--json"], ["models", "auth", "logout", "openai:person@example.com"], ["models", "auth", "list", "--json"]]);
+    assert.deepEqual(calls[4].slice(0, 4), ["migrate", "apply", "codex", "--from"]);
+    assert.deepEqual(calls[5], ["models", "auth", "list", "--json"]);
+    assert.deepEqual(calls[6].slice(0, 6), ["agent", "exec", "Reply with exactly: ok", "--model", "openai/gpt-6-astra", "--no-auth-env-only"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("health and doctor CLI fail on Codex and model-policy runtime blockers", posixStubOnly, () => {
+  const root = scratchNomarmyRoot();
+  try {
+    assert.equal(runAgentsCLI(root, ["add", "--json", "--name", "codex", "--kind", "subscription", "--provider", "openai", "--model", "gpt-6-astra", "--owner", "person@example.com"]).exitCode, 0);
+    assert.equal(runAgentsCLI(root, ["add", "--json", "--name", "grok", "--kind", "api", "--provider", "xai", "--model", "grok-4.7", "--auth-env", "XAI_API_KEY"]).exitCode, 0);
+    const openclaw = fakeExecutable(root, "diagnostic-openclaw", `const a=process.argv.slice(2); if(a.join(" ")==="models auth list --json") console.log(JSON.stringify({profiles:[{id:"openai:person@example.com",provider:"openai",type:"oauth"}]})); if(a[0]==="config" && a[2]==="agents.entries.main.modelPolicy.allow") console.log(JSON.stringify(["openai/gpt-6-astra"]));`);
+    fakeExecutable(root, "npm", 'process.exit(1);');
+    for (const cmd of ["health", "doctor"]) {
+      const result = runCLI([cmd, "--json"], { cwd: root, env: { NOMARMY_CONFIG_DIR: path.join(root, "config"), NOMARMY_AGENT_STATE: path.join(root, "state"), NOMARMY_OPENCLAW_CMD: openclaw, PATH: `${path.join(root,"bin")}:${process.env.PATH}` } });
+      assert.equal(result.exitCode, 1, result.stdout);
+      const data = JSON.parse(result.stdout);
+      const issues = data.issues ?? data.checks;
+      const selected = issues.filter((i) => i.id.startsWith("codex-import:") || i.id.startsWith("model-policy:"));
+      assert.deepEqual(selected.map((i) => i.id), ["codex-import:missing", "codex-import:shadowed", "model-policy:agents.entries.main.modelPolicy.allow"]);
+      assert.deepEqual(selected.map((i) => i.fix), [
+        "openclaw models auth logout openai:person@example.com && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --yes",
+        "openclaw models auth logout openai:person@example.com && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --yes",
+        "openclaw config unset agents.entries.main.modelPolicy (or add the missing models to agents.entries.main.modelPolicy.allow)",
+      ]);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

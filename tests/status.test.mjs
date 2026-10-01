@@ -176,22 +176,27 @@ test("statusLineText: a usage warning isn't repeated as the health warning", () 
   assert.equal(statusLineText({ session: { workspace: { project_dir: "/r/x" } }, stateRoot: root, now }), "x │ 🍪 idle │ ⚠ openai login 5d │ ⚠ codex 85% wk");
 });
 
-test("statusLineText: records changed Claude rate limits only, without risking the printed line", () => {
+test("statusLineText: records Claude session observations and expires idle sources without risking the printed line", () => {
   const root = tmp(), now = Date.parse("2026-09-25T12:00:00Z"), reset = Math.floor((now + 3600000) / 1000);
-  const session = { workspace: { project_dir: "/r/x" }, rate_limits: { seven_day: { used_percentage: 85, resets_at: reset } } };
+  const session = { session_id: "active", workspace: { project_dir: "/r/x" }, rate_limits: { seven_day: { used_percentage: 85, resets_at: reset } } };
   assert.equal(statusLineText({ session, stateRoot: root, now }), "x │ 🍪 idle │ ⚠ claude-cli 85% wk");
-  const first = fs.readFileSync(path.join(root, "usage-limits.json"), "utf8");
-  assert.deepEqual(readUsageSnapshots(root)["claude-cli"], {
-    source: "claude", plan: null, limitReached: false, observedAt: now,
-    windows: [{ name: "week", usedPercent: 85, windowMinutes: 10080, resetsAt: reset * 1000 }],
+  const expected = (percent, at, sources) => ({
+    source: "claude", plan: null, limitReached: false, observedAt: at,
+    windows: [{ name: "week", usedPercent: percent, windowMinutes: 10080, resetsAt: reset * 1000, sources }],
   });
+  assert.deepEqual(readUsageSnapshots(root)["claude-cli"], expected(85, now, [{ sourceId: "active", usedPercent: 85, observedAt: now }]));
   statusLineText({ session, stateRoot: root, now: now + 60000 });
-  assert.equal(fs.readFileSync(path.join(root, "usage-limits.json"), "utf8"), first, "an unchanged redraw does not write");
-  statusLineText({ session: { ...session, rate_limits: { seven_day: { used_percentage: 86, resets_at: reset } } }, stateRoot: root, now: now + 120000 });
-  assert.equal(readUsageSnapshots(root)["claude-cli"].windows[0].usedPercent, 86);
-  // Another, idle window redrawing with an older, lower figure doesn't pull it back.
-  statusLineText({ session: { ...session, rate_limits: { seven_day: { used_percentage: 81, resets_at: reset } } }, stateRoot: root, now: now + 180000 });
-  assert.equal(readUsageSnapshots(root)["claude-cli"].windows[0].usedPercent, 86);
+  assert.deepEqual(readUsageSnapshots(root)["claude-cli"], expected(85, now, [{ sourceId: "active", usedPercent: 85, observedAt: now }]));
+  statusLineText({ session: { ...session, session_id: "idle", rate_limits: { seven_day: { used_percentage: 89, resets_at: reset } } }, stateRoot: root, now: now + 120000 });
+  const low = { ...session, rate_limits: { seven_day: { used_percentage: 6, resets_at: reset } } };
+  assert.equal(statusLineText({ session: low, stateRoot: root, now: now + 180000 }), "x │ 🍪 idle │ ⚠ claude-cli 89% wk");
+  assert.deepEqual(readUsageSnapshots(root)["claude-cli"], expected(89, now + 180000, [
+    { sourceId: "idle", usedPercent: 89, observedAt: now + 120000 },
+    { sourceId: "active", usedPercent: 6, observedAt: now + 180000 },
+  ]));
+  const later = now + 42 * 60000;
+  assert.equal(statusLineText({ session: low, stateRoot: root, now: later }), "x │ 🍪 idle");
+  assert.deepEqual(readUsageSnapshots(root)["claude-cli"], expected(6, later, [{ sourceId: "active", usedPercent: 6, observedAt: later }]));
 
   const badRoot = path.join(root, "not-a-directory");
   fs.writeFileSync(badRoot, "occupied");
@@ -209,3 +214,36 @@ test("statusLineText: shows high and over usage after collapsing jobs and stays 
   assert.equal(line, "x │ 🍪 2: +2 │ ⛔ codex 100% wk");
   assert.ok([...line].length <= 48);
 });
+
+for (const refresh of [false, true]) {
+  test(`statusLineText: unchanged redraw ${refresh ? "after the interval writes and keeps the source fresh" : "within the interval does not write"}`, t => {
+    const root = tmp(), now = Date.parse("2026-09-25T12:00:00Z");
+    const reset = now + 3600000;
+    const session = { session_id: "active", workspace: { project_dir: "/r/x" },
+      rate_limits: { seven_day: { used_percentage: 85, resets_at: reset / 1000 } } };
+    const draw = at => statusLineText({ session, stateRoot: root, now: at });
+    draw(now);
+    const initial = readUsageSnapshots(root);
+    const writes = t.mock.method(fs, "writeFileSync");
+    const renames = t.mock.method(fs, "renameSync");
+    for (const offset of [1000, 60000, 299999]) draw(now + offset);
+    assert.equal(writes.mock.callCount(), 0);
+    assert.equal(renames.mock.callCount(), 0);
+    assert.deepEqual(readUsageSnapshots(root), initial);
+    if (refresh) {
+      const later = now + 5 * 60000;
+      assert.equal(draw(later), "x │ 🍪 idle │ ⚠ claude-cli 85% wk");
+      assert.equal(writes.mock.callCount(), 1);
+      assert.equal(renames.mock.callCount(), 1);
+      const expected = { "claude-cli": { source: "claude", plan: null, limitReached: false, observedAt: later,
+        windows: [{ name: "week", usedPercent: 85, windowMinutes: 10080, resetsAt: reset,
+          sources: [{ sourceId: "active", usedPercent: 85, observedAt: later }] }] } };
+      assert.deepEqual(readUsageSnapshots(root), expected);
+      // No new reading: the interval refresh alone extends visibility beyond the original TTL.
+      assert.equal(statusLineText({ session: { workspace: session.workspace }, stateRoot: root,
+        now: now + 31 * 60000 }), "x │ 🍪 idle │ ⚠ claude-cli 85% wk");
+      assert.equal(writes.mock.callCount(), 1);
+      assert.deepEqual(readUsageSnapshots(root), expected);
+    }
+  });
+}

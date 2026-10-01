@@ -19,21 +19,73 @@ const AUTH = { profiles: [
   { id: "openai:account-1", provider: "openai", type: "oauth", expiresAt: "2026-10-03T21:10:37.000Z" },
 ] };
 
+const CODEX_RECOVERY = "openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --yes";
+
 test("loginExpiryIssues: quiet 9 days out, a warning inside 7, an error once expired", () => {
   assert.deepEqual(loginExpiryIssues(AUTH, { now: Date.parse("2026-09-24T12:00:00Z") }), []);
   const soon = loginExpiryIssues(AUTH, { now: Date.parse("2026-09-28T12:00:00Z") });
-  assert.equal(soon[0].severity, "warn");
-  assert.match(soon[0].title, /Codex \(ChatGPT plan\) login expires in 5 days/);
-  assert.equal(soon[0].short, "openai login 5d");
-  assert.match(soon[0].fix, /nomarmy agents add subscription codex/);
-  assert.equal(loginExpiryIssues(AUTH, { now: Date.parse("2026-10-04T00:00:00Z") })[0].severity, "error");
+  assert.deepEqual(Object.keys(soon[0]).sort(), ["detail", "fix", "id", "severity", "short", "title"]);
+  assert.deepEqual(soon[0], {
+    id: "login-expiring:openai:account-1",
+    severity: "warn",
+    title: "Codex (ChatGPT plan) login expires in 5 days: openai:account-1",
+    detail: "Auth profile openai:account-1 expires 2026-10-03.",
+    fix: CODEX_RECOVERY,
+    short: "openai login 5d",
+  });
+  assert.doesNotMatch(soon[0].fix, /agents add/);
+  const expired = loginExpiryIssues(AUTH, { now: Date.parse("2026-10-04T00:00:00Z") })[0];
+  assert.equal(expired.severity, "error");
+  assert.equal(expired.detail, "Auth profile openai:account-1 expired 2026-10-03; every job on it will fail.");
+  assert.equal(expired.fix, CODEX_RECOVERY);
+});
+
+function authRun(profiles) {
+  return async (_cmd, args) => {
+    if (args?.[0] === "models" && args[1] === "auth") return { ok: true, stdout: `note\n${JSON.stringify({ profiles })}` };
+    return { ok: false, stdout: "" };
+  };
+}
+
+test("runHealthChecks names an expired Codex import beside a valid profile and gives the exact migrate recovery", async () => {
+  const expired = { id: "openai:codex-import", provider: "openai", type: "oauth", label: "(Codex import)", expiresAt: "2020-01-02T00:00:00.000Z" };
+  const valid = { id: "openai:working", provider: "openai", type: "oauth", expiresAt: "2099-01-01T00:00:00.000Z" };
+  const { issues } = await runHealthChecks({ now: Date.parse("2026-06-01T00:00:00Z"), run: authRun([expired, valid]) });
+  assert.equal(issues.length, 1);
+  assert.deepEqual(Object.keys(issues[0]).sort(), ["detail", "fix", "id", "severity", "short", "title"]);
+  assert.deepEqual(issues[0], {
+    id: "login-expired:openai:codex-import",
+    severity: "error",
+    title: "Codex (ChatGPT plan) login has expired: openai:codex-import (Codex import)",
+    detail: "Auth profile openai:codex-import (Codex import) expired 2020-01-02. OpenClaw may still pick it.",
+    fix: CODEX_RECOVERY,
+    short: "openai login expired",
+  });
+  assert.doesNotMatch(`${issues[0].title} ${issues[0].detail} ${issues[0].fix}`, /every job on it will fail|agents add/);
+});
+
+test("runHealthChecks with only an expired Codex import gives the exact migrate fix", async () => {
+  const expired = { id: "openai:codex-import", provider: "openai", type: "oauth", label: "(Codex import)", expiresAt: "2020-01-02T00:00:00.000Z" };
+  const { issues } = await runHealthChecks({ now: Date.parse("2026-06-01T00:00:00Z"), run: authRun([expired]) });
+  assert.equal(issues.length, 1);
+  assert.deepEqual(Object.keys(issues[0]).sort(), ["detail", "fix", "id", "severity", "short", "title"]);
+  assert.deepEqual(issues[0], {
+    id: "login-expired:openai:codex-import",
+    severity: "error",
+    title: "Codex (ChatGPT plan) login has expired: openai:codex-import (Codex import)",
+    detail: "Auth profile openai:codex-import (Codex import) expired 2020-01-02; every job on it will fail.",
+    fix: CODEX_RECOVERY,
+    short: "openai login expired",
+  });
+  assert.doesNotMatch(issues[0].fix, /auth logout|agents add/);
 });
 
 test("versionIssues: OpenClaw behind npm, and a plugin behind OpenClaw -- the real 2026.9.5/2026.9.6 cases", () => {
   const behind = versionIssues({ installed: "OpenClaw 2026.9.5 (ec9c1a1)", latest: "2026.9.6\n" });
   assert.equal(behind[0].id, "openclaw-update:2026.9.6");
-  assert.match(behind[0].fix, /npm update -g openclaw && openclaw doctor --fix/);
+  assert.equal(behind[0].fix, "nomarmy doctor --fix  (installs the tested OpenClaw release, when no nomArmy jobs are running)");
   assert.deepEqual(versionIssues({ installed: "OpenClaw 2026.9.6", latest: "2026.9.6" }), []);
+  assert.equal(versionIssues({ installed: "OpenClaw 2026.10.1", latest: "2026.10.2" })[0].fix, "No automatic upgrade: nomArmy keeps the tested release or a newer installed version");
   const skew = versionIssues({ installed: "OpenClaw 2026.9.6", latest: "2026.9.6", plugins: [{ id: "codex", version: "2026.9.5" }] });
   assert.equal(skew[0].id, "plugin-skew:codex:2026.9.5");
   assert.equal(skew[0].severity, "info");
