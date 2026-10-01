@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { criteriaProblems, proposalsFromDiff, jobAcceptanceProposals, fillAcceptance, gatherAcceptanceProposals } from "../lib/acceptance-fill.mjs";
 import { loadContract } from "../lib/acceptance.mjs";
-import { shareMarkdown } from "../lib/share.mjs";
+import { acceptanceSummary, shareMarkdown } from "../lib/share.mjs";
 import { computeStats } from "../lib/stats.mjs";
 import { reportView } from "../lib/job-format.mjs";
 import { jobSchema } from "../mcp/server.mjs";
@@ -141,10 +141,10 @@ test("acceptance fill CLI gathers a job or run, supports dry-run and JSON, and r
 });
 
 for (const [state, expected] of [["met", "1 met, 1 unproven (ACC-2)"], ["broken", "1 broken (ACC-1), 1 unproven (ACC-2)"], ["missing", "1 missing (ACC-1), 1 unproven (ACC-2)"], ["unproven", "2 unproven (ACC-1, ACC-2)"], ["retired", "1 unproven (ACC-2), 1 retired (ACC-1)"], ["none", null], ["error", "couldn't run"]]) {
-  test(`PR Acceptance row runs real evidence for ${state}`, t => {
+  test(`PR Acceptance row runs real evidence for ${state}`, async t => {
     const f = fixture(t);
     if (state === "none") {
-      assert.equal(shareMarkdown(computeStats([]), { repoDir: f.repoDir }).includes("| Acceptance | 1 met, 1 unproven (ACC-2) |"), true);
+      assert.equal(shareMarkdown(computeStats([]), { acceptance: await acceptanceSummary(f.repoDir) }).includes("| Acceptance | 1 met, 1 unproven (ACC-2) |"), true);
       fs.unlinkSync(f.file);
     }
     if (state === "error") fs.writeFileSync(f.file, "invalid: [");
@@ -152,7 +152,7 @@ for (const [state, expected] of [["met", "1 met, 1 unproven (ACC-2)"], ["broken"
     if (state === "missing") fs.writeFileSync(f.file, f.source.replace('test: "old"', 'test: "absent"'));
     if (state === "unproven") fs.writeFileSync(f.file, f.source.replace(/proven_by:\n[\s\S]*?    status:/, 'proven_by: []\n    status:'));
     if (state === "retired") fs.writeFileSync(f.file, f.source.replace("status: unproven #", "status: retired #"));
-    const md = shareMarkdown(computeStats([]), { repoDir: f.repoDir });
+    const md = shareMarkdown(computeStats([]), { acceptance: await acceptanceSummary(f.repoDir) });
     const rows = md.split("\n").filter(l => l.startsWith("| Acceptance |"));
     if (state === "error") { assert.equal(rows.length, 1); assert.equal(rows[0].startsWith("| Acceptance | couldn't run: "), true); }
     else assert.deepEqual(rows, expected === null ? [] : [`| Acceptance | ${expected} |`]);
