@@ -85,7 +85,7 @@ criteria:
     status: met
 
   - id: ACC-10
-    text: Acceptance fill appends job or run proposals without rewriting existing proofs or comments, skips duplicates, previews without writing, and marks unproven criteria met only after their proofs pass
+    text: Acceptance fill appends job or run proposals without rewriting existing proofs or comments, skips duplicates, previews without writing, and marks unproven criteria met only after their proofs pass through the sandbox runner using a read-only proposed-contract snapshot and the working tree; unavailable verification appends proposals without changing status, and acceptance check help states that the explicit check command runs tests locally
     proven_by:
       - file: tests/acceptance-fill.test.mjs
         test: fill appends without rewriting comments or existing entries and flips only passing criteria
@@ -95,6 +95,12 @@ criteria:
         test: acceptance fill CLI gathers a job or run, supports dry-run and JSON, and refuses another repo
       - file: tests/acceptance-fill.test.mjs
         test: fill rechecks duplicate proofs after a failure without adding or rewriting entries
+      - file: tests/acceptance-fill.test.mjs
+        test: fill unavailable sandbox appends proposals without executing host tests or changing status
+      - file: tests/acceptance-fill.test.mjs
+        test: "fill promotes status only from sandbox evidence: ${dryRun}"
+      - file: tests/acceptance-fill.test.mjs
+        test: acceptance check help explicitly says tests run locally
     status: met
 
   - id: ACC-11
@@ -111,7 +117,7 @@ criteria:
     status: met
 
   - id: ACC-12
-    text: Changed acceptance YAML contracts skip the production revert check, run only their own acceptance checks asynchronously with a timeout, record the results and fail verification on broken or missing evidence; mixed changes still revert-check real code
+    text: Changed acceptance YAML contracts skip the production revert check, run only their own acceptance checks with --strict asynchronously with a timeout and an absolute Node path immune to dependency PATH shadowing, record the results and fail verification on broken, missing or unproven evidence; removing or retiring criteria, dropping proofs or downgrading met status requires CONTRACT WEAKENED review with recorded details, while additive changes and current manual proofs pass; mixed changes still revert-check real code
     proven_by:
       - file: tests/acceptance-verification.test.mjs
         test: changed contracts skip reverting and run only their acceptance checks
@@ -125,6 +131,24 @@ criteria:
         test: passing contracts do not mask unavailable code verification
       - file: tests/acceptance-verification.test.mjs
         test: contract classification is limited to top-level acceptance YAML and checker mounts are read-only
+      - file: tests/acceptance-verification.test.mjs
+        test: "changed contract weakening requires review: ${kind}"
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contracts additive criteria and manual proofs pass strict verification
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contracts without proofs fail strict verification and report unproven
+      - file: tests/acceptance-verification.test.mjs
+        test: "sandbox checker cannot be shadowed by a dependency node bin: ${mode}"
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contract renames and copies preserve weakening results across comparison errors
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contracts match moved IDs and report all criteria deleted everywhere
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contract text rewording requires review but whitespace alone does not
+      - file: tests/acceptance-verification.test.mjs
+        test: whole contract sets handle the review paths and status laundering
+      - file: tests/acceptance-verification.test.mjs
+        test: whole contract comparison rejects duplicate IDs and retains issues after a bug
     status: met
 
   - id: ACC-13
