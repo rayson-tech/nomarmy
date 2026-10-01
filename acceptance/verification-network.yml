@@ -1,0 +1,37 @@
+# Backfilled from tests and plan docs; no job records were available.
+feature: Operator-controlled verification network
+criteria:
+  - id: NET-1
+    text: Committed files cannot grant network access; only operator-local policy can
+    proven_by:
+      - file: tests/verification-network.test.mjs
+        test: "operator-local policy validates exact hosts and refuses committed authority"
+        platforms: [posix]
+    status: met
+    security: true
+
+  - id: NET-2
+    text: Egress pins public DNS and denies private and unlisted targets
+    proven_by:
+      - file: tests/verification-network.test.mjs
+        test: "HTTP egress pins public DNS, denies private and unlisted targets, logs no payload"
+      - file: tests/verification-network.test.mjs
+        test: "CONNECT egress enforces exact ports and rejects mixed private DNS answers"
+    status: met
+    security: true
+
+  - id: NET-3
+    text: Credentials, networks, redaction and cleanup are isolated
+    proven_by:
+      - file: tests/verification-network.test.mjs
+        test: "verification egress isolates credentials, networks, redaction and cleanup"
+    status: met
+    security: true
+
+  - id: NET-4
+    text: Verification records preserve authority and verdict logs
+    proven_by:
+      - file: tests/verification-network.test.mjs
+        test: "network verification records preserve authority and verdict logs"
+    status: met
+    security: true

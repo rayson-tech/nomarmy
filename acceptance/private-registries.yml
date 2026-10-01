@@ -1,0 +1,29 @@
+# Backfilled from tests and plan docs; no job records were available.
+feature: Private registry credentials in dependency builds
+criteria:
+  - id: REG-1
+    text: Credentials reach only the install RUN via mounts and never enter the build context
+    proven_by:
+      - file: tests/registry-secrets.test.mjs
+        test: "registry mount is confined to the ${manager}"
+      - file: tests/registry-secrets.test.mjs
+        test: "registry credential cannot enter the build context via a manifest, symlink or hardlink"
+        platforms: [posix]
+    status: met
+    security: true
+
+  - id: REG-2
+    text: Registry declarations are local-only, validated and excluded from the job contract
+    proven_by:
+      - file: tests/registry-secrets.test.mjs
+        test: "registry declarations are local-only, validated and excluded from the loaded job contract"
+    status: met
+    security: true
+
+  - id: REG-3
+    text: The image tag hashes declarations and rotation without exposing secret bytes
+    proven_by:
+      - file: tests/registry-secrets.test.mjs
+        test: "registry tag hashes declarations and rotation without exposing secret bytes"
+    status: met
+    security: true
