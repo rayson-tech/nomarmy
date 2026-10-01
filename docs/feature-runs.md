@@ -32,7 +32,7 @@ The General can lower these for one run, never raise them. When a vendor answers
 
 ## Acceptance contracts
 
-A contract records a feature's durable promises in `acceptance/<feature>.yml`. Each criterion has a stable ID, a description, a recorded status and `proven_by` references to the exact test file and full test name:
+A contract records a feature's durable promises in `acceptance/<feature>.yml`. Each criterion has a stable ID, a description, a recorded status and `proven_by` evidence. A test proof names the exact file and full test name:
 
 ```yaml
 feature: Example feature
@@ -46,13 +46,15 @@ criteria:
     status: met
 ```
 
-Each `proven_by` entry, whether `{ file, test }` or `{ command }`, may have an optional `platforms` list of Node `process.platform` names or `posix` (every platform except `win32`). Entries outside the current platform are not run or counted. The human report marks how many proofs were not run, and `--json` lists their references under `notApplicable`. If none apply, the criterion is unproven with a `no proof applies on <platform>` note. An entry without `platforms` runs everywhere; an applicable test that passes zero times is broken.
+A command proof uses `command: "npm run build"` and can set `cwd: packages/example` relative to the repository. A manual proof uses `manual: "real device installation"`, `checked_by: "Reviewer Name"`, and `date: "2026-09-30"`; optional `expires_days: 90` expires it after that many days. A current manual proof counts as met and is reported as manual, while an expired one is unproven with a note. Manual evidence never overrides a broken automated proof. Use manual evidence for checks that cannot be automated.
 
-Run `nomarmy acceptance check` to check all contracts, or pass one or more files to select them. The check runs each criterion's referenced tests: **met** means they pass, **broken** means one fails, **missing** means a named test or file is gone, and **unproven** means there are no references applicable to the current platform. A retired criterion is reported as **retired** without running tests. Broken and missing fail the command; unproven fails only with `--strict`. Use `--json` for the same report as data. CI runs the check on every platform job.
+Each `proven_by` entry, whether `{ file, test }`, `{ command }` or `{ manual, checked_by, date }`, may have an optional `platforms` list of Node `process.platform` names or `posix` (every platform except `win32`). Entries outside the current platform are not run or counted. The human report marks how many proofs were not run, and `--json` lists their references under `notApplicable`. If none apply, the criterion is unproven with a `no proof applies on <platform>` note. An entry without `platforms` runs everywhere; an applicable test that passes zero times is broken.
 
-The General writes the contract in the operator checkout during planning and gives each implement job its `criteria` IDs. Unknown IDs are refused at admission. A committed job whose revert check passed records proposed test references for all its criteria, including exact names and templates matched by their fixed prefix.
+Run `nomarmy acceptance check` to check all contracts, or pass one or more files to select them. The check runs each criterion's referenced tests: **met** means they pass, **broken** means one fails, **missing** means a named test or file is gone, and **unproven** means there are no references applicable to the current platform. A retired criterion is reported as **retired** without running tests. Broken and missing fail the command; unproven fails only with `--strict`. Use `--json` for the same report as data. CI runs `nomarmy acceptance check` on every platform job. Every automatic check runs in the sandbox, never on the host.
 
-After integrating accepted jobs, preview `nomarmy acceptance fill <run-id> --dry-run`, then run it without `--dry-run` to append proofs (or supply one job ID). Existing references and comments stay intact; duplicate references are skipped. An unproven criterion is marked met only when its updated proofs pass the real checker. The General reviews and prunes the broad mapping, since every changed test is proposed for every criterion its job carries. `--json` returns the additions as data. `run_finish` checks the checkout again and includes its acceptance verdict in the PR block; check errors are shown, not hidden.
+The General writes the contract in the operator checkout during planning and assigns each implement job its `criteria` IDs in its brief, including parallel jobs; workers do not allocate the next free ID. Unknown IDs are refused at admission. A committed job whose revert check passed records proposed test references for all its criteria, including exact names and templates matched by their fixed prefix.
+
+After integrating accepted jobs, preview `nomarmy acceptance fill <run-id> --dry-run`, then run it without `--dry-run` to append proofs (or supply one job ID). Existing references and comments stay intact; duplicate references are skipped. An unproven criterion is marked met only when its updated proofs pass the real checker. The General reviews and prunes the broad mapping after filling, since every changed test is proposed for every criterion its job carries, then commits the contract with the feature. A `CONTRACT BROKEN:` issue means the change is wrong or the contract must intentionally change in the same pull request. `--json` returns the additions as data. `run_finish` checks the checkout again and includes its acceptance verdict in the PR block; check errors are shown, not hidden.
 
 ## Watching what nomArmy is doing
 

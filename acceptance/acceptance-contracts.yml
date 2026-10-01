@@ -1,4 +1,4 @@
-# Phase 1, 2 and 3 promises for acceptance contracts.
+# Phases 1 to 4 promises for acceptance contracts.
 feature: "Acceptance contracts: each feature's promises in the repo, checked per criterion"
 criteria:
   - id: ACC-1
@@ -140,4 +140,15 @@ criteria:
         test: judge receives affected promises and only adds behavior change flags
       - file: tests/acceptance-impact.test.mjs
         test: implement completion checks contracts after verification before commit and retains broken review
+    status: met
+
+  - id: ACC-14
+    text: A manual proof (what, checked_by, date, optional expires_days and platforms) counts as met and is reported as manual; an expired one reads unproven with a note and never overrides a broken automated proof
+    proven_by:
+      - file: tests/acceptance.test.mjs
+        test: acceptance manual proof is met until expiry and honors platforms
+      - file: tests/acceptance.test.mjs
+        test: acceptance manual proof never overrides broken automated evidence
+      - file: tests/acceptance.test.mjs
+        test: acceptance CLI displays manual evidence and strict accepts it
     status: met
