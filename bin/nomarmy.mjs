@@ -225,7 +225,7 @@ Usage: nomarmy <command> [options]
                   how many api and subscription jobs run at once, across
                   every session (default 4); with n, sets it in limits.yml.
                   Warns when the Podman VM is too small for that many.
-  jobs [--watch|--events [--until-done]|--prune|--wait <jobId>|--stop <jobId> [--reason <text>]] [--interval N] [--older-than DAYS]
+  jobs [--watch|--events [--until-done] [--run <run-id>] [--repo <path>]|--prune|--wait <jobId> [<jobId> ...]|--stop <jobId> [--reason <text>]] [--interval N] [--older-than DAYS]
                   what's running across every session (agent, model, phase,
                   last tool call, files changed, heartbeat) and what just
                   finished; --watch redraws every N seconds (default 3);
@@ -233,14 +233,17 @@ Usage: nomarmy <command> [options]
                   finish (--json for JSON lines). It's a stream: read it
                   with a monitor that wakes on each line. A background
                   command is only reported when it exits, so there use
-                  --events --until-done, which exits once every job it saw
-                  running has finished (or --wait for one job). The plain
+                  --events --until-done --run <run-id> for a whole run,
+                  or --wait <id> <id> ... for specific jobs. Unscoped
+                  --until-done watches every job on this machine. The plain
                   stream ends on its own after 30 minutes with nothing
                   running (--idle-minutes N); --prune removes the bulky runtime data
                   from finished jobs older than DAYS (default 2), keeping
                   their records, reports and any retained worktree;
-                  --wait <jobId> [--timeout <seconds>] blocks for one job
-                  to finish (default timeout 1800; --json is supported);
+                  --wait <jobId> [<jobId> ...] [--timeout <seconds>]
+                  blocks until all finish; comma-separated ids also work
+                  (default timeout 1800; --json is supported);
+                  --events --repo <path> limits events to one repository;
                   --stop <jobId> stops a running job's worker (no report
                   recovery, no verification), keeping its worktree for
                   continue_from
@@ -2702,7 +2705,7 @@ function pidIsAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; }
 }
 
-function collectJobs({ recent = 8 } = {}) {
+function collectJobs({ recent = 8, runId = null, projectDir = null } = {}) {
   const root = jobsRootDir();
   let names = [];
   try { names = fs.readdirSync(root); } catch { return { running: [], recent: [] }; }
@@ -2710,6 +2713,10 @@ function collectJobs({ recent = 8 } = {}) {
     const dir = path.join(root, name);
     const status = readJsonSafe(path.join(dir, "status.json")) ?? {};
     const meta = readJsonSafe(path.join(dir, "metadata.json"));
+    const lease = readJsonSafe(path.join(agentStateRoot(), "leases", `${name}.json`));
+    const jobRunId = meta?.labels?.runId ?? lease?.runId ?? null;
+    const jobProjectDir = meta?.projectDir ?? lease?.repo ?? null;
+    if ((runId && jobRunId !== runId) || (projectDir && (!jobProjectDir || path.resolve(jobProjectDir) !== projectDir))) return null;
     const started = Date.parse(status.startedAt ?? meta?.startedAt ?? "") || fs.statSync(dir).mtimeMs;
     const running = status.state === "running" && pidIsAlive(status.serverPid);
     return {
@@ -2722,7 +2729,7 @@ function collectJobs({ recent = 8 } = {}) {
       heartbeatAgeSeconds: status.heartbeatAt ? Math.round((Date.now() - Date.parse(status.heartbeatAt)) / 1000) : null,
       started, dir,
     };
-  }).sort((a, b) => b.started - a.started);
+  }).filter(Boolean).sort((a, b) => b.started - a.started);
   return { running: jobs.filter((j) => j.running), recent: jobs.filter((j) => !j.running).slice(0, recent) };
 }
 
@@ -2755,6 +2762,13 @@ async function streamJobEvents() {
   // background command (reported only on exit) was never told jobs had
   // finished, and eight of these streams were left running for days.
   const untilDone = flag("until-done");
+  const runId = value("run");
+  const projectDir = flag("repo") ? repoDir : null;
+  if (!runId && !projectDir) {
+    const detail = "watching every job on this machine; use --wait <ids> or --run <id> to scope the watch";
+    if (json) console.log(JSON.stringify({ at: new Date().toISOString(), event: "scope", detail }));
+    else console.log(detail);
+  }
   const idleLimitMs = Math.max(1, Number(value("idle-minutes", "30")) || 30) * 60000;
   let idleSinceMs = Date.now(), sawRunning = false;
   const seen = new Map();
@@ -2765,7 +2779,7 @@ async function streamJobEvents() {
   process.on("SIGINT", () => process.exit(0));
   let first = true;
   for (;;) {
-    const { running, recent } = collectJobs({ recent: 20 });
+    const { running, recent } = collectJobs({ recent: 20, runId, projectDir });
     const now = new Map([...running, ...recent].map((j) => [j.jobId, j]));
     for (const j of running) {
       const prev = seen.get(j.jobId);
@@ -2776,10 +2790,13 @@ async function streamJobEvents() {
       const j = now.get(id);
       if (prev.running && j && !j.running) emit("finished", j, `${j.phase} after ${fmtSeconds(j.elapsedSeconds)}`);
     }
+    // A finished record can briefly lack its run label after its lease is removed.
+    // Keep the running snapshot until the stamped record becomes visible.
+    const pending = (runId || projectDir) ? [...seen].filter(([id, j]) => j.running && !now.has(id)) : [];
     seen.clear();
-    for (const [id, j] of now) seen.set(id, j);
+    for (const [id, j] of [...now, ...pending]) seen.set(id, j);
     first = false;
-    if (running.length) { sawRunning = true; idleSinceMs = Date.now(); }
+    if (running.length || pending.length) { sawRunning = true; idleSinceMs = Date.now(); }
     else if (untilDone && sawRunning) {
       if (json) console.log(JSON.stringify({ at: new Date().toISOString(), event: "done", detail: "every job seen running has finished" }));
       else console.log(`${new Date().toLocaleTimeString()}  done      every job seen running has finished`);
@@ -2796,65 +2813,60 @@ async function streamJobEvents() {
 
 const commitSha = (commit) => (typeof commit === "string" ? commit : typeof commit?.sha === "string" ? commit.sha : null);
 
-/** Wait for one job in the shared, cross-session state directory. */
+/** Wait for selected jobs in the shared, cross-session state directory. */
 async function waitForJobCli() {
-  const requested = value("wait");
-  const jobId = requested ? path.basename(requested) : null;
+  const waitIndex = argv.indexOf("--wait");
+  const requested = [];
+  for (let i = waitIndex + 1; i < argv.length && !argv[i].startsWith("--"); i++) requested.push(...argv[i].split(","));
+  const jobIds = [...new Set(requested)];
   const timeoutSeconds = Number(value("timeout", "1800"));
-  if (!jobId || jobId !== requested) {
-    if (json) out({ error: "--wait needs a job id" });
-    else console.error("nomarmy jobs: --wait needs a job id");
+  const errorOut = (message) => {
+    if (json) out({ error: message });
+    else console.error(`nomarmy jobs: ${message}`);
     process.exitCode = 2;
-    return;
-  }
-  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 0) {
-    if (json) out({ error: "--timeout must be a non-negative number of seconds" });
-    else console.error("nomarmy jobs: --timeout must be a non-negative number of seconds");
-    process.exitCode = 2;
-    return;
-  }
-  const jobDir = path.join(jobsRootDir(), jobId);
-  const lease = path.join(agentStateRoot(), "leases", `${jobId}.json`);
-  if (!fs.existsSync(jobDir) && !fs.existsSync(lease)) {
-    if (json) out({ error: `unknown job id: ${jobId}` });
-    else console.error(`nomarmy jobs: unknown job id: ${jobId}`);
-    process.exitCode = 2;
-    return;
+  };
+  if (!jobIds.length) return errorOut("--wait needs a job id");
+  if (jobIds.some((id) => !id || path.basename(id) !== id || id === "." || id === "..")) return errorOut("--wait needs valid job ids");
+  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 0) return errorOut("--timeout must be a non-negative number of seconds");
+  for (const jobId of jobIds) {
+    if (!fs.existsSync(path.join(jobsRootDir(), jobId)) && !fs.existsSync(path.join(agentStateRoot(), "leases", `${jobId}.json`))) {
+      return errorOut(`unknown job id: ${jobId}`);
+    }
   }
   const deadline = Date.now() + timeoutSeconds * 1000;
-  for (;;) {
-    const status = readJsonSafe(path.join(jobDir, "status.json")) ?? {};
-    const meta = readJsonSafe(path.join(jobDir, "metadata.json")) ?? {};
-    if (status.state === "finished" || meta.outcome) {
-      const issues = Array.isArray(meta.issues) ? meta.issues : Array.isArray(status.issues) ? status.issues : [];
-      const result = {
-        jobId,
-        outcome: meta.outcome ?? status.outcome ?? null,
-        coordinatorStatus: meta.coordinatorStatus ?? status.coordinatorStatus ?? null,
-        branch: meta.branch ?? status.branch ?? null,
-        // A job that made no commit has commit: { created: false, sha: null }; only a sha is a commit.
-        commit: commitSha(meta.commit) ?? commitSha(status.commit),
-        issues,
-      };
-      if (json) out(result);
-      else {
-        const firstIssue = issues[0];
-        const issueText = firstIssue == null ? null : typeof firstIssue === "string" ? firstIssue : firstIssue.message ?? JSON.stringify(firstIssue);
-        console.log([result.jobId, result.outcome ?? "unknown", result.coordinatorStatus ?? "unknown",
-          result.branch ? `branch=${result.branch}` : null, result.commit ? `commit=${result.commit}` : null,
-          issueText ? `issue=${issueText}` : null].filter(Boolean).join(" "));
+  const results = await Promise.all(jobIds.map(async (jobId) => {
+    const jobDir = path.join(jobsRootDir(), jobId);
+    for (;;) {
+      const status = readJsonSafe(path.join(jobDir, "status.json")) ?? {};
+      const meta = readJsonSafe(path.join(jobDir, "metadata.json")) ?? {};
+      if (status.state === "finished" || meta.outcome) {
+        const issues = Array.isArray(meta.issues) ? meta.issues : Array.isArray(status.issues) ? status.issues : [];
+        const result = {
+          jobId,
+          outcome: meta.outcome ?? status.outcome ?? null,
+          coordinatorStatus: meta.coordinatorStatus ?? status.coordinatorStatus ?? null,
+          branch: meta.branch ?? status.branch ?? null,
+          commit: commitSha(meta.commit) ?? commitSha(status.commit),
+          issues,
+        };
+        if (json) out(result);
+        else {
+          const firstIssue = issues[0];
+          const issueText = firstIssue == null ? null : typeof firstIssue === "string" ? firstIssue : firstIssue.message ?? JSON.stringify(firstIssue);
+          console.log([result.jobId, result.outcome ?? "unknown", result.coordinatorStatus ?? "unknown",
+            result.branch ? `branch=${result.branch}` : null, result.commit ? `commit=${result.commit}` : null,
+            issueText ? `issue=${issueText}` : null].filter(Boolean).join(" "));
+        }
+        return result.coordinatorStatus === "complete" ? 0 : 1;
       }
-      process.exitCode = result.coordinatorStatus === "complete" ? 0 : 1;
-      return;
+      if (Date.now() >= deadline) {
+        errorOut(`timed out waiting for job ${jobId}`);
+        return 2;
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(2000, Math.max(1, deadline - Date.now()))));
     }
-    if (Date.now() >= deadline) {
-      if (json) out({ error: `timed out waiting for job ${jobId}` });
-      else console.error(`nomarmy jobs: timed out waiting for job ${jobId}`);
-      process.exitCode = 2;
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, Math.min(2000, Math.max(1, deadline - Date.now()))));
-  }
+  }));
+  process.exitCode = Math.max(...results);
 }
 
 /**

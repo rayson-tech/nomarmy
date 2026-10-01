@@ -1190,3 +1190,53 @@ test("agents add subscription cancellation exits nonzero before model prompts", 
     assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("jobs --wait reports multiple comma-separated and positional jobs as each finishes", async () => {
+  const state = mkdtempSync(path.join(tmpdir(), "nomarmy-wait-many-"));
+  try {
+    for (const id of ["first", "second", "third"]) {
+      const dir = path.join(state, "jobs", id);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify({ state: "running" }));
+    }
+    const finish = (id) => {
+      const dir = path.join(state, "jobs", id);
+      fs.writeFileSync(path.join(dir, "metadata.json"), JSON.stringify({ outcome: "WORKER_DONE", coordinatorStatus: "complete" }));
+      fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify({ state: "finished" }));
+    };
+    const pending = runJobsWait(state, "first,second", ["third", "--timeout", "8"]);
+    setTimeout(() => finish("second"), 200);
+    setTimeout(() => finish("first"), 2400);
+    setTimeout(() => finish("third"), 4600);
+    const result = await pending;
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout.trim(), "second WORKER_DONE complete\nfirst WORKER_DONE complete\nthird WORKER_DONE complete");
+  } finally { rmSync(state, { recursive: true, force: true }); }
+});
+
+test("jobs --wait rejects an unknown id in a list and returns failure after all known jobs finish", async () => {
+  const state = mkdtempSync(path.join(tmpdir(), "nomarmy-wait-many-errors-"));
+  try {
+    for (const [id, outcome, coordinatorStatus] of [["good", "WORKER_DONE", "complete"], ["bad", "NEEDS_REVIEW", "needs_review"]]) {
+      const dir = path.join(state, "jobs", id);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify({ state: "finished" }));
+      fs.writeFileSync(path.join(dir, "metadata.json"), JSON.stringify({ outcome, coordinatorStatus }));
+    }
+    const unknown = await runJobsWait(state, "good", ["missing", "bad"]);
+    assert.equal(unknown.exitCode, 2);
+    assert.equal(unknown.stderr.trim(), "nomarmy jobs: unknown job id: missing");
+    assert.equal(unknown.stdout, "");
+    const failed = await runJobsWait(state, "good", ["bad"]);
+    assert.equal(failed.exitCode, 1);
+    assert.equal(failed.stdout.trim(), "good WORKER_DONE complete\nbad NEEDS_REVIEW needs_review");
+  } finally { rmSync(state, { recursive: true, force: true }); }
+});
+
+test("jobs help names scoped waits and events", () => {
+  const help = execFileSync(process.execPath, [CLI_PATH, "help"], { encoding: "utf8" });
+  assert.match(help, /--wait <jobId> \[<jobId> \.\.\.\]/);
+  assert.match(help, /--events --until-done --run <run-id>/);
+  assert.match(help, /--events --repo <path>/);
+  assert.match(help, /Unscoped\s+--until-done watches every job on this machine/);
+});
