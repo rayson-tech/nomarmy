@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { readCodexRateLimits, normalizeClaudeRateLimits, recordUsageSnapshot, readUsageSnapshots, usageStatus } from "../lib/usage-limits.mjs";
+import { readCodexRateLimits, normalizeClaudeRateLimits, mergeUsageSnapshot, recordUsageSnapshot, readUsageSnapshots, usageStatus } from "../lib/usage-limits.mjs";
 import { COORDINATOR_INSTRUCTIONS } from "../lib/coordinator-instructions.mjs";
 import { createJobRuntime } from "../lib/admission.mjs";
 import { deriveBudgets } from "../lib/budget.mjs";
@@ -274,25 +274,101 @@ test("health, army, and capacity mark a stale over-limit reading and refresh it"
   assert.deepEqual(army.roles.coder.usage, { level: "ok", text: `0% of week, resets ${freshLabel}` });
 });
 
-test("mergeUsageSnapshot: an idle window's stale, lower reading never replaces a newer one", async () => {
-  const { mergeUsageSnapshot } = await import("../lib/usage-limits.mjs");
-  const now = Date.parse("2026-09-25T06:00:00Z"), week = now + 86400000, fiveHour = now + 3600000;
-  const w = (name, usedPercent, resetsAt) => ({ name, usedPercent, windowMinutes: null, resetsAt });
-  const s = (windows, observedAt = now) => ({ source: "claude", plan: null, limitReached: false, observedAt, windows });
-  const fresh = s([w("5h", 55, fiveHour), w("week", 93, week)]);
-  // Seen live: an idle window reporting 45%/92%, and another only 81% of the week.
-  assert.equal(mergeUsageSnapshot(fresh, s([w("5h", 45, fiveHour), w("week", 92, week)]), now), fresh);
-  assert.equal(mergeUsageSnapshot(fresh, s([w("week", 81, week)]), now), fresh);
-  // A higher figure at the same reset, or a later reset, is taken.
-  const up = mergeUsageSnapshot(fresh, s([w("week", 94, week)]), now + 1000);
-  assert.deepEqual(up.windows.map((x) => [x.name, x.usedPercent]), [["5h", 55], ["week", 94]]);
-  assert.equal(up.observedAt, now + 1000);
-  const reset = mergeUsageSnapshot(fresh, s([w("5h", 3, fiveHour + 18000000)]), now);
-  assert.deepEqual(reset.windows.find((x) => x.name === "5h").usedPercent, 3);
-  // A stored window that has reset is dropped even if the reading lacks it.
-  const later = mergeUsageSnapshot(fresh, s([w("week", 93, week)]), fiveHour + 1);
-  assert.deepEqual(later.windows.map((x) => x.name), ["week"]);
-  assert.equal(mergeUsageSnapshot(null, fresh, now), fresh);
+const claude = (percent, sourceId, observedAt = now, resetsAt = reset) => ({
+  source: "claude", plan: null, limitReached: false, observedAt, sourceId,
+  windows: [win("week", percent, resetsAt)],
+});
+const observation = (sourceId, usedPercent, observedAt = now) => ({ sourceId, usedPercent, observedAt });
+const mergedClaude = (usedPercent, sources, observedAt = now, resetsAt = reset) => ({
+  source: "claude", plan: null, limitReached: false, observedAt,
+  windows: [{ ...win("week", usedPercent, resetsAt), sources }],
+});
+
+test("Claude sources: fresh 6 percent replaces a 40-minute-old 89 percent", () => {
+  const oldAt = now - 40 * 60000;
+  const old = mergeUsageSnapshot(null, claude(89, "idle", oldAt), oldAt);
+  const result = mergeUsageSnapshot(old, claude(6, "active"), now);
+  assert.deepEqual(result, mergedClaude(6, [observation("active", 6)]));
+});
+
+test("Claude sources: two fresh sources use the maximum and each source can decrease", () => {
+  const first = mergeUsageSnapshot(null, claude(30, "a"), now);
+  const second = mergeUsageSnapshot(first, claude(35, "b"), now);
+  assert.deepEqual(second, mergedClaude(35, [observation("a", 30), observation("b", 35)]));
+  const next = mergeUsageSnapshot(second, claude(20, "b", now + 1000), now + 1000);
+  assert.deepEqual(next, mergedClaude(30, [observation("a", 30), observation("b", 20, now + 1000)], now + 1000));
+  // A delayed response from the same source must not replace its latest reading.
+  assert.deepEqual(mergeUsageSnapshot(next, claude(99, "b"), now + 1000), next);
+});
+
+test("Claude sources: later reset wins outright and rejects an earlier reset", () => {
+  const first = mergeUsageSnapshot(null, claude(89, "a"), now);
+  const nextReset = reset + 86400000;
+  const next = mergeUsageSnapshot(first, claude(2, "b", now, nextReset), now);
+  assert.deepEqual(next, mergedClaude(2, [observation("b", 2)], now, nextReset));
+  assert.deepEqual(mergeUsageSnapshot(next, claude(99, "a"), now), next);
+  // This also holds when the later reset comes from the same source.
+  assert.deepEqual(mergeUsageSnapshot(first, claude(2, "a", now, nextReset), now),
+    mergedClaude(2, [observation("a", 2)], now, nextReset));
+});
+
+test("Claude sources: old-format snapshots load and expire at their original observedAt", t => {
+  const root = fixture(t);
+  const legacy = { ...snap([win("week", 89)]), source: "claude", plan: null, observedAt: now - 40 * 60000 };
+  fs.writeFileSync(path.join(root, "usage-limits.json"), JSON.stringify({ "claude-cli": legacy }));
+  assert.deepEqual(readUsageSnapshots(root), { "claude-cli": legacy });
+  const result = mergeUsageSnapshot(readUsageSnapshots(root)["claude-cli"], claude(6, "active"), now);
+  assert.deepEqual(result, mergedClaude(6, [observation("active", 6)]));
+  recordUsageSnapshot(root, "claude-cli", result);
+  assert.deepEqual(readUsageSnapshots(root), { "claude-cli": result });
+  // A fresh legacy reading still competes as one anonymous source.
+  const fresh = mergeUsageSnapshot({ ...legacy, observedAt: now }, claude(6, "active"), now);
+  assert.equal(fresh.windows[0].usedPercent, 89);
+  assert.equal(fresh.windows[0].sources.length, 2);
+  const legacyId = fresh.windows[0].sources[0].sourceId;
+  assert.equal(typeof legacyId, "string");
+  assert.notEqual(legacyId, "active");
+  assert.deepEqual(fresh, mergedClaude(89, [observation(legacyId, 89), observation("active", 6)]));
+});
+
+test("Claude sources: invalid persisted source metadata is rejected", t => {
+  const root = fixture(t);
+  for (const sources of [null, {}, [{ sourceId: "a", usedPercent: 89 }], [observation("a", -1)], [observation(1, 89)]]) {
+    const snapshot = mergedClaude(89, sources);
+    fs.writeFileSync(path.join(root, "usage-limits.json"), JSON.stringify({ "claude-cli": snapshot }));
+    assert.deepEqual(readUsageSnapshots(root), {});
+  }
+});
+
+test("Claude sources: anonymous readings remain separate and missing windows age independently", () => {
+  const first = mergeUsageSnapshot(null, claude(35), now);
+  const second = mergeUsageSnapshot(first, claude(30), now);
+  const sources = second.windows[0].sources;
+  assert.equal(sources.length, 2);
+  assert.equal(typeof sources[0].sourceId, "string");
+  assert.equal(typeof sources[1].sourceId, "string");
+  assert.notEqual(sources[0].sourceId, sources[1].sourceId);
+  assert.deepEqual(second, mergedClaude(35, [observation(sources[0].sourceId, 35), observation(sources[1].sourceId, 30)]));
+  const partial = { ...claude(10, "a"), windows: [win("5h", 10, null, 300)] };
+  const merged = mergeUsageSnapshot(second, partial, now);
+  assert.deepEqual(merged, { ...second, windows: [...second.windows,
+    { ...win("5h", 10, null, 300), sources: [observation("a", 10)] }] });
+  const later = now + 31 * 60000;
+  assert.deepEqual(mergeUsageSnapshot(merged, { ...partial, observedAt: later }, later), {
+    ...merged, observedAt: later, windows: [{ ...win("5h", 10, null, 300), sources: [observation("a", 10, later)] }],
+  });
+});
+
+test("Claude sources: display expires observations without a new merge and TTL is configurable", () => {
+  const oldAt = now - 30 * 60000;
+  const snapshot = mergedClaude(89, [observation("idle", 89, oldAt), observation("active", 6)]);
+  assert.equal(usageStatus(snapshot, now).short, "89% wk");
+  const label = new Date(reset).toLocaleString("en-US", { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+  assert.deepEqual(usageStatus(snapshot, now + 1), { level: "ok", text: `6% of week, resets ${label}`, short: "6% wk", resetsAt: null, ageMinutes: 0 });
+  assert.deepEqual(usageStatus(snapshot, now + 31 * 60000), { level: "ok", text: "no live usage windows", short: null, resetsAt: null, ageMinutes: 31 });
+  assert.equal(usageStatus(snapshot, now + 1, 60 * 60000).short, "89% wk");
+  assert.deepEqual(mergeUsageSnapshot(snapshot, claude(6, "active"), now, 10 * 60000), mergedClaude(6, [observation("active", 6)]));
+  assert.deepEqual(mergeUsageSnapshot(snapshot, claude(6, "active"), now, 60 * 60000), snapshot);
 });
 
 
