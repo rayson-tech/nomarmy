@@ -96,6 +96,16 @@ outside the judgment and the detector, so list such files under
 Files a test runner loads by convention (`conftest.py`, a configured setup
 file) are treated as tests unless production code imports them.
 
+Test-named files outside test directories are production when their language has
+no import extraction. Go's `_test.go` files are the exception because the Go
+toolchain never links them into production builds. Test directories retain their
+existing rule (`tests/`, `test/`, `__tests__/`, and `spec/` with test evidence).
+The JS/TS import scan follows only relative `./` and `../` specifiers. A
+production file loading a test-named file through a path alias (`@/x`, tsconfig
+paths, or package.json `"imports"`), a bare specifier, or a computed import is not
+seen by this scan. List such files in `trust.sensitive.paths` in `.nomarmy.yml`
+so changes remain human-gated even when the scan excludes them from judgment.
+
 The proposal receipt detects edits; it is not a cryptographic attestation of a
 scout job. Its authority depends on the operator checkout and the human gates
 on both the proposal and receipt, just as the active map does.

@@ -124,3 +124,35 @@ test("all test-only detector kinds are informational without bypassing reach", a
     assert.deepEqual(await evaluateDiffTrust({ fileChanges: [{ file, before, after: before + "\n-- unrelated" }], ...validators }), normal);
   }
 });
+
+test("unsupported import languages keep test-named production guards judged and escalating", async () => {
+  const files = ["foo_test.rb", ...["rb", "php", "go", "rs", "java", "kt", "cs", "sh", "c", "h", "cpp", "hpp", "swift"].map(ext => `src/access.test.${ext}`)];
+  for (const file of files) {
+    const before = "if (!authorized)\n  return 403\nend\n";
+    const fileChanges = [{ file, before, after: "" }];
+    const answers = { access: 0, checks: 0, data: 0 };
+    let calls = 0;
+    const result = await evaluateDiffTrust({ fileChanges, jev: { key: "fixture" }, askJev: async request => {
+      calls++;
+      assert.deepEqual(request.state, { diff: `--- a/${file}\n+++ b/${file}\n@@ -1,3 +0,0 @@\n-if (!authorized)\n-  return 403\n-end\n` });
+      return { answers: Object.fromEntries(Object.keys(answers).map(key => [key, { choice: "no", probabilities: { yes: 0, no: 1 } }])) };
+    } });
+    const reason = `Removes or changes an access guard at ${file}:1.`;
+    assert.deepEqual(result, {
+      level: "review", reasons: [{ rule: "removed-check", reason, file, line: 1 }],
+      checks: [{ kind: "guard", file, line: 1, reason }],
+      judgment: { status: "available", validator: "jev", answers, error: null },
+    }, file);
+    assert.equal(calls, 1, file);
+  }
+});
+
+test("test directories and Go toolchain tests retain informational guards without judgment", async () => {
+  for (const file of ["test/foo_test.rb", "tests/foo_test.rb", "__tests__/foo_test.rb", "spec/foo.test.rb", "x_test.go", "pkg/x_test.go"]) {
+    // spec/ retains its existing requirement for test syntax or a test name.
+    const before = file.endsWith(".go") ? "if !authorized { return 403 }\n" : "if (!authorized)\n  return 403\nend\n";
+    assert.deepEqual(await evaluateDiffTrust({ fileChanges: [{ file, before, after: "" }], ...validators }), {
+      ...normal, checks: [{ kind: "guard", file, line: 1, informational: true, reason: "in test code" }],
+    }, file);
+  }
+});
