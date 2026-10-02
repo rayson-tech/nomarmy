@@ -94,3 +94,76 @@ test("bypass new-file locations map back to base reach nodes", async () => {
     reach: { key: "fixture", baseCommit: "base", heuristic: true, depth: 3, fanOut: 25, caps: [] },
   });
 });
+
+for (const file of ["src/stream.js", "src/stream.ts"]) {
+  test(`regression for await owns exits in ${file}`, () => {
+    const before = "async function orders(db) {\n  for await (const order of db.stream()) {\n    consume(order);\n  }\n  return db.orders.filter(order => order.tenant_id === tenant);\n}";
+    assert.deepEqual(detectRemovedChecks([{ file, before, after: insert(before, "    return db.orders;", 3) }]), [expected(file, 3)]);
+    assert.deepEqual(detectRemovedChecks([{ file, before, after: insert(before, "    const nested = () => { return db.orders; };", 3) }]), []);
+  });
+}
+
+for (const member of ["gen.return()", "promise.throw(error)", "gen . return()", "promise?.throw(error)", "gen.\n    return()"]) {
+  test(`regression member is not exit: ${member}`, () => {
+    const file = "src/orders.js";
+    assert.deepEqual(detectRemovedChecks([{ file, before: js, after: insert(js, `  ${member};`) }]), []);
+    for (const statement of ["return db.orders;", "throw error;"]) {
+      assert.deepEqual(detectRemovedChecks([{ file, before: js, after: insert(js, `  ${statement}`) }]), [expected(file)]);
+    }
+  });
+}
+
+for (const file of ["src/orders.js", "src/orders.ts", "src/orders.py"]) {
+  for (const keyword of ["continue", "break"]) {
+    test(`regression loop ${keyword} in ${file}`, () => {
+      const python = file.endsWith(".py");
+      const before = python
+        ? "def orders(db):\n    for order in db.orders:\n        rows = db.orders.filter(tenant_id=order.tenant_id)\n        consume(rows)"
+        : "function orders(db) {\n  for (const order of db.orders) {\n    const rows = db.orders.filter(row => row.tenant_id === order.tenant_id);\n    consume(rows);\n  }\n}";
+      const added = python ? `        if cached: ${keyword}` : `    if (cached) ${keyword};`;
+      assert.deepEqual(detectRemovedChecks([{ file, before, after: insert(before, added) }]), [expected(file)]);
+      assert.deepEqual(detectRemovedChecks([{ file, before, after: insert(before, added, 4) }]), []);
+    });
+  }
+}
+
+for (const [file, validation, added] of [
+  ["src/input.js", "  assertValid(input);", "  return input;"],
+  ["src/input.ts", "  validate(input);", "  throw error;"],
+  ["src/input.py", "    assert input is not None", "    return input"],
+  ["src/validated.py", "    validate(input)", "    raise RuntimeError()"],
+  ["tests/input.test.js", "  validate(input);", "  return input;"],
+]) {
+  test(`regression validation target in ${file}`, async () => {
+    const before = file.endsWith(".py") ? `def check(input):\n${validation}\n    consume(input)` : `function check(input) {\n${validation}\n  consume(input);\n}`;
+    const fileChanges = [{ file, before, after: insert(before, added, 2) }];
+    const informational = file.startsWith("tests/");
+    const check = { ...expected(file, 2, "an assertion or validation"), ...(informational ? { informational: true, reason: "in test code" } : {}) };
+    assert.deepEqual(detectRemovedChecks(fileChanges), [check]);
+    assert.deepEqual(await evaluateDiffTrust({ fileChanges, judgment: false }), {
+      level: informational ? "normal" : "review", checks: [check], judgment: disabled,
+      reasons: informational ? [] : [{ rule: "removed-check", reason: check.reason, file, line: 2 }],
+    });
+  });
+}
+
+test("regression Python floor division preserves filters and bypasses", () => {
+  const file = "src/orders.py";
+  const before = "def orders(db, a, b):\n    x = a // b\n    rows = db.orders.filter(tenant_id=x)\n    return rows";
+  // Division before a later-line filter must not hide either candidate or exit.
+  assert.deepEqual(detectRemovedChecks([{ file, before, after: insert(before, "    x = a // b; return db.orders") }]), [expected(file)]);
+  assert.deepEqual(detectRemovedChecks([{ file, before, after: before.replace("    rows = db.orders.filter(tenant_id=x)\n", "") }]), [{
+    kind: "tenant-filter", file, line: 3, reason: `Removes or changes a tenant or ownership filter at ${file}:3.`,
+  }]);
+  // A real Python comment still hides a keyword after division.
+  assert.deepEqual(detectRemovedChecks([{ file, before, after: insert(before, "    x = a // b # return db.orders") }]), []);
+});
+
+for (const expression of ["x = a // b; rows = db.orders.filter(tenant_id=x)", "rows = db.orders.filter(offset=a // b, tenant_id=x)"]) {
+  test(`regression Python removed division filter: ${expression}`, () => {
+    const file = "src/orders.py", before = `def orders(db, a, b):\n    ${expression}\n    return rows`;
+    assert.deepEqual(detectRemovedChecks([{ file, before, after: "def orders(db, a, b):\n    return rows" }]), [{
+      kind: "tenant-filter", file, line: 2, reason: `Removes or changes a tenant or ownership filter at ${file}:2.`,
+    }]);
+  });
+}
