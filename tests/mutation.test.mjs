@@ -45,7 +45,7 @@ test("runMutants: killed, survived and inconclusive are counted, and the worker'
   const mutants = pickMutants([{ path: "a.js", full, lines: [1, 2, 3, 4] }], 4);
   const seen = [];
   const replies = ["fail", "pass", "not_run", "boom"];
-  const result = await runMutants({ mutants, verify: async () => {
+  const result = await runMutants({ mutants, root: dir, verify: async () => {
     seen.push(fs.readFileSync(full, "utf8"));
     const r = replies[seen.length - 1] ?? "fail";
     if (r === "boom") throw new Error("runner crashed");
@@ -63,10 +63,10 @@ test("runMutants: killed, survived and inconclusive are counted, and the worker'
 test("runMutants stops at its deadline and says nothing ran when nothing did", async (t) => {
   const dir = workdir(t, { "a.js": "if (a < b) go();\n" });
   const mutants = pickMutants([{ path: "a.js", full: path.join(dir, "a.js"), lines: [1] }], 5);
-  const late = await runMutants({ mutants, verify: async () => ({ status: "fail" }), deadlineMs: Date.now() - 1 });
+  const late = await runMutants({ mutants, root: dir, verify: async () => ({ status: "fail" }), deadlineMs: Date.now() - 1 });
   assert.equal(late.status, "not_run");
   assert.equal(late.skipped, mutants.length);
-  assert.equal((await runMutants({ mutants: [], verify: async () => ({ status: "fail" }) })).status, "not_run");
+  assert.equal((await runMutants({ mutants: [], root: dir, verify: async () => ({ status: "fail" }) })).status, "not_run");
 });
 
 test(".nomarmy.yml mutation: defaults and limits", () => {

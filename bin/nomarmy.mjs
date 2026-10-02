@@ -9,6 +9,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execHostGitSync, spawnHostGitSync } from "../lib/worktree-pointer.mjs";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -179,8 +180,9 @@ Usage: nomarmy <command> [options]
                             --link-openclaw after CLI login; removing a
                             capturing email profile non-interactively needs
                             --remove-email-profiles. Interactive Codex setup
-                            offers removal (default yes), then imports the
-                            CLI login. For any kind, optionally
+                            asks before copying the CLI login (default yes),
+                            and offers email-profile removal separately.
+                            For any kind, optionally
                             --max-concurrent --context-window
                             --thinking [minimal|low|medium|high|xhigh|adaptive|max|ultra] --no-thinking
                   update <name>
@@ -1319,7 +1321,7 @@ function reapProbeSandbox(stateDir) {
 async function openclawProviderLogin(vendor, rl) {
   if (vendor === SUBSCRIPTION_VENDORS.codex) return linkCodex({
     run: runQuiet, command: openclawCmd(), isTTY: Boolean(input.isTTY),
-    removeEmailProfiles: flag("remove-email-profiles"),
+    importLogin: flag("link-openclaw"), removeEmailProfiles: flag("remove-email-profiles"),
     confirm: (prompt, opts) => confirm(rl, prompt, opts), print: (message) => console.log(c.dim(message)),
   });
   const provider = vendor.credential.loginProvider ?? vendor.provider;
@@ -1557,7 +1559,7 @@ async function addApiAgent(rl, agents) {
 const OWNER_EMAIL_RE = /^[^@\s]+@[^@\s]+$/;
 function validOwnerEmail(email) { return typeof email === "string" && OWNER_EMAIL_RE.test(email); }
 function gitUserEmail() {
-  const result = spawnSync("git", ["config", "user.email"], { cwd: repoDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  const result = spawnHostGitSync(repoDir, ["config", "user.email"], { cwd: repoDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   const email = result.status === 0 ? result.stdout.trim() : "";
   return validOwnerEmail(email) ? email : "";
 }
@@ -1682,8 +1684,10 @@ async function cmdAgentsAddJson() {
   if (kind === "subscription" && agent.provider === "openai" && (flag("link-openclaw") || flag("remove-email-profiles"))) {
     if (!readLoginStatus("codex").loggedIn) throw new Error("Confirm Codex CLI login first: codex login");
     const linked = await linkCodex({ run: runQuiet, command: openclawCmd(),
-      removeEmailProfiles: flag("remove-email-profiles"), print: (message) => console.error(message) });
-    if (!linked) throw new Error("Codex import failed; nothing was written.");
+      importLogin: flag("link-openclaw"), removeEmailProfiles: flag("remove-email-profiles"), print: (message) => console.error(message) });
+    if (!linked) throw new Error(flag("link-openclaw")
+      ? "Codex import failed; nothing was written."
+      : "Codex login was not imported: pass --link-openclaw to authorize copying it into OpenClaw. Nothing was written.");
     if (!probeWorker("openai", agent.model ?? SUBSCRIPTION_VENDORS.codex.defaultModel)) {
       throw new Error(`Codex test call failed; nothing was written. Fix: ${codexImportRecovery()}`);
     }
@@ -1842,7 +1846,7 @@ async function cmdAgents() {
 }
 
 function git(args) {
-  try { return execFileSync("git", args, { cwd: nomarmyRoot, encoding: "utf8" }).trim(); }
+  try { return execHostGitSync(nomarmyRoot, args, { cwd: nomarmyRoot, encoding: "utf8" }).trim(); }
   catch (error) { throw new Error(`git ${args.join(" ")} failed: ${error.stderr ? String(error.stderr).trim() : error.message}`); }
 }
 
@@ -2028,7 +2032,7 @@ async function cmdConnect() {
   if (nativeWindows && flag("copy-only")) throw new Error("Windows runs nomArmy inside WSL; run nomarmy connect <target> instead of --copy-only");
   let projectDir = null;
   if (scope !== "user") {
-    try { projectDir = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: repoDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
+    try { projectDir = execHostGitSync(repoDir, ["rev-parse", "--show-toplevel"], { cwd: repoDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
     catch { throw new Error(`--scope ${scope} registers nomArmy for one repository, and ${repoDir} isn't inside a git repository. Run it from the repository (or pass --repo <dir>).`); }
   }
   if (flag("copy-only")) {
@@ -2990,7 +2994,7 @@ async function shareStats(stats) {
   if (flag("share")) console.log(shareMarkdown(stats, { scope }));
   if (flag("badge")) {
     const given = value("badge");
-    const top = spawnSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" });
+    const top = spawnHostGitSync(process.cwd(), ["rev-parse", "--show-toplevel"], { encoding: "utf8" });
     const root = top.status === 0 ? top.stdout.trim() : process.cwd();
     const file = path.resolve(root, given ?? path.join(".github", "nomarmy-badge.svg"));
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -3007,7 +3011,7 @@ function cmdStats() {
   let repo = null;
   if (value("repo")) repo = resolveRepo(records, value("repo"));
   else if (!flag("all-repos")) {
-    try { repo = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: repoDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
+    try { repo = execHostGitSync(repoDir, ["rev-parse", "--show-toplevel"], { cwd: repoDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
     catch { throw new Error(`${repoDir} isn't inside a git repository; run nomarmy stats from one, or pass --repo <name> or --all-repos`); }
   }
   let agentFor = () => null;

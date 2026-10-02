@@ -1,3 +1,5 @@
+import { registerJobWorktree, assertRegisteredWorktree } from "../lib/worktree-pointer.mjs";
+import { removeWorktreeEntry } from "../lib/worktree-write.mjs";
 import { createJobRuntime, jobLane, currentMaxPoolWorkers, splitJobsByLane, toolText, refusalText } from "../lib/admission.mjs";
 export { jobLane, currentMaxPoolWorkers, splitJobsByLane, refusalText };
 import { createExecutor, sleep } from "../lib/execute.mjs";
@@ -37,7 +39,7 @@ import { modelRefusals } from "../lib/health.mjs";
 import { retryRefusedModelsInBackground } from "../lib/refusal-retry.mjs";
 import { podmanProblem, podmanVmStartedAt } from "../lib/podman-health.mjs";
 import { restartNotice } from "../lib/install-freshness.mjs";
-import { requestJobStop } from "../lib/openclaw-run.mjs";
+import { requestJobStop, JOB_ID_RE } from "../lib/openclaw-run.mjs";
 import { loadJobRecords, computeStats, formatStats, formatStatsSummary, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
 import { shareMarkdown } from "../lib/share.mjs";
 import { recentSuggestions } from "../lib/suggestions.mjs";
@@ -486,7 +488,7 @@ server.tool("stats", "What nomArmy's own job records show for this repository (o
 });
 
 server.tool("local_worker_stop", "Stop a running job's worker, for example one burning a frontier model's usage on the wrong track. Its worker ends within about 15 seconds, without the report-recovery call a timeout gets and without running verification; its worktree is kept uncommitted, so a new job with continue_from: <job_id> (and a cheaper model if you like) can finish the work. Works for a job started by any session. Refuses a job that isn't running or is already past its worker.", {
-  job_id: z.string().regex(/^[A-Za-z0-9._-]{1,120}$/),
+  job_id: z.string().regex(JOB_ID_RE),
   reason: z.string().max(300).optional().describe("Why it's being stopped; recorded in the job's issues."),
 }, async ({ job_id, reason }) => {
   const r = requestJobStop({ jobsRoot, jobId: job_id, reason: reason ?? null });
@@ -770,7 +772,7 @@ export async function stripRuntimeJunk(worktree) {
   try {
     const statusOut = await gitRaw(["status", "--porcelain=v1", "-z", "--untracked-files=all"], worktree);
     for (const entry of parseStatusPorcelainZ(statusOut)) {
-      if (isRuntimeJunk(entry.file)) fs.rmSync(path.join(worktree, entry.file), { recursive: true, force: true });
+      if (isRuntimeJunk(entry.file)) removeWorktreeEntry(worktree, path.join(worktree, entry.file));
     }
   } catch { /* best-effort; falls through to the normal remove attempt */ }
 }
@@ -828,6 +830,8 @@ server.tool("local_worker_sweep", "Bulk-reap job worktrees/branches that are PRO
     const target = resolveCleanupTarget({ jobDir, jobId, meta, status: meta ? null : readJson(path.join(jobDir, "status.json")) });
     if (!target?.worktree || !fs.existsSync(target.worktree)) continue; // nothing here to reap at all
     const { worktree, branch } = target;
+    try { registerJobWorktree(meta?.worktreePointerBefore ? meta : readJson(path.join(jobDir, "status.json")), { worktree, repoRoot: projectDir }); }
+    catch (error) { skipped.push({ jobId, reason: error.message }); continue; }
     let finishedAtMs;
     try { finishedAtMs = meta?.finishedAt ? Date.parse(meta.finishedAt) : fs.statSync(jobDir).mtimeMs; }
     catch { finishedAtMs = Date.now(); }
@@ -848,6 +852,7 @@ server.tool("local_worker_sweep", "Bulk-reap job worktrees/branches that are PRO
     try {
       await releaseSandboxLocks(worktree);
       await stripRuntimeJunk(worktree);
+      assertRegisteredWorktree(worktree);
       await run("git", ["worktree", "remove", worktree], { cwd: projectDir });
       let branchDeleted = false;
       if (delete_branches && branch) {
@@ -876,8 +881,10 @@ server.tool("local_worker_cleanup", "Remove a retained worker worktree and optio
   if (!target) throw new Error(`Unknown job: ${job_id}`);
   const { worktree, branch } = target;
   if (worktree && fs.existsSync(worktree)) {
+    registerJobWorktree(meta?.worktreePointerBefore ? meta : readJson(path.join(jobDir, "status.json")), { worktree, repoRoot: projectDir });
     await releaseSandboxLocks(worktree);
     if (!force) await stripRuntimeJunk(worktree);
+    assertRegisteredWorktree(worktree);
     await run("git", ["worktree", "remove", ...(force ? ["--force"] : []), worktree], { cwd: projectDir });
   }
   let branchDeleteMode = null;

@@ -1,3 +1,4 @@
+import { plantWorktreePointer } from "./helpers/worktree-fixture.mjs";
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -114,17 +115,18 @@ for (const failBuild of [false, true]) {
     write(f.cwd, 'go.sum', 'changed');
     const flow = createVerificationFlow({});
     flow.registerVerificationRunner(runner);
-    const executor = createExecutor({ VERSION: 'test', projectDir: f.trustedDir, jobsRoot: f.root,
-      assertRepo: async () => {}, ensureJobsRoot: () => f.root, resolveBase: async () => ({ ref: 'base', sha: 'base' }),
+    const executor = createExecutor({ VERSION: 'test', projectDir: f.trustedDir, jobsRoot: path.join(f.root, 'jobs'),
+      assertRepo: async () => {}, ensureJobsRoot: () => path.join(f.root, 'jobs'), resolveBase: async () => ({ ref: 'base', sha: 'base' }),
       collectGitRecord: async () => ({}), ...flow,
       // Stub worktree operations: no Git or Podman processes are launched.
       run: async (_cmd, args) => {
-        if (args[1] === 'add') fs.cpSync(f.cwd, args[3], { recursive: true });
+        if (args[1] === 'add') { fs.cpSync(f.cwd, args[3], { recursive: true }); plantWorktreePointer(args[3], f.trustedDir); }
         else fs.rmSync(args[3], { recursive: true, force: true });
       },
     });
     const result = await executor.executeJob({ task: 'verify', mode: 'verify', verification: 'quick', jobId: 'check' });
     const manifest = JSON.parse(fs.readFileSync(path.join(result.jobDir, 'metadata.json'), 'utf8'));
+    assert.equal(JSON.parse(fs.readFileSync(path.join(result.jobDir, 'status.json'))).worktreePointerBefore.bytes, Buffer.from(`gitdir: ${path.join(f.trustedDir, '.git', 'worktrees', 'check')}\n`).toString('base64'));
     assert.deepEqual(manifest.issues, [noteFor('go.sum')]);
     assert.equal(manifest.verification.status, failBuild ? 'not_run' : 'fail');
     assert.equal(manifest.verification.detail.includes(noteFor('go.sum')), true);
