@@ -74,7 +74,7 @@ test("verify is model-free from expansion through admission, execution and repor
     const r = await executor.executeJob({ task: "tests", mode: "verify", verification: "quick", baseRef: "selected", jobId: status });
     const wt = path.join(root, status, "worktree");
     assert.deepEqual(calls, [["git", "worktree", "add", "--detach", wt, "selected-sha"], ["git", "worktree", "remove", "--force", wt]]);
-    assert.equal(JSON.parse(fs.readFileSync(path.join(r.jobDir, "status.json"))).worktreePointerBefore.bytes, Buffer.from(`gitdir: ${root}/.git/worktrees/${status}\n`).toString("base64"));
+    assert.equal(JSON.parse(fs.readFileSync(path.join(r.jobDir, "status.json"))).worktreePointerBefore.bytes, Buffer.from(`gitdir: ${path.join(root, ".git", "worktrees", status)}\n`).toString("base64"));
     assert.equal(fs.existsSync(wt), false);
     assert.equal(r.ok, status === "pass");
     assert.equal(r.manifest.outcome, outcome);

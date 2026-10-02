@@ -16,7 +16,8 @@ import { snapshotRetainedWork } from "../lib/continue-from.mjs";
 import { plantWorktreePointer } from "./helpers/worktree-fixture.mjs";
 
 function fixture(t) {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-escape-")));
+  // Native realpath: on Windows the temp dir can be an 8.3 short name.
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-escape-")));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const repoRoot = path.join(root, "repo"), jobsRoot = path.join(root, "jobs");
   const jobDir = path.join(jobsRoot, "job"), worktree = path.join(jobDir, "worktree");
@@ -164,7 +165,7 @@ test("host install repair skips and flags a symlinked package parent without del
     assert.equal(cmd, "git"); assert.equal(args.includes("ls-files"), true); return "ui/package-lock.json\0";
   });
   const result = repairHostInstalls(f.worktree, null, { ui: "link" });
-  assert.deepEqual(result, [`ui/node_modules (refused: refusing symlinked parent ${f.worktree}/ui)`]);
+  assert.deepEqual(result, [`ui/node_modules (refused: refusing symlinked parent ${path.join(f.worktree, "ui")})`]);
   assert.equal(fs.readFileSync(path.join(outside, "node_modules", "sentinel"), "utf8"), "untouched");
   assert.equal(fs.lstatSync(path.join(f.worktree, "ui")).isSymbolicLink(), true);
 });
@@ -184,7 +185,8 @@ test("cleanup after restart registers the job record before status or removal an
   fs.writeFileSync(path.join(f.jobDir, "metadata.json"), JSON.stringify({ worktree: f.worktree, worktreePointerBefore: { bytes: f.bytes } }));
   const seen = [];
   patchBuiltin(t, childProcess, "spawn", original => (cmd, args, opts) => {
-    if (cmd === "git" && args.includes("worktree") && args.includes("remove")) {
+    // Windows resolves "git" to a full git.exe path before spawning.
+    if (path.basename(String(cmd)).toLowerCase().replace(/\.exe$/, "") === "git" && args.includes("worktree") && args.includes("remove")) {
       const registered = pointer.registeredWorktree(f.worktree);
       assert.equal(registered?.expectedBytes.toString("base64"), f.bytes);
       seen.push("remove");

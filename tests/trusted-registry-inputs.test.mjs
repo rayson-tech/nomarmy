@@ -126,7 +126,7 @@ for (const failBuild of [false, true]) {
     });
     const result = await executor.executeJob({ task: 'verify', mode: 'verify', verification: 'quick', jobId: 'check' });
     const manifest = JSON.parse(fs.readFileSync(path.join(result.jobDir, 'metadata.json'), 'utf8'));
-    assert.equal(JSON.parse(fs.readFileSync(path.join(result.jobDir, 'status.json'))).worktreePointerBefore.bytes, Buffer.from(`gitdir: ${f.trustedDir}/.git/worktrees/check\n`).toString('base64'));
+    assert.equal(JSON.parse(fs.readFileSync(path.join(result.jobDir, 'status.json'))).worktreePointerBefore.bytes, Buffer.from(`gitdir: ${path.join(f.trustedDir, '.git', 'worktrees', 'check')}\n`).toString('base64'));
     assert.deepEqual(manifest.issues, [noteFor('go.sum')]);
     assert.equal(manifest.verification.status, failBuild ? 'not_run' : 'fail');
     assert.equal(manifest.verification.detail.includes(noteFor('go.sum')), true);
