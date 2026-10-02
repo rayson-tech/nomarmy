@@ -289,7 +289,9 @@ test("review regression detects expanded tenant columns and additive custom iden
 });
 
 test("review regression oversized enabled diffs fail closed without lowering prior trust", async () => {
-  const fileChanges = [{ file: "notes.txt", before: "", after: "x".repeat(TRUST_EVIDENCE_CHARS) }];
+  const fileChanges = [{ file: "notes.mjs", before: "", after: "x".repeat(TRUST_EVIDENCE_CHARS) }];
+  assert.deepEqual(await evaluateDiffTrust({ fileChanges: [{ ...fileChanges[0], file: "notes.txt" }], judge: {} }),
+    { level: "normal", reasons: [], checks: [], judgment: { status: "skipped: no production code", validator: null, answers: {}, error: null } });
   const length = trustDiffEvidence(fileChanges).length;
   assert.equal(length, 60078);
   const reason = { rule: "judgment", reason: "the diff is too large to judge (60078 characters); review it" };
@@ -314,6 +316,8 @@ test("review regression oversized enabled diffs fail closed without lowering pri
 });
 
 test("snapshot hunks isolate sparse edits with exact context and unified ranges", async () => {
+  assert.deepEqual(await evaluateDiffTrust({ fileChanges: [{ file: "a.txt", before: "old", after: "new" }], judge: {} }),
+    { level: "normal", reasons: [], checks: [], judgment: { status: "skipped: no production code", validator: null, answers: {}, error: null } });
   const evidence = (before, after) => trustDiffEvidence([{ file: "a.txt", before, after }]);
   const lines = Array.from({ length: 20 }, (_, i) => "line" + (i + 1) + "\n");
   const changed = [...lines]; changed[0] = "first\n"; changed[19] = "last\n";
@@ -331,7 +335,7 @@ test("snapshot hunks isolate sparse edits with exact context and unified ranges"
   assert.equal(evidence(large.join(""), edits.join("")), expected);
   assert.equal(expected.length < TRUST_EVIDENCE_CHARS / 10, true);
   let calls = 0;
-  assert.deepEqual(await evaluateDiffTrust({ fileChanges: [{ file: "a.txt", before: large.join(""), after: edits.join("") }],
+  assert.deepEqual(await evaluateDiffTrust({ fileChanges: [{ file: "a.mjs", before: large.join(""), after: edits.join("") }],
     judge: {}, askJudge: async () => { calls++; return { answer: probabilities() }; } }),
     { level: "normal", reasons: [], checks: [], judgment: { ...available(), validator: "judge" } });
   assert.equal(calls, 1);

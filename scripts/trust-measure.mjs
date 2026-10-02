@@ -117,8 +117,9 @@ export async function measure(dir, mode = 'off', validator = validatorFor(mode))
 
 export function measurementLine(item) {
   const { kind, label, level, findings, reason, diff, judgment, ...metadata } = item;
-  const unavailable = judgment.status === 'unavailable' ? `\tjudgment unavailable: ${judgment.error}` : '';
-  return `${kind}\t${label}\t${level}\t${findings}\t${reason ?? 'none'}${unavailable}${Object.keys(metadata).length ? `\t${JSON.stringify(metadata)}` : ''}`;
+  const status = judgment.status === 'available' ? 'judged' : judgment.status === 'unavailable'
+    ? `unavailable: ${judgment.error}` : judgment.status;
+  return `${kind}\t${label}\t${level}\t${findings}\t${reason ?? 'none'}\tjudgment ${status}${Object.keys(metadata).length ? `\t${JSON.stringify(metadata)}` : ''}`;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

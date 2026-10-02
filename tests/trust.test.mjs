@@ -13,6 +13,7 @@ import { classifyTestChanges } from "../lib/diff-checks.mjs";
 import { createProcess } from "../lib/process.mjs";
 import { HIGH_STAKES_NOTE } from "../lib/outcome.mjs";
 
+const withSkippedJudgment = (trust) => ({ ...trust, judgment: { status: "skipped: no production code", validator: null, answers: {}, error: null }, checks: [] });
 const withJudgment = (trust) => ({ ...trust, judgment: { status: "unavailable", validator: null, answers: {}, error: "No trust validator configured." }, checks: [] });
 const normal = { level: "normal", reasons: [] };
 const sensitive = (file, rule = 0, reason = "access control and tenant data") => ({
@@ -245,7 +246,7 @@ test("implement jobs enforce checkout trust, retain normal records, and leave un
   assert.equal(manifest.issues.filter((issue) => issue === HIGH_STAKES_NOTE).length, 1);
   assert.equal(manifest.commit.created, true); // Integration is gated, not the worker commit.
   const unmatched = (await implement(t, { config: trustConfig, changed: ["README.md"] })).manifest;
-  assert.deepEqual(unmatched.trust, withJudgment(normal));
+  assert.deepEqual(unmatched.trust, withSkippedJudgment(normal));
   assert.equal(unmatched.reviewRequired, false);
   assert.deepEqual(unmatched.issues, ["existing issue"]);
   const ordinary = (await implement(t)).manifest;
@@ -450,8 +451,8 @@ function forbidContentReads(t, paths) {
 const unchecked = (file, problem = "is not a regular file or symlink") => ({
   level: "human", reasons: [{ rule: "trust", reason: `changes ${file}, which ${problem}, so its content can't be checked`, file }],
 });
-function assertGated(manifest, trust) {
-  assert.deepEqual(manifest.trust, withJudgment(trust));
+function assertGated(manifest, trust, judgment = withJudgment) {
+  assert.deepEqual(manifest.trust, judgment(trust));
   assert.equal(manifest.reviewRequired, true);
   assert.equal(manifest.issues[0], `HUMAN REVIEW REQUIRED (trust): ${trust.reasons.map(({ reason }) => reason).join("; ")}`);
 }
@@ -557,7 +558,7 @@ test("safe trust snapshots gate files under symlinked parent directories", posix
     },
   });
   check();
-  assertGated(manifest, unchecked("nested/redirect/private.txt", "has a symlinked parent directory"));
+  assertGated(manifest, unchecked("nested/redirect/private.txt", "has a symlinked parent directory"), withSkippedJudgment);
 });
 
 test("safe trust snapshots gate oversized files before opening and accept the size boundary", async (t) => {
@@ -575,10 +576,8 @@ test("safe trust snapshots gate oversized files before opening and accept the si
       },
     });
     check();
-    if (size > limit) assertGated(manifest, unchecked("large.txt", "exceeds the 16777216-byte content limit"));
-    else assert.deepEqual(manifest.trust, withJudgment({ level: "review", reasons: [
-      { rule: "judgment", reason: "the diff is too large to judge (33554556 characters); review it" },
-    ] }));
+    if (size > limit) assertGated(manifest, unchecked("large.txt", "exceeds the 16777216-byte content limit"), withSkippedJudgment);
+    else assert.deepEqual(manifest.trust, withSkippedJudgment(normal));
   }
 });
 

@@ -178,7 +178,7 @@ criteria:
     status: met
     security: true
   - id: TRUST-12
-    text: Compact unified snapshot hunks carry three context lines per change to diff-only Jev or judge; probabilities only escalate trust, comments are data and oversized evidence fails closed
+    text: Compact unified snapshot hunks carry three context lines per change to diff-only Jev or judge; judged on production code only (docs and tests excluded); probabilities only escalate trust, comments are data and oversized evidence fails closed
     proven_by:
       - file: tests/trust-phase2.test.mjs
         test: diff judgment sees only raw diff data prefers Jev falls back to judge and cannot lower a planted-comment floor
@@ -190,6 +190,16 @@ criteria:
         test: safe trust snapshots gate oversized files before opening and accept the size boundary
       - file: tests/trust-phase2.test.mjs
         test: snapshot hunks isolate sparse edits with exact context and unified ranges
+      - file: tests/trust-production.test.mjs
+        test: documentation-only judgment skips all documentation paths without changing the floor
+      - file: tests/trust-production.test.mjs
+        test: tests-only judgment skips the detector test-path rule
+      - file: tests/trust-production.test.mjs
+        test: mixed judgment sends only production hunks to Jev and judge
+      - file: tests/trust-production.test.mjs
+        test: excluded docs and tests retain sensitive path content CODEOWNERS and removed-check gates
+      - file: tests/trust-measure.test.mjs
+        test: corpus prints skipped production-free judgments without calling the validator
     status: met
     security: true
   - id: TRUST-13
