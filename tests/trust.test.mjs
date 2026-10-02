@@ -841,3 +841,19 @@ test("review two runtime classifies production dependencies from the untouched b
     reasons: checks.map(({ file, line, reason }) => ({ rule: "removed-check", reason, file, line })),
   });
 });
+
+test("implement added bypass requires review with judgment disabled", async t => {
+  const file = "src/orders.mjs";
+  const before = "export function listOrders(req, db) {\n  const user = requireTenantUser(req);\n  return db.orders.filter((order) => order.tenant_id === user.tenant_id);\n}\n";
+  const after = before.replace("  return db.orders.filter", "  if (req.query?.all === true) return db.orders;\n  return db.orders.filter");
+  const { manifest } = await implement(t, {
+    config: "trust:\n  judgment: false\n", changed: [file], baseFiles: { [file]: before }, newFiles: { [file]: after },
+  });
+  const reason = "Adds an early exit before a tenant or ownership filter at src/orders.mjs:3.";
+  assert.deepEqual(manifest.trust, {
+    level: "review", reasons: [{ rule: "removed-check", reason, file, line: 3 }],
+    checks: [{ kind: "bypass", file, line: 3, reason }],
+    judgment: { status: "disabled", validator: null, answers: {}, error: null },
+  });
+  assert.equal(manifest.reviewRequired, true);
+});
