@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { continuationProblem, continuationBase, snapshotRetainedWork, applyRetainedWork, continuationNote } from "../lib/continue-from.mjs";
+import { captureWorktreePointer } from "../lib/worktree-pointer.mjs";
 
 const git = async (args, { cwd, env } = {}) => execFileSync("git", args, { cwd, env: env ?? process.env, stdio: ["ignore", "pipe", "pipe"] }).toString();
 
@@ -34,12 +35,14 @@ test("snapshot and apply carry a retained worktree's modified, new and deleted f
   fs.mkdirSync(path.join(oldTree, ".npm")); fs.writeFileSync(path.join(oldTree, ".npm", "cache"), "junk\n");
   const statusBefore = await git(["status", "--porcelain"], { cwd: oldTree });
 
-  const snapshot = await snapshotRetainedWork({ worktree: oldTree, baseSha, jobId: "old-job", git });
+  const oldPointer = captureWorktreePointer(oldTree);
+  const snapshot = await snapshotRetainedWork({ worktree: oldTree, baseSha, jobId: "old-job", git, repoRoot: dir, expectedPointer: oldPointer });
   assert.deepEqual(snapshot.files.sort(), ["math.js", "math.test.js", "old.txt"]);
   assert.equal(await git(["status", "--porcelain"], { cwd: oldTree }), statusBefore, "the retained worktree and its index are untouched");
 
   g("worktree", "add", "-q", "-b", "agent/new", newTree, baseSha);
-  await applyRetainedWork({ worktree: newTree, baseSha, commit: snapshot.commit, git });
+  const newPointer = captureWorktreePointer(newTree);
+  await applyRetainedWork({ worktree: newTree, baseSha, commit: snapshot.commit, git, repoRoot: dir, expectedPointer: newPointer });
   assert.equal(fs.readFileSync(path.join(newTree, "math.js"), "utf8"), fs.readFileSync(path.join(oldTree, "math.js"), "utf8"));
   assert.ok(fs.existsSync(path.join(newTree, "math.test.js")));
   assert.equal(fs.existsSync(path.join(newTree, "old.txt")), false, "a deletion carries over");
