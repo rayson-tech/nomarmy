@@ -190,7 +190,7 @@ criteria:
     status: met
     security: true
   - id: TRUST-12
-    text: Compact unified snapshot hunks carry three context lines per change to diff-only Jev or judge; judged on production code only (docs and tests excluded); probabilities only escalate trust, comments are data and oversized evidence fails closed
+    text: Compact unified snapshot hunks carry three context lines per change to diff-only Jev or judge; judged on production code only (unreferenced docs and unimported tests excluded with throwing validators; runtime imports and referenced data judged); probabilities only escalate trust, comments are data and oversized evidence fails closed
     proven_by:
       - file: tests/trust-phase2.test.mjs
         test: diff judgment sees only raw diff data prefers Jev falls back to judge and cannot lower a planted-comment floor
@@ -252,7 +252,7 @@ criteria:
     status: met
     security: true
   - id: TRUST-16
-    text: The schema-validated operator-only map is human-gated when edited; a review-role scout brief and cited proposal import skip generated and vendored code, and accept/drop/edit review alone activates entries
+    text: The schema-validated operator-only map, proposal and provenance receipt are human-gated when edited; scout job origins are shown and unknown or edited proposals require per-entry review; a review-role scout brief and cited proposal import skip generated and vendored code, and accept/drop/edit review alone activates entries
     proven_by:
       - file: tests/trust-map.test.mjs
         test: trust map schema reads only the operator checkout and map edits are human gated
@@ -260,17 +260,25 @@ criteria:
         test: trust map scout brief and cited import skip generated and vendored files
       - file: tests/trust-map.test.mjs
         test: trust review JSON accepts drops and edits proposals without implicit activation
+      - file: tests/trust-map.test.mjs
+        test: proposal edits are human gated and unknown or edited origins require per-entry review
       - file: tests/trust.test.mjs
         test: implement reach uses only the operator map and untouched base before worker edits
     status: met
     security: true
   - id: TRUST-17
-    text: Base-snapshot symbol reach gates dependent changes at review and removed checks at human, with bounded depth and fan-out recorded and caches keyed by base commit and accepted map
+    text: Base-snapshot symbol reach follows ES, CommonJS and Python aliases and namespace calls and includes K&R and Allman bodies; it gates dependent changes at review and removed checks at human, with bounded depth and fan-out recorded and caches keyed by base commit and accepted map
     proven_by:
       - file: tests/trust-map.test.mjs
         test: trust reach gates two-call helpers not unrelated functions and removed checks become human
       - file: tests/trust-map.test.mjs
         test: trust reach states depth and fan-out caps and caches separately per base commit and map
+      - file: tests/trust-map.test.mjs
+        test: trust reach resolves exact import aliases and namespace calls to target definitions
+      - file: tests/trust-map.test.mjs
+        test: trust reach includes K&R and exact Allman bodies and helper edits
+      - file: tests/trust-map.test.mjs
+        test: trust reach records unresolved aliases instead of silently missing their targets
       - file: tests/trust.test.mjs
         test: implement reach uses only the operator map and untouched base before worker edits
     status: met

@@ -72,15 +72,15 @@ test("trust map scout brief and cited import skip generated and vendored files",
 test("trust review JSON accepts drops and edits proposals without implicit activation", t => {
   const root = fixture(t);
   const proposals = [{ ...entry, line: 1 }, { ...entry, symbol: "middle", file: "helpers.py", line: 1 }, { ...entry, symbol: "leaf", file: "helpers.py", line: 4 }];
-  writeTrustProposal(root, proposals);
-  assert.deepEqual(cli(root, ["review"]), { status: "pending", entries: proposals });
+  writeTrustProposal(root, proposals, { scoutJobId: "scout-review" });
+  assert.deepEqual(cli(root, ["review"]), { status: "pending", entries: proposals, origins: proposals.map(() => ({ writer: "nomarmy trust map", scoutJobId: "scout-review", status: "verified" })) });
   assert.deepEqual(loadTrustMap(root), []);
   const edit = { ...entry, symbol: "leaf", file: "helpers.py", category: "access", reason: "Checks tenant identity" };
   const decisions = [{ action: "accept" }, { action: "drop" }, { action: "edit", entry: edit }];
   assert.deepEqual(cli(root, ["review", "--decisions", JSON.stringify(decisions)]), { status: "reviewed", map: TRUST_MAP_FILE, entries: [entry, edit], decisions });
   assert.deepEqual(loadTrustMap(root), [entry, edit]);
-  assert.deepEqual(cli(root, ["review"]), { status: "pending", entries: [] });
-  writeTrustProposal(root, [{ ...entry, symbol: "middle", file: "helpers.py", line: 1 }]);
+  assert.deepEqual(cli(root, ["review"]), { status: "pending", entries: [], origins: [] });
+  writeTrustProposal(root, [{ ...entry, symbol: "middle", file: "helpers.py", line: 1 }], { scoutJobId: "scout-middle" });
   assert.throws(() => reviewTrustProposal({ operatorDir: root, decisions: [] }), /one decision/);
   assert.deepEqual(cli(root, ["review", "--accept-all"]), { status: "reviewed", map: TRUST_MAP_FILE, entries: [entry, edit, { ...entry, symbol: "middle", file: "helpers.py" }], decisions: [{ action: "accept" }] });
 });
@@ -140,4 +140,89 @@ test("trust reach states depth and fan-out caps and caches separately per base c
   const changedMap = cachedTrustReach({ ...args, entries: [{ ...entry, category: "access" }] });
   assert.notEqual(changedMap.key, first.key);
   assert.deepEqual(changedMap.boundaries[0].entry, { ...entry, category: "access" });
+});
+
+test("trust reach resolves exact import aliases and namespace calls to target definitions", t => {
+  const cases = [
+    ['import { check as verify } from "./auth.js";', 'verify()', 'check', 'auth.js'],
+    ['import { a as b } from "./auth.js";', 'b()', 'a', 'auth.js'],
+    ['import * as ns from "./auth.js";', 'ns.a()', 'a', 'auth.js'],
+    ['const { a: b } = require("./auth.js");', 'b()', 'a', 'auth.js'],
+    ['from m import a as b', 'b()', 'a', 'm.py'],
+    ['import m as n', 'n.a()', 'a', 'm.py'],
+  ];
+  for (const [statement, call, symbol, target] of cases) {
+    const root = fixture(t), python = target.endsWith('.py'), file = python ? 'gate.py' : 'gate.js';
+    const mapped = { ...entry, symbol: 'gate', file, category: 'access' };
+    write(root, file, python ? `${statement}\ndef gate(user):\n    return ${call}\n` : `${statement}\nexport function gate(user) {\n  return ${call};\n}\n`);
+    const before = python ? `def ${symbol}():\n    return 1\n` : `export function ${symbol}() { return 1; }\n`;
+    write(root, target, before);
+    write(root, python ? 'decoy.py' : 'decoy.js', python ? `def ${symbol}():\n    return 0\n` : `function ${symbol}() { return 0; }\n`);
+    const reach = computeTrustReach({ baseDir: root, entries: [mapped] });
+    assert.deepEqual(reach, { heuristic: true, depth: 3, fanOut: 25, caps: [], boundaries: [{ entry: mapped, nodes: [
+      { symbol: 'gate', file, line: 2, end: 4, depth: 0, via: [] },
+      { symbol, file: target, line: 1, end: python ? 3 : 1, depth: 1, via: [{ symbol: 'gate', file, line: 2 }] },
+    ] }] }, statement);
+    assert.deepEqual(evaluateReachTrust({ reach, fileChanges: [{ file: target, before, after: before.replace('return 1', 'return 2') }] }), {
+      level: 'review', reasons: [{ rule: 'trust-reach', file: target, line: 1, reason: `changes helper \`${symbol}\` (${target}:1), which \`gate\` (${file}:2), the access boundary, depends on via \`gate\` (${file}:2)` }],
+    }, statement);
+  }
+});
+
+test("trust reach includes K&R and exact Allman bodies and helper edits", t => {
+  for (const gate of ['export function gate(user) {\n  return helper(user);\n}', 'export function gate(user)\n{\n  return helper(user);\n}']) {
+    const root = fixture(t), file = 'flow.js', end = gate.split('\n').length;
+    const mapped = { ...entry, symbol: 'gate', file, category: 'access' };
+    const before = gate + '\nfunction helper(user) { return user.id; }\n';
+    write(root, file, before);
+    const reach = computeTrustReach({ baseDir: root, entries: [mapped] });
+    assert.deepEqual(reach, { heuristic: true, depth: 3, fanOut: 25, caps: [], boundaries: [{ entry: mapped, nodes: [
+      { symbol: 'gate', file, line: 1, end, depth: 0, via: [] },
+      { symbol: 'helper', file, line: end + 1, end: end + 1, depth: 1, via: [{ symbol: 'gate', file, line: 1 }] },
+    ] }] });
+    assert.deepEqual(evaluateReachTrust({ reach, fileChanges: [{ file, before, after: before.replace('return user.id', 'return user.name') }] }), {
+      level: 'review', reasons: [{ rule: 'trust-reach', file, line: end + 1, reason: `changes helper \`helper\` (flow.js:${end + 1}), which \`gate\` (flow.js:1), the access boundary, depends on via \`gate\` (flow.js:1)` }],
+    });
+    assert.deepEqual(evaluateReachTrust({ reach, fileChanges: [{ file, before, after: before.replace('helper(user);', 'helper(null);') }] }), {
+      level: 'review', reasons: [{ rule: 'trust-reach', file, line: 1, reason: 'changes mapped symbol `gate` (flow.js:1), the access boundary' }],
+    });
+  }
+});
+
+test("proposal edits are human gated and unknown or edited origins require per-entry review", t => {
+  const root = fixture(t), proposals = [{ ...entry, line: 1 }];
+  for (const file of [TRUST_PROPOSAL_FILE, '.nomarmy/trust-map.provenance.json']) assert.deepEqual(evaluateTrust({ changedFiles: [file] }), {
+    level: 'human', reasons: [{ rule: 'trust', reason: "changes the repository's trust rules", file }],
+  });
+  write(root, TRUST_PROPOSAL_FILE, JSON.stringify(proposals));
+  const unknown = { writer: null, scoutJobId: null, status: 'unknown-or-edited' };
+  assert.deepEqual(cli(root, ['review']), { status: 'pending', entries: proposals, origins: [unknown] });
+  assert.throws(() => reviewTrustProposal({ operatorDir: root, acceptAll: true }), /unknown or edited proposals need per-entry review/);
+  assert.deepEqual(loadTrustMap(root), []);
+  write(root, 'scout.yml', JSON.stringify(proposals));
+  cli(root, ['map', '--from', 'scout.yml', '--scout-job', 'scout-123']);
+  assert.deepEqual(cli(root, ['review']), { status: 'pending', entries: proposals, origins: [{ writer: 'nomarmy trust map', scoutJobId: 'scout-123', status: 'verified' }] });
+  fs.appendFileSync(path.join(root, TRUST_PROPOSAL_FILE), '\n');
+  assert.deepEqual(cli(root, ['review']), { status: 'pending', entries: proposals, origins: [unknown] });
+  assert.throws(() => reviewTrustProposal({ operatorDir: root, acceptAll: true }), /per-entry review/);
+  assert.deepEqual(loadTrustMap(root), []);
+  assert.deepEqual(reviewTrustProposal({ operatorDir: root, decisions: [{ action: 'accept' }] }), {
+    status: 'reviewed', map: TRUST_MAP_FILE, entries: [entry], decisions: [{ action: 'accept' }],
+  });
+  writeTrustProposal(root, proposals);
+  assert.throws(() => reviewTrustProposal({ operatorDir: root, acceptAll: true }), /scout job id/);
+});
+
+test("trust reach records unresolved aliases instead of silently missing their targets", t => {
+  const root = fixture(t);
+  const mapped = { ...entry, symbol: "gate", file: "gate.js", category: "access" };
+  write(root, "gate.js", 'import { check as verify } from "./auth.js";\nexport function gate(user) { return verify(user); }\n');
+  const reach = computeTrustReach({ baseDir: root, entries: [mapped] });
+  assert.deepEqual(reach, { heuristic: true, depth: 3, fanOut: 25,
+    caps: [{ kind: "unresolved-import", symbol: "check", file: "gate.js", limit: null }],
+    boundaries: [{ entry: mapped, nodes: [{ symbol: "gate", file: "gate.js", line: 2, end: 2, depth: 0, via: [] }] }],
+  });
+  assert.deepEqual(evaluateReachTrust({ reach, fileChanges: [{ file: "other.js", before: "old", after: "new" }] }), {
+    level: "review", reasons: [{ rule: "trust-reach-cap", reason: "trust reach is incomplete: unresolved-import at gate.js:check" }],
+  });
 });

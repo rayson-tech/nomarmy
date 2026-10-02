@@ -805,7 +805,7 @@ test("implement reach uses only the operator map and untouched base before worke
     { rule: "trust-reach", file: "helper.py", line: 1, reason: "removes a check in helper `helper` (helper.py:1), which `boundary` (boundary.py:1), the tenant boundary, depends on via `boundary` (boundary.py:1)" },
   ]);
   const unaccepted = await implement(t, { baseFiles, changed: ["helper.py", ".nomarmy/trust-map.proposed.yml"], newFiles: { "helper.py": baseFiles["helper.py"].replace("return user.tenant_id", "return str(user.tenant_id)"), ".nomarmy/trust-map.proposed.yml": JSON.stringify([{ ...mapped, line: 1 }]) }, config: "trust:\n  judgment: false\n" });
-  assert.deepEqual(unaccepted.manifest.trust, { level: "normal", reasons: [], judgment: { status: "disabled", validator: null, answers: {}, error: null }, checks: [] });
+  assert.deepEqual(unaccepted.manifest.trust, { level: "human", reasons: [{ rule: "trust", reason: "changes the repository's trust rules", file: ".nomarmy/trust-map.proposed.yml" }], judgment: { status: "disabled", validator: null, answers: {}, error: null }, checks: [] });
 });
 
 test("review two runtime classifies production dependencies from the untouched base", async t => {

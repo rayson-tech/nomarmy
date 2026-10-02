@@ -53,7 +53,16 @@ test("mixed judgment sends only production hunks to Jev and judge", async () => 
 });
 
 test("excluded docs and tests retain sensitive path content CODEOWNERS and removed-check gates", async () => {
-  for (const file of ["docs/access.md", "docs/access.py", "tests/access.py"]) {
+  for (const file of ["README.md", "docs/access.md", "tests/access.py", "docs/access.py", "foo_test.py", "queries.txt"]) {
+    const production = ["docs/access.py", "foo_test.py", "queries.txt"].includes(file);
+    const repository = { files: [{ file: "main.py", source: 'import foo_test\nopen("queries.txt")\n' }], incomplete: false };
+    let calls = 0;
+    const answers = { access: 0, checks: 0, data: 0 };
+    const askJev = production ? async request => {
+      calls++;
+      assert.deepEqual(request.state, { diff: `--- a/${file}\n+++ b/${file}\n@@ -1,2 +1,1 @@\n-if not authorized:\n-    return 403\n+secret token\n` });
+      return { answers: Object.fromEntries(Object.keys(answers).map(key => [key, { choice: "no", probabilities: { yes: 0, no: 1 } }])) };
+    } : forbidden;
     const fileChanges = [{ file, before: "if not authorized:\n    return 403\n", after: "secret token\n" }];
     const floor = evaluateTrust({ fileChanges, rules: [
       { paths: [file], reason: "restricted" }, { content: ["secret token"], reason: "secrets" },
@@ -66,8 +75,9 @@ test("excluded docs and tests retain sensitive path content CODEOWNERS and remov
     assert.deepEqual(floor, { level: "human", reasons });
     const finding = { kind: "guard", file, line: 1, reason: `Removes or changes an access guard at ${file}:1.` };
     const checks = file.endsWith(".md") ? [] : [finding];
-    assert.deepEqual(await evaluateDiffTrust({ fileChanges, floor }), {
-      level: "human", reasons: [...reasons, ...checks.map(({ reason, file, line }) => ({ rule: "removed-check", reason, file, line }))], checks, judgment: file === "docs/access.py" ? { status: "unavailable", validator: null, answers: {}, error: "No trust validator configured." } : skipped,
+    assert.deepEqual(await evaluateDiffTrust({ fileChanges, floor, repository, ...validators, askJev }), {
+      level: "human", reasons: [...reasons, ...checks.map(({ reason, file, line }) => ({ rule: "removed-check", reason, file, line }))], checks, judgment: production ? { status: "available", validator: "jev", answers, error: null } : skipped,
     });
+    assert.equal(calls, production ? 1 : 0, file);
   }
 });

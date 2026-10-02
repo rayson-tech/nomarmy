@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { writeTrustScoutBrief, writeTrustProposal, loadTrustProposal, reviewTrustProposal } from "../lib/trust-map.mjs";
+import { writeTrustScoutBrief, writeTrustProposal, loadTrustProposal, trustProposalOrigins, reviewTrustProposal } from "../lib/trust-map.mjs";
 import { fillAcceptance, gatherAcceptanceProposals } from "../lib/acceptance-fill.mjs";
 // nomArmy CLI. Every command proposes before it writes anything -- init,
 // setup, model and update all show exactly what would change and write only
@@ -155,7 +155,7 @@ Usage: nomarmy <command> [options]
                   npm's latest alpha, or for a git checkout pulls (fast-forward
                   only; refuses on local changes). Then restart open sessions.
   trust map       Write a read-only review scout brief for the General.
-                  --from <scout.yml> validates citations and writes a proposal.
+                  --from <scout.yml> --scout-job <job-id> records the cited scout origin.
   trust review    Accept, drop or edit proposals; only accepted entries gate jobs.
                   --json lists; --accept-all or --decisions '<JSON array>' writes.
   agents <list|add|update|remove>
@@ -3271,18 +3271,21 @@ async function cmdTrust() {
   let result;
   if (argv[1] === "map") {
     result = value("from")
-      ? writeTrustProposal(repoDir, parseYaml(fs.readFileSync(path.resolve(repoDir, value("from")), "utf8")))
+      ? writeTrustProposal(repoDir, parseYaml(fs.readFileSync(path.resolve(repoDir, value("from")), "utf8")), { scoutJobId: value("scout-job") ?? null })
       : writeTrustScoutBrief({ operatorDir: repoDir, roles: loadArmy({ projectDir: repoDir }).army.roles });
   } else if (argv[1] === "review") {
     const proposed = loadTrustProposal(repoDir);
-    if (json && !flag("accept-all") && !value("decisions")) return out({ status: "pending", entries: proposed });
+    const origins = trustProposalOrigins(repoDir, proposed);
+    if (json && !flag("accept-all") && !value("decisions")) return out({ status: "pending", entries: proposed, origins });
     let decisions = value("decisions") ? JSON.parse(value("decisions")) : undefined;
     if (!flag("accept-all") && decisions === undefined) {
       if (!input.isTTY) throw new Error("Use --accept-all or --decisions '<JSON array>' for scripted review; --json alone only lists proposals.");
       decisions = [];
       const rl = createInterface({ input, output });
       try {
-        for (const entry of proposed) {
+        for (const [index, entry] of proposed.entries()) {
+          const origin = origins[index];
+          console.log(`Origin: ${origin.scoutJobId ?? "unknown"} (${origin.writer ?? origin.status})`);
           console.log(`${entry.symbol} (${entry.file}:${entry.line}), ${entry.category}: ${entry.reason}`);
           let action;
           do { action = (await rl.question("Accept, drop or edit? [a/d/e] ")).trim().toLowerCase(); } while (!["a", "d", "e"].includes(action));
@@ -3294,9 +3297,9 @@ async function cmdTrust() {
       } finally { rl.close(); }
     }
     result = reviewTrustProposal({ operatorDir: repoDir, decisions, acceptAll: flag("accept-all") });
-  } else throw new Error("Usage: nomarmy trust map [--from scout.yml] | trust review [--accept-all | --decisions '<JSON array>'] [--json]");
+  } else throw new Error("Usage: nomarmy trust map [--from scout.yml --scout-job job-id] | trust review [--accept-all | --decisions '<JSON array>'] [--json]");
   if (json) out(result);
-  else if (result.status === "awaiting-scout") console.log(`Scout brief: ${result.brief}. General must dispatch the read-only review scout, then import its cited YAML with nomarmy trust map --from scout.yml. Nothing is active yet.`);
+  else if (result.status === "awaiting-scout") console.log(`Scout brief: ${result.brief}. General must dispatch the read-only review scout, then import its cited YAML with nomarmy trust map --from scout.yml --scout-job job-id. Nothing is active yet.`);
   else console.log(`${result.status}: ${result.map ?? result.proposal} (${result.entries.length} entries)`);
 }
 
