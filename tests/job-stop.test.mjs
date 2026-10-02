@@ -24,19 +24,21 @@ function jobsRoot(t, jobs) {
 
 test("requestJobStop stops only a job still in its worker, once, and records why", (t) => {
   const root = jobsRoot(t, {
-    running: { "status.json": { state: "running", phase: "worker" } },
-    verifying: { "status.json": { state: "running", phase: "verification" } },
-    done: { "status.json": { state: "finished", phase: "finished" } },
+    "running-20261002-163910-52ff3b": { "status.json": { state: "running", phase: "worker" } },
+    "verifying-20261002-163910-52ff3b": { "status.json": { state: "running", phase: "verification" } },
+    "done-20261002-163910-52ff3b": { "status.json": { state: "finished", phase: "finished" } },
   });
-  const r = requestJobStop({ jobsRoot: root, jobId: "running", reason: "wrong track, burning astra" });
+  const r = requestJobStop({ jobsRoot: root, jobId: "running-20261002-163910-52ff3b", reason: "wrong track, burning astra" });
   assert.equal(r.ok, true);
+  assert.deepEqual(Object.keys(r).sort(), ["message", "ok", "projectDir"]);
+  assert.equal(r.projectDir, null);
   assert.match(r.message, /ends within about 15 seconds.*continue_from/);
-  assert.equal(readStopRequest(path.join(root, "running")).reason, "wrong track, burning astra");
-  assert.match(requestJobStop({ jobsRoot: root, jobId: "running" }).message, /already requested/);
-  assert.match(requestJobStop({ jobsRoot: root, jobId: "verifying" }).message, /past its worker.*spends no more model usage/);
-  assert.equal(requestJobStop({ jobsRoot: root, jobId: "verifying" }).ok, false);
-  assert.match(requestJobStop({ jobsRoot: root, jobId: "done" }).message, /isn't running \(it's finished\)/);
-  assert.match(requestJobStop({ jobsRoot: root, jobId: "nope" }).message, /no job nope/);
+  assert.equal(readStopRequest(path.join(root, "running-20261002-163910-52ff3b")).reason, "wrong track, burning astra");
+  assert.match(requestJobStop({ jobsRoot: root, jobId: "running-20261002-163910-52ff3b" }).message, /already requested/);
+  assert.match(requestJobStop({ jobsRoot: root, jobId: "verifying-20261002-163910-52ff3b" }).message, /past its worker.*spends no more model usage/);
+  assert.equal(requestJobStop({ jobsRoot: root, jobId: "verifying-20261002-163910-52ff3b" }).ok, false);
+  assert.match(requestJobStop({ jobsRoot: root, jobId: "done-20261002-163910-52ff3b" }).message, /isn't running \(it's finished\)/);
+  assert.match(requestJobStop({ jobsRoot: root, jobId: "nope-20261002-163910-52ff3b" }).message, /no job nope/);
   assert.equal(requestJobStop({ jobsRoot: root, jobId: "../etc" }).ok, false);
 });
 

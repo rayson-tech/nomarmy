@@ -12,6 +12,7 @@ import { createVerificationFlow } from "../lib/verification-flow.mjs";
 import { classifyTestChanges } from "../lib/diff-checks.mjs";
 import { createProcess } from "../lib/process.mjs";
 import { HIGH_STAKES_NOTE } from "../lib/outcome.mjs";
+import { plantWorktreePointer } from "./helpers/worktree-fixture.mjs";
 
 const withSkippedJudgment = (trust) => ({ ...trust, judgment: { status: "skipped: no production code", validator: null, answers: {}, error: null }, checks: [] });
 const withJudgment = (trust) => ({ ...trust, judgment: { status: "unavailable", validator: null, answers: {}, error: "No trust validator configured." }, checks: [] });
@@ -194,7 +195,7 @@ async function implement(t, { trustMap = null, config = null, workerConfig = con
         return { stdout: Buffer.from(file === ".nomarmy.yml" ? config ?? "" : baseFiles[file]) };
       }
       assert.deepEqual(args.slice(0, 3), ["worktree", "add", "-b"]);
-      write(args[4], ".git", "gitdir: synthetic-pointer\n");
+      plantWorktreePointer(args[4], projectDir);
       if (trustMap !== null) for (const [file, text] of Object.entries(baseFiles)) write(args[4], file, text);
     },
     gitRaw: async (args) => {

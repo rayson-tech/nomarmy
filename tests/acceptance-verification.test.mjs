@@ -12,6 +12,7 @@ import { createVerificationRunner, buildPodmanArgs } from "../lib/verify.mjs";
 import { changedContractWeakening, touchesAcceptance } from "../lib/acceptance-impact.mjs";
 import { loadContracts } from "../lib/acceptance.mjs";
 import * as classification from "../lib/diff-checks.mjs";
+import { plantWorktreePointer } from "./helpers/worktree-fixture.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const exec = promisify(execFile);
@@ -61,7 +62,7 @@ async function job(t, { proof = "good", code = false, timeout = false, profileSt
       const cwd = args[4];
       fs.mkdirSync(path.join(cwd, "acceptance"), { recursive: true });
       fs.mkdirSync(path.join(cwd, "tests"));
-      fs.writeFileSync(path.join(cwd, ".git"), "gitdir: synthetic\n");
+      plantWorktreePointer(cwd, repo);
       for (const [file, source] of Object.entries(headFiles ?? { "acceptance/changed.yml": headContract })) {
         if (source !== null) {
           fs.mkdirSync(path.dirname(path.join(cwd, file)), { recursive: true });

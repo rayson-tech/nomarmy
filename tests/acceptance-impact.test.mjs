@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { affectedContracts, checkJobContracts } from "../lib/acceptance-impact.mjs";
 import { judgePrompt, runJudge, resetJudgeBreaker } from "../lib/judge.mjs";
 import { createExecutor } from "../lib/execute.mjs";
+import { plantWorktreePointer } from "./helpers/worktree-fixture.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 function fixture(t) {
@@ -197,7 +198,7 @@ test("implement completion checks contracts after verification before commit and
         }
       };
       copy("");
-      fs.writeFileSync(path.join(args[4], ".git"), "gitdir: synthetic\n");
+      plantWorktreePointer(args[4], f.projectDir);
       return { stdout: "" };
     },
     gitRaw: async () => "", collectGitRecord: async () => record,

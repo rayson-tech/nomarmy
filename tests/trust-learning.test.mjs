@@ -14,6 +14,7 @@ import { shareMarkdown } from "../lib/share.mjs";
 import { computeTrustReach, evaluateReachTrust } from "../lib/trust-reach.mjs";
 import { createExecutor } from "../lib/execute.mjs";
 import { escRegex } from "../lib/diff-checks.mjs";
+import { plantWorktreePointer } from "./helpers/worktree-fixture.mjs";
 
 const cliFile = fileURLToPath(new URL("../bin/nomarmy.mjs", import.meta.url));
 const when = "2026-10-02T00:00:00.000Z";
@@ -181,7 +182,7 @@ test("trust completed scout execution persists review evidence automatically", a
   const executor = createExecutor({ VERSION: "test", projectDir: f.operatorDir, jobsRoot: f.jobsRoot,
     assertRepo: async () => {}, ensureJobsRoot: () => {}, resolveBase: async () => ({ sha: "base", ref: "main" }),
     sweepStaleSandboxContainers: async () => {},
-    run: async (_command, args) => { if (args[1] === "add") fs.mkdirSync(args[3], { recursive: true }); },
+    run: async (_command, args) => { if (args[1] === "add") plantWorktreePointer(args[3], f.operatorDir); },
     gitRaw: async () => source,
     collectGitRecord: async () => ({ repoStatusFiles: [] }), budgetState: { budgets: { scout: {} } },
     runOpenClaw: async () => ({ final: "SCOUT REPORT\nQUESTION: Find defects\nCONFIDENCE: high\nFINDING: `check_scope` has a missing tenant check [access.py:1-2]\nNOT_FOUND: none\nEND", provider: "reviewer" }),

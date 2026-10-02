@@ -14,6 +14,7 @@ import { reportView } from "../lib/job-format.mjs";
 import { jobSchema } from "../mcp/server.mjs";
 import { createJobRuntime } from "../lib/admission.mjs";
 import { deriveBudgets } from "../lib/budget.mjs";
+import { plantWorktreePointer } from "./helpers/worktree-fixture.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const fillAcceptance = input => {
@@ -184,7 +185,7 @@ test("implement executor persists criterion IDs and proposals from its full-cont
       assert.equal(cmd, "git");
       assert.deepEqual(args.slice(0, 3), ["worktree", "add", "-b"]);
       fs.mkdirSync(args[4], { recursive: true });
-      fs.writeFileSync(path.join(args[4], ".git"), "gitdir: synthetic\n");
+      plantWorktreePointer(args[4], f.repoDir);
       return { stdout: "" };
     },
     gitRaw: async args => { calls.push(args); return diff; },
