@@ -13,6 +13,7 @@ import { classifyTestChanges } from "../lib/diff-checks.mjs";
 import { createProcess } from "../lib/process.mjs";
 import { HIGH_STAKES_NOTE } from "../lib/outcome.mjs";
 
+const withJudgment = (trust) => ({ ...trust, judgment: { status: "unavailable", validator: null, answers: {}, error: "No trust validator configured." }, checks: [] });
 const normal = { level: "normal", reasons: [] };
 const sensitive = (file, rule = 0, reason = "access control and tenant data") => ({
   rule, reason: `changes ${file}, which the repo marks sensitive: ${reason}`, file,
@@ -139,7 +140,7 @@ test("changing the trust contract or any CODEOWNERS file is itself human-level",
   });
 });
 
-async function implement(t, { config = null, workerConfig = config, changed = ["auth/check.py"], diffText = "", owners = null, workerOwners = null, untracked = false, workerFails = false, baseFiles = {}, newFiles = {}, entries = null, baseModes = {}, setupWorker = null, conversion = null } = {}) {
+async function implement(t, { config = null, workerConfig = config, changed = ["auth/check.py"], diffText = "", owners = null, workerOwners = null, untracked = false, workerFails = false, baseFiles = {}, newFiles = {}, entries = null, baseModes = {}, setupWorker = null, conversion = null, validatorDeps = {}, task = "change access check", stakes = null, trustAdmission = null } = {}) {
   const root = fixture(t), projectDir = path.join(root, "checkout"), jobsRoot = path.join(root, "jobs");
   fs.mkdirSync(projectDir);
   if (config !== null) write(projectDir, ".nomarmy.yml", config);
@@ -151,7 +152,7 @@ async function implement(t, { config = null, workerConfig = config, changed = ["
   flow.registerVerificationRunner(async () => ({ status: "pass" }));
   let commitOutcome, setupError;
   const hashCalls = [], blobs = new Map();
-  const executor = createExecutor({ VERSION: "test", projectDir, jobsRoot,
+  const executor = createExecutor({ ...validatorDeps, VERSION: "test", projectDir, jobsRoot,
     assertRepo: async () => {}, ensureJobsRoot: () => fs.mkdirSync(jobsRoot, { recursive: true }),
     resolveBase: async () => ({ ref: "base", sha: "base-sha" }),
     sweepStaleSandboxContainers: async () => {},
@@ -225,7 +226,7 @@ async function implement(t, { config = null, workerConfig = config, changed = ["
     ...flow, verificationFlow: flow, repoPolicy: () => ({}), buildMetrics: () => ({}), recordedBudgets: () => ({}),
     resolveReasoningApplied: () => "off", execution: {}, budgetState: { budgets: { report: { implement: 256 } } },
   });
-  const result = await executor.executeJob({ task: "change access check", jobId: "trust-job" });
+  const result = await executor.executeJob({ task, stakes, trustAdmission, jobId: "trust-job" });
   if (setupError) throw setupError;
   assert.equal(result.manifest.error, undefined, result.report);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(result.jobDir, "metadata.json"), "utf8")), result.manifest);
@@ -237,36 +238,36 @@ const trustConfig = "trust:\n  sensitive:\n    - paths: ['auth/**']\n      reaso
 test("implement jobs enforce checkout trust, retain normal records, and leave unconfigured repos unchanged", async (t) => {
   const { manifest, commitOutcome } = await implement(t, { config: trustConfig, workerConfig: "{}\n", changed: ["auth/check.py", ".nomarmy.yml"] });
   const trust = { level: "human", reasons: [sensitive("auth/check.py"), ruleChange(".nomarmy.yml")] };
-  assert.deepEqual(manifest.trust, trust);
+  assert.deepEqual(manifest.trust, withJudgment(trust));
   assert.equal(manifest.reviewRequired, true);
   assert.equal(commitOutcome.reviewRequired, true);
   assert.equal(manifest.issues[0], `HUMAN REVIEW REQUIRED (trust): ${trust.reasons.map((reason) => reason.reason).join("; ")}`);
   assert.equal(manifest.issues.filter((issue) => issue === HIGH_STAKES_NOTE).length, 1);
   assert.equal(manifest.commit.created, true); // Integration is gated, not the worker commit.
   const unmatched = (await implement(t, { config: trustConfig, changed: ["README.md"] })).manifest;
-  assert.deepEqual(unmatched.trust, normal);
+  assert.deepEqual(unmatched.trust, withJudgment(normal));
   assert.equal(unmatched.reviewRequired, false);
   assert.deepEqual(unmatched.issues, ["existing issue"]);
   const ordinary = (await implement(t)).manifest;
-  assert.equal(Object.hasOwn(ordinary, "trust"), false);
-  assert.deepEqual(Object.keys(ordinary).sort(), Object.keys(unmatched).filter((key) => key !== "trust").sort());
+  assert.deepEqual(ordinary.trust, withJudgment(normal));
+  assert.deepEqual(Object.keys(ordinary).sort(), Object.keys(unmatched).sort());
   assert.equal(ordinary.reviewRequired, false);
   assert.deepEqual(ordinary.issues, ["existing issue"]);
 });
 
 test("implement gates owner changes, new-file content, and sensitive diffs from failed workers", async (t) => {
   const owned = (await implement(t, { config: "trust:\n  codeowners: true\n", owners: "/auth/ @security\n", workerOwners: "", changed: ["auth/check.py", ".github/CODEOWNERS"] })).manifest;
-  assert.deepEqual(owned.trust, { level: "human", reasons: [
+  assert.deepEqual(owned.trust, withJudgment({ level: "human", reasons: [
     { rule: "codeowners", reason: "changes auth/check.py, owned in CODEOWNERS by @security", file: "auth/check.py" }, ruleChange(".github/CODEOWNERS"),
-  ] });
+  ] }));
   const content = (await implement(t, { config: "trust:\n  sensitive:\n    - content: ['TRUNCATE']\n      reason: destructive SQL\n", changed: ["new.sql"], untracked: true })).manifest;
-  assert.deepEqual(content.trust, { level: "human", reasons: [
+  assert.deepEqual(content.trust, withJudgment({ level: "human", reasons: [
     { rule: 0, reason: "adds sensitive content at new.sql:1, which the repo marks sensitive: destructive SQL", file: "new.sql", line: 1 },
-  ] });
+  ] }));
   const failed = (await implement(t, { config: trustConfig, workerFails: true })).manifest;
   assert.equal(failed.outcome, "WORKER_FAILED");
   assert.equal(failed.reviewRequired, true);
-  assert.deepEqual(failed.trust, { level: "human", reasons: [sensitive("auth/check.py")] });
+  assert.deepEqual(failed.trust, withJudgment({ level: "human", reasons: [sensitive("auth/check.py")] }));
   assert.equal(failed.issues[0], "HUMAN REVIEW REQUIRED (trust): changes auth/check.py, which the repo marks sensitive: access control and tenant data");
   assert.equal(failed.issues.includes(HIGH_STAKES_NOTE), true);
 });
@@ -335,7 +336,7 @@ test("raw trust content scans NUL and invalid UTF-8 bytes on both sides", async 
     newFiles: { "query.bin": Buffer.concat([Buffer.from([0xfe, 0]), Buffer.from("\nDROP TABLE new;\n")]) },
     diffText: "Binary files a/query.bin and b/query.bin differ\n",
   });
-  assert.deepEqual(manifest.trust, { level: "human", reasons: [sqlReason("query.bin", "removes"), sqlReason("query.bin")] });
+  assert.deepEqual(manifest.trust, withJudgment({ level: "human", reasons: [sqlReason("query.bin", "removes"), sqlReason("query.bin")] }));
   // Latin1 fallback is observable, not just an ASCII match after replacement.
   assert.deepEqual(evaluateTrust({ rules: [{ content: ["ÿ"], reason: "binary marker" }],
     fileChanges: [{ file: "query.bin", before: Buffer.alloc(0), after: Buffer.from([0xff]) }] }), {
@@ -415,10 +416,10 @@ test("raw snapshots gate untracked renamed and deleted content and old paths", a
     baseFiles: { "auth/old.sql": "select 1;\nDROP TABLE renamed;\n", "deleted.sql": "select 1;\nDROP TABLE deleted;\n" },
     newFiles: { "new.sql": "select 1;\nDROP TABLE untracked;\n", "renamed.sql": "select 1;\nDROP TABLE renamed;\n", "deleted.sql": null },
   });
-  assert.deepEqual(manifest.trust, { level: "human", reasons: [
+  assert.deepEqual(manifest.trust, withJudgment({ level: "human", reasons: [
     sensitive("auth/old.sql", 0, "destructive SQL"), sqlReason("new.sql"), sqlReason("renamed.sql"),
     sqlReason("deleted.sql", "removes"), sqlReason("auth/old.sql", "removes"),
-  ] });
+  ] }));
 });
 
 test("missing and malformed trust snapshots fail closed", () => {
@@ -450,7 +451,7 @@ const unchecked = (file, problem = "is not a regular file or symlink") => ({
   level: "human", reasons: [{ rule: "trust", reason: `changes ${file}, which ${problem}, so its content can't be checked`, file }],
 });
 function assertGated(manifest, trust) {
-  assert.deepEqual(manifest.trust, trust);
+  assert.deepEqual(manifest.trust, withJudgment(trust));
   assert.equal(manifest.reviewRequired, true);
   assert.equal(manifest.issues[0], `HUMAN REVIEW REQUIRED (trust): ${trust.reasons.map(({ reason }) => reason).join("; ")}`);
 }
@@ -486,7 +487,7 @@ test("safe trust snapshots compare an outside symlink target string without read
     },
   });
   check();
-  assert.deepEqual(manifest.trust, normal);
+  assert.deepEqual(manifest.trust, withJudgment(normal));
   assert.equal(manifest.reviewRequired, false);
 });
 
@@ -511,9 +512,9 @@ test("safe trust snapshots compare base symlink blobs like for like", posixOnly,
       baseModes: { "tracked-link": "120000" }, newFiles: { "tracked-link": null },
       setupWorker(cwd) { fs.symlinkSync(target, path.join(cwd, "tracked-link")); },
     });
-    assert.deepEqual(manifest.trust, target === "DROP TABLE old" ? normal : {
+    assert.deepEqual(manifest.trust, withJudgment(target === "DROP TABLE old" ? normal : {
       level: "human", reasons: [sqlReason("tracked-link", "removes", 1), sqlReason("tracked-link", "adds", 1)],
-    });
+    }));
   }
 });
 
@@ -575,7 +576,7 @@ test("safe trust snapshots gate oversized files before opening and accept the si
     });
     check();
     if (size > limit) assertGated(manifest, unchecked("large.txt", "exceeds the 16777216-byte content limit"));
-    else assert.deepEqual(manifest.trust, normal);
+    else assert.deepEqual(manifest.trust, withJudgment(normal));
   }
 });
 
@@ -652,4 +653,90 @@ test("whole-file occurrence counts locate new matches after unchanged context", 
     fileChanges: [{ file: "query.sql", before, after }] }), {
     level: "human", reasons: [sqlReason("query.sql", "adds", 2)],
   });
+});
+
+test("implement phase two grades raw removed checks and judgments as high stakes with a human-only hard stop", async (t) => {
+  const { resetJevBreaker } = await import("../lib/validators.mjs");
+  for (const [probability, removed, expected] of [[0, false, "normal"], [0, true, "review"], [0.5, false, "review"], [0.5, true, "review"], [0.8, false, "human"], [0.8, true, "human"]]) {
+    resetJevBreaker();
+    const validatorDeps = { jevSettings: () => ({ key: "fixture", checks: [] }), askTrustJev: async ({ state }) => {
+      assert.deepEqual(Object.keys(state), ["diff"]);
+      assert.equal(state.diff.includes("SECRET_BRIEF"), false);
+      return { answers: { access: { probabilities: { yes: probability } }, checks: { probabilities: { yes: 0 } }, data: { probabilities: { yes: 0 } } } };
+    } };
+    const { manifest, commitOutcome } = await implement(t, { validatorDeps, task: "SECRET_BRIEF", changed: ["utils.py", ".gitattributes"],
+      baseFiles: { "utils.py": removed ? "if not authorized:\n    raise Denied()" : "value = 1" },
+      newFiles: { "utils.py": "# this is safe\nvalue = 2", ".gitattributes": "* -diff" }, diffText: "" });
+    const reasons = [
+      ...(removed ? [{ rule: "removed-check", reason: "Removes or changes an access guard at utils.py:1.", file: "utils.py", line: 1 }] : []),
+      ...(probability >= 0.5 ? [{ rule: "judgment", reason: `The diff may change access control at utils.py:1, .gitattributes:1 (jev, probability ${probability.toFixed(2)}).` }] : []),
+    ];
+    assert.deepEqual(manifest.trust, { level: expected, reasons,
+      judgment: { status: "available", validator: "jev", answers: { access: probability, checks: 0, data: 0 }, error: null },
+      checks: removed ? [{ kind: "guard", file: "utils.py", line: 1, reason: "Removes or changes an access guard at utils.py:1." }] : [] });
+    assert.equal(manifest.stakes ?? null, expected === "normal" ? null : "high");
+    assert.equal(manifest.reviewRequired, expected !== "normal");
+    assert.equal(commitOutcome.reviewRequired, expected !== "normal");
+    assert.equal(manifest.commit.created, true);
+    assert.deepEqual(manifest.issues, [
+      ...(expected === "human" ? [`HUMAN REVIEW REQUIRED (trust): ${reasons.map(r => r.reason).join("; ")}`] : []),
+      ...(expected !== "normal" ? [HIGH_STAKES_NOTE] : []), "existing issue",
+    ]);
+  }
+  const { manifest } = await implement(t, { stakes: "high", trustAdmission: { notes: ["Brief marks task high."] }, changed: ["utils.py"], newFiles: { "utils.py": "value = 2" } });
+  assert.equal(manifest.stakes, "high");
+  assert.deepEqual(manifest.trustAdmission, { notes: ["Brief marks task high."] });
+  assert.equal(manifest.reviewRequired, true);
+});
+
+test("trust judgment schema accepts booleans and rejects other values", () => {
+  for (const judgment of [false, true]) {
+    assert.deepEqual(validateConfig({ trust: { judgment } }), {
+      valid: true, config: { trust: { judgment }, environment_retention: { success: "destroy", failure: "logs", debug: "retain" } },
+      errors: [], elevated: { shared: [], remote: [] },
+    });
+  }
+  for (const [judgment, type] of [["false", "string"], [0, "number"], [null, "null"], [[], "array"], [{}, "object"]]) {
+    assert.deepEqual(validateConfig({ trust: { judgment } }), {
+      valid: false, config: null, errors: [`trust.judgment: Invalid input: expected boolean, received ${type}`], elevated: { shared: [], remote: [] },
+    });
+  }
+});
+
+test("operator judgment opt-out records disabled judgments while defaults and worktree edits keep judgment enabled", async (t) => {
+  const { resetJevBreaker } = await import("../lib/validators.mjs");
+  const disabled = { status: "disabled", validator: null, answers: {}, error: null };
+  const enabled = { status: "available", validator: "jev", answers: { access: 0, checks: 0, data: 0 }, error: null };
+  const off = "trust:\n  judgment: false\n";
+  for (const config of [null, "trust:\n  judgment: true\n", off]) {
+    for (const removed of [false, true]) {
+      resetJevBreaker();
+      let calls = 0;
+      const { manifest } = await implement(t, { config, workerConfig: off, changed: ["utils.py"],
+        baseFiles: { "utils.py": removed ? "if not authorized:\n    raise Denied()" : "value = 1" },
+        newFiles: { "utils.py": "value = 2" },
+        validatorDeps: { jevSettings: () => ({ key: "fixture", checks: [] }), askTrustJev: async () => {
+          calls++;
+          return { answers: { access: { probabilities: { yes: 0 } }, checks: { probabilities: { yes: 0 } }, data: { probabilities: { yes: 0 } } } };
+        }, askTrustJudge: async () => assert.fail("unexpected judge call") },
+      });
+      assert.equal(calls, config === off ? 0 : 1);
+      assert.deepEqual(manifest.trust, { level: removed ? "review" : "normal",
+        reasons: removed ? [{ rule: "removed-check", reason: "Removes or changes an access guard at utils.py:1.", file: "utils.py", line: 1 }] : [],
+        judgment: config === off ? disabled : enabled,
+        checks: removed ? [{ kind: "guard", file: "utils.py", line: 1, reason: "Removes or changes an access guard at utils.py:1." }] : [] });
+      assert.equal(manifest.reviewRequired, removed);
+    }
+  }
+  // A tracked policy edit remains human-gated and cannot disable the call.
+  resetJevBreaker();
+  let judgeCalls = 0;
+  const { manifest } = await implement(t, { workerConfig: off, changed: [".nomarmy.yml"],
+    validatorDeps: { judgeSettings: () => ({}), askTrustJudge: async () => {
+      judgeCalls++;
+      return { answer: { access: 0, checks: 0, data: 0 } };
+    } } });
+  assert.equal(judgeCalls, 1);
+  assert.deepEqual(manifest.trust, { level: "human", reasons: [ruleChange(".nomarmy.yml")], checks: [],
+    judgment: { ...enabled, validator: "judge" } });
 });

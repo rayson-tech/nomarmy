@@ -26,7 +26,7 @@ import { connectViaWsl, connectClaude, connectCodex, connectCursor, cursorAlread
 import { compareVersions, readPackageVersion, readInstallVersions, copyIsStale } from "../lib/install-freshness.mjs";
 import { loadJobRecords, computeStats, formatStats, formatStatsSummary, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
 import { requestJobStop } from "../lib/openclaw-run.mjs";
-import { loadValidators, saveJevKey, removeJev, jevSettings, askJev, validatorsPath, JEV_CHECKS, saveJudge, removeJudge, judgeSettings, judgeAgentChoices, chooseJudgeAgent, confirmJudgeHostTools } from "../lib/validators.mjs";
+import { loadValidators, saveJevKey, removeJev, jevSettings, askJev, validatorsPath, JEV_CHECKS, saveJudge, removeJudge, judgeSettings, judgeAgentChoices, chooseJudgeAgent, confirmJudgeHostTools, validatorTrustDisclosure } from "../lib/validators.mjs";
 import { probeModel } from "../lib/model-probe.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
 import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, agentProviderId, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
@@ -3060,10 +3060,18 @@ async function cmdValidators() {
     try { config = loadValidators(); } catch (error) { if (json) return out({ error: error.message }); console.log(c.red(error.message)); process.exitCode = 1; return; }
     const judge = config.judge ? { enabled: config.judge.enabled, agent: config.judge.agent, model: config.judge.model, checks: config.judge.checks, hostTools: config.judge.host_tools } : null;
     const jev = config.jev ? { enabled: config.jev.enabled, checks: config.jev.checks, model: config.jev.model, key: config.jev.key_env ? `env ${config.jev.key_env}` : config.jev.key_file, keyReadable: Boolean(jevSettings()) } : null;
+    if (jev) jev.trustJudgment = validatorTrustDisclosure("Jev", "TypeSafe");
+    if (judge) {
+      const agents = loadAgents(globalConfigDir()).agents;
+      const vendor = agentProviderId(agents[judge.agent]) ?? `the configured vendor for agent "${judge.agent}" (agent unavailable)`;
+      judge.trustJudgment = validatorTrustDisclosure("the judge", vendor);
+    }
     if (json) return out({ path: validatorsPath(), jev, judge });
     if (!jev && !judge) { console.log("No validators configured. Add one with: nomarmy validators add jev, or nomarmy validators add judge --agent <name> --model <model>"); return; }
     if (jev) console.log(`Jev: ${jev.enabled ? c.green("on") : "off"} (${jev.model}); checks: ${jev.checks.join(", ")}; key: ${jev.key}${jev.keyReadable ? "" : c.red(" (not readable)")}`);
+    if (jev) console.log(`  Also drives the trust judgment. ${jev.trustJudgment}`);
     if (judge) console.log(`Judge: ${judge.enabled ? c.green("on") : "off"} (${judge.agent}/${judge.model}); checks: ${judge.checks.join(", ")}${judge.hostTools ? c.yellow("; host tools allowed") : ""}`);
+    if (judge) console.log(`  Also drives the trust judgment. ${judge.trustJudgment}`);
     return;
   }
   if (name === "judge") return cmdValidatorsJudge(sub);
@@ -3075,12 +3083,14 @@ async function cmdValidators() {
       console.log("Its answers only add review flags; they never pass a check or allow a commit.");
       console.log(c.yellow("It sends excerpts of your code (findings, cited lines, diffs, worker reports) to TypeSafe.\n"));
     }
+    const trustJudgment = validatorTrustDisclosure("Jev", "TypeSafe");
+    (json ? console.error : console.log)(`Before saving: ${trustJudgment}`);
     const key = flag("key-stdin") ? await readStdin() : await readHiddenLine("TypeSafe API key (not shown): ");
     const saved = saveJevKey(key);
     let ok = false, why = null;
     try { ok = await testJev(jevSettings()); } catch (error) { why = error.message; }
-    if (json) return out({ saved: true, keyFile: saved.keyFile, configPath: saved.configPath, test: ok ? "pass" : "fail", reason: why });
-    console.log(c.green(`✓ Saved the key to ${saved.keyFile} (readable only by you) and turned Jev on in ${saved.configPath}.`));
+    if (json) return out({ saved: true, keyFile: saved.keyFile, configPath: saved.configPath, test: ok ? "pass" : "fail", reason: why, trustJudgment });
+    console.log(c.green(`✓ Saved the key to ${saved.keyFile} (readable only by you) and turned Jev on in ${saved.configPath}. ${trustJudgment}`));
     console.log(ok ? c.green("✓ Test call answered. New jobs use it; restart open coordinator sessions to pick it up.") : c.red(`✗ Test call failed: ${why ?? "no answer"}. Check the key, then: nomarmy validators test jev`));
     if (!ok) process.exitCode = 1;
     return;
@@ -3136,6 +3146,8 @@ async function cmdValidatorsJudge(sub) {
       model = /^\d+$/.test(answer) && listed[Number(answer) - 1] ? listed[Number(answer) - 1] : answer || fallback;
       if (!model) { rl?.close(); throw new Error("A model id is required."); }
     }
+    const trustJudgment = validatorTrustDisclosure("the judge", agentProviderId(agents[agent]));
+    (json ? console.error : console.log)(`Before saving: ${trustJudgment}`);
     let hostTools = flag("host-tools");
     if (agentRunsToolsOnHost(agents[agent]) && !hostTools) {
       if (!process.stdin.isTTY || json) {
@@ -3152,8 +3164,8 @@ async function cmdValidatorsJudge(sub) {
     const settings = resolve();
     if (settings?.problem) throw new Error(settings.problem);
     const test = await probe(settings);
-    if (json) return out({ saved: true, configPath: saved.configPath, test: test.ok ? "pass" : test.refused ? "refused" : "inconclusive", reason: test.reason });
-    console.log(c.green(`✓ The judge is ${agent}/${model}, in ${saved.configPath}.`));
+    if (json) return out({ saved: true, configPath: saved.configPath, test: test.ok ? "pass" : test.refused ? "refused" : "inconclusive", reason: test.reason, trustJudgment });
+    console.log(c.green(`✓ The judge is ${agent}/${model}, in ${saved.configPath}. ${trustJudgment}`));
     if (dominantBuilderVendor === null) {
       try {
         const roles = loadArmy({ projectDir: repoDir }).army.roles;

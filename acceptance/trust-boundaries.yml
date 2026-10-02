@@ -1,5 +1,5 @@
 # Acceptance contract for the deterministic trust floor and its human gate.
-feature: Trust boundaries, phase 1
+feature: Trust boundaries, phases 1 and 2
 criteria:
   - id: TRUST-1
     text: trust.sensitive and trust.codeowners validate in .nomarmy.yml; bad entries name the rule
@@ -117,10 +117,16 @@ criteria:
     status: met
     security: true
   - id: TRUST-9
-    text: A repo without trust rules behaves exactly as before
+    text: A repo without trust rules gets no floor gating; the removed-check detector always runs, and the per-diff judgment runs unless trust.judgment is false
     proven_by:
       - file: tests/trust.test.mjs
         test: implement jobs enforce checkout trust, retain normal records, and leave unconfigured repos unchanged
+      - file: tests/trust.test.mjs
+        test: operator judgment opt-out records disabled judgments while defaults and worktree edits keep judgment enabled
+      - file: tests/trust-phase2.test.mjs
+        test: brief judgment opt-out uses operator checkout and records disabled without validator calls
+      - file: tests/trust.test.mjs
+        test: trust judgment schema accepts booleans and rejects other values
     status: met
     security: true
   - id: TRUST-10
@@ -147,4 +153,36 @@ criteria:
         test: safe trust snapshots gate base gitlinks without cat-file blob even when deleted
     status: met
     note: the symlink, FIFO and socket proofs apply on POSIX only (the engine runs in WSL on Windows). A sandbox that denies mkfifo skips the FIFO test, so this criterion reads broken there; check it on the host or in CI
+    security: true
+  - id: TRUST-11
+    text: Raw before and after snapshots deterministically flag removed or changed access guards, middleware, validations, tenant filters and row-level security with locations
+    proven_by:
+      - file: tests/trust-phase2.test.mjs
+        test: removed checks detect raw guards middleware validations tenant filters and RLS with harmless near misses
+    status: met
+    security: true
+  - id: TRUST-12
+    text: Diff-only Jev or judge probabilities can only escalate trust; comments are data and unavailable validators cannot lower the floor
+    proven_by:
+      - file: tests/trust-phase2.test.mjs
+        test: diff judgment sees only raw diff data prefers Jev falls back to judge and cannot lower a planted-comment floor
+      - file: tests/trust-phase2.test.mjs
+        test: unavailable failing invalid and bounded validators retain deterministic escalation
+    status: met
+    security: true
+  - id: TRUST-13
+    text: Normal, review and human levels retain assigned floors with plain reasons; review means high stakes and only human adds the hard stop
+    proven_by:
+      - file: tests/trust-phase2.test.mjs
+        test: graded trust escalation table preserves assigned levels and exact plain reasons
+      - file: tests/trust.test.mjs
+        test: implement phase two grades raw removed checks and judgments as high stakes with a human-only hard stop
+    status: met
+    security: true
+  - id: TRUST-14
+    text: Bounded asynchronous brief judgment marks high stakes with admission notes and never refuses a job; no validator skips silently
+    proven_by:
+      - file: tests/trust-phase2.test.mjs
+        test: brief admission marks high stakes with exact notes never refuses and skips silently without a validator
+    status: met
     security: true

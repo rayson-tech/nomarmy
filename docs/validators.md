@@ -8,7 +8,7 @@ nomArmy's built-in checks run on every job: it reads the real diff, runs your ve
 | [Jev](#jev) | Do a scout's cited lines support its finding? Does a worker's report match its diff? | `nomarmy validators add jev` | A fraction of a cent a job | Yes, to TypeSafe |
 | [Model judge](#model-judge) | Does the diff meet each acceptance criterion, match the report, keep its tests as strong? | `nomarmy validators add judge --agent <name> --model <model>` | One call to your agent a job | Yes, to that agent's vendor |
 
-`nomarmy validators list` shows which are on.
+`nomarmy validators list` shows which are on and, per validator, that it also drives the trust judgment, what is sent, the vendor, and the repository opt-out. Adding Jev or a model judge turns on nomArmy's trust judgment in every repository. Setup discloses this before saving (on stderr with `--json`) and repeats it in the saved result.
 
 ## What every validator shares
 
@@ -43,7 +43,7 @@ That's a live run: a worker's `isAdult(age)` passed verification with tests for 
 
 ## Jev
 
-[Jev](https://docs.typesafe.ai) is TypeSafe's fast judgment model. It makes two judgments nomArmy's mechanical checks can't:
+[Jev](https://docs.typesafe.ai) is TypeSafe's fast judgment model. It checks questions nomArmy's mechanical checks can't:
 
 - **Do a scout's cited lines support its finding?** nomArmy checks that a citation exists; Jev reads the whole cited range against the claim. A finding that fails is marked `[JEV: ...]` in the scout's report.
 - **Does a worker's report match its diff?** A contradiction ("restored check.js to base commit" beside a diff that rewrote it) raises review.
@@ -58,7 +58,7 @@ The key is saved to `~/.config/nomarmy/secrets/typesafe.key`, readable only by y
 
 **What we measured** on real job records: every mismatched citation we planted was caught, and the real findings it flagged were real problems (a finding that misread its own cited line; true claims citing the wrong lines). It flagged none of 30 real reports against their own diffs and caught a worker's false claim. A job's checks cost a fraction of a cent.
 
-**It sends excerpts of your code** (findings, cited lines, diffs, worker reports) to TypeSafe. A failed or slow call (15 seconds at most) skips Jev for every job for 10 minutes, and a job never spends more than 45 seconds on it.
+**What it sends to TypeSafe:** excerpts of your code (findings, cited lines, diffs, worker reports), plus each implement job's diff and its brief at dispatch for nomArmy's trust judgment in every repository. The trust judgment checks for security-sensitive changes (access control, removed checks, personal data, secrets, money). It can only raise a job's review level. Turn it off for a repository with `trust: { judgment: false }` in its `.nomarmy.yml`. A failed or slow call (15 seconds at most) skips Jev for every job for 10 minutes, and a job never spends more than 45 seconds on it.
 
 ## Model judge
 
@@ -75,7 +75,9 @@ After each implement job it answers three questions about the diff, in one call:
 
 - **Pick an agent independent of the builders.** The terminal lists independent agents first and marks agents that use the same vendor as builders. Move to a newer model by running `add judge` again.
 - **Host tools need consent.** When `nomarmy validators add judge` selects an agent whose tools run on your machine, it explains the boundary and asks for consent in an interactive terminal. The judge runs through OpenClaw in an empty folder and is told not to use tools, but OpenClaw can't turn an agent's tools off. Pass `--host-tools` to give the same consent in a scripted command. An api key, Codex or Muse agent needs none.
-- It sends the diff and report to that agent's vendor, like any job on it. The local model can't be a judge (too little context for a diff).
+- **What it sends to the selected agent's vendor:** the diff, report, and acceptance criteria, plus each implement job's diff and its brief at dispatch for nomArmy's trust judgment in every repository. The trust judgment checks for security-sensitive changes (access control, removed checks, personal data, secrets, money). It can only raise a job's review level. Turn it off for a repository with `trust: { judgment: false }` in its `.nomarmy.yml`. The local model can't be a judge (too little context for a diff).
+
+The trust judgment prefers Jev when available and otherwise uses the model judge; it does not send the same judgment to both. The repository opt-out disables diff and brief trust judgments, not the validator's other checks. A repo without trust rules gets no floor gating; the removed-check detector always runs, and the per-diff judgment runs unless `trust.judgment` is false.
 
 **What we measured** with Claude Haiku 4.5 as judge on 12 real jobs: it flagged none against their own diffs, caught 8 of 12 reports paired with another job's diff and a worker's false claim, and never called a real job's acceptance criterion unmet (it said "unclear" when it couldn't tell). About 13 seconds a job.
 

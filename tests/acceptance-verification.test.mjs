@@ -47,10 +47,17 @@ async function job(t, { proof = "good", code = false, timeout = false, profileSt
   });
   const flow = createVerificationFlow({});
   flow.registerVerificationRunner(context => context.acceptanceFiles ? runner(context) : { status: profileStatus });
+  let snapshot;
   const executor = createExecutor({ VERSION: "test", projectDir: repo, jobsRoot,
     assertRepo: async () => {}, ensureJobsRoot: () => fs.mkdirSync(jobsRoot, { recursive: true }), resolveBase: async () => ({ ref: "base", sha: "base" }),
     sweepStaleSandboxContainers: async () => {},
-    run: async (_cmd, args) => {
+    run: async (_cmd, args, options) => {
+      if (args[0] === "hash-object") { snapshot = options.input; return { stdout: "a".repeat(40) }; }
+      if (args[0] === "cat-file") {
+        if (args[2] === "a".repeat(40)) return { stdout: snapshot };
+        const file = args[2].slice("base:".length);
+        return { stdout: Buffer.from((baseFiles ?? { "acceptance/changed.yml": baseContract })[file] ?? "") };
+      }
       const cwd = args[4];
       fs.mkdirSync(path.join(cwd, "acceptance"), { recursive: true });
       fs.mkdirSync(path.join(cwd, "tests"));
@@ -69,7 +76,7 @@ async function job(t, { proof = "good", code = false, timeout = false, profileSt
       if (args[0] === "ls-tree") return [...new Set([
         ...Object.entries(baseFiles ?? { "acceptance/changed.yml": baseContract }).filter(([, source]) => source !== null).map(([file]) => file),
         ...Object.keys(baseErrors),
-      ])].sort().join("\0");
+      ])].sort().map(file => args.includes("--name-only") ? file : `100644 blob ${"b".repeat(40)}\t${file}`).join("\0");
       if (args[0] !== "show") return "";
       const file = args[1].slice("base:".length);
       if (baseErrors[file]) throw new Error(baseErrors[file]);
@@ -85,6 +92,7 @@ async function job(t, { proof = "good", code = false, timeout = false, profileSt
   });
   const result = await executor.executeJob({ task: "Check contracts", mode: "implement", verification: "quick", verifyRegression: true, jobId: "job-contract" });
   const manifest = JSON.parse(fs.readFileSync(path.join(result.jobDir, "metadata.json"), "utf8"));
+  assert.deepEqual(Object.keys(manifest.trust).sort(), ["checks", "judgment", "level", "reasons"]);
   if (!Object.keys(baseErrors).length) {
     assert.deepEqual(manifest.issues.filter(issue => issue.startsWith("CONTRACT CHECK ERROR:")), []);
   }
