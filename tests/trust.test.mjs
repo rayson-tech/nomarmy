@@ -141,11 +141,12 @@ test("changing the trust contract or any CODEOWNERS file is itself human-level",
   });
 });
 
-async function implement(t, { config = null, workerConfig = config, changed = ["auth/check.py"], diffText = "", owners = null, workerOwners = null, untracked = false, workerFails = false, baseFiles = {}, newFiles = {}, entries = null, baseModes = {}, setupWorker = null, conversion = null, validatorDeps = {}, task = "change access check", stakes = null, trustAdmission = null } = {}) {
+async function implement(t, { trustMap = null, config = null, workerConfig = config, changed = ["auth/check.py"], diffText = "", owners = null, workerOwners = null, untracked = false, workerFails = false, baseFiles = {}, newFiles = {}, entries = null, baseModes = {}, setupWorker = null, conversion = null, validatorDeps = {}, task = "change access check", stakes = null, trustAdmission = null } = {}) {
   const root = fixture(t), projectDir = path.join(root, "checkout"), jobsRoot = path.join(root, "jobs");
   fs.mkdirSync(projectDir);
   if (config !== null) write(projectDir, ".nomarmy.yml", config);
   if (owners !== null) write(projectDir, ".github/CODEOWNERS", owners);
+  if (trustMap !== null) write(projectDir, ".nomarmy/trust-map.yml", JSON.stringify(trustMap));
   const nameStatus = entries ?? changed.map((file) => ({ path: file, status: untracked ? "A" : "M", oldPath: null, ...(untracked ? { untracked: true } : {}) }));
   const record = { repoStatusFiles: changed, changedFiles: untracked ? [] : changed, nameStatus,
     testChanges: classifyTestChanges(nameStatus), issues: ["existing issue"], ignoredRuntimeJunk: [], filesChanged: changed.length, additions: 1, deletions: 1 };
@@ -194,6 +195,7 @@ async function implement(t, { config = null, workerConfig = config, changed = ["
       }
       assert.deepEqual(args.slice(0, 3), ["worktree", "add", "-b"]);
       write(args[4], ".git", "gitdir: synthetic-pointer\n");
+      if (trustMap !== null) for (const [file, text] of Object.entries(baseFiles)) write(args[4], file, text);
     },
     gitRaw: async (args) => {
       if (args[0] === "ls-tree") {
@@ -784,4 +786,24 @@ test("review regression tenant columns come only from the operator checkout and 
     });
     assert.equal(manifest.reviewRequired, expected);
   }
+});
+
+
+test("implement reach uses only the operator map and untouched base before worker edits", async t => {
+  const mapped = { symbol: "boundary", file: "boundary.py", category: "tenant", reason: "tenant isolation" };
+  const baseFiles = { "boundary.py": "def boundary(user):\n    return helper(user)\n", "helper.py": "def helper(user):\n    assert user.tenant_id\n    return user.tenant_id\n" };
+  const newFiles = { "boundary.py": "def boundary(user):\n    return user\n", "helper.py": baseFiles["helper.py"].replace("    assert user.tenant_id\n", ""), ".nomarmy/trust-map.yml": "[]\n" };
+  const result = await implement(t, { trustMap: [mapped], baseFiles, newFiles, changed: Object.keys(newFiles), config: "trust:\n  judgment: false\n" });
+  assert.equal(result.manifest.trust.level, "human");
+  assert.equal(result.manifest.reviewRequired, true);
+  assert.equal(result.manifest.stakes, "high");
+  assert.deepEqual(Object.keys(result.manifest.trust).sort(), ["checks", "judgment", "level", "reach", "reasons"]);
+  assert.deepEqual(result.manifest.trust.reach, { baseCommit: "base-sha", key: result.manifest.trust.reach.key, heuristic: true, depth: 3, fanOut: 25, caps: [] });
+  assert.match(result.manifest.trust.reach.key, /^[a-f0-9]{64}$/);
+  assert.deepEqual(result.manifest.trust.reasons.filter(r => r.rule === "trust-reach"), [
+    { rule: "trust-reach", file: "boundary.py", line: 1, reason: "changes mapped symbol `boundary` (boundary.py:1), the tenant boundary" },
+    { rule: "trust-reach", file: "helper.py", line: 1, reason: "removes a check in helper `helper` (helper.py:1), which `boundary` (boundary.py:1), the tenant boundary, depends on via `boundary` (boundary.py:1)" },
+  ]);
+  const unaccepted = await implement(t, { baseFiles, changed: ["helper.py", ".nomarmy/trust-map.proposed.yml"], newFiles: { "helper.py": baseFiles["helper.py"].replace("return user.tenant_id", "return str(user.tenant_id)"), ".nomarmy/trust-map.proposed.yml": JSON.stringify([{ ...mapped, line: 1 }]) }, config: "trust:\n  judgment: false\n" });
+  assert.deepEqual(unaccepted.manifest.trust, { level: "normal", reasons: [], judgment: { status: "disabled", validator: null, answers: {}, error: null }, checks: [] });
 });
