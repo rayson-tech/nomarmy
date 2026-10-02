@@ -351,18 +351,24 @@ test("snapshot hunks isolate sparse edits with exact context and unified ranges"
   assert.equal(evidence("same\n", "same\n"), "");
 });
 
-test("test validation removals stay normal while helper security findings still escalate", async () => {
+test("test-only validations and guards are informational while production findings escalate", async () => {
   const disabled = { status: "disabled", validator: null, answers: {}, error: null };
   for (const file of ["tests/helper.py", "pkg/test/helper.py", "__tests__/helper.py", "pkg/spec/helper.py",
     "test_rules.py", "pkg/rules_test.py", "a.test.ts", "pkg/a.spec.js", "pkg\\tests\\helper.py"]) {
     for (const after of ["", "assert other\nvalidateOther(value)"]) {
       assert.deepEqual(await evaluateDiffTrust({ fileChanges: [{ file, before: "assert value\nvalidateInput(value)", after }], judgment: false }),
-        { level: "normal", reasons: [], checks: [], judgment: disabled }, file);
+        { level: "normal", reasons: [], checks: [
+          { kind: "validation", file, line: 1, informational: true, reason: "in test code" },
+          { kind: "validation", file, line: 2, informational: true, reason: "in test code" },
+        ], judgment: disabled }, file);
     }
     const before = "assert value\nif not authorized:\n    return 403";
-    const finding = removedFinding("guard", file, 2);
+    const checks = [
+      { kind: "validation", file, line: 1, informational: true, reason: "in test code" },
+      { kind: "guard", file, line: 2, informational: true, reason: "in test code" },
+    ];
     assert.deepEqual(await evaluateDiffTrust({ fileChanges: [{ file, before, after: "" }], judgment: false }),
-      { level: "review", reasons: [{ rule: "removed-check", reason: finding.reason, file, line: 2 }], checks: [finding], judgment: disabled });
+      { level: "normal", reasons: [], checks, judgment: disabled });
   }
   for (const file of ["src/helper.py", "contest/helper.py", "tests_helper.py", "src/test_helper.js", "src/a.testing.ts"]) {
     assert.deepEqual(detectRemovedChecks([{ file, before: "validateInput(value)", after: "" }]), [removedFinding("validation", file)]);

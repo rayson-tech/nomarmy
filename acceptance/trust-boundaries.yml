@@ -155,7 +155,7 @@ criteria:
     note: the symlink, FIFO and socket proofs apply on POSIX only (the engine runs in WSL on Windows). A sandbox that denies mkfifo skips the FIFO test, so this criterion reads broken there; check it on the host or in CI
     security: true
   - id: TRUST-11
-    text: Raw before and after snapshots deterministically flag removed or changed access guards, middleware, validations outside test files, tenant filters and row-level security with locations; other security findings in tests still count
+    text: Raw before and after snapshots deterministically flag removed or changed access guards, middleware, validations, tenant filters and row-level security with locations; findings in test-only files are informational and do not raise trust, while test-named files imported by production or outside test directories in languages without import extraction still escalate (Go _test.go files remain test-only); sensitive path floors, CODEOWNERS and reach rules are unchanged
     proven_by:
       - file: tests/trust-phase2.test.mjs
         test: removed checks detect raw guards middleware validations tenant filters and RLS with harmless near misses
@@ -174,7 +174,15 @@ criteria:
       - file: tests/trust.test.mjs
         test: review regression tenant columns come only from the operator checkout and remain additive
       - file: tests/trust-phase2.test.mjs
-        test: test validation removals stay normal while helper security findings still escalate
+        test: test-only validations and guards are informational while production findings escalate
+      - file: tests/trust-production.test.mjs
+        test: test-only middleware is informational but production imports and guards still escalate
+      - file: tests/trust-production.test.mjs
+        test: all test-only detector kinds are informational without bypassing reach
+      - file: tests/trust-production.test.mjs
+        test: unsupported import languages keep test-named production guards judged and escalating
+      - file: tests/trust-production.test.mjs
+        test: test directories and Go toolchain tests retain informational guards without judgment
       - file: tests/trust-review.test.mjs
         test: review two collects the unbraced JS else statement
       - file: tests/trust-review.test.mjs

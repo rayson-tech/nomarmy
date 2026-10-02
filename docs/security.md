@@ -27,4 +27,14 @@ Checkout-owned sensitive-path, changed-line-content and optional CODEOWNERS rule
 
 If configured, Jev or the model judge receives production-code diff hunks at its vendor and judges access control, weakened checks and sensitive data or irreversible operations. The task brief is sent separately for admission judgment, which can mark a job high stakes before dispatch. Documentation and unreferenced tests are excluded from diff judgment. The removed-check detector, floor rules and map/reach checks run locally. Model judgment only escalates: scores at least 0.5 require `review`, and scores at least 0.8 require `human`. Jev scores can vary slightly near these thresholds. `trust.judgment: false` in the operator checkout disables the diff and brief model judgments, not the deterministic layers.
 
+Test-named files outside test directories are production when their language has
+no import extraction. Go's `_test.go` files are the exception because the Go
+toolchain never links them into production builds. Test directories retain their
+existing rule (`tests/`, `test/`, `__tests__/`, and `spec/` with test evidence).
+The JS/TS import scan follows only relative `./` and `../` specifiers. A
+production file loading a test-named file through a path alias (`@/x`, tsconfig
+paths, or package.json `"imports"`), a bare specifier, or a computed import is not
+seen by this scan. List such files in `trust.sensitive.paths` in `.nomarmy.yml`
+so changes remain human-gated even when the scan excludes them from judgment.
+
 `normal` follows ordinary verification. `review` needs the independent review required for `stakes: high` before acceptance. `human` adds a hard stop before integration until the operator decides. For a repository without a map, run `nomarmy trust map` once, dispatch its scout brief, import the proposal and use `nomarmy trust review` to accept, edit or drop entries. Only accepted entries in `.nomarmy/trust-map.yml` are active. Later review defects and human rejections can suggest additions, never activate them automatically. Record a human-level decision with `nomarmy trust ack <job> --accept|--reject --reason ...`; a rejection does not authorize integration. See [trust map and bounded reach](trust-map.md) for the detailed workflow and limits.

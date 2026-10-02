@@ -83,7 +83,8 @@ test("review two promotes imported test files including Python module paths", as
     assert.deepEqual(detectRemovedChecks(fileChanges, { repository }), [finding("validation", file)]);
     // Comments, unrelated modules and test-only importers do not promote it.
     for (const [refFile, refSource] of [["tests/caller.py", source], [importer, importer.endsWith("py") ? `# ${source}` : `// ${source}`], [importer, "import unrelated"]]) {
-      assert.deepEqual(await evaluateDiffTrust({ fileChanges, repository: { files: [{ file: refFile, source: refSource }], incomplete: false } }), expected([], skipped));
+      assert.deepEqual(await evaluateDiffTrust({ fileChanges, repository: { files: [{ file: refFile, source: refSource }], incomplete: false } }),
+        { ...expected([], skipped), checks: [{ kind: "validation", file, line: 1, informational: true, reason: "in test code" }] });
     }
   });
 });

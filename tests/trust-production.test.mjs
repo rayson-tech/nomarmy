@@ -21,7 +21,7 @@ test("documentation-only judgment skips all documentation paths without changing
 
 test("tests-only judgment skips the detector test-path rule", async () => {
   for (const file of ["tests/helper.py", "pkg/test/helper.py", "__tests__/helper.py", "pkg/spec/helper.py", "test_rules.py", "pkg/rules_test.py", "a.test.ts", "pkg/a.spec.js", "pkg\\tests\\helper.py", "TESTS/helper.py"]) {
-    assert.deepEqual(await evaluateDiffTrust({ fileChanges: [{ file, before: "assert value\n", after: "assert other\n" }], ...validators }), normal, file);
+    assert.deepEqual(await evaluateDiffTrust({ fileChanges: [{ file, before: "assert value\n", after: "assert other\n" }], ...validators }), { ...normal, checks: [{ kind: "validation", file, line: 1, informational: true, reason: "in test code" }] }, file);
   }
 });
 
@@ -74,10 +74,85 @@ test("excluded docs and tests retain sensitive path content CODEOWNERS and remov
     ];
     assert.deepEqual(floor, { level: "human", reasons });
     const finding = { kind: "guard", file, line: 1, reason: `Removes or changes an access guard at ${file}:1.` };
-    const checks = file.endsWith(".md") ? [] : [finding];
+    const checks = file.endsWith(".md") ? [] : [file === "tests/access.py"
+      ? { ...finding, informational: true, reason: "in test code" } : finding];
     assert.deepEqual(await evaluateDiffTrust({ fileChanges, floor, repository, ...validators, askJev }), {
-      level: "human", reasons: [...reasons, ...checks.map(({ reason, file, line }) => ({ rule: "removed-check", reason, file, line }))], checks, judgment: production ? { status: "available", validator: "jev", answers, error: null } : skipped,
+      level: "human", reasons: [...reasons, ...checks.filter(check => !check.informational).map(({ reason, file, line }) => ({ rule: "removed-check", reason, file, line }))], checks, judgment: production ? { status: "available", validator: "jev", answers, error: null } : skipped,
     });
     assert.equal(calls, production ? 1 : 0, file);
+  }
+});
+
+test("test-only middleware is informational but production imports and guards still escalate", async () => {
+  const middleware = "router.get('/x', requireAuth, handler);";
+  const disabled = { status: "disabled", validator: null, answers: {}, error: null };
+  for (const file of ["ui/components/admin/__tests__/sourceOwnershipActions.test.tsx", "src/access.test.ts"]) {
+    const fileChanges = [{ file, before: "\n".repeat(94) + middleware, after: "" }];
+    const check = { kind: "middleware", file, line: 95, reason: `Removes or changes authentication or permission middleware at ${file}:95.` };
+    assert.deepEqual(await evaluateDiffTrust({ fileChanges, ...validators }), {
+      ...normal, checks: [{ ...check, informational: true, reason: "in test code" }],
+    });
+    const repository = { files: [{ file: "main.ts", source: `import './${file}';` }], incomplete: false };
+    assert.deepEqual(await evaluateDiffTrust({ fileChanges, repository, judgment: false }), {
+      level: "review", reasons: [{ rule: "removed-check", file, line: 95, reason: check.reason }], checks: [check], judgment: disabled,
+    });
+  }
+  const file = "src/access.ts", reason = "Removes or changes an access guard at src/access.ts:1.";
+  assert.deepEqual(await evaluateDiffTrust({ fileChanges: [{ file, before: "if (!authorized) return 403;", after: "" }], judgment: false }), {
+    level: "review", reasons: [{ rule: "removed-check", file, line: 1, reason }],
+    checks: [{ kind: "guard", file, line: 1, reason }], judgment: disabled,
+  });
+});
+
+test("all test-only detector kinds are informational without bypassing reach", async () => {
+  for (const [file, before, kind] of [
+    ["tests/access.js", "if (!authorized) return 403;", "guard"],
+    ["tests/access.js", "router.get('/x', requireAuth, handler);", "middleware"],
+    ["tests/access.js", "validateInput(value);", "validation"],
+    ["tests/query.sql", "SELECT * FROM data WHERE tenant_id = 1;", "tenant-filter"],
+    ["tests/policy.sql", "ALTER TABLE data ENABLE ROW LEVEL SECURITY;", "rls"],
+  ]) {
+    const fileChanges = [{ file, before, after: "" }];
+    const checks = [{ kind, file, line: 1, informational: true, reason: "in test code" }];
+    assert.deepEqual(await evaluateDiffTrust({ fileChanges, ...validators }), { ...normal, checks });
+    const reach = { baseCommit: "fixture", key: "fixture", heuristic: true, depth: 3, fanOut: 25, caps: [],
+      boundaries: [{ entry: { file, symbol: "*", category: "access" }, nodes: [] }] };
+    assert.deepEqual(await evaluateDiffTrust({ fileChanges, reach, ...validators }), {
+      level: "human", reasons: [{ rule: "trust-reach", file, line: 1, reason: `removes a check in mapped file ${file}, the access boundary` }],
+      checks, judgment: skipped, reach: { baseCommit: "fixture", key: "fixture", heuristic: true, depth: 3, fanOut: 25, caps: [] },
+    });
+    assert.deepEqual(await evaluateDiffTrust({ fileChanges: [{ file, before, after: before + "\n-- unrelated" }], ...validators }), normal);
+  }
+});
+
+test("unsupported import languages keep test-named production guards judged and escalating", async () => {
+  const files = ["foo_test.rb", ...["rb", "php", "go", "rs", "java", "kt", "cs", "sh", "c", "h", "cpp", "hpp", "swift"].map(ext => `src/access.test.${ext}`)];
+  for (const file of files) {
+    const before = "if (!authorized)\n  return 403\nend\n";
+    const fileChanges = [{ file, before, after: "" }];
+    const answers = { access: 0, checks: 0, data: 0 };
+    let calls = 0;
+    const result = await evaluateDiffTrust({ fileChanges, jev: { key: "fixture" }, askJev: async request => {
+      calls++;
+      assert.deepEqual(request.state, { diff: `--- a/${file}\n+++ b/${file}\n@@ -1,3 +0,0 @@\n-if (!authorized)\n-  return 403\n-end\n` });
+      return { answers: Object.fromEntries(Object.keys(answers).map(key => [key, { choice: "no", probabilities: { yes: 0, no: 1 } }])) };
+    } });
+    const reason = `Removes or changes an access guard at ${file}:1.`;
+    assert.deepEqual(result, {
+      level: "review", reasons: [{ rule: "removed-check", reason, file, line: 1 }],
+      checks: [{ kind: "guard", file, line: 1, reason }],
+      judgment: { status: "available", validator: "jev", answers, error: null },
+    }, file);
+    assert.equal(calls, 1, file);
+  }
+});
+
+test("test directories and Go toolchain tests retain informational guards without judgment", async () => {
+  for (const file of ["test/foo_test.rb", "tests/foo_test.rb", "__tests__/foo_test.rb", "spec/foo.test.rb", "x_test.go", "pkg/x_test.go"]) {
+    // spec/ retains its existing requirement for test syntax or a test name.
+    const before = file.endsWith(".go") ? "if !authorized { return 403 }\n" : "if (!authorized)\n  return 403\nend\n";
+    assert.deepEqual(await evaluateDiffTrust({ fileChanges: [{ file, before, after: "" }], ...validators }), {
+      ...normal, checks: [{ kind: "guard", file, line: 1, informational: true, reason: "in test code" }],
+    }, file);
   }
 });
