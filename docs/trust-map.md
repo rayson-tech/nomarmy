@@ -88,6 +88,14 @@ cannot be resolved statically and is left to the diff judgment, not certified by
 an empty reach result. Runtime module loading, re-exports, computed property
 names, binding shadowing and language-specific module resolution can also need
 judgment. Import-looking comments and strings do not create import bindings.
+Prompt, policy or query files (`.md`, `.txt` and similar) count as production
+only when production code names them in a string literal. A file the code loads
+by a computed path (`"sys" + ".md"`, a template, a directory read) stays
+outside the judgment and the detector, so list such files under
+`trust.sensitive.paths` in `.nomarmy.yml`: the floor gates any change to them.
+Files a test runner loads by convention (`conftest.py`, a configured setup
+file) are treated as tests unless production code imports them.
+
 The proposal receipt detects edits; it is not a cryptographic attestation of a
 scout job. Its authority depends on the operator checkout and the human gates
 on both the proposal and receipt, just as the active map does.
