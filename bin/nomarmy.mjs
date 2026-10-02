@@ -179,8 +179,9 @@ Usage: nomarmy <command> [options]
                             --link-openclaw after CLI login; removing a
                             capturing email profile non-interactively needs
                             --remove-email-profiles. Interactive Codex setup
-                            offers removal (default yes), then imports the
-                            CLI login. For any kind, optionally
+                            asks before copying the CLI login (default yes),
+                            and offers email-profile removal separately.
+                            For any kind, optionally
                             --max-concurrent --context-window
                             --thinking [minimal|low|medium|high|xhigh|adaptive|max|ultra] --no-thinking
                   update <name>
@@ -1319,7 +1320,7 @@ function reapProbeSandbox(stateDir) {
 async function openclawProviderLogin(vendor, rl) {
   if (vendor === SUBSCRIPTION_VENDORS.codex) return linkCodex({
     run: runQuiet, command: openclawCmd(), isTTY: Boolean(input.isTTY),
-    removeEmailProfiles: flag("remove-email-profiles"),
+    importLogin: flag("link-openclaw"), removeEmailProfiles: flag("remove-email-profiles"),
     confirm: (prompt, opts) => confirm(rl, prompt, opts), print: (message) => console.log(c.dim(message)),
   });
   const provider = vendor.credential.loginProvider ?? vendor.provider;
@@ -1682,7 +1683,7 @@ async function cmdAgentsAddJson() {
   if (kind === "subscription" && agent.provider === "openai" && (flag("link-openclaw") || flag("remove-email-profiles"))) {
     if (!readLoginStatus("codex").loggedIn) throw new Error("Confirm Codex CLI login first: codex login");
     const linked = await linkCodex({ run: runQuiet, command: openclawCmd(),
-      removeEmailProfiles: flag("remove-email-profiles"), print: (message) => console.error(message) });
+      importLogin: flag("link-openclaw"), removeEmailProfiles: flag("remove-email-profiles"), print: (message) => console.error(message) });
     if (!linked) throw new Error("Codex import failed; nothing was written.");
     if (!probeWorker("openai", agent.model ?? SUBSCRIPTION_VENDORS.codex.defaultModel)) {
       throw new Error(`Codex test call failed; nothing was written. Fix: ${codexImportRecovery()}`);

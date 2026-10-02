@@ -920,13 +920,14 @@ function runInteractiveAgents(root, args, replies, env = {}) {
       cwd: root, env: { ...process.env, PATH: `${path.join(root, "bin")}:${process.env.PATH}`, NOMARMY_CONFIG_DIR: path.join(root, "config"), ...env },
       stdio: ["pipe", "pipe", "pipe"],
     });
-    let stdout = "", stderr = "", sent = 0;
+    let stdout = "", stderr = "", sent = 0, importAnswered = false;
     const timer = setTimeout(() => {
       child.kill();
       reject(new Error(`Interactive agents stalled after ${sent}/${replies.length} replies. Output: ${stdout}`));
     }, 12000);
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
+      if (!importAnswered && stdout.includes("Import your Codex login into OpenClaw?")) { importAnswered = true; child.stdin.write("\n"); return; }
       if (sent < replies.length && stdout.includes(replies[sent][0])) child.stdin.write(replies[sent++][1] + "\n");
     });
     child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
@@ -1315,6 +1316,9 @@ if(a.startsWith("migrate apply codex")) { fs.writeFileSync(file,JSON.stringify([
     assert.equal(result.exitCode, 0, result.stdout);
     assert.equal(result.sent, 3);
     assert.match(result.stdout, /Confirmed an unexpired openai:account- \(Codex import\) profile/);
+    assert.equal(result.stdout.split("Import your Codex login into OpenClaw?").length - 1, 1);
+    assert.match(result.stdout, /This copies the ChatGPT credential Codex stores into OpenClaw's auth store \[Y\/n\]/);
+    assert.match(result.stdout, /Imported the ChatGPT credential stored by Codex into OpenClaw's auth store\./);
     assert.doesNotMatch(result.stdout, /SECRET_SENTINEL|models auth login/);
     const commands = fs.readFileSync(marker, "utf8").trim().split("\n");
     const logout = commands.indexOf("models auth logout openai:person@example.com");

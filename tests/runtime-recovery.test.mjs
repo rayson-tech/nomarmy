@@ -23,14 +23,14 @@ function linkRunner(initial, final = [imported], fail = null) {
     return { ok: !(fail === "logout" && args[2] === "logout") && !(fail === "migrate" && args[0] === "migrate"), stdout: "SECRET_SENTINEL" };
   } };
 }
-const options = { command: "stub", codexDir: "/sandbox/codex", now };
+const options = { command: "stub", codexDir: "/sandbox/codex", now, importLogin: true };
 
 test("Codex link removes capturing email before migration and confirms the account import without logging output", async () => {
   const r = linkRunner([email, imported]); const printed = []; const questions = [];
   assert.equal(await linkCodex({ ...options, run: r.run, isTTY: true, print: (s) => printed.push(s), confirm: async (...args) => { questions.push(args); return true; } }), true);
   assert.deepEqual(questions, [["Remove these email-keyed profiles before importing?", { defaultYes: true }]]);
   assert.deepEqual(r.calls, [list, ["models", "auth", "logout", email.id], list, migration, list]);
-  assert.deepEqual(printed, [`Email-keyed profiles will capture the Codex import: ${email.id}.`, `Linking OpenClaw: ${migrate}`, "Confirmed an unexpired openai:account- (Codex import) profile."]);
+  assert.deepEqual(printed, [`Email-keyed profiles will capture the Codex import: ${email.id}.`, `Linking OpenClaw: ${migrate}`, "Imported the ChatGPT credential stored by Codex into OpenClaw's auth store.", "Confirmed an unexpired openai:account- (Codex import) profile."]);
 });
 
 test("Codex link requires removal consent, with an explicit noninteractive flag", async () => {
@@ -39,12 +39,18 @@ test("Codex link requires removal consent, with an explicit noninteractive flag"
     assert.equal(await linkCodex({ ...options, run: r.run, isTTY, confirm: async () => false }), false);
     assert.deepEqual(r.calls, [list]);
   }
+  const unapproved = linkRunner([]);
+  assert.equal(await linkCodex({ ...options, run: unapproved.run, importLogin: false, removeEmailProfiles: true }), false);
+  assert.deepEqual(unapproved.calls, [list]);
   const r = linkRunner([email]);
   assert.equal(await linkCodex({ ...options, run: r.run, removeEmailProfiles: true }), true);
   assert.deepEqual(r.calls, [list, ["models", "auth", "logout", email.id], list, migration, list]);
 });
 
 test("Codex link rejects missing, email, expired, and mislabeled imports and failed migrations", async () => {
+  const unapproved = linkRunner([]);
+  assert.equal(await linkCodex({ ...options, run: unapproved.run, importLogin: false }), false);
+  assert.deepEqual(unapproved.calls, [list]);
   for (const final of [[], [email], [{ ...imported, expiresAt: "1970-01-01T00:00:00.000Z" }], [{ ...imported, label: "OAuth" }]]) {
     const r = linkRunner([], final);
     assert.equal(await linkCodex({ ...options, run: r.run }), false);

@@ -37,7 +37,7 @@ import { modelRefusals } from "../lib/health.mjs";
 import { retryRefusedModelsInBackground } from "../lib/refusal-retry.mjs";
 import { podmanProblem, podmanVmStartedAt } from "../lib/podman-health.mjs";
 import { restartNotice } from "../lib/install-freshness.mjs";
-import { requestJobStop } from "../lib/openclaw-run.mjs";
+import { requestJobStop, JOB_ID_RE } from "../lib/openclaw-run.mjs";
 import { loadJobRecords, computeStats, formatStats, formatStatsSummary, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
 import { shareMarkdown } from "../lib/share.mjs";
 import { recentSuggestions } from "../lib/suggestions.mjs";
@@ -486,7 +486,7 @@ server.tool("stats", "What nomArmy's own job records show for this repository (o
 });
 
 server.tool("local_worker_stop", "Stop a running job's worker, for example one burning a frontier model's usage on the wrong track. Its worker ends within about 15 seconds, without the report-recovery call a timeout gets and without running verification; its worktree is kept uncommitted, so a new job with continue_from: <job_id> (and a cheaper model if you like) can finish the work. Works for a job started by any session. Refuses a job that isn't running or is already past its worker.", {
-  job_id: z.string().regex(/^[A-Za-z0-9._-]{1,120}$/),
+  job_id: z.string().regex(JOB_ID_RE),
   reason: z.string().max(300).optional().describe("Why it's being stopped; recorded in the job's issues."),
 }, async ({ job_id, reason }) => {
   const r = requestJobStop({ jobsRoot, jobId: job_id, reason: reason ?? null });
