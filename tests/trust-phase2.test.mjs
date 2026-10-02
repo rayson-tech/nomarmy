@@ -207,3 +207,108 @@ test("brief judgment opt-out uses operator checkout and records disabled without
   assert.deepEqual(optedOut, { task: "Change tenant access", stakes: "normal", verify_regression: false,
     trustAdmission: { judgment: { status: "disabled", validator: null, answers: {}, error: null }, notes: [] } });
 });
+
+const removedFinding = (kind, file = "a.py", line = 1) => ({ kind, file, line,
+  reason: `Removes or changes ${descriptions[kind]} at ${file}:${line}.` });
+
+test("review regression collects else and elif denial branches with the retained auth guard", async (t) => {
+  for (const [name, file, before, after] of [
+    ["python same-indent else", "a.py", "if authorized: return\nelse: raise PermissionError()", "if authorized: return"],
+    ["python multiline else", "a.py", "if authorized:\n    return\nelse:\n    raise PermissionError()", "if authorized:\n    return"],
+    ["python elif", "a.py", "if authorized: return\nelif blocked: raise PermissionError()", "if authorized: return"],
+    ["python nested indentation", "a.py", "def view():\n    if authorized: return\n    else: raise PermissionError()", "def view():\n    if authorized: return"],
+    ["js separate else return", "a.js", "if (authorized) { return; }\nelse { return 403 }", "if (authorized) { return; }"],
+    ["js separated closing brace", "a.js", "if (authorized) {\n  return;\n}\nelse { throw new Error('denied'); }", "if (authorized) {\n  return;\n}"],
+    ["js else if", "a.js", "if (authorized) { return; }\nelse if (blocked) { return 403; }", "if (authorized) { return; }"],
+  ]) await t.test(name, () => {
+    assert.deepEqual(detectRemovedChecks([{ file, before, after }]), [removedFinding("guard", file, name === "python nested indentation" ? 2 : 1)]);
+    assert.deepEqual(detectRemovedChecks([{ file, before, after: `${before}\n// unrelated` }]), []);
+    // The already-covered same-line closing brace remains a positive control.
+    if (name === "js separated closing brace") assert.deepEqual(detectRemovedChecks([{ file,
+      before: "if (authorized) {\n  return;\n} else { throw new Error('denied'); }", after }]), [removedFinding("guard", file)]);
+  });
+});
+
+test("review regression ignores quoted SQL semicolons when joining tenant statements", async (t) => {
+  for (const note of ["'a;b'", '"a;b"', "'a'';b'", '"a"";b"', "'a;--b'", "'a;/*b*/'", "'a;\nb'"]) await t.test(note, () => {
+    const before = `SELECT * FROM t WHERE note = ${note}\nAND tenant_id = :tenant_id;`;
+    assert.deepEqual(detectRemovedChecks([{ file: "a.sql", before, after: `SELECT * FROM t WHERE note = ${note}` }]), [removedFinding("tenant-filter", "a.sql")]);
+    for (const comment of ["-- ; ignored", "/* ; ignored */", "/* ;\n ignored */"]) {
+      const query = `SELECT * FROM t WHERE note = ${note} ${comment}\nAND tenant_id = :tenant_id;`;
+      assert.deepEqual(detectRemovedChecks([{ file: "a.sql", before: query, after: `SELECT * FROM t WHERE note = ${note};` }]), [removedFinding("tenant-filter", "a.sql")]);
+    }
+    assert.deepEqual(detectRemovedChecks([{ file: "a.sql", before, after: `${before}\nSELECT 'unrelated';` }]), []);
+    assert.deepEqual(detectRemovedChecks([{ file: "a.sql", before: `SELECT * FROM t WHERE note = ${note};\nSELECT tenant_id FROM t;`, after: "" }]), []);
+  });
+});
+
+test("review regression detects framework denials and auth-related next errors", async (t) => {
+  const fixtures = [
+    ...[401, 403, 404].map(status => ["a.py", `if not authorized:\n    abort(${status})`]),
+    ...[401, 403].map(status => ["a.js", `if (!authorized) { res.sendStatus(${status}); }`]),
+    ["a.js", "if (!authorized) { res.status(403).json({ error: 'denied' }); }"],
+    ["a.js", "if (!authorized) { next(err); }"],
+    ["a.js", "if (!authorized) { next(new Error('denied')); }"],
+    ["a.js", "next(new UnauthorizedError('denied'));"],
+    ["a.js", "next(authError);"],
+    ["a.py", "if blocked:\n    HttpResponseForbidden()"],
+    ...["PermissionDenied", "Unauthorized", "Forbidden"].flatMap(name => [
+      ["a.py", `if blocked:\n    raise ${name}()`], ["a.py", `raise ${name}`],
+      ["a.js", `if (blocked) { throw new ${name}(); }`],
+    ]),
+  ];
+  for (const [file, before] of fixtures) await t.test(before, () => {
+    assert.deepEqual(detectRemovedChecks([{ file, before, after: "" }]), [removedFinding("guard", file)]);
+    assert.deepEqual(detectRemovedChecks([{ file, before, after: `${before}\n// unrelated` }]), []);
+    for (const nearMiss of ["next(err);", "if (failed) { next(new Error('oops')); }", "res.status(200).end();", "// abort(403)", 'const s = "res.sendStatus(403)";']) {
+      assert.deepEqual(detectRemovedChecks([{ file: "a.js", before: nearMiss, after: "" }]), []);
+    }
+  });
+});
+
+test("review regression recognizes patterned auth middleware and decorators", async (t) => {
+  for (const name of ["customAuth", "needs_login", "check_permissions", "require_member", "routeGuard", "enforce_policy", "allowed_role", "check_scope", "admin_only", "staff_only", "superuser_only"]) await t.test(name, () => {
+    for (const [file, before] of [["a.py", `@${name}\ndef view(): pass`], ["a.js", `router.get('/x', ${name}, handler);`]]) {
+      assert.deepEqual(detectRemovedChecks([{ file, before, after: "" }]), [removedFinding("middleware", file)]);
+      assert.deepEqual(detectRemovedChecks([{ file, before, after: `${before}\n// unrelated` }]), []);
+    }
+    assert.deepEqual(detectRemovedChecks([{ file: "a.js", before: `router.get('/${name}', handler);`, after: "" }]), []);
+  });
+});
+
+test("review regression detects expanded tenant columns and additive custom identifiers", async (t) => {
+  for (const column of ["account_id", "workspace_id", "company_id", "customer_id", "team_id", "project_id", "billing_partition"]) await t.test(column, () => {
+    const options = { tenantColumns: ["billing_partition"] };
+    for (const [file, before, after] of [
+      ["a.sql", `SELECT * FROM t WHERE active = true\nAND ${column} = :${column};`, "SELECT * FROM t WHERE active = true;"],
+      ["a.py", `query.filter(${column}=current)`, "query"],
+    ]) assert.deepEqual(detectRemovedChecks([{ file, before, after }], options), [removedFinding("tenant-filter", file)]);
+    assert.deepEqual(detectRemovedChecks([{ file: "a.sql", before: "SELECT * FROM t WHERE tenant_id = :tenant_id;", after: "" }], options), [removedFinding("tenant-filter", "a.sql")]);
+    assert.deepEqual(detectRemovedChecks([{ file: "a.sql", before: `SELECT * FROM t WHERE other_${column} = 1;`, after: "" }], options), []);
+  });
+});
+
+test("review regression oversized enabled diffs fail closed without lowering prior trust", async () => {
+  const fileChanges = [{ file: "notes.txt", before: "", after: "x".repeat(TRUST_EVIDENCE_CHARS) }];
+  const length = trustDiffEvidence(fileChanges).length;
+  assert.equal(length, 60054);
+  const reason = { rule: "judgment", reason: "the diff is too large to judge (60054 characters); review it" };
+  const overBudget = { status: "unavailable", validator: "judge", answers: {}, error: "Trust evidence exceeds the validator budget." };
+  for (const level of ["normal", "review", "human"]) {
+    for (const settings of [{ judge: {} }, {}]) {
+      const result = await evaluateDiffTrust({ fileChanges, ...settings, floor: { level, reasons: [] },
+        askJudge: async () => assert.fail("over budget must not call a validator") });
+      assert.deepEqual(result, { level: level === "human" ? "human" : "review", reasons: [reason], checks: [], judgment: settings.judge ? overBudget : missing });
+    }
+  }
+  assert.deepEqual(await evaluateDiffTrust({ fileChanges, previous: { level: "human", reasons: [] }, judge: {} }),
+    { level: "human", reasons: [reason], checks: [], judgment: overBudget });
+  assert.deepEqual(await evaluateDiffTrust({ fileChanges, judgment: false, judge: {}, askJudge: async () => assert.fail("opted out") }),
+    { level: "normal", reasons: [], checks: [], judgment: { status: "disabled", validator: null, answers: {}, error: null } });
+  const boundary = [{ ...fileChanges[0], after: "x".repeat(TRUST_EVIDENCE_CHARS - 54) }];
+  assert.equal(trustDiffEvidence(boundary).length, 60000);
+  let calls = 0;
+  assert.deepEqual(await evaluateDiffTrust({ fileChanges: boundary, judge: {}, askJudge: async () => { calls++; return { answer: probabilities() }; } }),
+    { level: "normal", reasons: [], checks: [], judgment: { ...available(), validator: "judge" } });
+  assert.equal(calls, 1);
+});

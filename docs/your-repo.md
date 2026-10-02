@@ -42,6 +42,15 @@ trust:
 
 Each `sensitive` rule needs a one-line `reason` and at least one nonempty `paths` or `content` list. `content` matches added or removed diff lines, not unchanged context. With `codeowners: true`, paths owned in the checkout's CODEOWNERS also count as sensitive. nomArmy reads these rules from **your checkout**, never a worker's worktree; changing trust rules or CODEOWNERS is itself gated. A match marks the job `trust.level: human`, records each reason, requires review, and stops `/feature` before integration until you explicitly approve. The job report, run finish result, PR block and stats surface the gate.
 
+The removed-check detector also reviews deleted or changed access guards, denial branches, auth middleware, and tenant filters. Built-in tenant columns are `tenant_id`, `org_id`, `owner_id`, `user_id`, `account_id`, `workspace_id`, `company_id`, `customer_id`, `team_id`, and `project_id`. Add project-specific column identifiers in your checkout's `.nomarmy.yml`:
+
+```yaml
+trust:
+  tenant_columns: [billing_partition, organization_key]
+```
+
+These names extend the built-ins; a worker's settings cannot override them. When trust judgment is enabled, diff evidence over 60,000 characters requires at least review even though the validator cannot judge it. `trust.judgment: false` in your checkout disables that judgment, but not the deterministic removed-check detector.
+
 **Refactors.** Reverting a behavior-preserving change restores code that works, so the revert check can't prove anything about it. A job can declare `refactor: true` instead: nomArmy then commits it only if verification passes **and no test file was added, changed or deleted**. The existing tests passing unchanged is the evidence. A change that alters behavior has to alter tests to show it, so it can't pass as a refactor.
 
 **Add a check for what unit tests can't see.** A module left out of a deploy bundle passes every unit test and crashes at deploy. When `nomarmy init` sees a bundle or packaging step (Lambda asset scripts, SAM, Serverless, CDK), it suggests a profile that runs it and then imports each entry point from the built bundle.

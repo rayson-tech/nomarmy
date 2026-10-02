@@ -159,6 +159,20 @@ criteria:
     proven_by:
       - file: tests/trust-phase2.test.mjs
         test: removed checks detect raw guards middleware validations tenant filters and RLS with harmless near misses
+      - file: tests/trust-phase2.test.mjs
+        test: review regression collects else and elif denial branches with the retained auth guard
+      - file: tests/trust-phase2.test.mjs
+        test: review regression ignores quoted SQL semicolons when joining tenant statements
+      - file: tests/trust-phase2.test.mjs
+        test: review regression detects framework denials and auth-related next errors
+      - file: tests/trust-phase2.test.mjs
+        test: review regression recognizes patterned auth middleware and decorators
+      - file: tests/trust-phase2.test.mjs
+        test: review regression detects expanded tenant columns and additive custom identifiers
+      - file: tests/trust.test.mjs
+        test: review regression tenant column schema accepts identifiers and rejects malformed configuration
+      - file: tests/trust.test.mjs
+        test: review regression tenant columns come only from the operator checkout and remain additive
     status: met
     security: true
   - id: TRUST-12
@@ -168,6 +182,10 @@ criteria:
         test: diff judgment sees only raw diff data prefers Jev falls back to judge and cannot lower a planted-comment floor
       - file: tests/trust-phase2.test.mjs
         test: unavailable failing invalid and bounded validators retain deterministic escalation
+      - file: tests/trust-phase2.test.mjs
+        test: review regression oversized enabled diffs fail closed without lowering prior trust
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots gate oversized files before opening and accept the size boundary
     status: met
     security: true
   - id: TRUST-13

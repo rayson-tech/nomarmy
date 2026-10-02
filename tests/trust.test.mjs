@@ -576,7 +576,9 @@ test("safe trust snapshots gate oversized files before opening and accept the si
     });
     check();
     if (size > limit) assertGated(manifest, unchecked("large.txt", "exceeds the 16777216-byte content limit"));
-    else assert.deepEqual(manifest.trust, withJudgment(normal));
+    else assert.deepEqual(manifest.trust, withJudgment({ level: "review", reasons: [
+      { rule: "judgment", reason: "the diff is too large to judge (201326699 characters); review it" },
+    ] }));
   }
 });
 
@@ -739,4 +741,48 @@ test("operator judgment opt-out records disabled judgments while defaults and wo
   assert.equal(judgeCalls, 1);
   assert.deepEqual(manifest.trust, { level: "human", reasons: [ruleChange(".nomarmy.yml")], checks: [],
     judgment: { ...enabled, validator: "judge" } });
+});
+
+test("review regression tenant column schema accepts identifiers and rejects malformed configuration", () => {
+  for (const tenant_columns of [[], ["billing_partition", "CustomerKey", "_organization"]]) {
+    assert.deepEqual(validateConfig({ trust: { tenant_columns } }), {
+      valid: true, config: { trust: { tenant_columns }, environment_retention: { success: "destroy", failure: "logs", debug: "retain" } },
+      errors: [], elevated: { shared: [], remote: [] },
+    });
+  }
+  for (const value of ["", "customer.id", "a|tenant_id", "9tenant", "a b"]) {
+    assert.deepEqual(validateConfig({ trust: { tenant_columns: [value] } }), {
+      valid: false, config: null, errors: ["trust.tenant_columns.0: must be a column identifier"], elevated: { shared: [], remote: [] },
+    });
+  }
+  for (const [tenant_columns, error] of [["tenant", "trust.tenant_columns: Invalid input: expected array, received string"],
+    [[3], "trust.tenant_columns.0: Invalid input: expected string, received number"]]) {
+    assert.deepEqual(validateConfig({ trust: { tenant_columns } }), {
+      valid: false, config: null, errors: [error], elevated: { shared: [], remote: [] },
+    });
+  }
+});
+
+test("review regression tenant columns come only from the operator checkout and remain additive", async (t) => {
+  const configured = "trust:\n  tenant_columns: [billing_partition]\n";
+  const empty = "trust:\n  tenant_columns: []\n";
+  for (const [config, workerConfig, column, expected] of [
+    [configured, empty, "billing_partition", true],
+    [empty, configured, "billing_partition", false],
+    [null, configured, "billing_partition", false],
+    [empty, empty, "workspace_id", true],
+    [configured, empty, "tenant_id", true],
+  ]) {
+    const { manifest } = await implement(t, { config, workerConfig, changed: ["query.sql"],
+      baseFiles: { "query.sql": `SELECT * FROM t WHERE active = true\nAND ${column} = :${column};` },
+      newFiles: { "query.sql": "SELECT * FROM t WHERE active = true;" },
+    });
+    const reason = "Removes or changes a tenant or ownership filter at query.sql:1.";
+    assert.deepEqual(manifest.trust, { level: expected ? "review" : "normal",
+      reasons: expected ? [{ rule: "removed-check", reason, file: "query.sql", line: 1 }] : [],
+      checks: expected ? [{ kind: "tenant-filter", file: "query.sql", line: 1, reason }] : [],
+      judgment: { status: "unavailable", validator: null, answers: {}, error: "No trust validator configured." },
+    });
+    assert.equal(manifest.reviewRequired, expected);
+  }
 });
