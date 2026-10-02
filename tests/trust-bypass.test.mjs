@@ -167,3 +167,12 @@ for (const expression of ["x = a // b; rows = db.orders.filter(tenant_id=x)", "r
     }]);
   });
 }
+
+test("regression an exit after a line ending in a dot is still an exit", () => {
+  const file = "src/orders.mjs";
+  const before = "export function listOrders(req, db) {\n  const scale = 1.\n  return db.orders.filter((order) => order.tenant_id === req.user.tenant_id);\n}";
+  const after = insert(before, "  return db.orders;\n");
+  assert.deepEqual(detectRemovedChecks([{ file, before, after }]), [expected(file)]);
+  // A member call named return on its own line is still not an exit.
+  assert.deepEqual(detectRemovedChecks([{ file, before, after: insert(before, "  gen.return(db);\n") }]), []);
+});
