@@ -13,6 +13,7 @@ import { computeStats, gatedJobs } from "../lib/stats.mjs";
 import { shareMarkdown } from "../lib/share.mjs";
 import { computeTrustReach, evaluateReachTrust } from "../lib/trust-reach.mjs";
 import { createExecutor } from "../lib/execute.mjs";
+import { escRegex } from "../lib/diff-checks.mjs";
 
 const cliFile = fileURLToPath(new URL("../bin/nomarmy.mjs", import.meta.url));
 const when = "2026-10-02T00:00:00.000Z";
@@ -37,6 +38,15 @@ function review(f, job, id = "review-one") {
       citations: [{ path: "access.py", status: "ok", related: true, start: 1, end: 2, excerpt: [{ line: 1, text: "def check_scope(user):" }, { line: 2, text: "    return user.tenant" }] }] }] } };
 }
 const ack = (f, jobId, decision, reason = "checked") => acknowledgeTrust({ ...f, jobId, decision, reason, who: "operator@example.test", when });
+
+test("trust regex escapes backslash dot parentheses and dollar literally", () => {
+  const token = String.raw`a\.($b`;
+  const pattern = new RegExp(`^${escRegex(token)}$`);
+  assert.equal(pattern.test(token), true);
+  for (const other of ["a.($b", String.raw`a\x($b`, String.raw`a\.(xb`, String.raw`a\.($c`]) {
+    assert.equal(pattern.test(other), false, other);
+  }
+});
 
 // TRUST-18: one sign-off, all operator surfaces, without changing acceptance.
 test("trust ack appends human decisions and displays them across report jobs run finish and PR", t => {
@@ -68,12 +78,12 @@ test("trust ack appends human decisions and displays them across report jobs run
 
 test("trust ack CLI validates human level flags repo and identity without changing outcomes", t => {
   const f = fixture(t); f.save(f.job("human")); f.save(f.job("normal", "normal")); f.save(f.job("review", "review"));
-  // Fake only the read-only identity command; no Git operations run in this test.
-  const bin = path.join(f.root, "bin");
-  write(path.join(bin, "git"), '#!/bin/sh\n[ "$1 $2 $3 $4" = "config --get user.email " ] || exit 2\nprintf "repo@example.test\\n"\n');
-  fs.chmodSync(path.join(bin, "git"), 0o755);
+  fs.mkdirSync(path.join(f.operatorDir, ".git", "objects"), { recursive: true });
+  fs.mkdirSync(path.join(f.operatorDir, ".git", "refs"));
+  write(path.join(f.operatorDir, ".git", "HEAD"), "ref: refs/heads/main\n");
+  write(path.join(f.operatorDir, ".git", "config"), "[user]\n\temail = repo@example.test\n");
   const cli = (...args) => spawnSync(process.execPath, [cliFile, "trust", "ack", ...args, "--repo", f.operatorDir, "--json"], {
-    encoding: "utf8", env: { ...process.env, NOMARMY_AGENT_STATE: f.stateDir, PATH: `${bin}${path.delimiter}${process.env.PATH}` },
+    encoding: "utf8", env: { ...process.env, NOMARMY_AGENT_STATE: f.stateDir },
   });
   const result = cli("human", "--accept", "--reason", "operator approval"); assert.equal(result.status, 0, result.stderr);
   const output = JSON.parse(result.stdout);
