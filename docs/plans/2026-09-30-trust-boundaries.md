@@ -1,6 +1,6 @@
 # Plan: trust boundaries, the work that must reach a human
 
-**Status: phase 1 built (on this branch).** Later phases remain planned.
+**Status: phases 1 to 4 built (on this branch).**
 
 ## Why
 
@@ -42,7 +42,7 @@ trust:
 
 Once per repository, a scout maps where the real guarantees live, as **symbols, not folders**: the functions that check permissions, apply tenant filters, handle personal data, move money, delete data, or deploy. For example: `_enforce_scope` in `lambda/frontend_api/rls/common.py` is the tenant boundary.
 
-- `nomarmy trust map` runs the scout (a review-phase role on another vendor than the builders) and writes a proposal.
+- `nomarmy trust map` writes a scout brief for the General to dispatch to a review-phase role on another vendor than the builders. Import the scout result with `nomarmy trust map --from scout.yml --scout-job <job-id>` to write a proposal.
 - The operator reviews it (`nomarmy trust review`: accept, drop or edit each entry) and it's committed as `.nomarmy/trust-map.yml`, each entry with its symbol, file, category and one-line reason.
 - Nothing in the map is active until a human accepts it.
 
@@ -54,7 +54,7 @@ Bounded and deterministic: the reach set is computed from the base commit, cache
 
 ### 4. A per-diff judgment
 
-Every implement job's diff gets a typed judgment from Jev (fast, cheap, probabilities rather than prose), one question per category:
+Every implement job's production-code diff hunks get a typed judgment from Jev (fast, cheap, probabilities rather than prose), one question per category:
 
 - Does this change who can access what (authentication, authorization, tenant isolation)?
 - Does it remove or weaken a check (a guard, a filter, a validation, an error path)?
@@ -104,7 +104,11 @@ When an independent review finds a defect, or the operator rejects work at a hum
 3. **The trust map and reach.** The mapping scout, `nomarmy trust map` and `trust review`, the reach computation with its caps. Acceptance: a change to a helper under a mapped symbol is gated; unmapped code isn't.
 4. **Learning.** Defect and rejection records, proposed map additions with evidence.
 
-Measure first, as with design checks: run phase 2's questions over Senti's known escaped defects and a sample of harmless diffs before building the gate, to set thresholds on evidence and see the false-positive rate.
+The phase 2 questions were measured against escaped defects and harmless diffs to set thresholds and assess false positives.
+
+## Measurement
+
+On a private corpus of 14 real escaped defects and 15 harmless commits, the local detector alone caught 1 of 14 defects with no false positives. With Jev judgment on production code, 13 of 14 defects were raised (10 human, 3 review), while 1 of 15 harmless commits reached review and none reached human. The 0.5 medium and 0.8 high thresholds were kept.
 
 ## Cost
 
@@ -112,9 +116,9 @@ Measure first, as with design checks: run phase 2's questions over Senti's known
 - Per repository: one mapping scout, then a review when proposals accumulate.
 - Reach: computed locally, cached per base commit.
 
-## Open questions
+## Resolved questions
 
-- Threshold defaults per category, from the measurement.
-- Whether `human` should also block `nomarmy`'s own commit on the worker branch until acknowledged, or only gate integration (today's lean: gate integration; the commit is on the worker's branch anyway).
-- How the map handles generated or vendored code.
-- Where the operator acknowledges a gate outside `/feature` (a `nomarmy trust ack <job>` command, or the coordinator's own review).
+- Keep the measured medium threshold at 0.5 and high threshold at 0.8.
+- `human` gates integration, not the worker-branch commit.
+- The mapper skips generated and vendored code.
+- The operator records decisions inside or outside `/feature` with `nomarmy trust ack <job> --accept|--reject --reason ...`.

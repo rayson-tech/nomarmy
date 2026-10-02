@@ -1,5 +1,5 @@
 # Acceptance contract for the deterministic trust floor and its human gate.
-feature: Trust boundaries, phase 1
+feature: Trust boundaries, phases 1, 2, 3 and 4
 criteria:
   - id: TRUST-1
     text: trust.sensitive and trust.codeowners validate in .nomarmy.yml; bad entries name the rule
@@ -117,10 +117,16 @@ criteria:
     status: met
     security: true
   - id: TRUST-9
-    text: A repo without trust rules behaves exactly as before
+    text: A repo without trust rules gets no floor gating; the removed-check detector always runs, and the per-diff judgment runs unless trust.judgment is false
     proven_by:
       - file: tests/trust.test.mjs
         test: implement jobs enforce checkout trust, retain normal records, and leave unconfigured repos unchanged
+      - file: tests/trust.test.mjs
+        test: operator judgment opt-out records disabled judgments while defaults and worktree edits keep judgment enabled
+      - file: tests/trust-phase2.test.mjs
+        test: brief judgment opt-out uses operator checkout and records disabled without validator calls
+      - file: tests/trust.test.mjs
+        test: trust judgment schema accepts booleans and rejects other values
     status: met
     security: true
   - id: TRUST-10
@@ -147,4 +153,150 @@ criteria:
         test: safe trust snapshots gate base gitlinks without cat-file blob even when deleted
     status: met
     note: the symlink, FIFO and socket proofs apply on POSIX only (the engine runs in WSL on Windows). A sandbox that denies mkfifo skips the FIFO test, so this criterion reads broken there; check it on the host or in CI
+    security: true
+  - id: TRUST-11
+    text: Raw before and after snapshots deterministically flag removed or changed access guards, middleware, validations outside test files, tenant filters and row-level security with locations; other security findings in tests still count
+    proven_by:
+      - file: tests/trust-phase2.test.mjs
+        test: removed checks detect raw guards middleware validations tenant filters and RLS with harmless near misses
+      - file: tests/trust-phase2.test.mjs
+        test: review regression collects else and elif denial branches with the retained auth guard
+      - file: tests/trust-phase2.test.mjs
+        test: review regression ignores quoted SQL semicolons when joining tenant statements
+      - file: tests/trust-phase2.test.mjs
+        test: review regression detects framework denials and auth-related next errors
+      - file: tests/trust-phase2.test.mjs
+        test: review regression recognizes patterned auth middleware and decorators
+      - file: tests/trust-phase2.test.mjs
+        test: review regression detects expanded tenant columns and additive custom identifiers
+      - file: tests/trust.test.mjs
+        test: review regression tenant column schema accepts identifiers and rejects malformed configuration
+      - file: tests/trust.test.mjs
+        test: review regression tenant columns come only from the operator checkout and remain additive
+      - file: tests/trust-phase2.test.mjs
+        test: test validation removals stay normal while helper security findings still escalate
+      - file: tests/trust-review.test.mjs
+        test: review two collects the unbraced JS else statement
+      - file: tests/trust-review.test.mjs
+        test: review two joins SQL dollar strings and hash comments
+      - file: tests/trust-review.test.mjs
+        test: review two recognizes array middleware and dotted decorators
+      - file: tests/trust-review.test.mjs
+        test: review two promotes imported test files including Python module paths
+      - file: tests/trust-review.test.mjs
+        test: review two scans and judges production referenced document extensions
+      - file: tests/trust.test.mjs
+        test: review two runtime classifies production dependencies from the untouched base
+    status: met
+    security: true
+  - id: TRUST-12
+    text: Compact unified snapshot hunks carry three context lines per change to diff-only Jev or judge; judged on production code only (unreferenced docs and unimported tests excluded with throwing validators; runtime imports and referenced data judged); probabilities only escalate trust, comments are data and oversized evidence fails closed
+    proven_by:
+      - file: tests/trust-phase2.test.mjs
+        test: diff judgment sees only raw diff data prefers Jev falls back to judge and cannot lower a planted-comment floor
+      - file: tests/trust-phase2.test.mjs
+        test: unavailable failing invalid and bounded validators retain deterministic escalation
+      - file: tests/trust-phase2.test.mjs
+        test: review regression oversized enabled diffs fail closed without lowering prior trust
+      - file: tests/trust.test.mjs
+        test: safe trust snapshots gate oversized files before opening and accept the size boundary
+      - file: tests/trust-phase2.test.mjs
+        test: snapshot hunks isolate sparse edits with exact context and unified ranges
+      - file: tests/trust-production.test.mjs
+        test: documentation-only judgment skips all documentation paths without changing the floor
+      - file: tests/trust-production.test.mjs
+        test: tests-only judgment skips the detector test-path rule
+      - file: tests/trust-production.test.mjs
+        test: mixed judgment sends only production hunks to Jev and judge
+      - file: tests/trust-production.test.mjs
+        test: excluded docs and tests retain sensitive path content CODEOWNERS and removed-check gates
+      - file: tests/trust-measure.test.mjs
+        test: corpus prints skipped production-free judgments without calling the validator
+      - file: tests/trust-review.test.mjs
+        test: review two classifies docs and spec production by evidence not directory
+      - file: tests/trust-review.test.mjs
+        test: review two promotes imported test files including Python module paths
+      - file: tests/trust-review.test.mjs
+        test: review two follows production imports transitively and preserves removed references
+      - file: tests/trust-review.test.mjs
+        test: review two scans and judges production referenced document extensions
+      - file: tests/trust-review.test.mjs
+        test: review two uses bounded safe repository snapshots for unchanged importers
+      - file: tests/trust.test.mjs
+        test: review two runtime classifies production dependencies from the untouched base
+    status: met
+    security: true
+  - id: TRUST-13
+    text: Normal, review and human levels retain assigned floors with plain reasons; review means high stakes and only human adds the hard stop
+    proven_by:
+      - file: tests/trust-phase2.test.mjs
+        test: graded trust escalation table preserves assigned levels and exact plain reasons
+      - file: tests/trust.test.mjs
+        test: implement phase two grades raw removed checks and judgments as high stakes with a human-only hard stop
+    status: met
+    security: true
+  - id: TRUST-14
+    text: Bounded asynchronous brief judgment marks high stakes with admission notes and never refuses a job; no validator skips silently
+    proven_by:
+      - file: tests/trust-phase2.test.mjs
+        test: brief admission marks high stakes with exact notes never refuses and skips silently without a validator
+    status: met
+    security: true
+  - id: TRUST-15
+    text: Corpus measurement continues after unavailable judgments, records why per item and reports the number judged alongside deterministic confusion counts
+    proven_by:
+      - file: tests/trust-measure.test.mjs
+        test: synthetic corpus reports exact levels and confusion in text and JSON without writing
+      - file: tests/trust-measure.test.mjs
+        test: unavailable corpus judgments retain reasons continue and count judged items
+    status: met
+    security: true
+  - id: TRUST-16
+    text: The schema-validated operator-only map, proposal and provenance receipt are human-gated when edited; scout job origins are shown and unknown or edited proposals require per-entry review; a review-role scout brief and cited proposal import skip generated and vendored code, and accept/drop/edit review alone activates entries
+    proven_by:
+      - file: tests/trust-map.test.mjs
+        test: trust map schema reads only the operator checkout and map edits are human gated
+      - file: tests/trust-map.test.mjs
+        test: trust map scout brief and cited import skip generated and vendored files
+      - file: tests/trust-map.test.mjs
+        test: trust review JSON accepts drops and edits proposals without implicit activation
+      - file: tests/trust-map.test.mjs
+        test: proposal edits are human gated and unknown or edited origins require per-entry review
+      - file: tests/trust.test.mjs
+        test: implement reach uses only the operator map and untouched base before worker edits
+    status: met
+    security: true
+  - id: TRUST-17
+    text: Base-snapshot symbol reach follows ES, CommonJS and Python aliases and namespace calls and includes K&R and Allman bodies; it gates dependent changes at review and removed checks at human, with bounded depth and fan-out recorded and caches keyed by base commit and accepted map
+    proven_by:
+      - file: tests/trust-map.test.mjs
+        test: trust reach gates two-call helpers not unrelated functions and removed checks become human
+      - file: tests/trust-map.test.mjs
+        test: trust reach states depth and fan-out caps and caches separately per base commit and map
+      - file: tests/trust-map.test.mjs
+        test: trust reach resolves exact import aliases and namespace calls to target definitions
+      - file: tests/trust-map.test.mjs
+        test: trust reach includes K&R and exact Allman bodies and helper edits
+      - file: tests/trust-map.test.mjs
+        test: trust reach records unresolved aliases instead of silently missing their targets
+      - file: tests/trust.test.mjs
+        test: implement reach uses only the operator map and untouched base before worker edits
+    status: met
+    security: true
+  - id: TRUST-18
+    text: Human-only append-only operator sign-off is visible across reports jobs runs and PR pending counts without changing level or outcome; independent review defects and rejections feed state-only evidence-backed map proposals at two events, with explicit accept/drop/edit and suppression until new evidence
+    proven_by:
+      - file: tests/trust-learning.test.mjs
+        test: trust ack appends human decisions and displays them across report jobs run finish and PR
+      - file: tests/trust-learning.test.mjs
+        test: trust ack CLI validates human level flags repo and identity without changing outcomes
+      - file: tests/trust-learning.test.mjs
+        test: trust learning records only independent supported review defects and deduplicates collection
+      - file: tests/trust-learning.test.mjs
+        test: trust review learns at two events with evidence and accepts drops edits only on operator choice
+      - file: tests/trust-learning.test.mjs
+        test: trust file-only learning accepts a whole-file map entry that gates subsequent changes
+      - file: tests/trust-learning.test.mjs
+        test: trust completed scout execution persists review evidence automatically
+    status: met
     security: true

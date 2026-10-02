@@ -177,6 +177,7 @@ test("judge receives affected promises and only adds behavior change flags", asy
 test("implement completion checks contracts after verification before commit and retains broken review", async t => {
   const f = fixture(t);
   const jobsRoot = path.join(f.dir, "jobs"), events = [];
+  let snapshot;
   const record = { repoStatusFiles: ["lib/answer.mjs"], changedFiles: ["lib/answer.mjs"], nameStatus: [{ status: "M", path: "lib/answer.mjs" }],
     testChanges: { production_files_changed: ["lib/answer.mjs"], new_tests_added: [], existing_tests_modified: [], existing_tests_deleted: [], reviewRequired: false },
     ignoredRuntimeJunk: [], issues: [], additions: 1, deletions: 1 };
@@ -184,7 +185,9 @@ test("implement completion checks contracts after verification before commit and
     VERSION: "test", projectDir: f.projectDir, jobsRoot,
     assertRepo: async () => {}, ensureJobsRoot: () => fs.mkdirSync(jobsRoot, { recursive: true }),
     resolveBase: async () => ({ ref: "base", sha: "base" }), sweepStaleSandboxContainers: async () => {},
-    run: async (command, args) => {
+    run: async (command, args, options) => {
+      if (args[0] === "hash-object") { snapshot = options.input; return { stdout: "a".repeat(40) }; }
+      if (args[0] === "cat-file") return { stdout: snapshot };
       assert.equal(command, "git"); assert.deepEqual(args.slice(0, 3), ["worktree", "add", "-b"]);
       const copy = relative => {
         for (const entry of fs.readdirSync(path.join(f.worktree, relative), { withFileTypes: true })) {
@@ -213,6 +216,7 @@ test("implement completion checks contracts after verification before commit and
       f.save({ ...f.contract, criteria: [] }, cwd);
       return { status: "pass" };
     },
+    askTrustJudge: async () => ({ answer: { access: 0, checks: 0, data: 0 } }),
     judgeSettings: () => ({ agent: "judge", model: "synthetic", checks: [] }),
     runJudge: async ({ contracts }) => {
       events.push("judge");
@@ -231,6 +235,7 @@ test("implement completion checks contracts after verification before commit and
   const result = await executor.executeJob({ task: "Change answer", verification: "quick", jobId: "job-example" });
   assert.equal(result.ok, true, JSON.stringify(result.manifest));
   assert.deepEqual(events, ["verification", "impact", "judge", "commit"]);
+  assert.deepEqual(result.manifest.trust, { level: "normal", reasons: [], checks: [], judgment: { status: "available", validator: "judge", answers: { access: 0, checks: 0, data: 0 }, error: null } });
   assert.equal(result.manifest.reviewRequired, true);
   assert.deepEqual(result.manifest.issues, ["CONTRACT BROKEN: EX-1 (acceptance/example.yml): tests/answer.test.mjs: answer stays 42"]);
   assert.deepEqual(Object.keys(result.manifest.contract).sort(), ["affected", "broken"]);

@@ -630,6 +630,17 @@ test("acceptance workflow is in the General instructions and rendered /feature p
   }
 });
 
+test("General guidance pins the trust map and acknowledgement workflow", () => {
+  for (const guidance of [COORDINATOR_INSTRUCTIONS, FEATURE_BODY]) {
+    assert.match(guidance, /nomarmy trust map/);
+    assert.match(guidance, /nomarmy trust review/);
+    assert.match(guidance, /nomarmy trust ack <job> --accept\|--reject --reason/);
+    assert.match(guidance, /trust\.level: review/);
+    assert.match(guidance, /trust\.level: human/);
+    assert.match(guidance, /independent review/);
+  }
+});
+
 test("installPlaybooks: installs, refreshes its own copy, and never overwrites the operator's own same-named file", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-playbooks-"));
   try {

@@ -42,6 +42,27 @@ trust:
 
 Each `sensitive` rule needs a one-line `reason` and at least one nonempty `paths` or `content` list. `content` matches added or removed diff lines, not unchanged context. With `codeowners: true`, paths owned in the checkout's CODEOWNERS also count as sensitive. nomArmy reads these rules from **your checkout**, never a worker's worktree; changing trust rules or CODEOWNERS is itself gated. A match marks the job `trust.level: human`, records each reason, requires review, and stops `/feature` before integration until you explicitly approve. The job report, run finish result, PR block and stats surface the gate.
 
+The removed-check detector also reviews deleted or changed access guards, denial branches, auth middleware, and tenant filters. Built-in tenant columns are `tenant_id`, `org_id`, `owner_id`, `user_id`, `account_id`, `workspace_id`, `company_id`, `customer_id`, `team_id`, and `project_id`. Add project-specific column identifiers in your checkout's `.nomarmy.yml`:
+
+```yaml
+trust:
+  tenant_columns: [billing_partition, organization_key]
+```
+
+These names extend the built-ins; a worker's settings cannot override them. When trust judgment is enabled, diff evidence over 60,000 characters requires at least review even though the validator cannot judge it. `trust.judgment: false` in your checkout disables that judgment, but not the deterministic removed-check detector.
+
+The trust layers are cumulative. The checkout-owned sensitive-path, changed-line-content and CODEOWNERS rules set a deterministic human-level floor. The local removed-check detector (`lib/trust-checks.mjs`) looks for literal guard, denial, middleware, policy and tenant-filter patterns in changed code; a finding requires at least review and rises to human when it is within a mapped boundary's reach. It is a pattern detector, not a proof that every check has been found. The accepted [trust map](trust-map.md) adds review for changes to a mapped symbol or a helper it reaches. Static reach cannot resolve dynamic dispatch, so it is left to the judgment rather than certified safe; unresolved mapped symbols and capped scans require review.
+
+If configured, Jev or the model judge evaluates production-code diff hunks for access changes, weakened checks and sensitive data or irreversible operations. Those hunks go to the configured validator's vendor; the deterministic detector and map/reach checks run locally. Documentation and tests not referenced by production code are excluded from this diff judgment. The task brief is judged separately at admission; a high result raises the job's stakes before work starts. The judgment can only raise a level, never override a floor. Its medium threshold is 0.5 (`review`) and high threshold is 0.8 (`human`); Jev scores can vary slightly near a threshold. Set `trust.judgment: false` in the operator checkout's `.nomarmy.yml` to disable this model judgment, including the brief judgment, without disabling deterministic checks or the map.
+
+| Level | Response |
+|---|---|
+| `normal` | Ordinary verification and acceptance. |
+| `review` | Independent review on another vendor, as for `stakes: high`, before acceptance. |
+| `human` | Independent review plus a hard stop before integration until the operator decides. |
+
+Run `nomarmy trust map` once for a repository without a map, dispatch its scout brief, then import the scout result and use `nomarmy trust review` to accept, edit or drop each proposal. Only accepted entries in `.nomarmy/trust-map.yml` are active. `trust review` also offers evidence-backed additions from recorded review defects and human rejections; they remain inert until accepted. After a human-level decision, record it with `nomarmy trust ack <job> --accept|--reject --reason ...`. An acknowledgement records the decision; rejection never permits integration. See [trust map and bounded reach](trust-map.md) for the full workflow and its limits.
+
 **Refactors.** Reverting a behavior-preserving change restores code that works, so the revert check can't prove anything about it. A job can declare `refactor: true` instead: nomArmy then commits it only if verification passes **and no test file was added, changed or deleted**. The existing tests passing unchanged is the evidence. A change that alters behavior has to alter tests to show it, so it can't pass as a refactor.
 
 **Add a check for what unit tests can't see.** A module left out of a deploy bundle passes every unit test and crashes at deploy. When `nomarmy init` sees a bundle or packaging step (Lambda asset scripts, SAM, Serverless, CDK), it suggests a profile that runs it and then imports each entry point from the built bundle.
