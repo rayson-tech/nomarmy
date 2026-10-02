@@ -1,5 +1,5 @@
 # Acceptance contract for the deterministic trust floor and its human gate.
-feature: Trust boundaries, phases 1, 2 and 3
+feature: Trust boundaries, phases 1, 2, 3 and 4
 criteria:
   - id: TRUST-1
     text: trust.sensitive and trust.codeowners validate in .nomarmy.yml; bad entries name the rule
@@ -281,5 +281,22 @@ criteria:
         test: trust reach records unresolved aliases instead of silently missing their targets
       - file: tests/trust.test.mjs
         test: implement reach uses only the operator map and untouched base before worker edits
+    status: met
+    security: true
+  - id: TRUST-18
+    text: Human-only append-only operator sign-off is visible across reports jobs runs and PR pending counts without changing level or outcome; independent review defects and rejections feed state-only evidence-backed map proposals at two events, with explicit accept/drop/edit and suppression until new evidence
+    proven_by:
+      - file: tests/trust-learning.test.mjs
+        test: trust ack appends human decisions and displays them across report jobs run finish and PR
+      - file: tests/trust-learning.test.mjs
+        test: trust ack CLI validates human level flags repo and identity without changing outcomes
+      - file: tests/trust-learning.test.mjs
+        test: trust learning records only independent supported review defects and deduplicates collection
+      - file: tests/trust-learning.test.mjs
+        test: trust review learns at two events with evidence and accepts drops edits only on operator choice
+      - file: tests/trust-learning.test.mjs
+        test: trust file-only learning accepts a whole-file map entry that gates subsequent changes
+      - file: tests/trust-learning.test.mjs
+        test: trust completed scout execution persists review evidence automatically
     status: met
     security: true

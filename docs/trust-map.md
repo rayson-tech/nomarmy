@@ -91,3 +91,48 @@ judgment. Import-looking comments and strings do not create import bindings.
 The proposal receipt detects edits; it is not a cryptographic attestation of a
 scout job. Its authority depends on the operator checkout and the human gates
 on both the proposal and receipt, just as the active map does.
+
+## Human sign-off and learning
+
+Outside or inside `/feature`, the operator records a human gate decision with:
+
+```sh
+nomarmy trust ack <job-id> --accept --reason "Reviewed the tenant boundary"
+nomarmy trust ack <job-id> --reject --reason "Missing tenant filter"
+```
+
+Only a job from this repository with `trust.level: human` can be acknowledged.
+`trust.ack` is an append-only array of decisions with `decision`, `who`, `when`
+and `reason`. Identity is the repository's Git `user.email`, falling back to the
+OS user. The last decision is current; earlier decisions remain in the record.
+Sign-off never changes the level, outcome, tests or review requirements. A reject
+is an acknowledged refusal, not permission to integrate. The status report and
+jobs listing carry the history; `run_finish` labels gates pending or acknowledged
+and includes the latest decision. Only pending gates count in the PR block's
+"Needs human review" row.
+
+Finished independent review scouts with `reviews: <job-id>` contribute supported
+findings with explicit defect language and citations to that job's changed files.
+Failed, same-provider, weak and unsupported findings do not contribute. Defect
+classification and symbol extraction from cited excerpts are heuristic. Every
+human rejection contributes its changed files and the recorded floor/reach reasons.
+The executor records review evidence immediately; `trust review` also collects
+persisted review records idempotently, including older reviews.
+
+Evidence is append-only, repository-scoped by canonical checkout path, in
+`$NOMARMY_AGENT_STATE/trust-learning/<repo-hash>/evidence.jsonl` (the normal nomArmy
+state directory if unset), never in the repository. Two or more distinct evidence
+records touching a symbol or file produce an inert suggestion. Each suggestion
+shows the event count, total recorded defects/rejections, and job ids. A review
+contributes once even if several findings cite the same symbol. The initial
+category is `access` as a review placeholder; edit it to the appropriate category.
+If no symbol has enough evidence, a file-level suggestion uses `symbol: "*"`.
+An accepted whole-file entry gates changes anywhere in that file, including code
+without a recognized definition; removed checks raise it to human.
+
+Learning suggestions appear after scout proposals in `trust review`, with the
+same accept/drop/edit decisions. `--accept-all` cannot approve learning suggestions.
+Nothing becomes active until explicitly accepted or edited. Dropping a suggestion
+persists the evidence fingerprint outside the repository, so rereading or collecting
+the same evidence cannot propose it again. New evidence for that target makes it
+eligible again. Already mapped targets are not suggested again.

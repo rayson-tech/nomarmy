@@ -31,7 +31,7 @@ test("trust feature playbook stops before integration and coordinator repeats th
 test("trust run_finish lists only its human-gated jobs with exact reasons", () => {
   const records = [record("a", "run-x", human([access, rules])), record("b", "run-y", human([rules])),
     record("c", "run-x", { level: "normal", reasons: [] }), record("d", "run-x")];
-  assert.deepEqual(gatedJobs(records, "run-x"), [{ jobId: "a", reasons: [access, rules] }]);
+  assert.deepEqual(gatedJobs(records, "run-x"), [{ jobId: "a", reasons: [access, rules], status: "pending" }]);
   assert.deepEqual(gatedJobs(records, "run-none"), []);
   const server = fs.readFileSync(new URL("../mcp/server.mjs", import.meta.url), "utf8");
   const finish = server.slice(server.indexOf('server.tool("run_finish"'), server.indexOf('server.tool("army"'));

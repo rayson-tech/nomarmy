@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { writeTrustScoutBrief, writeTrustProposal, loadTrustProposal, trustProposalOrigins, reviewTrustProposal } from "../lib/trust-map.mjs";
+import { acknowledgeTrust, collectReviewEvidence, trustSuggestions, reviewTrustLearning, trustAcknowledgment } from "../lib/trust-learning.mjs";
+import { writeTrustScoutBrief, writeTrustProposal, loadTrustProposal, trustProposalOrigins } from "../lib/trust-map.mjs";
 import { fillAcceptance, gatherAcceptanceProposals } from "../lib/acceptance-fill.mjs";
 // nomArmy CLI. Every command proposes before it writes anything -- init,
 // setup, model and update all show exactly what would change and write only
@@ -156,8 +157,9 @@ Usage: nomarmy <command> [options]
                   only; refuses on local changes). Then restart open sessions.
   trust map       Write a read-only review scout brief for the General.
                   --from <scout.yml> --scout-job <job-id> records the cited scout origin.
-  trust review    Accept, drop or edit proposals; only accepted entries gate jobs.
+  trust review    Accept, drop or edit scout and evidence-backed proposals.
                   --json lists; --accept-all or --decisions '<JSON array>' writes.
+  trust ack <job> --accept|--reject [--reason "text"]  Sign off a human gate.
   agents <list|add|update|remove>
                   Every account a job can run on, in one list:
                   ~/.config/nomarmy/agents.yml (or NOMARMY_CONFIG_DIR).
@@ -2781,6 +2783,7 @@ function collectJobs({ recent = 8, runId = null, projectDir = null } = {}) {
       lastTool: status.lastTool ? `${status.lastTool.tool}${status.lastTool.target ? ` ${String(status.lastTool.target).slice(0, 40)}` : ""}` : null,
       filesChanged: status.filesChangedLive ?? meta?.git?.filesChanged?.length ?? null,
       heartbeatAgeSeconds: status.heartbeatAt ? Math.round((Date.now() - Date.parse(status.heartbeatAt)) / 1000) : null,
+      ...(meta?.trust ? { trust: meta.trust } : {}),
       started, dir,
     };
   }).filter(Boolean).sort((a, b) => b.started - a.started);
@@ -2800,6 +2803,10 @@ function renderJobs({ running, recent }) {
   }
   lines.push("", c.bold("Recent"));
   for (const j of recent) lines.push(`  ${j.jobId.padEnd(40)} ${String(j.phase).padEnd(20)} ${fmtSeconds(j.elapsedSeconds).padStart(7)}  ${c.dim(`${j.agent ?? ""}${j.model ? `/${j.model}` : ""}`)}`);
+  for (const j of [...running, ...recent]) if (j.trust?.level === "human") {
+    const ack = trustAcknowledgment(j.trust);
+    lines.push(`  ${j.jobId}: human review ${ack ? `acknowledged (${ack.decision}) by ${ack.who} at ${ack.when}${ack.reason ? `: ${ack.reason}` : ""}` : "pending"}`);
+  }
   return lines.join("\n");
 }
 
@@ -3269,13 +3276,20 @@ async function cmdAcceptance() {
 
 async function cmdTrust() {
   let result;
-  if (argv[1] === "map") {
+  if (argv[1] === "ack") {
+    if (flag("accept") === flag("reject")) throw new Error("Choose exactly one of --accept or --reject");
+    result = acknowledgeTrust({ jobsRoot: jobsRootDir(), stateDir: agentStateRoot(), operatorDir: repoDir, jobId: argv[2], decision: flag("accept") ? "accept" : "reject", reason: value("reason", "") });
+  } else if (argv[1] === "map") {
     result = value("from")
       ? writeTrustProposal(repoDir, parseYaml(fs.readFileSync(path.resolve(repoDir, value("from")), "utf8")), { scoutJobId: value("scout-job") ?? null })
       : writeTrustScoutBrief({ operatorDir: repoDir, roles: loadArmy({ projectDir: repoDir }).army.roles });
   } else if (argv[1] === "review") {
-    const proposed = loadTrustProposal(repoDir);
-    const origins = trustProposalOrigins(repoDir, proposed);
+    const learning = { stateDir: agentStateRoot(), operatorDir: repoDir };
+    collectReviewEvidence({ ...learning, records: loadJobRecords(jobsRootDir()) });
+    const stored = loadTrustProposal(repoDir);
+    const suggestions = trustSuggestions(learning);
+    const proposed = [...stored, ...suggestions.map(s => s.entry)];
+    const origins = [...trustProposalOrigins(repoDir, stored), ...suggestions.map(s => ({ writer: "trust learning", status: "evidence-backed", evidence: s.evidence }))];
     if (json && !flag("accept-all") && !value("decisions")) return out({ status: "pending", entries: proposed, origins });
     let decisions = value("decisions") ? JSON.parse(value("decisions")) : undefined;
     if (!flag("accept-all") && decisions === undefined) {
@@ -3286,6 +3300,7 @@ async function cmdTrust() {
         for (const [index, entry] of proposed.entries()) {
           const origin = origins[index];
           console.log(`Origin: ${origin.scoutJobId ?? "unknown"} (${origin.writer ?? origin.status})`);
+          if (origin.evidence) console.log(`${origin.evidence.summary}; jobs: ${origin.evidence.jobIds.join(", ")}`);
           console.log(`${entry.symbol} (${entry.file}:${entry.line}), ${entry.category}: ${entry.reason}`);
           let action;
           do { action = (await rl.question("Accept, drop or edit? [a/d/e] ")).trim().toLowerCase(); } while (!["a", "d", "e"].includes(action));
@@ -3296,9 +3311,10 @@ async function cmdTrust() {
         }
       } finally { rl.close(); }
     }
-    result = reviewTrustProposal({ operatorDir: repoDir, decisions, acceptAll: flag("accept-all") });
-  } else throw new Error("Usage: nomarmy trust map [--from scout.yml --scout-job job-id] | trust review [--accept-all | --decisions '<JSON array>'] [--json]");
+    result = reviewTrustLearning({ ...learning, decisions, acceptAll: flag("accept-all"), expected: proposed });
+  } else throw new Error("Usage: nomarmy trust map [--from scout.yml --scout-job job-id] | trust ack <job-id> --accept|--reject [--reason text] | trust review [--accept-all | --decisions '<JSON array>'] [--json]");
   if (json) out(result);
+  else if (result.status === "acknowledged") console.log(`${result.jobId}: human review acknowledged (${result.ack.decision}) by ${result.ack.who} at ${result.ack.when}${result.ack.reason ? `: ${result.ack.reason}` : ""}`);
   else if (result.status === "awaiting-scout") console.log(`Scout brief: ${result.brief}. General must dispatch the read-only review scout, then import its cited YAML with nomarmy trust map --from scout.yml --scout-job job-id. Nothing is active yet.`);
   else console.log(`${result.status}: ${result.map ?? result.proposal} (${result.entries.length} entries)`);
 }
