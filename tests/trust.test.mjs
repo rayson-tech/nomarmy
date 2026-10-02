@@ -577,7 +577,7 @@ test("safe trust snapshots gate oversized files before opening and accept the si
     check();
     if (size > limit) assertGated(manifest, unchecked("large.txt", "exceeds the 16777216-byte content limit"));
     else assert.deepEqual(manifest.trust, withJudgment({ level: "review", reasons: [
-      { rule: "judgment", reason: "the diff is too large to judge (201326699 characters); review it" },
+      { rule: "judgment", reason: "the diff is too large to judge (33554556 characters); review it" },
     ] }));
   }
 });

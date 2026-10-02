@@ -93,8 +93,7 @@ function validatorFor(mode) {
   return { judge, askJudge, stateRoot: process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), '.local', 'share', 'nomarmy-local-agents') };
 }
 
-export async function measure(dir, mode = 'off') {
-  const validator = validatorFor(mode);
+export async function measure(dir, mode = 'off', validator = validatorFor(mode)) {
   const corpus = JSON.parse(fs.readFileSync(path.join(dir, 'corpus.json'), 'utf8'));
   if (!Array.isArray(corpus)) throw new Error('corpus.json must be an array');
   const items = [];
@@ -104,17 +103,22 @@ export async function measure(dir, mode = 'off') {
     if (!diffPath.startsWith(`${dir}${path.sep}`)) throw new Error(`Diff path escapes corpus directory: ${item.diff}`);
     const fileChanges = fileChangesFromDiff(fs.readFileSync(diffPath, 'utf8'));
     const trust = await evaluateDiffTrust({ floor: { level: 'normal', reasons: [] }, fileChanges, ...validator });
-    if (mode !== 'off' && trust.judgment.status !== 'available') throw new Error(`Skipped: ${mode} judgment unavailable: ${trust.judgment.error}`);
     const { kind, diff, ...metadata } = item;
-    items.push({ kind, label: path.basename(diff, path.extname(diff)), diff, ...metadata, level: trust.level, findings: trust.checks.length, reason: trust.reasons[0]?.reason ?? null });
+    items.push({ kind, label: path.basename(diff, path.extname(diff)), diff, ...metadata, judgment: trust.judgment, level: trust.level, findings: trust.checks.length, reason: trust.reasons[0]?.reason ?? null });
   }
   const count = (kind, caught) => items.filter(i => i.kind === kind && (i.level !== 'normal') === caught).length;
   const defects = count('defect', true) + count('defect', false);
   const harmless = count('harmless', true) + count('harmless', false);
-  return { items, confusion: {
+  return { items, judged: items.filter(item => item.judgment.status === 'available').length, confusion: {
     defects: { caught: count('defect', true), missed: count('defect', false), catchRate: defects ? count('defect', true) / defects : null },
     harmless: { normal: count('harmless', false), falsePositives: count('harmless', true), falsePositiveRate: harmless ? count('harmless', true) / harmless : null },
   } };
+}
+
+export function measurementLine(item) {
+  const { kind, label, level, findings, reason, diff, judgment, ...metadata } = item;
+  const unavailable = judgment.status === 'unavailable' ? `\tjudgment unavailable: ${judgment.error}` : '';
+  return `${kind}\t${label}\t${level}\t${findings}\t${reason ?? 'none'}${unavailable}${Object.keys(metadata).length ? `\t${JSON.stringify(metadata)}` : ''}`;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
@@ -123,10 +127,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     const result = await measure(dir, judgment);
     if (json) console.log(JSON.stringify(result, null, 2));
     else {
-      for (const item of result.items) {
-        const { kind, label, level, findings, reason, diff, ...metadata } = item;
-        console.log(`${kind}\t${label}\t${level}\t${findings}\t${reason ?? 'none'}${Object.keys(metadata).length ? `\t${JSON.stringify(metadata)}` : ''}`);
-      }
+      for (const item of result.items) console.log(measurementLine(item));
+      console.log(`judged\t${result.judged}/${result.items.length}`);
       const { defects, harmless } = result.confusion;
       console.log('kind\tcaught/normal\tmissed/false positives\trate');
       console.log(`defects\t${defects.caught}\t${defects.missed}\t${defects.catchRate === null ? 'n/a' : (100 * defects.catchRate).toFixed(1) + '%'}`);

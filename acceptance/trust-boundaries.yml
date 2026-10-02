@@ -155,7 +155,7 @@ criteria:
     note: the symlink, FIFO and socket proofs apply on POSIX only (the engine runs in WSL on Windows). A sandbox that denies mkfifo skips the FIFO test, so this criterion reads broken there; check it on the host or in CI
     security: true
   - id: TRUST-11
-    text: Raw before and after snapshots deterministically flag removed or changed access guards, middleware, validations, tenant filters and row-level security with locations
+    text: Raw before and after snapshots deterministically flag removed or changed access guards, middleware, validations outside test files, tenant filters and row-level security with locations; other security findings in tests still count
     proven_by:
       - file: tests/trust-phase2.test.mjs
         test: removed checks detect raw guards middleware validations tenant filters and RLS with harmless near misses
@@ -173,10 +173,12 @@ criteria:
         test: review regression tenant column schema accepts identifiers and rejects malformed configuration
       - file: tests/trust.test.mjs
         test: review regression tenant columns come only from the operator checkout and remain additive
+      - file: tests/trust-phase2.test.mjs
+        test: test validation removals stay normal while helper security findings still escalate
     status: met
     security: true
   - id: TRUST-12
-    text: Diff-only Jev or judge probabilities can only escalate trust; comments are data and unavailable validators cannot lower the floor
+    text: Compact unified snapshot hunks carry three context lines per change to diff-only Jev or judge; probabilities only escalate trust, comments are data and oversized evidence fails closed
     proven_by:
       - file: tests/trust-phase2.test.mjs
         test: diff judgment sees only raw diff data prefers Jev falls back to judge and cannot lower a planted-comment floor
@@ -186,6 +188,8 @@ criteria:
         test: review regression oversized enabled diffs fail closed without lowering prior trust
       - file: tests/trust.test.mjs
         test: safe trust snapshots gate oversized files before opening and accept the size boundary
+      - file: tests/trust-phase2.test.mjs
+        test: snapshot hunks isolate sparse edits with exact context and unified ranges
     status: met
     security: true
   - id: TRUST-13
@@ -202,5 +206,14 @@ criteria:
     proven_by:
       - file: tests/trust-phase2.test.mjs
         test: brief admission marks high stakes with exact notes never refuses and skips silently without a validator
+    status: met
+    security: true
+  - id: TRUST-15
+    text: Corpus measurement continues after unavailable judgments, records why per item and reports the number judged alongside deterministic confusion counts
+    proven_by:
+      - file: tests/trust-measure.test.mjs
+        test: synthetic corpus reports exact levels and confusion in text and JSON without writing
+      - file: tests/trust-measure.test.mjs
+        test: unavailable corpus judgments retain reasons continue and count judged items
     status: met
     security: true
