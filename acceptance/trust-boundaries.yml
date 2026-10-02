@@ -175,6 +175,18 @@ criteria:
         test: review regression tenant columns come only from the operator checkout and remain additive
       - file: tests/trust-phase2.test.mjs
         test: test validation removals stay normal while helper security findings still escalate
+      - file: tests/trust-review.test.mjs
+        test: review two collects the unbraced JS else statement
+      - file: tests/trust-review.test.mjs
+        test: review two joins SQL dollar strings and hash comments
+      - file: tests/trust-review.test.mjs
+        test: review two recognizes array middleware and dotted decorators
+      - file: tests/trust-review.test.mjs
+        test: review two promotes imported test files including Python module paths
+      - file: tests/trust-review.test.mjs
+        test: review two scans and judges production referenced document extensions
+      - file: tests/trust.test.mjs
+        test: review two runtime classifies production dependencies from the untouched base
     status: met
     security: true
   - id: TRUST-12
@@ -200,6 +212,18 @@ criteria:
         test: excluded docs and tests retain sensitive path content CODEOWNERS and removed-check gates
       - file: tests/trust-measure.test.mjs
         test: corpus prints skipped production-free judgments without calling the validator
+      - file: tests/trust-review.test.mjs
+        test: review two classifies docs and spec production by evidence not directory
+      - file: tests/trust-review.test.mjs
+        test: review two promotes imported test files including Python module paths
+      - file: tests/trust-review.test.mjs
+        test: review two follows production imports transitively and preserves removed references
+      - file: tests/trust-review.test.mjs
+        test: review two scans and judges production referenced document extensions
+      - file: tests/trust-review.test.mjs
+        test: review two uses bounded safe repository snapshots for unchanged importers
+      - file: tests/trust.test.mjs
+        test: review two runtime classifies production dependencies from the untouched base
     status: met
     security: true
   - id: TRUST-13

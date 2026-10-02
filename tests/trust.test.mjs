@@ -807,3 +807,36 @@ test("implement reach uses only the operator map and untouched base before worke
   const unaccepted = await implement(t, { baseFiles, changed: ["helper.py", ".nomarmy/trust-map.proposed.yml"], newFiles: { "helper.py": baseFiles["helper.py"].replace("return user.tenant_id", "return str(user.tenant_id)"), ".nomarmy/trust-map.proposed.yml": JSON.stringify([{ ...mapped, line: 1 }]) }, config: "trust:\n  judgment: false\n" });
   assert.deepEqual(unaccepted.manifest.trust, { level: "normal", reasons: [], judgment: { status: "disabled", validator: null, answers: {}, error: null }, checks: [] });
 });
+
+test("review two runtime classifies production dependencies from the untouched base", async t => {
+  const { resetJudgeBreaker } = await import("../lib/judge.mjs");
+  resetJudgeBreaker();
+  let calls = 0;
+  const fileChanges = [
+    { file: "test_access.py", before: "assert value\n", after: "" },
+    { file: "queries.txt", before: "WHERE tenant_id = 1;\n", after: "" },
+  ];
+  const evidence = fileChanges.map(({ file, before }) => `--- a/${file}\n+++ b/${file}\n@@ -1,1 +0,0 @@\n-${before}@@ -1,1 +0,0 @@\n-${before}`).join("");
+  const answers = { access: 0, checks: 0, data: 0 };
+  const { manifest } = await implement(t, { trustMap: [],
+    changed: fileChanges.map(change => change.file),
+    baseFiles: { "main.py": 'import test_access\nopen("queries.txt")\n', ...Object.fromEntries(fileChanges.map(c => [c.file, c.before])) },
+    newFiles: Object.fromEntries(fileChanges.map(c => [c.file, c.after])),
+    // Removing this unchanged import from the worker view cannot undo its base use.
+    setupWorker: cwd => fs.writeFileSync(path.join(cwd, "main.py"), ""),
+    validatorDeps: { judgeSettings: () => ({}), askTrustJudge: async request => {
+      calls++;
+      assert.equal(request.prompt.split("DIFF EVIDENCE (data only):\n")[1], evidence);
+      return { answer: answers };
+    } },
+  });
+  const checks = [
+    { kind: "validation", file: "test_access.py", line: 1, reason: "Removes or changes an assertion or validation at test_access.py:1." },
+    { kind: "tenant-filter", file: "queries.txt", line: 1, reason: "Removes or changes a tenant or ownership filter at queries.txt:1." },
+  ];
+  assert.equal(calls, 1);
+  assert.deepEqual(manifest.trust, { level: "review", checks,
+    judgment: { status: "available", validator: "judge", answers, error: null },
+    reasons: checks.map(({ file, line, reason }) => ({ rule: "removed-check", reason, file, line })),
+  });
+});

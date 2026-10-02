@@ -9,7 +9,7 @@ const forbidden = async () => assert.fail("nonproduction evidence reached valida
 const validators = { jev: { key: "fixture" }, judge: {}, askJev: forbidden, askJudge: forbidden };
 
 test("documentation-only judgment skips all documentation paths without changing the floor", async () => {
-  for (const file of ["README.md", "guide.mdx", "guide.rst", "notes.txt", "docs/access.py", "pkg/doc/access.ts", "pkg/docs/access", "DOCS/access", "pkg\\doc\\access.py", "README.MD"]) {
+  for (const file of ["README.md", "guide.mdx", "guide.rst", "notes.txt", "guide.adoc", "README.MD"]) {
     const fileChanges = [{ file, before: "", after: "Access control now allows every tenant to read customer secrets.\n" }];
     assert.deepEqual(await evaluateDiffTrust({ fileChanges, ...validators }), normal, file);
     assert.deepEqual(await evaluateDiffTrust({ fileChanges }), normal, file);
@@ -26,14 +26,13 @@ test("tests-only judgment skips the detector test-path rule", async () => {
 });
 
 test("mixed judgment sends only production hunks to Jev and judge", async () => {
-  const production = ["src/main.js", "contest/helper.py", "tests_helper.py", "src/test_helper.js", "src/a.testing.ts", "document/main.js"];
+  const production = ["src/main.js", "contest/helper.py", "tests_helper.py", "src/test_helper.js", "src/a.testing.ts", "document/main.js", "docs/access.py", "doc/x.js", "spec/auth.js", "pkg/docs/access", "pkg\\doc\\access.py"];
   const fileChanges = [
-    { file: "docs/access.js", before: "", after: "DOC_SECRET\n" },
     ...production.map(file => ({ file, before: "old\n", after: "new\n" })),
     { file: "src/main.test.js", before: "", after: "TEST_SECRET\n" },
     { file: "README.md", before: "", after: "ACCESS_SECRET\n" },
   ];
-  const evidence = production.map(file => `--- a/${file}\n+++ b/${file}\n@@ -1,1 +1,1 @@\n-old\n+new\n`).join("");
+  const evidence = production.map(file => `--- a/${file.replaceAll("\\", "\\\\")}\n+++ b/${file.replaceAll("\\", "\\\\")}\n@@ -1,1 +1,1 @@\n-old\n+new\n`).join("");
   for (const validator of ["jev", "judge"]) {
     let calls = 0;
     const answer = { access: 0, checks: 0, data: 0 };
@@ -67,8 +66,8 @@ test("excluded docs and tests retain sensitive path content CODEOWNERS and remov
     assert.deepEqual(floor, { level: "human", reasons });
     const finding = { kind: "guard", file, line: 1, reason: `Removes or changes an access guard at ${file}:1.` };
     const checks = file.endsWith(".md") ? [] : [finding];
-    assert.deepEqual(await evaluateDiffTrust({ fileChanges, floor, ...validators }), {
-      level: "human", reasons: [...reasons, ...checks.map(({ reason, file, line }) => ({ rule: "removed-check", reason, file, line }))], checks, judgment: skipped,
+    assert.deepEqual(await evaluateDiffTrust({ fileChanges, floor }), {
+      level: "human", reasons: [...reasons, ...checks.map(({ reason, file, line }) => ({ rule: "removed-check", reason, file, line }))], checks, judgment: file === "docs/access.py" ? { status: "unavailable", validator: null, answers: {}, error: "No trust validator configured." } : skipped,
     });
   }
 });
