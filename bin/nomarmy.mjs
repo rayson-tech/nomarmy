@@ -1685,7 +1685,9 @@ async function cmdAgentsAddJson() {
     if (!readLoginStatus("codex").loggedIn) throw new Error("Confirm Codex CLI login first: codex login");
     const linked = await linkCodex({ run: runQuiet, command: openclawCmd(),
       importLogin: flag("link-openclaw"), removeEmailProfiles: flag("remove-email-profiles"), print: (message) => console.error(message) });
-    if (!linked) throw new Error("Codex import failed; nothing was written.");
+    if (!linked) throw new Error(flag("link-openclaw")
+      ? "Codex import failed; nothing was written."
+      : "Codex login was not imported: pass --link-openclaw to authorize copying it into OpenClaw. Nothing was written.");
     if (!probeWorker("openai", agent.model ?? SUBSCRIPTION_VENDORS.codex.defaultModel)) {
       throw new Error(`Codex test call failed; nothing was written. Fix: ${codexImportRecovery()}`);
     }
