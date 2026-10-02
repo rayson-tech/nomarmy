@@ -1,0 +1,186 @@
+# Phases 1 to 4 promises for acceptance contracts.
+feature: "Acceptance contracts: each feature's promises in the repo, checked per criterion"
+criteria:
+  - id: ACC-1
+    text: A contract is validated against a schema, and errors name the contract file and the criterion id
+    proven_by:
+      - file: tests/acceptance.test.mjs
+        test: acceptance schema validates fields and reports file and criterion IDs
+    status: met
+
+  - id: ACC-2
+    text: nomarmy acceptance check runs only each criterion's tests and reports met, broken (with the failing test) or unproven per criterion; --json gives the same as data
+    proven_by:
+      - file: tests/acceptance.test.mjs
+        test: acceptance runs literal names with punctuation and loop prefixes only
+      - file: tests/acceptance.test.mjs
+        test: acceptance detects failing tests and zero executed tests
+      - file: tests/acceptance.test.mjs
+        test: acceptance CLI JSON and plain output agree; strict fails on unproven
+    status: met
+
+  - id: ACC-3
+    text: A referenced test that was renamed or deleted is reported as missing, naming the criterion and the old name, and fails the check
+    proven_by:
+      - file: tests/acceptance.test.mjs
+        test: acceptance detects renamed tests and deleted files before running
+      - file: tests/acceptance.test.mjs
+        test: acceptance CLI fails broken and missing criteria and honors explicit files
+    status: met
+
+  - id: ACC-4
+    text: The check exits 1 on broken or missing; unproven passes unless --strict
+    proven_by:
+      - file: tests/acceptance.test.mjs
+        test: acceptance CLI fails broken and missing criteria and honors explicit files
+      - file: tests/acceptance.test.mjs
+        test: acceptance CLI JSON and plain output agree; strict fails on unproven
+    status: met
+
+  - id: ACC-5
+    text: CI runs the check on every platform job
+    proven_by:
+      - file: tests/acceptance.test.mjs
+        test: acceptance CI checks every platform job
+    status: met
+
+  - id: ACC-6
+    text: The Windows feature's contract checks as 14 met, including manual WIN-12
+    proven_by:
+      - file: tests/acceptance.test.mjs
+        test: acceptance real Windows contract returns 14 met including manual WIN-12
+    status: met
+
+  - id: ACC-7
+    text: Proofs may be scoped to platforms; out-of-platform proofs are reported without running, while applicable zero-pass proofs remain broken
+    proven_by:
+      - file: tests/acceptance.test.mjs
+        test: acceptance validates proof platforms for both reference types
+      - file: tests/acceptance.test.mjs
+        test: acceptance skips out-of-platform proofs without reading or running them
+      - file: tests/acceptance.test.mjs
+        test: acceptance makes wholly scoped-out criteria unproven, including posix on win32
+      - file: tests/acceptance.test.mjs
+        test: acceptance keeps unscoped and applicable zero-pass proofs broken
+      - file: tests/acceptance.test.mjs
+        test: acceptance CLI reports skipped proofs and strict rejects scoped-out criteria
+    status: met
+
+  - id: ACC-8
+    text: Implement jobs carry contract IDs; unknown IDs are refused from the operator checkout with the searched files named, and records and reports retain the IDs
+    proven_by:
+      - file: tests/acceptance-fill.test.mjs
+        test: contract criteria schema, admission and report preserve IDs and name unknown IDs plus searched files
+      - file: tests/acceptance-fill.test.mjs
+        test: implement executor persists criterion IDs and proposals from its full-context precommit diff
+    status: met
+
+  - id: ACC-9
+    text: Only committed jobs with criteria and a passing revert check propose their added or changed literal and template-named tests for those criteria
+    proven_by:
+      - file: tests/acceptance-fill.test.mjs
+        test: diff proposals include changed bodies, exact and template names, excluding untouched or nonliteral tests
+      - file: tests/acceptance-fill.test.mjs
+        test: job proposals require criteria, a commit and a passing revert check
+    status: met
+
+  - id: ACC-10
+    text: Acceptance fill appends job or run proposals without rewriting existing proofs or comments, skips duplicates, previews without writing, and marks unproven criteria met only after their proofs pass through the sandbox runner using a read-only proposed-contract snapshot and the working tree; unavailable verification appends proposals without changing status, and acceptance check help states that the explicit check command runs tests locally
+    proven_by:
+      - file: tests/acceptance-fill.test.mjs
+        test: fill appends without rewriting comments or existing entries and flips only passing criteria
+      - file: tests/acceptance-fill.test.mjs
+        test: fill dry-run writes nothing and template prefix evidence passes the real checker
+      - file: tests/acceptance-fill.test.mjs
+        test: acceptance fill CLI gathers a job or run, supports dry-run and JSON, and refuses another repo
+      - file: tests/acceptance-fill.test.mjs
+        test: fill rechecks duplicate proofs after a failure without adding or rewriting entries
+      - file: tests/acceptance-fill.test.mjs
+        test: fill unavailable sandbox appends proposals without executing host tests or changing status
+      - file: tests/acceptance-fill.test.mjs
+        test: "fill promotes status only from sandbox evidence: ${dryRun}"
+      - file: tests/acceptance-fill.test.mjs
+        test: acceptance check help explicitly says tests run locally
+    status: met
+
+  - id: ACC-11
+    text: The run finish PR block checks real acceptance evidence in a sandbox at detached HEAD with the installed checker mounted read-only, never falls back to host execution when the sandbox is unavailable, includes criterion IDs for non-met states, omits the row only when no contracts exist, and displays check errors
+    proven_by:
+      - file: tests/acceptance-run-finish.test.mjs
+        test: run_finish reports sandbox unavailable without launching host acceptance tests
+      - file: tests/acceptance-fill.test.mjs
+        test: PR Acceptance row runs real evidence for ${state}
+      - file: tests/acceptance-summary.test.mjs
+        test: PR acceptance uses a detached HEAD sandbox and never a host test spawner
+      - file: tests/acceptance-summary.test.mjs
+        test: PR acceptance without a sandbox reports unavailable and cleans up HEAD
+    status: met
+
+  - id: ACC-12
+    text: Changed acceptance YAML contracts skip the production revert check, run only their own acceptance checks with --strict asynchronously with a timeout and an absolute Node path immune to dependency PATH shadowing, record the results and fail verification on broken, missing or unproven evidence; removing or retiring criteria, dropping proofs or downgrading met status requires CONTRACT WEAKENED review with recorded details, while additive changes and current manual proofs pass; mixed changes still revert-check real code
+    proven_by:
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contracts skip reverting and run only their acceptance checks
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contract ${proof} criterion fails job verification
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contracts plus code revert-check only real code
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contract timeout fails verification and prevents committing
+      - file: tests/acceptance-verification.test.mjs
+        test: passing contracts do not mask unavailable code verification
+      - file: tests/acceptance-verification.test.mjs
+        test: contract classification is limited to top-level acceptance YAML and checker mounts are read-only
+      - file: tests/acceptance-verification.test.mjs
+        test: "changed contract weakening requires review: ${kind}"
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contracts additive criteria and manual proofs pass strict verification
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contracts without proofs fail strict verification and report unproven
+      - file: tests/acceptance-verification.test.mjs
+        test: "sandbox checker cannot be shadowed by a dependency node bin: ${mode}"
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contract renames and copies preserve weakening results across comparison errors
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contracts match moved IDs and report all criteria deleted everywhere
+      - file: tests/acceptance-verification.test.mjs
+        test: changed contract text rewording requires review but whitespace alone does not
+      - file: tests/acceptance-verification.test.mjs
+        test: whole contract sets handle the review paths and status laundering
+      - file: tests/acceptance-verification.test.mjs
+        test: whole contract comparison rejects duplicate IDs and retains issues after a bug
+    status: met
+
+  - id: ACC-13
+    text: Later implement jobs run only affected operator-checkout contract criteria in the same timed asynchronous verification sandbox with read-only installed checker and operator-contract snapshot mounts, never falling back to host execution if the sandbox is unavailable, after verification and before commit, using a static relative import graph bounded to depth 8 and 2000 files; broken or missing proofs name the promise and require review, bounded traversal is recorded, and judge answers only add flags
+    proven_by:
+      - file: tests/acceptance-impact.test.mjs
+        test: contract impact follows static imports transitively with relative resolution and deleted files
+      - file: tests/acceptance-impact.test.mjs
+        test: unrelated changes and repositories without contracts run no contract child
+      - file: tests/acceptance-impact.test.mjs
+        test: affected checks use operator contracts and report met broken and missing references
+      - file: tests/acceptance-impact.test.mjs
+        test: contract graph bounds depth eight and two thousand files and records conservative selection
+      - file: tests/acceptance-impact.test.mjs
+        test: contract checks stay asynchronous and time out hung proofs into review issues
+      - file: tests/acceptance-impact.test.mjs
+        test: judge receives affected promises and only adds behavior change flags
+      - file: tests/acceptance-impact.test.mjs
+        test: implement completion checks contracts after verification before commit and retains broken review
+      - file: tests/acceptance-impact.test.mjs
+        test: "impact checks use a read-only operator snapshot in the sandbox: ${available}"
+      - file: tests/acceptance-impact.test.mjs
+        test: Podman acceptance executor forwards the read-only contract snapshot mount
+    status: met
+
+  - id: ACC-14
+    text: A manual proof (what, checked_by, date, optional expires_days and platforms) counts as met and is reported as manual; an expired one reads unproven with a note and never overrides a broken automated proof
+    proven_by:
+      - file: tests/acceptance.test.mjs
+        test: acceptance manual proof is met until expiry and honors platforms
+      - file: tests/acceptance.test.mjs
+        test: acceptance manual proof never overrides broken automated evidence
+      - file: tests/acceptance.test.mjs
+        test: acceptance CLI displays manual evidence and strict accepts it
+    status: met

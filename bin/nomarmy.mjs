@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { acknowledgeTrust, collectReviewEvidence, trustSuggestions, reviewTrustLearning, trustAcknowledgment } from "../lib/trust-learning.mjs";
+import { writeTrustScoutBrief, writeTrustProposal, loadTrustProposal, trustProposalOrigins } from "../lib/trust-map.mjs";
+import { fillAcceptance, gatherAcceptanceProposals } from "../lib/acceptance-fill.mjs";
 // nomArmy CLI. Every command proposes before it writes anything -- init,
 // setup, model and update all show exactly what would change and write only
 // after explicit confirmation ([y/N]) or an explicit non-interactive flag
@@ -14,6 +17,7 @@ import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { loadConfig, validateConfig, stringifyConfig, findConfigFile, parseYaml, CONFIG_FILENAMES } from "../lib/config.mjs";
+import { loadContract, loadContracts, checkContract, contractDisplayPath } from "../lib/acceptance.mjs";
 import { scanRepository, compareEvidence } from "../lib/scan.mjs";
 import { buildConfigProposal } from "../lib/propose.mjs";
 import { detectHardware } from "../lib/hardware.mjs";
@@ -25,7 +29,7 @@ import { connectViaWsl, connectClaude, connectCodex, connectCursor, cursorAlread
 import { compareVersions, readPackageVersion, readInstallVersions, copyIsStale } from "../lib/install-freshness.mjs";
 import { loadJobRecords, computeStats, formatStats, formatStatsSummary, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
 import { requestJobStop } from "../lib/openclaw-run.mjs";
-import { loadValidators, saveJevKey, removeJev, jevSettings, askJev, validatorsPath, JEV_CHECKS, saveJudge, removeJudge, judgeSettings, judgeAgentChoices, chooseJudgeAgent, confirmJudgeHostTools } from "../lib/validators.mjs";
+import { loadValidators, saveJevKey, removeJev, jevSettings, askJev, validatorsPath, JEV_CHECKS, saveJudge, removeJudge, judgeSettings, judgeAgentChoices, chooseJudgeAgent, confirmJudgeHostTools, validatorTrustDisclosure } from "../lib/validators.mjs";
 import { probeModel } from "../lib/model-probe.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
 import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, agentProviderId, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
@@ -117,6 +121,11 @@ function usage(code = 0) {
 
 Usage: nomarmy <command> [options]
 
+  acceptance fill <run-id|job-id> [--dry-run] [--json]
+                  Append proposed test proofs to feature contracts.
+  acceptance check [file...] [--json] [--strict]
+                  Check feature contracts in acceptance/*.yml; runs this repository's tests on this machine.
+                  --strict fails on unproven criteria as well as broken or missing.
   scan            Inspect this repository and report its execution environment.
                   --check   compare the evidence against a committed .nomarmy.yml
   init            Propose a .nomarmy.yml from this repository's scan evidence
@@ -147,6 +156,11 @@ Usage: nomarmy <command> [options]
   update          Update nomArmy and reconnect your coordinators: installs
                   npm's latest alpha, or for a git checkout pulls (fast-forward
                   only; refuses on local changes). Then restart open sessions.
+  trust map       Write a read-only review scout brief for the General.
+                  --from <scout.yml> --scout-job <job-id> records the cited scout origin.
+  trust review    Accept, drop or edit scout and evidence-backed proposals.
+                  --json lists; --accept-all or --decisions '<JSON array>' writes.
+  trust ack <job> --accept|--reject [--reason "text"]  Sign off a human gate.
   agents <list|add|update|remove>
                   Every account a job can run on, in one list:
                   ~/.config/nomarmy/agents.yml (or NOMARMY_CONFIG_DIR).
@@ -2773,6 +2787,7 @@ function collectJobs({ recent = 8, runId = null, projectDir = null } = {}) {
       lastTool: status.lastTool ? `${status.lastTool.tool}${status.lastTool.target ? ` ${String(status.lastTool.target).slice(0, 40)}` : ""}` : null,
       filesChanged: status.filesChangedLive ?? meta?.git?.filesChanged?.length ?? null,
       heartbeatAgeSeconds: status.heartbeatAt ? Math.round((Date.now() - Date.parse(status.heartbeatAt)) / 1000) : null,
+      ...(meta?.trust ? { trust: meta.trust } : {}),
       started, dir,
     };
   }).filter(Boolean).sort((a, b) => b.started - a.started);
@@ -2792,6 +2807,10 @@ function renderJobs({ running, recent }) {
   }
   lines.push("", c.bold("Recent"));
   for (const j of recent) lines.push(`  ${j.jobId.padEnd(40)} ${String(j.phase).padEnd(20)} ${fmtSeconds(j.elapsedSeconds).padStart(7)}  ${c.dim(`${j.agent ?? ""}${j.model ? `/${j.model}` : ""}`)}`);
+  for (const j of [...running, ...recent]) if (j.trust?.level === "human") {
+    const ack = trustAcknowledgment(j.trust);
+    lines.push(`  ${j.jobId}: human review ${ack ? `acknowledged (${ack.decision}) by ${ack.who} at ${ack.when}${ack.reason ? `: ${ack.reason}` : ""}` : "pending"}`);
+  }
   return lines.join("\n");
 }
 
@@ -3057,10 +3076,18 @@ async function cmdValidators() {
     try { config = loadValidators(); } catch (error) { if (json) return out({ error: error.message }); console.log(c.red(error.message)); process.exitCode = 1; return; }
     const judge = config.judge ? { enabled: config.judge.enabled, agent: config.judge.agent, model: config.judge.model, checks: config.judge.checks, hostTools: config.judge.host_tools } : null;
     const jev = config.jev ? { enabled: config.jev.enabled, checks: config.jev.checks, model: config.jev.model, key: config.jev.key_env ? `env ${config.jev.key_env}` : config.jev.key_file, keyReadable: Boolean(jevSettings()) } : null;
+    if (jev) jev.trustJudgment = validatorTrustDisclosure("Jev", "TypeSafe");
+    if (judge) {
+      const agents = loadAgents(globalConfigDir()).agents;
+      const vendor = agentProviderId(agents[judge.agent]) ?? `the configured vendor for agent "${judge.agent}" (agent unavailable)`;
+      judge.trustJudgment = validatorTrustDisclosure("the judge", vendor);
+    }
     if (json) return out({ path: validatorsPath(), jev, judge });
     if (!jev && !judge) { console.log("No validators configured. Add one with: nomarmy validators add jev, or nomarmy validators add judge --agent <name> --model <model>"); return; }
     if (jev) console.log(`Jev: ${jev.enabled ? c.green("on") : "off"} (${jev.model}); checks: ${jev.checks.join(", ")}; key: ${jev.key}${jev.keyReadable ? "" : c.red(" (not readable)")}`);
+    if (jev) console.log(`  Also drives the trust judgment. ${jev.trustJudgment}`);
     if (judge) console.log(`Judge: ${judge.enabled ? c.green("on") : "off"} (${judge.agent}/${judge.model}); checks: ${judge.checks.join(", ")}${judge.hostTools ? c.yellow("; host tools allowed") : ""}`);
+    if (judge) console.log(`  Also drives the trust judgment. ${judge.trustJudgment}`);
     return;
   }
   if (name === "judge") return cmdValidatorsJudge(sub);
@@ -3072,12 +3099,14 @@ async function cmdValidators() {
       console.log("Its answers only add review flags; they never pass a check or allow a commit.");
       console.log(c.yellow("It sends excerpts of your code (findings, cited lines, diffs, worker reports) to TypeSafe.\n"));
     }
+    const trustJudgment = validatorTrustDisclosure("Jev", "TypeSafe");
+    (json ? console.error : console.log)(`Before saving: ${trustJudgment}`);
     const key = flag("key-stdin") ? await readStdin() : await readHiddenLine("TypeSafe API key (not shown): ");
     const saved = saveJevKey(key);
     let ok = false, why = null;
     try { ok = await testJev(jevSettings()); } catch (error) { why = error.message; }
-    if (json) return out({ saved: true, keyFile: saved.keyFile, configPath: saved.configPath, test: ok ? "pass" : "fail", reason: why });
-    console.log(c.green(`✓ Saved the key to ${saved.keyFile} (readable only by you) and turned Jev on in ${saved.configPath}.`));
+    if (json) return out({ saved: true, keyFile: saved.keyFile, configPath: saved.configPath, test: ok ? "pass" : "fail", reason: why, trustJudgment });
+    console.log(c.green(`✓ Saved the key to ${saved.keyFile} (readable only by you) and turned Jev on in ${saved.configPath}. ${trustJudgment}`));
     console.log(ok ? c.green("✓ Test call answered. New jobs use it; restart open coordinator sessions to pick it up.") : c.red(`✗ Test call failed: ${why ?? "no answer"}. Check the key, then: nomarmy validators test jev`));
     if (!ok) process.exitCode = 1;
     return;
@@ -3133,6 +3162,8 @@ async function cmdValidatorsJudge(sub) {
       model = /^\d+$/.test(answer) && listed[Number(answer) - 1] ? listed[Number(answer) - 1] : answer || fallback;
       if (!model) { rl?.close(); throw new Error("A model id is required."); }
     }
+    const trustJudgment = validatorTrustDisclosure("the judge", agentProviderId(agents[agent]));
+    (json ? console.error : console.log)(`Before saving: ${trustJudgment}`);
     let hostTools = flag("host-tools");
     if (agentRunsToolsOnHost(agents[agent]) && !hostTools) {
       if (!process.stdin.isTTY || json) {
@@ -3149,8 +3180,8 @@ async function cmdValidatorsJudge(sub) {
     const settings = resolve();
     if (settings?.problem) throw new Error(settings.problem);
     const test = await probe(settings);
-    if (json) return out({ saved: true, configPath: saved.configPath, test: test.ok ? "pass" : test.refused ? "refused" : "inconclusive", reason: test.reason });
-    console.log(c.green(`✓ The judge is ${agent}/${model}, in ${saved.configPath}.`));
+    if (json) return out({ saved: true, configPath: saved.configPath, test: test.ok ? "pass" : test.refused ? "refused" : "inconclusive", reason: test.reason, trustJudgment });
+    console.log(c.green(`✓ The judge is ${agent}/${model}, in ${saved.configPath}. ${trustJudgment}`));
     if (dominantBuilderVendor === null) {
       try {
         const roles = loadArmy({ projectDir: repoDir }).army.roles;
@@ -3188,7 +3219,111 @@ function cmdMcp() {
   child.on("exit", (code, signal) => { if (signal) process.kill(process.pid, signal); else process.exit(code ?? 1); });
 }
 
-const commands = { stats: cmdStats, validators: cmdValidators, mcp: cmdMcp, scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, install: cmdInstall, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, sandbox: cmdSandbox, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
+async function cmdAcceptance() {
+  if (argv[1] === "fill") {
+    const ids = [];
+    for (let i = 2; i < argv.length; i++) {
+      if (argv[i] === "--repo") { i++; continue; }
+      if (["--json", "--dry-run"].includes(argv[i])) continue;
+      if (argv[i].startsWith("--")) throw new Error(`Unknown acceptance option: ${argv[i]}`);
+      ids.push(argv[i]);
+    }
+    if (ids.length !== 1) throw new Error("Usage: nomarmy acceptance fill <run-id|job-id> [--dry-run] [--json]");
+    const proposals = gatherAcceptanceProposals({ id: ids[0], repoDir, jobsRoot: jobsRootDir(), runsRoot: path.join(agentStateRoot(), "runs") });
+    const result = await fillAcceptance({ repoDir, proposals, dryRun: flag("dry-run") });
+    if (json) out(result);
+    else if (!result.criteria.length) console.log("No new acceptance proofs.");
+    else for (const item of result.criteria) {
+      console.log(`${item.criterion}: ${result.dryRun ? "would add" : "added"} ${item.added.length} proof(s) in ${item.file}; status ${item.status}`);
+      for (const ref of item.added) console.log(`  ${ref.file}: ${ref.test}`);
+    }
+    if (!json && result.verificationError) console.log(result.verificationError);
+    return;
+  }
+  if (argv[1] !== "check") throw new Error("Usage: nomarmy acceptance check [file...] [--json] [--strict]");
+  const files = [];
+  for (let i = 2; i < argv.length; i++) {
+    if (argv[i] === "--repo") { i++; continue; }
+    if (["--json", "--strict"].includes(argv[i])) continue;
+    if (argv[i].startsWith("--")) throw new Error(`Unknown acceptance option: ${argv[i]}`);
+    files.push(argv[i]);
+  }
+  const contracts = files.length ? files.map((file) => loadContract(path.resolve(repoDir, file))) : loadContracts(repoDir);
+  const results = contracts.map((contract) => ({
+    file: contractDisplayPath(repoDir, contract.file),
+    feature: contract.feature,
+    criteria: checkContract(contract, { repoDir }),
+  }));
+  const totals = { met: 0, broken: 0, missing: 0, unproven: 0, retired: 0 };
+  for (const result of results) for (const criterion of result.criteria) totals[criterion.status]++;
+  if (json) out({ contracts: results, totals });
+  else {
+    results.forEach((result, index) => {
+      console.log(c.bold(`${result.file}: ${result.feature}`));
+      const idWidth = Math.max(0, ...result.criteria.map((criterion) => criterion.id.length));
+      result.criteria.forEach((criterion, criterionIndex) => {
+        const failed = ["broken", "missing"].includes(criterion.status);
+        const label = failed ? c.red(criterion.status.toUpperCase())
+          : criterion.status === "met" ? c.green("met") : c.yellow(criterion.status);
+        const detail = criterion.failures.map((failure) => failure.command ?? `${failure.file}: ${failure.test}`).join("; ")
+          || (criterion.status === "unproven" ? criterion.note ?? contracts[index].criteria[criterionIndex].note ?? "" : "");
+        const manual = criterion.status === "met" && criterion.manual?.length
+          ? ` (manual: ${criterion.manual.map((ref) => `${ref.checked_by}, ${ref.date}`).join("; ")})` : "";
+        const skipped = criterion.notApplicable?.length ? ` (${criterion.notApplicable.length} proofs not run on ${process.platform})` : "";
+        console.log(`${criterion.id.padEnd(idWidth)}  ${label}${manual}${skipped}${detail ? `  ${detail}` : ""}`);
+      });
+    });
+    console.log(`Total: ${Object.entries(totals).map(([status, count]) => `${count} ${status}`).join(", ")}`);
+  }
+  if (totals.broken || totals.missing || (flag("strict") && totals.unproven)) process.exitCode = 1;
+}
+
+async function cmdTrust() {
+  let result;
+  if (argv[1] === "ack") {
+    if (flag("accept") === flag("reject")) throw new Error("Choose exactly one of --accept or --reject");
+    result = acknowledgeTrust({ jobsRoot: jobsRootDir(), stateDir: agentStateRoot(), operatorDir: repoDir, jobId: argv[2], decision: flag("accept") ? "accept" : "reject", reason: value("reason", "") });
+  } else if (argv[1] === "map") {
+    result = value("from")
+      ? writeTrustProposal(repoDir, parseYaml(fs.readFileSync(path.resolve(repoDir, value("from")), "utf8")), { scoutJobId: value("scout-job") ?? null })
+      : writeTrustScoutBrief({ operatorDir: repoDir, roles: loadArmy({ projectDir: repoDir }).army.roles });
+  } else if (argv[1] === "review") {
+    const learning = { stateDir: agentStateRoot(), operatorDir: repoDir };
+    collectReviewEvidence({ ...learning, records: loadJobRecords(jobsRootDir()) });
+    const stored = loadTrustProposal(repoDir);
+    const suggestions = trustSuggestions(learning);
+    const proposed = [...stored, ...suggestions.map(s => s.entry)];
+    const origins = [...trustProposalOrigins(repoDir, stored), ...suggestions.map(s => ({ writer: "trust learning", status: "evidence-backed", evidence: s.evidence }))];
+    if (json && !flag("accept-all") && !value("decisions")) return out({ status: "pending", entries: proposed, origins });
+    let decisions = value("decisions") ? JSON.parse(value("decisions")) : undefined;
+    if (!flag("accept-all") && decisions === undefined) {
+      if (!input.isTTY) throw new Error("Use --accept-all or --decisions '<JSON array>' for scripted review; --json alone only lists proposals.");
+      decisions = [];
+      const rl = createInterface({ input, output });
+      try {
+        for (const [index, entry] of proposed.entries()) {
+          const origin = origins[index];
+          console.log(`Origin: ${origin.scoutJobId ?? "unknown"} (${origin.writer ?? origin.status})`);
+          if (origin.evidence) console.log(`${origin.evidence.summary}; jobs: ${origin.evidence.jobIds.join(", ")}`);
+          console.log(`${entry.symbol} (${entry.file}:${entry.line}), ${entry.category}: ${entry.reason}`);
+          let action;
+          do { action = (await rl.question("Accept, drop or edit? [a/d/e] ")).trim().toLowerCase(); } while (!["a", "d", "e"].includes(action));
+          if (action !== "e") { decisions.push({ action: action === "a" ? "accept" : "drop" }); continue; }
+          const edited = {};
+          for (const key of ["symbol", "file", "category", "reason"]) edited[key] = (await rl.question(`${key} [${entry[key]}]: `)).trim() || entry[key];
+          decisions.push({ action: "edit", entry: edited });
+        }
+      } finally { rl.close(); }
+    }
+    result = reviewTrustLearning({ ...learning, decisions, acceptAll: flag("accept-all"), expected: proposed });
+  } else throw new Error("Usage: nomarmy trust map [--from scout.yml --scout-job job-id] | trust ack <job-id> --accept|--reject [--reason text] | trust review [--accept-all | --decisions '<JSON array>'] [--json]");
+  if (json) out(result);
+  else if (result.status === "acknowledged") console.log(`${result.jobId}: human review acknowledged (${result.ack.decision}) by ${result.ack.who} at ${result.ack.when}${result.ack.reason ? `: ${result.ack.reason}` : ""}`);
+  else if (result.status === "awaiting-scout") console.log(`Scout brief: ${result.brief}. General must dispatch the read-only review scout, then import its cited YAML with nomarmy trust map --from scout.yml --scout-job job-id. Nothing is active yet.`);
+  else console.log(`${result.status}: ${result.map ?? result.proposal} (${result.entries.length} entries)`);
+}
+
+const commands = { trust: cmdTrust, acceptance: cmdAcceptance, stats: cmdStats, validators: cmdValidators, mcp: cmdMcp, scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, install: cmdInstall, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, sandbox: cmdSandbox, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
   if (windowsFrontEnd()) {

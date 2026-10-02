@@ -30,6 +30,32 @@ The General can lower these for one run, never raise them. When a vendor answers
 
 **Sharing it.** `run_finish` returns a `prBlock`, a "Verified by nomArmy" table for the pull request's description, scoped to that run; the playbook tells the General to use it as is. `nomarmy stats --share` prints the same block for any period or run, and `nomarmy stats --badge [path]` writes an SVG badge (default `.github/nomarmy-badge.svg`) plus the README line for it. Re-run it to refresh the numbers. If your README is also shown on npm, point the image at the file's raw GitHub URL, since npm doesn't resolve relative image paths (nomArmy's own README does this).
 
+## Acceptance contracts
+
+A contract records a feature's durable promises in `acceptance/<feature>.yml`. Each criterion has a stable ID, a description, a recorded status and `proven_by` evidence. A test proof names the exact file and full test name:
+
+```yaml
+feature: Example feature
+criteria:
+  - id: EX-1
+    text: The command reports its result
+    proven_by:
+      - file: tests/example.test.mjs
+        test: command reports its result
+        platforms: [linux, darwin, posix]
+    status: met
+```
+
+A command proof uses `command: "npm run build"` and can set `cwd: packages/example` relative to the repository. A manual proof uses `manual: "real device installation"`, `checked_by: "Reviewer Name"`, and `date: "2026-09-30"`; optional `expires_days: 90` expires it after that many days. A current manual proof counts as met and is reported as manual, while an expired one is unproven with a note. Manual evidence never overrides a broken automated proof. Use manual evidence for checks that cannot be automated.
+
+Each `proven_by` entry, whether `{ file, test }`, `{ command }` or `{ manual, checked_by, date }`, may have an optional `platforms` list of Node `process.platform` names or `posix` (every platform except `win32`). Entries outside the current platform are not run or counted. The human report marks how many proofs were not run, and `--json` lists their references under `notApplicable`. If none apply, the criterion is unproven with a `no proof applies on <platform>` note. An entry without `platforms` runs everywhere; an applicable test that passes zero times is broken.
+
+Run `nomarmy acceptance check` to check all contracts, or pass one or more files to select them. The check runs each criterion's referenced tests: **met** means they pass, **broken** means one fails, **missing** means a named test or file is gone, and **unproven** means there are no references applicable to the current platform. A retired criterion is reported as **retired** without running tests. Broken and missing fail the command; unproven fails only with `--strict`. Use `--json` for the same report as data. CI runs `nomarmy acceptance check` on every platform job. Every automatic check runs in the sandbox, never on the host.
+
+The General writes the contract in the operator checkout during planning and assigns each implement job its `criteria` IDs in its brief, including parallel jobs; workers do not allocate the next free ID. Unknown IDs are refused at admission. A committed job whose revert check passed records proposed test references for all its criteria, including exact names and templates matched by their fixed prefix.
+
+After integrating accepted jobs, preview `nomarmy acceptance fill <run-id> --dry-run`, then run it without `--dry-run` to append proofs (or supply one job ID). Existing references and comments stay intact; duplicate references are skipped. An unproven criterion is marked met only when its updated proofs pass the real checker. The General reviews and prunes the broad mapping after filling, since every changed test is proposed for every criterion its job carries, then commits the contract with the feature. A `CONTRACT BROKEN:` issue means the change is wrong or the contract must intentionally change in the same pull request. `--json` returns the additions as data. `run_finish` checks the checkout again and includes its acceptance verdict in the PR block; check errors are shown, not hidden.
+
 ## Watching what nomArmy is doing
 
 - **Claude Code's status line** shows what's running in this repo, a count for other repos, the open run, and the most serious health warning: `Opus 5.5 · rayson-senti │ 🍪 2: sr-dev codex 9m 10f · scout grok 1m │ run 3/14 $0.41`. `nomarmy connect claude` installs it unless you have your own; then `nomarmy statusline` prints nomArmy's part for you to add.
