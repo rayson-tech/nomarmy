@@ -233,14 +233,52 @@ test("acceptance CLI handles empty repos and validation errors", (t) => {
   assert.equal(report.error.includes("ACC-1"), true);
 });
 
-test("acceptance real Windows contract returns 13 met and only WIN-12 unproven", () => {
+test("acceptance real Windows contract returns 14 met including manual WIN-12", () => {
   const data = loadContract(path.join(root, "acceptance/windows-first-class.yml"));
-  const results = checkContract(data, { repoDir: root });
+  const results = checkContract(data, { repoDir: root, today: "2026-09-30" });
   assert.deepEqual(results, data.criteria.map((item) => ({
-    id: item.id, text: item.text, status: item.id === "WIN-12" ? "unproven" : "met", security: item.security ?? false, failures: [],
+    id: item.id, text: item.text, status: "met", security: item.security ?? false, failures: [],
+    ...(item.id === "WIN-12" ? { manual: item.proven_by } : {}),
   })));
-  assert.equal(results.filter((item) => item.status === "met").length, 13);
-  assert.deepEqual(results.filter((item) => item.status === "unproven").map((item) => item.id), ["WIN-12"]);
+  assert.equal(results.filter((item) => item.status === "met").length, 14);
+  assert.deepEqual(results.filter((item) => item.status === "unproven").map((item) => item.id), []);
+});
+
+test("acceptance manual proof is met until expiry and honors platforms", (t) => {
+  const f = fixture(t);
+  const manual = { manual: "real install", checked_by: "Lee Todd", date: "2026-09-28", expires_days: 90, platforms: ["win32"] };
+  const data = contract([criterion("ACC-1", [manual])]);
+  assert.deepEqual(contractSchema.parse(data), data);
+  const run = () => assert.fail("manual proof must not execute");
+  assert.deepEqual(checkContract(data, { ...f, run, platform: "win32", today: "2026-12-27" }), [{ ...expected("ACC-1", "met"), manual: [manual] }]);
+  assert.deepEqual(checkContract(data, { ...f, run, platform: "win32", today: "2026-12-28" }), [{ ...expected("ACC-1", "unproven"), note: "manual check by Lee Todd on 2026-09-28 expired after 90 days" }]);
+  assert.deepEqual(checkContract(data, { ...f, run, platform: "linux", today: "2026-09-30" }), [{ ...expected("ACC-1", "unproven"), notApplicable: [manual], note: "no proof applies on linux" }]);
+});
+
+test("acceptance manual proof never overrides broken automated evidence", (t) => {
+  const f = fixture(t);
+  const manual = { manual: "real install", checked_by: "Lee Todd", date: "2026-09-28" };
+  const data = contract([criterion("ACC-1", [manual, { command: "exit 7" }])]);
+  assert.deepEqual(checkContract(data, { ...f, today: "2026-09-30" }), [{ ...expected("ACC-1", "broken", [{ command: "exit 7", detail: "process exited 7" }]), manual: [manual] }]);
+});
+
+test("acceptance manual schema rejects invalid real dates and extra fields", () => {
+  const proof = { manual: "real install", checked_by: "Lee Todd", date: "2026-02-30" };
+  for (const invalid of [proof, { ...proof, date: "2026-09-28", extra: true }, { ...proof, date: "2026-09-28", expires_days: 0 }]) {
+    assert.equal(contractSchema.safeParse(contract([criterion("ACC-1", [invalid])])).success, false);
+  }
+});
+
+test("acceptance CLI displays manual evidence and strict accepts it", (t) => {
+  const f = fixture(t);
+  const manual = { manual: "real install", checked_by: "Lee Todd", date: "2026-09-28" };
+  f.write(contract([criterion("ACC-1", [manual])]));
+  const strict = f.invoke("--strict", "--json");
+  assert.equal(strict.status, 0, strict.stderr);
+  assert.deepEqual(JSON.parse(strict.stdout), { contracts: [{ file: "acceptance/example.yml", feature: "Example", criteria: [{ ...expected("ACC-1", "met"), manual: [manual] }] }], totals: totals({ met: 1 }) });
+  const plain = f.invoke("--strict");
+  assert.equal(plain.status, 0, plain.stderr);
+  assert.equal(plain.stdout, "acceptance/example.yml: Example\nACC-1  met (manual: Lee Todd, 2026-09-28)\nTotal: 1 met, 0 broken, 0 missing, 0 unproven, 0 retired\n");
 });
 
 test("acceptance CI checks every platform job", () => {

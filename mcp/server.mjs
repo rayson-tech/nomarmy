@@ -1,3 +1,4 @@
+import { criterionIdSchema } from "../lib/acceptance.mjs";
 import { createJobRuntime, jobLane, currentMaxPoolWorkers, splitJobsByLane, toolText, refusalText } from "../lib/admission.mjs";
 export { jobLane, currentMaxPoolWorkers, splitJobsByLane, refusalText };
 import { createExecutor, sleep } from "../lib/execute.mjs";
@@ -32,14 +33,14 @@ import { liveLeases } from "../lib/slots.mjs";
 import { createRun, loadRun, runTotals, finishRun, resolveRunLimits, describeLoweredLimits } from "../lib/runs.mjs";
 import { agentDispatchFields, resolveAgentModel, agentProviderId, describeAgent } from "../lib/agents.mjs";
 import { OUTCOMES, COORDINATOR_STATUS_BY_OUTCOME } from "../lib/outcomes.mjs";
-import { readUsageSnapshots, usageStatus } from "../lib/usage-limits.mjs";
+import { readUsageSnapshots, usageStatus, usageDisplayText, refreshStaleOverLimitReadings } from "../lib/usage-limits.mjs";
 import { modelRefusals } from "../lib/health.mjs";
 import { retryRefusedModelsInBackground } from "../lib/refusal-retry.mjs";
 import { podmanProblem, podmanVmStartedAt } from "../lib/podman-health.mjs";
 import { restartNotice } from "../lib/install-freshness.mjs";
 import { requestJobStop } from "../lib/openclaw-run.mjs";
 import { loadJobRecords, gatedJobs, computeStats, formatStats, formatStatsSummary, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
-import { shareMarkdown } from "../lib/share.mjs";
+import { acceptanceSummary, shareMarkdown } from "../lib/share.mjs";
 import { recentSuggestions } from "../lib/suggestions.mjs";
 import { probeModel } from "../lib/model-probe.mjs";
 import { jevSettings, judgeSettings } from "../lib/validators.mjs";
@@ -307,7 +308,7 @@ const { executeJob, executeImplement, executeScout, executeDecompose } = createE
 });
 export { executeJob };
 
-const { WORKER_START_STAGGER_MS, activeJobs, runningCount, agentMaxConcurrent, withAgentSlot, track, notifyJobFinished, capacitySnapshot, admit, refusal, runBrief, recordJobInRun, trackInRun, launch, liveProgress, summarize } = createJobRuntime({
+const { WORKER_START_STAGGER_MS, activeJobs, runningCount, agentMaxConcurrent, withAgentSlot, track, notifyJobFinished, capacitySnapshot, displayedCapacity, admit, refusal, runBrief, recordJobInRun, trackInRun, launch, liveProgress, summarize } = createJobRuntime({
   projectDir, stateRoot, jobsRoot, runsRoot, leasesRoot, slotsRoot, run, currentMaxWorkers, slug, agentsConfig, modelCatalogReady, budgetsForJob, resolveSubscriptionSelection, executeJob, subscriptionJobFieldProblems, repoPolicy, jobArgs,
   env: process.env, budgetState, getActiveRunId: () => activeRunId,
   sandboxProblem: () => podmanChecks?.problem() ?? null,
@@ -319,6 +320,7 @@ export const jobSchema = z.object({
   task: z.string().min(1).max(maxTaskChars,
     `Objective exceeds the ${maxTaskChars}-character worker context budget. This length limit does not by itself mean the job is too broad: a single-purpose objective that inlines file contents can hit it just from being verbose. If that's the case here, reference exact paths and line ranges instead (the worker can read them, or use \`evidence\` to hand it the answer already resolved) rather than pasting the file into the brief. If the objective genuinely covers multiple files or concerns, split it into separate jobs.`
   ).describe("implement: the OBJECTIVE the worker must achieve, not the edit it should make. scout: the QUESTION to answer from the repository. decompose: the broad OBJECTIVE to propose a split for."),
+  criteria: z.array(criterionIdSchema).optional().describe("implement: contract IDs from acceptance/*.yml served by this job."),
   acceptance: z.array(z.string().min(1).max(maxAcceptanceItemChars,
     `Acceptance item exceeds ${maxAcceptanceItemChars} characters. Keep each criterion to one concrete, checkable statement.`
   )).max(20).optional().describe("implement: acceptance criteria the worker must satisfy. scout: points a complete answer must cover. decompose: constraints a good split must respect."),
@@ -385,7 +387,7 @@ export function repoPolicy(loadConfigFn = () => loadConfig(projectDir)) {
 // `pool` or `subscription_worker`.
 function jobArgs(args, workerId) {
   const subscriptionWorker = args.subscription_worker;
-  return { task: args.task, acceptance: args.acceptance, verification: args.verification, mode: args.mode, baseRef: args.base_ref,
+  return { task: args.task, acceptance: args.acceptance, criteria: args.criteria, verification: args.verification, mode: args.mode, baseRef: args.base_ref,
     timeoutSeconds: args.timeout_seconds, profile: args.profile, reasoning: args.reasoning, pool: args.pool,
     subscriptionWorker, onBehalfOf: args.on_behalf_of, model: args.model ?? null, reportSize: args.report ?? null, evidence: args.evidence,
     verifyRegression: resolveVerifyRegression(args), commitSubject: args.commit_subject ?? null, refactor: Boolean(args.refactor), continueFrom: args.continue_from ?? null, stakes: args.stakes ?? null, reviews: args.reviews ?? null, workerId };
@@ -395,10 +397,11 @@ server.tool("local_worker", "Run one isolated local worker and wait for it. mode
     const expanded = expandJobs([rawArgs]);
     if (expanded.problems.length) return refusal(expanded.problems);
     const [args] = expanded.jobs;
-    const { problems } = await admit([args]);
+    const { problems, admission } = await admit([args]);
     if (problems.length) return refusal(problems);
     const r = await launch(args).promise;
-    return toolText(coordinatorResult(r), !r.ok);
+    const refreshed = (admission.reasons ?? []).filter((line) => line.startsWith("stale usage reading "));
+    return toolText(refreshed.length ? `${coordinatorResult(r)}\n\n${refreshed.join("\n")}` : coordinatorResult(r), !r.ok);
   });
 server.tool("local_worker_start", "Start one worker or scout in the background and return immediately with a job_id. Poll it with local_worker_status (optionally long-polling with wait_seconds). Same admission rules as local_worker: refuses under memory pressure or when NOMARMY_MAX_WORKERS jobs are already running.", jobSchema.shape,
   async rawArgs => {
@@ -494,7 +497,7 @@ server.tool("local_worker_stop", "Stop a running job's worker, for example one b
 
 server.tool("local_worker_capacity", "What this host can take right now: context per nom and the brief/report budgets derived from it, memory pressure and whether another job would be admitted, and the jobs currently running. Read-only.", {}, async () => {
   await budgetState.refresh();
-  return toolText(JSON.stringify(withRestartNotice(capacitySnapshot()), null, 2));
+  return toolText(JSON.stringify(withRestartNotice(await displayedCapacity()), null, 2));
 });
 // The only way to know what `verification`/`union_verification`/
 // `verify_regression` profile names are actually valid for this repo used to
@@ -574,7 +577,8 @@ server.tool("run_finish", "Close a /feature run as complete or stopped, with a o
     try {
       const records = loadJobRecords(jobsRoot);
       gated = gatedJobs(records, run_id);
-      prBlock = shareMarkdown(computeStats(records, { runId: run_id }), { scope: "this feature run" });
+      const acceptance = await acceptanceSummary(projectDir);
+      prBlock = shareMarkdown(computeStats(records, { runId: run_id }), { scope: "this feature run", acceptance });
     } catch { /* the totals stand without it */ }
     return toolText(JSON.stringify({ id: run.id, status: run.status, ...runTotals(run), ...(gated.length ? { gated } : {}), ...(prBlock ? { prBlock, prBlockNote: "Put prBlock in the pull request's description as it is: every number is from nomArmy's verified records." } : {}) }, null, 2));
   } catch (error) { return toolText(error.message, true); }
@@ -582,8 +586,9 @@ server.tool("run_finish", "Close a /feature run as complete or stopped, with a o
 server.tool("army", "Who you, the General, are and who you call for what in this repository: your fixed charter and the agent you're defined as, the army's workflow, then each role's description, phase (build, review, acceptance), suggested mode, and the agent it runs on, with which config layer set each value (global, project .nomarmy.yml, local .nomarmy.local.yml). Flags roles with no usable agent, and roles that share your model or subscription (not an independent review). Dispatch a role with `army_role`, or an agent directly with `agent`. Read-only, re-read on every call.", {}, async () => {
   try {
     const agents = agentsConfig().agents;
-    const usageSnapshots = readUsageSnapshots(stateRoot);
-    const summary = describeArmy(currentArmy(), { agents, describeAgent, usageSnapshots, agentProviderId });
+    const usageRefresh = await refreshStaleOverLimitReadings(stateRoot);
+    const usageSnapshots = usageRefresh.snapshots;
+    const summary = describeArmy(currentArmy(), { agents, describeAgent, usageSnapshots, agentProviderId, usageRefreshError: usageRefresh.error, usageRefreshFailed: usageRefresh.failedProviders });
     // Each agent's models, from OpenClaw's catalog, so the General can pick
     // one for a role set to "auto". The catalog can lag a brand-new model.
     const catalog = await modelCatalogReady();
@@ -597,7 +602,11 @@ server.tool("army", "Who you, the General, are and who you call for what in this
       const models = listed.filter((m) => !refusals[`${provider}/${m}`]);
       const refusedModels = listed.filter((m) => refusals[`${provider}/${m}`]);
       const snapshot = usageSnapshots[provider];
-      const usage = snapshot ? (() => { const { level, text } = usageStatus(snapshot); return { level, text }; })() : null;
+      const usage = snapshot ? (() => {
+        const status = usageStatus(snapshot);
+        const failed = usageRefresh.failedProviders.includes(provider);
+        return { level: status.level, text: `${usageDisplayText(status)}${failed ? `. ${usageRefresh.error}` : ""}` };
+      })() : null;
       return [name, { runsOn: describeAgent(agent), defaultModel: agent.model ?? null, models, ...(refusedModels.length ? { refusedModels } : {}), usage }];
     }));
     // A pinned model missing from the catalog isn't necessarily wrong:
@@ -637,7 +646,7 @@ server.tool("local_workers", "Run independent jobs (implement or scout) with bou
   const expanded = expandJobs(rawJobs);
   if (expanded.problems.length) return refusal(expanded.problems);
   const { jobs } = expanded;
-  const { problems } = await admit(jobs);
+  const { problems, admission } = await admit(jobs);
   let forcedBase = null;
   if (auto_union) {
     const refs = [...new Set(jobs.map(j => j.base_ref).filter(Boolean))];
@@ -702,7 +711,8 @@ server.tool("local_workers", "Run independent jobs (implement or scout) with bou
     jobs: results.map(r => ({ jobId: r.manifest.jobId, workerId: r.manifest.workerId, mode: r.manifest.mode, outcome: r.manifest.outcome || OUTCOMES.WORKER_FAILED, recovered: Boolean(r.manifest.recovered), status: r.manifest.coordinatorStatus || "failed", branch: r.manifest.branch, commit: r.manifest.commit?.sha || null, worktree: r.manifest.worktree, jobDir: r.jobDir })),
     ...(union ? { union } : {}) };
   const unionSection = union ? `UNION\n\n${formatUnion(withWindowsPaths(union))}\n\n` : "";
-  const text = `BATCH EXECUTION RECORD\n${coordinatorJson(summary)}\n\n${unionSection}WORKER RESULTS\n\n${results.map((r, i) => `===== WORKER ${i + 1} =====\n${coordinatorResult(r)}`).join("\n\n")}`;
+  const refreshed = (admission?.reasons ?? []).filter((line) => line.startsWith("stale usage reading "));
+  const text = `BATCH EXECUTION RECORD\n${coordinatorJson(summary)}\n\n${unionSection}WORKER RESULTS\n\n${results.map((r, i) => `===== WORKER ${i + 1} =====\n${coordinatorResult(r)}`).join("\n\n")}${refreshed.length ? `\n\n${refreshed.join("\n")}` : ""}`;
   return toolText(text, results.some(r => !r.ok) || union?.status === "union_verification_failed" || union?.status === "union_error");
 });
 // No model, no sandbox, no tokens spent on a worker: the coordinator asks the

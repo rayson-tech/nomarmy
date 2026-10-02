@@ -1,0 +1,24 @@
+# Backfilled from tests and plan docs for PRs 52 to 54; no job records were available.
+feature: Dependency sandbox images
+pr: "52-54"
+criteria:
+  - id: IMG-1
+    text: Dependency image tags are deterministic and change with dependency content
+    proven_by:
+      - file: tests/sandbox-images.test.mjs
+        test: "pythonImageTag: deterministic for the same content, changes when a requirements file's content changes"
+    status: met
+
+  - id: IMG-2
+    text: Images build once from a context containing only dependency files, tagged by hash
+    proven_by:
+      - file: tests/sandbox-images.test.mjs
+        test: "ensureDependencyImageBuilt: builds from a context of only the dependency files, tagged by their hash, once"
+    status: met
+
+  - id: IMG-3
+    text: A failed install leaves a marker rather than a failed image
+    proven_by:
+      - file: tests/sandbox-images.test.mjs
+        test: "dependencyDockerfile: each package installs at its repo path under /deps as the sandbox user; a failed install leaves a marker, not a failed image"
+    status: met

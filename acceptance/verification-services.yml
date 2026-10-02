@@ -1,0 +1,24 @@
+# Backfilled from tests and plan docs; no job records were available.
+feature: Verification services
+criteria:
+  - id: SVC-1
+    text: Service specs must use pinned images and bounded settings
+    proven_by:
+      - file: tests/harness-services.test.mjs
+        test: "service schema accepts exact specs and rejects unpinned images and invalid boundaries"
+    status: met
+
+  - id: SVC-2
+    text: Service lifecycle is internal, ordered, bounded and cleaned on every failure
+    proven_by:
+      - file: tests/harness-services.test.mjs
+        test: "verification services lifecycle is internal, ordered, bounded and cleaned on every failure"
+    status: met
+
+  - id: SVC-3
+    text: A repository's committed opt-in cannot name unknown or allowlist-level harnesses
+    proven_by:
+      - file: tests/harness-services.test.mjs
+        test: "committed harness opt-in adds undetected services and refuses unknown and allowlist names"
+    status: met
+    security: true

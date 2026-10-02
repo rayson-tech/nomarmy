@@ -1,6 +1,6 @@
 # Plan: acceptance contracts, what a feature promises, kept in the repo
 
-**Status: phase 1 built (on this branch).**
+**Status: phases 1 to 4 built (on this branch).**
 
 ## Why
 
@@ -58,8 +58,8 @@ Versioned with the code they describe, reviewed in the same PR, readable by work
 3. **Later jobs are checked against contracts**: criteria for touched code in the brief; the judge's check; breaking one needs review.
 4. **Backfill** for other merged features where job records exist, curated like the Windows one.
 
-## Open questions
+## Resolved questions
 
-- Referencing tests by name versus tagging the test itself with the ID (`test("[WIN-6] connectViaWsl ...")`): tags survive renames but touch every test; names need no test changes. The prototype uses names.
-- Whether criteria belong per feature file or in one `acceptance/` index per repository.
-- How to handle a criterion proven only by an end-to-end or manual step (a real Windows install): a `proven_by` of kind `manual` with a date and who checked it, instead of `unproven`.
+- Tests are referenced by exact name, not ID tags in test names. Renames require updating the contract.
+- Contracts live in one `acceptance/<feature>.yml` per feature, not a repository-wide index.
+- Manual proofs use `manual`, `checked_by`, `date`, optional `expires_days` and optional `platforms`. A current proof can meet a criterion; an expired proof is unproven with a note and never overrides broken automated evidence.

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { fillAcceptance, gatherAcceptanceProposals } from "../lib/acceptance-fill.mjs";
 // nomArmy CLI. Every command proposes before it writes anything -- init,
 // setup, model and update all show exactly what would change and write only
 // after explicit confirmation ([y/N]) or an explicit non-interactive flag
@@ -32,16 +33,18 @@ import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgent
 import { loadArmy, mergeArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
 import { parseLlamaUrl } from "../lib/execution.mjs";
 import { setupSteps, formatSetupSteps, runSetupPlaybook } from "../lib/setup-steps.mjs";
-import { readUsageSnapshots } from "../lib/usage-limits.mjs";
+import { readUsageSnapshots, refreshStaleOverLimitReadings } from "../lib/usage-limits.mjs";
 import { pickMachine, planResize } from "../lib/sandbox-vm.mjs";
 import { listProcesses, staleSessions, formatStaleSessions } from "../lib/stale-sessions.mjs";
 import { readSetting, writeSetting, writeEnvLine, userCommonPath, userProfilePath, profilePathFor, tildePath } from "../lib/user-config.mjs";
 import { MIN_PODMAN_VM_MB } from "../lib/doctor.mjs";
 import { liveLeases } from "../lib/slots.mjs";
 import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
-import { recordProbeSuccess } from "../lib/health.mjs";
+import { linkCodex } from "../lib/codex-link.mjs";
+import { recordProbeSuccess, parseOpenclawAuthProfiles, codexImportRecovery } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
-import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
+import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, openclawSignInFailure, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
+import { PINNED_OPENCLAW_VERSION, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors } from "../lib/openclaw-install.mjs";
 import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
 import { fileURLToPath } from "node:url";
@@ -115,8 +118,10 @@ function usage(code = 0) {
 
 Usage: nomarmy <command> [options]
 
+  acceptance fill <run-id|job-id> [--dry-run] [--json]
+                  Append proposed test proofs to feature contracts.
   acceptance check [file...] [--json] [--strict]
-                  Check feature contracts in acceptance/*.yml.
+                  Check feature contracts in acceptance/*.yml; runs this repository's tests on this machine.
                   --strict fails on unproven criteria as well as broken or missing.
   scan            Inspect this repository and report its execution environment.
                   --check   compare the evidence against a committed .nomarmy.yml
@@ -177,7 +182,12 @@ Usage: nomarmy <command> [options]
                             --model --auth-env [--base-url]
                             [--openclaw-provider --plugin] [--register]
                             [--update-mcp] (api); --provider --model
-                            --owner (subscription); and optionally
+                            --owner (subscription). Codex JSON setup can
+                            --link-openclaw after CLI login; removing a
+                            capturing email profile non-interactively needs
+                            --remove-email-profiles. Interactive Codex setup
+                            offers removal (default yes), then imports the
+                            CLI login. For any kind, optionally
                             --max-concurrent --context-window
                             --thinking [minimal|low|medium|high|xhigh|adaptive|max|ultra] --no-thinking
                   update <name>
@@ -189,7 +199,7 @@ Usage: nomarmy <command> [options]
                             --no-model clears the default model, so every
                             role or job names its own.
                             (--json with the matching flags; --probe to
-                            test-call a subscription's new model first)
+                            test-call the agent; without a name, all agents)
                   remove <name>
                             remove one agent
   army <show|init|assign|general>
@@ -228,7 +238,7 @@ Usage: nomarmy <command> [options]
                   how many api and subscription jobs run at once, across
                   every session (default 4); with n, sets it in limits.yml.
                   Warns when the Podman VM is too small for that many.
-  jobs [--watch|--events [--until-done]|--prune|--wait <jobId>|--stop <jobId> [--reason <text>]] [--interval N] [--older-than DAYS]
+  jobs [--watch|--events [--until-done] [--run <run-id>] [--repo <path>]|--prune|--wait <jobId> [<jobId> ...]|--stop <jobId> [--reason <text>]] [--interval N] [--older-than DAYS]
                   what's running across every session (agent, model, phase,
                   last tool call, files changed, heartbeat) and what just
                   finished; --watch redraws every N seconds (default 3);
@@ -236,14 +246,17 @@ Usage: nomarmy <command> [options]
                   finish (--json for JSON lines). It's a stream: read it
                   with a monitor that wakes on each line. A background
                   command is only reported when it exits, so there use
-                  --events --until-done, which exits once every job it saw
-                  running has finished (or --wait for one job). The plain
+                  --events --until-done --run <run-id> for a whole run,
+                  or --wait <id> <id> ... for specific jobs. Unscoped
+                  --until-done watches every job on this machine. The plain
                   stream ends on its own after 30 minutes with nothing
                   running (--idle-minutes N); --prune removes the bulky runtime data
                   from finished jobs older than DAYS (default 2), keeping
                   their records, reports and any retained worktree;
-                  --wait <jobId> [--timeout <seconds>] blocks for one job
-                  to finish (default timeout 1800; --json is supported);
+                  --wait <jobId> [<jobId> ...] [--timeout <seconds>]
+                  blocks until all finish; comma-separated ids also work
+                  (default timeout 1800; --json is supported);
+                  --events --repo <path> limits events to one repository;
                   --stop <jobId> stops a running job's worker (no report
                   recovery, no verification), keeping its worktree for
                   continue_from
@@ -357,7 +370,7 @@ function cmdScan() {
   const notes = evidence.notes?.items ?? [];
   if (notes.length) {
     console.log("\nNotes:");
-    for (const n of notes) console.log(`  ${n.message ?? n}`);
+    for (const n of notes) console.log(`  ${typeof n === "string" ? n : n.message ?? JSON.stringify(n)}`);
   }
   console.log("\nThis is deterministic evidence only - nothing here was executed.");
   console.log("Describe the environment in .nomarmy.yml, then run 'nomarmy validate'.");
@@ -380,12 +393,12 @@ function scanCheck(evidence) {
     process.exit(1);
   }
   console.log(`Comparing ${path.basename(loaded.path)} against repository evidence\n`);
-  if (drift.summary) console.log(`${drift.summary}\n`);
+  if (drift.summary) console.log(`Drift: ${drift.summary.missingFromConfig} missing from config, ${drift.summary.missingFromRepo} missing from repo (${drift.summary.total} total)\n`);
   for (const section of ["services", "ports", "environment", "commandKinds"]) {
     const d = drift[section];
     if (!d) continue;
-    for (const m of d.missingFromConfig ?? []) console.log(`  repo has, config omits:  ${section}: ${m}`);
-    for (const m of d.missingFromRepo ?? []) console.log(`  config has, repo lacks:  ${section}: ${m}`);
+    for (const m of d.missingFromConfig ?? []) console.log(`  repo has, config omits:  ${section}: ${typeof m === "object" ? JSON.stringify(m) : m}`);
+    for (const m of d.missingFromRepo ?? []) console.log(`  config has, repo lacks:  ${section}: ${typeof m === "object" ? JSON.stringify(m) : m}`);
   }
   process.exit(drift.ok ? 0 : 1);
 }
@@ -1182,23 +1195,24 @@ async function ensureVendorAuth(rl, vendorKey) {
   let status = readLoginStatus(vendorKey);
   if (!status.loggedIn) {
     console.log(c.yellow(`You're not logged in to ${vendor.cli.bin} yet -- this opens its own login (a browser or a device code).`));
-    if (!(await confirm(rl, "Log in now?"))) return { ok: false };
-    runInteractive(vendor.cli.bin, vendor.cli.loginArgs);
+    if (!(await confirm(rl, "Log in now?"))) { console.log(c.red(`✗ Sign-in canceled. Retry with \`nomarmy agents add subscription ${vendorKey}\`.`)); return { ok: false }; }
+    const loginOk = runInteractive(vendor.cli.bin, vendor.cli.loginArgs);
+    if (!loginOk) { console.log(c.red(`✗ ${vendor.cli.bin} sign-in failed or was canceled. Retry with \`nomarmy agents add subscription ${vendorKey}\`.`)); return { ok: false }; }
     status = readLoginStatus(vendorKey);
-    if (!status.loggedIn) { console.log(c.red(`✗ Still not logged in to ${vendor.cli.bin}.`)); return { ok: false }; }
+    if (!status.loggedIn) { console.log(c.red(`✗ Still not logged in to ${vendor.cli.bin}. Retry with \`nomarmy agents add subscription ${vendorKey}\`.`)); return { ok: false }; }
   }
   console.log(c.green(`✓ Logged in to ${vendor.cli.bin}${status.email ? ` as ${status.email}` : ""}${status.subscriptionType ? ` (${status.subscriptionType})` : ""}.`));
 
   if (vendor.plugin) {
     step("OpenClaw plugin");
     const version = parseOpenclawVersion(runQuiet(openclawCmd(), ["--version"]).out);
-    if (!versionAtLeast(version, vendor.plugin.minOpenclaw)) {
-      console.log(c.yellow(`OpenClaw ${version ? version.join(".") : "(unknown version)"} is older than the ${vendor.plugin.minOpenclaw} this vendor's plugin needs.`));
-      if (!(await confirm(rl, "Update OpenClaw now (npm update -g openclaw)?"))) return { ok: false };
-      if (!runInteractive("npm", ["update", "-g", "openclaw"])) {
-        console.log(c.red("✗ Update failed. If npm reports EACCES, your global npm directory has root-owned files from an old sudo install: `sudo chown -R $(whoami) ~/.npm ~/.npm-global` fixes it."));
-        return { ok: false };
-      }
+    if (!versionAtLeast(version, PINNED_OPENCLAW_VERSION)) {
+      const repaired = await repairOpenclaw({
+        command: openclawCmd(),
+        vendors: configuredSubscriptionVendors(loadAgentsOrExit().agents, [vendorKey]),
+        isTTY: Boolean(input.isTTY), ask: (prompt) => rl.question(prompt),
+      });
+      if (!repaired.ok) return { ok: false };
     }
     if (!runQuiet(openclawCmd(), ["plugins", "inspect", vendor.plugin.id]).ok) {
       console.log(c.dim(`Installing ${vendor.plugin.spec}...`));
@@ -1207,6 +1221,12 @@ async function ensureVendorAuth(rl, vendorKey) {
         return { ok: false };
       }
       runQuiet(openclawCmd(), ["plugins", "registry", "--refresh"]);
+    }
+    const checks = verifyOpenclaw({ command: openclawCmd(), vendors: configuredSubscriptionVendors(loadAgentsOrExit().agents, [vendorKey]) });
+    const failed = checks.filter((check) => !check.ok);
+    if (failed.length) {
+      for (const check of failed) console.log(c.red(`✗ ${check.message} Fix: ${check.fix}`));
+      return { ok: false };
     }
     console.log(c.green(`✓ OpenClaw's ${vendor.plugin.id} plugin is ready.`));
   }
@@ -1229,13 +1249,27 @@ async function ensureVendorAuth(rl, vendorKey) {
   return { ok: true, email: status.email };
 }
 
+function hasUsableOpenclawAuthProfile(provider) {
+  // Same OpenClaw command and JSON shape used by health's login-expiry check.
+  const result = runQuiet(openclawCmd(), ["models", "auth", "list", "--json"]);
+  if (!result.ok) return false;
+  const profiles = parseOpenclawAuthProfiles(result.stdout);
+  return profiles?.some((profile) => {
+    if (profile.provider !== provider) return false;
+    if (profile.expiresAt == null) return true;
+    const expires = Date.parse(profile.expiresAt);
+    return Number.isFinite(expires) && expires > Date.now();
+  }) ?? false;
+}
+
 function catalogModelsFor(provider) {
   return parseCatalogModels(runQuiet(openclawCmd(), ["models", "list", "--refresh"]).out, provider);
 }
 
-/** One real, one-token completion through OpenClaw -- the only proof a credential actually works. */
+/** One real, one-token completion through OpenClaw to test a model. */
 // Why the last probeWorker() call failed, in the vendor's words when it said.
 let lastProbeFailure = null;
+let lastProbeText = "";
 function probeWorker(provider, model) {
   // The route a job takes: the ambient OpenClaw config and a state dir of
   // its own, never --isolated. --isolated skips that config, and with it the
@@ -1251,7 +1285,10 @@ function probeWorker(provider, model) {
       "--json", "--cwd", cwd, "--state-dir", stateDir, "--timeout", "90"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], cwd });
     // Streams kept apart: OpenClaw logs a "run ... ended" line to stderr
     // AFTER the JSON envelope, and the merged text doesn't parse.
-    const outcome = probeOutcome({ stdout: result.stdout ?? "", stderr: result.stderr ?? "" });
+    const stdout = result.stdout ?? "";
+    const stderr = result.stderr ?? "";
+    const outcome = probeOutcome({ stdout, stderr });
+    lastProbeText = `${stderr}\n${stdout}`;
     lastProbeFailure = outcome.ok ? null : outcome.reason;
     if (outcome.ok) recordProbeSuccess(agentStateRoot(), `${provider}/${model}`);
     return outcome.ok;
@@ -1283,10 +1320,15 @@ function reapProbeSandbox(stateDir) {
 /**
  * OpenClaw's own provider login, for the vendors whose plugin wants one on
  * top of the vendor CLI's login (Claude doesn't: OpenClaw reuses the CLI
- * session directly). Only ever run when a probe or catalog lookup has
- * already shown it's needed -- never preemptively.
+ * session directly). Codex always refreshes its imported copy after CLI
+ * login is confirmed; other providers link when catalog or auth checks fail.
  */
-function openclawProviderLogin(vendor) {
+async function openclawProviderLogin(vendor, rl) {
+  if (vendor === SUBSCRIPTION_VENDORS.codex) return linkCodex({
+    run: runQuiet, command: openclawCmd(), isTTY: Boolean(input.isTTY),
+    removeEmailProfiles: flag("remove-email-profiles"),
+    confirm: (prompt, opts) => confirm(rl, prompt, opts), print: (message) => console.log(c.dim(message)),
+  });
   const provider = vendor.credential.loginProvider ?? vendor.provider;
   console.log(c.dim(`Linking OpenClaw to it (\`openclaw models auth login --provider ${provider}\`) -- follow its prompts:`));
   const ok = runInteractive(openclawCmd(), ["models", "auth", "login", "--provider", provider]);
@@ -1299,8 +1341,9 @@ function openclawProviderLogin(vendor) {
 // One list in ~/.config/nomarmy/agents.yml (lib/agents.mjs): the local
 // model, api keys, and individual subscriptions. `add` walks through what
 // each kind needs -- a key registered with OpenClaw, or the vendor's own
-// login -- and proves it with a real test call before saving. Changes apply
-// to the next job; the MCP server re-reads the file when it changes.
+// login -- and tests the selected model before saving, with an explicit
+// opt-in to save after a failed model call. Changes apply to the next job;
+// the MCP server re-reads the file when it changes.
 
 function loadAgentsOrExit() {
   try { return loadAgents(globalConfigDir()); }
@@ -1518,6 +1561,14 @@ async function addApiAgent(rl, agents) {
   console.log(c.dim(`Use it with \`nomarmy army assign <role> ${name}\` or agent: "${name}" on a job.`));
 }
 
+const OWNER_EMAIL_RE = /^[^@\s]+@[^@\s]+$/;
+function validOwnerEmail(email) { return typeof email === "string" && OWNER_EMAIL_RE.test(email); }
+function gitUserEmail() {
+  const result = spawnSync("git", ["config", "user.email"], { cwd: repoDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  const email = result.status === 0 ? result.stdout.trim() : "";
+  return validOwnerEmail(email) ? email : "";
+}
+
 const SUBSCRIPTION_AGENT_DEFAULT_NAMES = { claude: "claude", codex: "codex", meta: "muse" };
 
 async function addSubscriptionAgent(rl, agents) {
@@ -1541,15 +1592,33 @@ async function addSubscriptionAgent(rl, agents) {
   }
 
   const auth = await ensureVendorAuth(rl, vendorKey);
-  if (!auth.ok) { console.log(c.dim("\nStopped; nothing was written.")); return; }
+  if (!auth.ok) { console.log(c.dim("\nStopped; nothing was written.")); process.exitCode = 1; return; }
 
   console.log(`\n${c.bold("→")} Models`);
   const needsOpenclawLogin = vendor.credential.kind === "openclaw-login";
   let linkedOpenclaw = false;
+  if (vendorKey === "codex") {
+    linkedOpenclaw = await openclawProviderLogin(vendor, rl);
+    if (!linkedOpenclaw) {
+      console.log(c.red("✗ Sign-in has no usable auth profile. Retry with `nomarmy agents add subscription codex`."));
+      process.exitCode = 1; return;
+    }
+  }
   let models = catalogModelsFor(vendor.provider);
-  if (!models.length && needsOpenclawLogin) {
-    linkedOpenclaw = openclawProviderLogin(vendor);
+  if (!models.length && needsOpenclawLogin && !linkedOpenclaw) {
+    linkedOpenclaw = await openclawProviderLogin(vendor, rl);
+    if (!linkedOpenclaw) { console.log(c.red(`✗ Sign-in failed or was canceled. Retry with \`nomarmy agents add subscription ${vendorKey}\`.`)); process.exitCode = 1; return; }
     models = catalogModelsFor(vendor.provider);
+  }
+  // Catalog entries can be cached, and a particular model can refuse a
+  // working login. Check OpenClaw's auth profile before asking for details.
+  if (needsOpenclawLogin && !hasUsableOpenclawAuthProfile(vendor.provider)) {
+    if (linkedOpenclaw || !(await openclawProviderLogin(vendor, rl)) || !hasUsableOpenclawAuthProfile(vendor.provider)) {
+      console.log(c.red(`✗ Sign-in has no usable auth profile. Retry with \`nomarmy agents add subscription ${vendorKey}\`.`));
+      process.exitCode = 1;
+      return;
+    }
+    linkedOpenclaw = true;
   }
   // The agent is the account; the model is only a default. Roles pick
   // their own model (or "auto" for the General to choose per job).
@@ -1558,27 +1627,38 @@ async function addSubscriptionAgent(rl, agents) {
   const pick = (await rl.question(c.bold(`Default model, optional${models.length ? " (a number or an id)" : ""}; blank = pick per role: `))).trim();
   const model = /^\d+$/.test(pick) && models.length ? models[Number(pick) - 1] : pick || null;
   if (pick && !model) throw new Error(`Not a valid choice: "${pick}".`);
-  // The test call needs some model; it proves the login, not the choice.
+  // A usable profile is only a fast precondition. The test call is what
+  // proves sign-in: an unexpired Codex import can still answer 401.
   const probeModel = model ?? models[0] ?? vendor.defaultModel;
 
-  const knownOwners = [...new Set(Object.values(agents).filter((a) => a.kind === "subscription").map((a) => a.owner))];
-  const ownerDefault = auth.email ?? (knownOwners.length === 1 ? knownOwners[0] : "");
-  const owner = (await rl.question(c.bold(`Whose subscription is this${ownerDefault ? ` [${ownerDefault}]` : ""}: `))).trim() || ownerDefault;
-  if (!owner) throw new Error("An owner is required -- every job on this agent must name them in on_behalf_of.");
+  const ownerDefault = validOwnerEmail(auth.email) ? auth.email : gitUserEmail();
+  const owner = await askUntilValid(rl, `Whose subscription is this${ownerDefault ? ` [${ownerDefault}]` : ""}: `, {
+    allowEmpty: Boolean(ownerDefault), fallback: ownerDefault, pattern: OWNER_EMAIL_RE,
+    invalidMessage: "enter an email address (one @, no spaces).",
+  });
 
   const name = await askAgentName(rl, agents, SUBSCRIPTION_AGENT_DEFAULT_NAMES[vendorKey] ?? vendorKey);
   if (!name) { console.log(c.dim("Stopped; nothing was written.")); return; }
 
   console.log(`\n${c.bold("→")} Test call`);
-  let works = probeModel ? probeWorker(vendor.provider, probeModel) : false;
-  if (!works && needsOpenclawLogin && !linkedOpenclaw && probeModel) {
-    openclawProviderLogin(vendor);
-    works = probeWorker(vendor.provider, probeModel);
-  }
+  const probed = Boolean(probeModel);
+  const works = probed ? probeWorker(vendor.provider, probeModel) : false;
   if (works) console.log(c.green(`✓ ${vendor.provider}/${probeModel} answered a real test prompt.`));
-  else {
-    console.log(c.red(probeModel ? `✗ A real test prompt to ${vendor.provider}/${probeModel} didn't come back.` : "✗ No model to make a test call with."));
-    if (!(await confirm(rl, "Save the agent anyway?", { defaultYes: false }))) { console.log(c.dim("Stopped; nothing was written.")); return; }
+  else if (needsOpenclawLogin && probed && openclawSignInFailure(`${lastProbeFailure ?? ""}\n${lastProbeText}`)) {
+    const why = lastProbeFailure ? `: ${lastProbeFailure}` : "";
+    console.log(c.red(`✗ Sign-in failed${why}.`));
+    console.log(`  fix: ${codexImportRecovery()}`);
+    console.log(c.dim("Stopped; nothing was written."));
+    process.exitCode = 1;
+    return;
+  } else {
+    console.log(c.yellow(probeModel ? `⚠ The login works, but ${vendor.provider}/${probeModel} didn't answer a real test prompt.` : "⚠ The login works, but no model is available for a test call."));
+    console.log(c.dim(`You can retry later with \`nomarmy agents update ${name} --probe\`.`));
+    if (!(await confirm(rl, "Save the agent anyway?", { defaultYes: false }))) {
+      console.log(c.dim("Stopped; nothing was written."));
+      process.exitCode = 1;
+      return;
+    }
   }
   const written = saveAgents({ ...agents, [name]: { kind: "subscription", provider: vendor.provider, owner, ...(model ? { model } : {}) } });
   savedAgentMessage(name, written);
@@ -1591,6 +1671,7 @@ async function cmdAgentsAddJson() {
   const kind = value("kind") ?? (AGENT_KINDS.includes(argv[2]) ? argv[2] : null);
   if (!name || !kind) throw new Error(`--json requires --name <agent> and --kind <${AGENT_KINDS.join("|")}>, plus that kind's fields (see \`nomarmy help\`).`);
   if (RESERVED_AGENT_NAMES.includes(name)) throw new Error(`"${name}" is a reserved name.`);
+  if (kind === "subscription" && value("owner") !== null && !validOwnerEmail(value("owner"))) throw new Error("--owner must be an email address (one @, no spaces).");
   const agent = { kind };
   const num = (flagName) => (value(flagName) !== null ? Number(value(flagName)) : undefined);
   if (kind === "local") {
@@ -1605,6 +1686,15 @@ async function cmdAgentsAddJson() {
     const thinking = resolveThinkingFlag();
     if (thinking !== undefined) agent.thinking = thinking;
   }
+  if (kind === "subscription" && agent.provider === "openai" && (flag("link-openclaw") || flag("remove-email-profiles"))) {
+    if (!readLoginStatus("codex").loggedIn) throw new Error("Confirm Codex CLI login first: codex login");
+    const linked = await linkCodex({ run: runQuiet, command: openclawCmd(),
+      removeEmailProfiles: flag("remove-email-profiles"), print: (message) => console.error(message) });
+    if (!linked) throw new Error("Codex import failed; nothing was written.");
+    if (!probeWorker("openai", agent.model ?? SUBSCRIPTION_VENDORS.codex.defaultModel)) {
+      throw new Error(`Codex test call failed; nothing was written. Fix: ${codexImportRecovery()}`);
+    }
+  }
   const written = saveAgents({ ...agents, [name]: agent });
   const saved = written[name];
   let registered = null, mcpUpdated = false;
@@ -1616,6 +1706,43 @@ async function cmdAgentsAddJson() {
   return out({ written: agentsConfigPath(globalConfigDir()), name, agent: saved, ...(kind === "api" ? { registered, mcpUpdated } : {}) });
 }
 
+// A probe-only update checks credentials without changing agents.yml.
+function probeConfiguredAgent(name, agent) {
+  const provider = agentProviderId(agent);
+  let model = agent.model;
+  let source = "";
+  if (!model && provider) {
+    const role = agentAssignments()[name]?.roles.find((r) => r.model && r.model !== "auto");
+    if (role) { model = role.model; source = `${role.role}'s model`; }
+    if (!model) {
+      const vendor = Object.values(SUBSCRIPTION_VENDORS).find((v) => v.provider === provider);
+      if (vendor?.defaultModel) { model = vendor.defaultModel; source = "vendor default"; }
+    }
+    if (!model) {
+      model = catalogModelsFor(provider)[0];
+      if (model) source = "first catalog model";
+    }
+  }
+  if (!provider || !model) {
+    console.log(c.red(`✗ ${name}  ${provider ?? agent.kind}/${model ?? "no model"}  no model available; set one with \`nomarmy agents update ${name} --model <m>\``));
+    process.exitCode = 1;
+    return;
+  }
+  const selected = `${provider}/${model}${source ? ` (${source})` : ""}`;
+  const start = performance.now();
+  const ok = probeWorker(provider, model);
+  const elapsed = ((performance.now() - start) / 1000).toFixed(1);
+  console.log(ok ? c.green(`✓ ${name}  ${selected}  answered in ${elapsed}s`)
+    : c.red(`✗ ${name}  ${selected}  failed: ${lastProbeFailure ?? "no answer"}`));
+  if (!ok) process.exitCode = 1;
+}
+
+function cmdAgentsProbeAll() {
+  const agents = fileAgentsOrExit();
+  if (!Object.keys(agents).length) { console.log("No configured agents to probe."); return; }
+  for (const [name, agent] of Object.entries(agents)) probeConfiguredAgent(name, agent);
+}
+
 // --- update ---
 
 // Kind, provider and owner are fixed: changing any of them is a different
@@ -1624,7 +1751,8 @@ async function cmdAgentsAddJson() {
 // test call `add` makes (interactive always; --json only with --probe,
 // since it spends a real request on the subscription).
 async function cmdAgentsUpdate() {
-  const name = argv[2];
+  const name = argv[2]?.startsWith("--") ? null : argv[2];
+  if (!name && flag("probe")) return cmdAgentsProbeAll();
   if (!name) throw new Error("Usage: nomarmy agents update <name> [--model <m>|--no-model] [--slot coder|gpt] [--auth-env <NAME>] [--base-url <url>] [--max-concurrent <n>] [--context-window <tokens>] [--thinking [low|medium|high]|--no-thinking] [--probe]");
   const agents = fileAgentsOrExit();
   const current = Object.prototype.hasOwnProperty.call(agents, name) ? agents[name] : name === "local" ? { ...BUILTIN_LOCAL_AGENT } : undefined;
@@ -1649,8 +1777,8 @@ async function cmdAgentsUpdate() {
     if (flag("owner") || value("owner") !== null || value("provider") !== null || value("kind") !== null) {
       throw new Error("Kind, provider and owner can't be changed -- that's a different agent. Use `nomarmy agents add`.");
     }
-    probe = flag("probe") && current.kind === "subscription";
-    if (!Object.keys(changes).length) throw new Error("Nothing to update -- pass at least one field flag (see `nomarmy agents update` usage).");
+    probe = flag("probe");
+    if (!Object.keys(changes).length && !probe) throw new Error("Nothing to update -- pass at least one field flag (see `nomarmy agents update` usage).");
   } else {
     if (!process.stdin.isTTY) throw new Error("nomarmy agents update needs an interactive terminal, or the flags to change (e.g. --max-concurrent 3).");
     const rl = createInterface({ input, output });
@@ -1697,7 +1825,8 @@ async function cmdAgentsUpdate() {
     if (!Object.keys(changes).length) { console.log(c.dim("\nNothing changed.")); return; }
   }
 
-  if (probe && changes.model && !probeWorker(current.provider, changes.model)) {
+  if (probe && !Object.keys(changes).length) { probeConfiguredAgent(name, current); return; }
+  if (probe && changes.model && !probeWorker(agentProviderId(current), changes.model)) {
     out({ error: `a real test prompt to ${current.provider}/${changes.model} didn't come back -- nothing was written` });
     process.exit(1);
   }
@@ -2323,11 +2452,17 @@ function armyLayerFlag(fallback = "global") {
   return chosen[0] ?? fallback;
 }
 
-function loadArmyForCli() {
+function loadArmyForCli({ globalOnly = false, usageRefresh = null } = {}) {
   const agents = loadAgentsOrExit().agents;
-  const loaded = loadArmy({ projectDir: repoDir });
-  const usageSnapshots = readUsageSnapshots(process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents"));
-  return { loaded, agents, summary: describeArmy(loaded, { agents, describeAgent: describeAgentLabel, usageSnapshots, agentProviderId }) };
+  const loaded = globalOnly
+    ? (() => {
+        const filePath = armyLayerPath("global", { projectDir: repoDir });
+        const army = readArmyFile(filePath, { armyOnly: true });
+        return { ...mergeArmy([{ layer: "global", army }]), layers: [{ layer: "global", path: filePath, exists: fs.existsSync(filePath), hasArmy: Boolean(army) }] };
+      })()
+    : loadArmy({ projectDir: repoDir });
+  const usageSnapshots = usageRefresh?.snapshots ?? readUsageSnapshots(process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents"));
+  return { loaded, agents, summary: describeArmy(loaded, { agents, describeAgent: describeAgentLabel, usageSnapshots, agentProviderId, usageRefreshError: usageRefresh?.error ?? null, usageRefreshFailed: usageRefresh?.failedProviders ?? null }) };
 }
 
 // Claude Code adds settings.local.json to .gitignore for the same reason:
@@ -2353,11 +2488,25 @@ function usageLine(usage, indent) {
   return usage.level === "over" ? c.red(`${text} (at the limit)`) : usage.level === "high" ? c.yellow(text) : c.dim(text);
 }
 
+function repositoryHere(dir) {
+  let current = path.resolve(dir);
+  while (true) {
+    if (fs.existsSync(path.join(current, ".git"))) return true;
+    const parent = path.dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
+}
+
 async function cmdArmyShow() {
-  const { summary } = loadArmyForCli();
+  const inRepository = repositoryHere(repoDir);
+  const stateRoot = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
+  const usageRefresh = await refreshStaleOverLimitReadings(stateRoot);
+  const { summary } = loadArmyForCli({ globalOnly: !inRepository, usageRefresh });
   if (json) return out(summary);
   const g = summary.general;
-  console.log(c.bold("🪖 nomArmy") + c.dim(`  (${repoDir})`));
+  console.log(c.bold("🪖 nomArmy") + (inRepository ? c.dim(`  (${repoDir})`) : ""));
+  if (!inRepository) console.log(c.dim("no repository here: showing global settings"));
   console.log(`\n${c.bold("General")}  ${g.agent ? agentCell(g.agent, g.agentRunsOn) : ""}${g.setBy ? c.dim(`  [${g.setBy}]`) : ""}`);
   console.log(c.dim(`  ${g.who}`));
   for (const line of g.responsibilities) console.log(c.dim(`  - ${line}`));
@@ -2387,7 +2536,7 @@ async function cmdArmyShow() {
     }
   }
   console.log(`\n${c.bold("Layers")}  ${c.dim("(later ones win)")}`);
-  for (const layer of summary.layers) {
+  for (const layer of summary.layers.filter((entry) => inRepository || entry.layer === "global")) {
     const state = layer.hasArmy ? c.green("● army section") : layer.exists ? c.dim("○ file exists, no army section") : c.dim("○ no file");
     console.log(`  ${layer.layer.padEnd(8)} ${state.padEnd(40)} ${c.dim(layer.path)}`);
   }
@@ -2437,14 +2586,31 @@ async function cmdArmyInit() {
   }
 }
 
+function armyPositionals() {
+  const result = [];
+  const args = argv.slice(2);
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (["--repo", "--agent", "--model"].includes(arg)) {
+      if (!args[i + 1] || args[i + 1].startsWith("--")) throw new Error(`${arg} requires a value`);
+      i++;
+    } else if (["--global", "--project", "--local", "--json", "--no-check"].includes(arg)) {
+      continue;
+    } else if (arg.startsWith("--")) {
+      throw new Error(`Unknown army option ${arg}`);
+    } else result.push(arg);
+  }
+  return result;
+}
+
 async function cmdArmyAssign() {
-  // Positionals only: argv also holds flags, and `--json` must never be read as a model.
-  const positional = argv.slice(2);
-  const firstFlag = positional.findIndex((a) => a.startsWith("--"));
-  const [roleName, agentName, model] = firstFlag === -1 ? positional : positional.slice(0, firstFlag);
-  if (!roleName || !agentName) throw new Error("Usage: nomarmy army assign <role> <agent|none> [model|auto] [--global|--project|--local]");
+  const positional = armyPositionals();
+  const [roleName, agentName, model] = positional;
+  if (!roleName || !agentName || positional.length > 3) throw new Error("Usage: nomarmy army assign <role> <agent|none> [model|auto] [--global|--project|--local]");
   const layer = armyLayerFlag("global");
   const filePath = armyLayerPath(layer, { projectDir: repoDir });
+  const defined = Object.prototype.hasOwnProperty.call(loadArmy({ projectDir: repoDir }).army.roles, roleName);
+  if (!defined) throw new Error(`Role "${roleName}" is not defined in any army roster. Run nomarmy army init first.`);
   const target = parseTargetSpec(agentName, model);
   const check = flag("no-check") ? { status: "skipped" } : checkRoleModel(agentName, model);
   if (check.status === "failed") {
@@ -2500,8 +2666,9 @@ function checkRoleModel(agentName, model) {
 // Which agent the General is. Global or local only: it describes the
 // person's own coordinator session, which a committed project file can't know.
 async function cmdArmyGeneral() {
-  const agentName = argv[2];
-  if (!agentName) throw new Error("Usage: nomarmy army general <agent> [--global|--local]");
+  const positional = armyPositionals();
+  const [agentName] = positional;
+  if (!agentName || positional.length !== 1) throw new Error("Usage: nomarmy army general <agent> [--global|--local]");
   const layer = armyLayerFlag("global");
   if (layer === "project") throw new Error("The General is your own coordinator session, so it's set in --global or --local, never in a committed project file.");
   const agents = loadAgentsOrExit().agents;
@@ -2587,7 +2754,7 @@ function pidIsAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; }
 }
 
-function collectJobs({ recent = 8 } = {}) {
+function collectJobs({ recent = 8, runId = null, projectDir = null } = {}) {
   const root = jobsRootDir();
   let names = [];
   try { names = fs.readdirSync(root); } catch { return { running: [], recent: [] }; }
@@ -2595,6 +2762,10 @@ function collectJobs({ recent = 8 } = {}) {
     const dir = path.join(root, name);
     const status = readJsonSafe(path.join(dir, "status.json")) ?? {};
     const meta = readJsonSafe(path.join(dir, "metadata.json"));
+    const lease = readJsonSafe(path.join(agentStateRoot(), "leases", `${name}.json`));
+    const jobRunId = meta?.labels?.runId ?? lease?.runId ?? null;
+    const jobProjectDir = meta?.projectDir ?? lease?.repo ?? null;
+    if ((runId && jobRunId !== runId) || (projectDir && (!jobProjectDir || path.resolve(jobProjectDir) !== projectDir))) return null;
     const started = Date.parse(status.startedAt ?? meta?.startedAt ?? "") || fs.statSync(dir).mtimeMs;
     const running = status.state === "running" && pidIsAlive(status.serverPid);
     return {
@@ -2607,7 +2778,7 @@ function collectJobs({ recent = 8 } = {}) {
       heartbeatAgeSeconds: status.heartbeatAt ? Math.round((Date.now() - Date.parse(status.heartbeatAt)) / 1000) : null,
       started, dir,
     };
-  }).sort((a, b) => b.started - a.started);
+  }).filter(Boolean).sort((a, b) => b.started - a.started);
   return { running: jobs.filter((j) => j.running), recent: jobs.filter((j) => !j.running).slice(0, recent) };
 }
 
@@ -2640,6 +2811,13 @@ async function streamJobEvents() {
   // background command (reported only on exit) was never told jobs had
   // finished, and eight of these streams were left running for days.
   const untilDone = flag("until-done");
+  const runId = value("run");
+  const projectDir = flag("repo") ? repoDir : null;
+  if (!runId && !projectDir) {
+    const detail = "watching every job on this machine; use --wait <ids> or --run <id> to scope the watch";
+    if (json) console.log(JSON.stringify({ at: new Date().toISOString(), event: "scope", detail }));
+    else console.log(detail);
+  }
   const idleLimitMs = Math.max(1, Number(value("idle-minutes", "30")) || 30) * 60000;
   let idleSinceMs = Date.now(), sawRunning = false;
   const seen = new Map();
@@ -2650,7 +2828,7 @@ async function streamJobEvents() {
   process.on("SIGINT", () => process.exit(0));
   let first = true;
   for (;;) {
-    const { running, recent } = collectJobs({ recent: 20 });
+    const { running, recent } = collectJobs({ recent: 20, runId, projectDir });
     const now = new Map([...running, ...recent].map((j) => [j.jobId, j]));
     for (const j of running) {
       const prev = seen.get(j.jobId);
@@ -2661,10 +2839,13 @@ async function streamJobEvents() {
       const j = now.get(id);
       if (prev.running && j && !j.running) emit("finished", j, `${j.phase} after ${fmtSeconds(j.elapsedSeconds)}`);
     }
+    // A finished record can briefly lack its run label after its lease is removed.
+    // Keep the running snapshot until the stamped record becomes visible.
+    const pending = (runId || projectDir) ? [...seen].filter(([id, j]) => j.running && !now.has(id)) : [];
     seen.clear();
-    for (const [id, j] of now) seen.set(id, j);
+    for (const [id, j] of [...now, ...pending]) seen.set(id, j);
     first = false;
-    if (running.length) { sawRunning = true; idleSinceMs = Date.now(); }
+    if (running.length || pending.length) { sawRunning = true; idleSinceMs = Date.now(); }
     else if (untilDone && sawRunning) {
       if (json) console.log(JSON.stringify({ at: new Date().toISOString(), event: "done", detail: "every job seen running has finished" }));
       else console.log(`${new Date().toLocaleTimeString()}  done      every job seen running has finished`);
@@ -2681,65 +2862,60 @@ async function streamJobEvents() {
 
 const commitSha = (commit) => (typeof commit === "string" ? commit : typeof commit?.sha === "string" ? commit.sha : null);
 
-/** Wait for one job in the shared, cross-session state directory. */
+/** Wait for selected jobs in the shared, cross-session state directory. */
 async function waitForJobCli() {
-  const requested = value("wait");
-  const jobId = requested ? path.basename(requested) : null;
+  const waitIndex = argv.indexOf("--wait");
+  const requested = [];
+  for (let i = waitIndex + 1; i < argv.length && !argv[i].startsWith("--"); i++) requested.push(...argv[i].split(","));
+  const jobIds = [...new Set(requested)];
   const timeoutSeconds = Number(value("timeout", "1800"));
-  if (!jobId || jobId !== requested) {
-    if (json) out({ error: "--wait needs a job id" });
-    else console.error("nomarmy jobs: --wait needs a job id");
+  const errorOut = (message) => {
+    if (json) out({ error: message });
+    else console.error(`nomarmy jobs: ${message}`);
     process.exitCode = 2;
-    return;
-  }
-  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 0) {
-    if (json) out({ error: "--timeout must be a non-negative number of seconds" });
-    else console.error("nomarmy jobs: --timeout must be a non-negative number of seconds");
-    process.exitCode = 2;
-    return;
-  }
-  const jobDir = path.join(jobsRootDir(), jobId);
-  const lease = path.join(agentStateRoot(), "leases", `${jobId}.json`);
-  if (!fs.existsSync(jobDir) && !fs.existsSync(lease)) {
-    if (json) out({ error: `unknown job id: ${jobId}` });
-    else console.error(`nomarmy jobs: unknown job id: ${jobId}`);
-    process.exitCode = 2;
-    return;
+  };
+  if (!jobIds.length) return errorOut("--wait needs a job id");
+  if (jobIds.some((id) => !id || path.basename(id) !== id || id === "." || id === "..")) return errorOut("--wait needs valid job ids");
+  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 0) return errorOut("--timeout must be a non-negative number of seconds");
+  for (const jobId of jobIds) {
+    if (!fs.existsSync(path.join(jobsRootDir(), jobId)) && !fs.existsSync(path.join(agentStateRoot(), "leases", `${jobId}.json`))) {
+      return errorOut(`unknown job id: ${jobId}`);
+    }
   }
   const deadline = Date.now() + timeoutSeconds * 1000;
-  for (;;) {
-    const status = readJsonSafe(path.join(jobDir, "status.json")) ?? {};
-    const meta = readJsonSafe(path.join(jobDir, "metadata.json")) ?? {};
-    if (status.state === "finished" || meta.outcome) {
-      const issues = Array.isArray(meta.issues) ? meta.issues : Array.isArray(status.issues) ? status.issues : [];
-      const result = {
-        jobId,
-        outcome: meta.outcome ?? status.outcome ?? null,
-        coordinatorStatus: meta.coordinatorStatus ?? status.coordinatorStatus ?? null,
-        branch: meta.branch ?? status.branch ?? null,
-        // A job that made no commit has commit: { created: false, sha: null }; only a sha is a commit.
-        commit: commitSha(meta.commit) ?? commitSha(status.commit),
-        issues,
-      };
-      if (json) out(result);
-      else {
-        const firstIssue = issues[0];
-        const issueText = firstIssue == null ? null : typeof firstIssue === "string" ? firstIssue : firstIssue.message ?? JSON.stringify(firstIssue);
-        console.log([result.jobId, result.outcome ?? "unknown", result.coordinatorStatus ?? "unknown",
-          result.branch ? `branch=${result.branch}` : null, result.commit ? `commit=${result.commit}` : null,
-          issueText ? `issue=${issueText}` : null].filter(Boolean).join(" "));
+  const results = await Promise.all(jobIds.map(async (jobId) => {
+    const jobDir = path.join(jobsRootDir(), jobId);
+    for (;;) {
+      const status = readJsonSafe(path.join(jobDir, "status.json")) ?? {};
+      const meta = readJsonSafe(path.join(jobDir, "metadata.json")) ?? {};
+      if (status.state === "finished" || meta.outcome) {
+        const issues = Array.isArray(meta.issues) ? meta.issues : Array.isArray(status.issues) ? status.issues : [];
+        const result = {
+          jobId,
+          outcome: meta.outcome ?? status.outcome ?? null,
+          coordinatorStatus: meta.coordinatorStatus ?? status.coordinatorStatus ?? null,
+          branch: meta.branch ?? status.branch ?? null,
+          commit: commitSha(meta.commit) ?? commitSha(status.commit),
+          issues,
+        };
+        if (json) out(result);
+        else {
+          const firstIssue = issues[0];
+          const issueText = firstIssue == null ? null : typeof firstIssue === "string" ? firstIssue : firstIssue.message ?? JSON.stringify(firstIssue);
+          console.log([result.jobId, result.outcome ?? "unknown", result.coordinatorStatus ?? "unknown",
+            result.branch ? `branch=${result.branch}` : null, result.commit ? `commit=${result.commit}` : null,
+            issueText ? `issue=${issueText}` : null].filter(Boolean).join(" "));
+        }
+        return result.coordinatorStatus === "complete" ? 0 : 1;
       }
-      process.exitCode = result.coordinatorStatus === "complete" ? 0 : 1;
-      return;
+      if (Date.now() >= deadline) {
+        errorOut(`timed out waiting for job ${jobId}`);
+        return 2;
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(2000, Math.max(1, deadline - Date.now()))));
     }
-    if (Date.now() >= deadline) {
-      if (json) out({ error: `timed out waiting for job ${jobId}` });
-      else console.error(`nomarmy jobs: timed out waiting for job ${jobId}`);
-      process.exitCode = 2;
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, Math.min(2000, Math.max(1, deadline - Date.now()))));
-  }
+  }));
+  process.exitCode = Math.max(...results);
 }
 
 /**
@@ -2793,6 +2969,7 @@ async function cmdHealth() {
   const { checkAndRecordHealth } = await import("../lib/health.mjs");
   const stateRoot = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
   const { result } = await checkAndRecordHealth({ projectDir: repoDir, stateRoot, configDir: globalConfigDir(), env: installEnv() });
+  if (result.issues.some((i) => i.severity === "error")) process.exitCode = 1;
   if (json) return out(result);
   console.log(c.bold("🍪 nomArmy health") + c.dim(`  ${new Date(result.checkedAt).toLocaleString()}`));
   if (!result.issues.length) { console.log(c.green("\n✓ Nothing to fix.")); return; }
@@ -3014,7 +3191,27 @@ function cmdMcp() {
   child.on("exit", (code, signal) => { if (signal) process.kill(process.pid, signal); else process.exit(code ?? 1); });
 }
 
-function cmdAcceptance() {
+async function cmdAcceptance() {
+  if (argv[1] === "fill") {
+    const ids = [];
+    for (let i = 2; i < argv.length; i++) {
+      if (argv[i] === "--repo") { i++; continue; }
+      if (["--json", "--dry-run"].includes(argv[i])) continue;
+      if (argv[i].startsWith("--")) throw new Error(`Unknown acceptance option: ${argv[i]}`);
+      ids.push(argv[i]);
+    }
+    if (ids.length !== 1) throw new Error("Usage: nomarmy acceptance fill <run-id|job-id> [--dry-run] [--json]");
+    const proposals = gatherAcceptanceProposals({ id: ids[0], repoDir, jobsRoot: jobsRootDir(), runsRoot: path.join(agentStateRoot(), "runs") });
+    const result = await fillAcceptance({ repoDir, proposals, dryRun: flag("dry-run") });
+    if (json) out(result);
+    else if (!result.criteria.length) console.log("No new acceptance proofs.");
+    else for (const item of result.criteria) {
+      console.log(`${item.criterion}: ${result.dryRun ? "would add" : "added"} ${item.added.length} proof(s) in ${item.file}; status ${item.status}`);
+      for (const ref of item.added) console.log(`  ${ref.file}: ${ref.test}`);
+    }
+    if (!json && result.verificationError) console.log(result.verificationError);
+    return;
+  }
   if (argv[1] !== "check") throw new Error("Usage: nomarmy acceptance check [file...] [--json] [--strict]");
   const files = [];
   for (let i = 2; i < argv.length; i++) {
@@ -3042,8 +3239,10 @@ function cmdAcceptance() {
           : criterion.status === "met" ? c.green("met") : c.yellow(criterion.status);
         const detail = criterion.failures.map((failure) => failure.command ?? `${failure.file}: ${failure.test}`).join("; ")
           || (criterion.status === "unproven" ? criterion.note ?? contracts[index].criteria[criterionIndex].note ?? "" : "");
+        const manual = criterion.status === "met" && criterion.manual?.length
+          ? ` (manual: ${criterion.manual.map((ref) => `${ref.checked_by}, ${ref.date}`).join("; ")})` : "";
         const skipped = criterion.notApplicable?.length ? ` (${criterion.notApplicable.length} proofs not run on ${process.platform})` : "";
-        console.log(`${criterion.id.padEnd(idWidth)}  ${label}${skipped}${detail ? `  ${detail}` : ""}`);
+        console.log(`${criterion.id.padEnd(idWidth)}  ${label}${manual}${skipped}${detail ? `  ${detail}` : ""}`);
       });
     });
     console.log(`Total: ${Object.entries(totals).map(([status, count]) => `${count} ${status}`).join(", ")}`);
@@ -3060,7 +3259,27 @@ async function cmdDoctor() {
   }
   // Import lazily to avoid circular dependencies
   const { runDoctor } = await import("../lib/doctor.mjs");
-  await runDoctor({ json, exit: true, env: installEnv() });
+  const agents = loadAgentsOrExit().agents;
+  const vendors = configuredSubscriptionVendors(agents);
+  let armySummary = null;
+  try { armySummary = describeArmy(loadArmy({ projectDir: repoDir }), { agents }); } catch { /* other doctor checks still run */ }
+  let checks;
+  if (flag("fix")) {
+    const repaired = await repairOpenclaw({
+      command: openclawCmd(), vendors, yes: flag("yes"), isTTY: Boolean(input.isTTY),
+      print: json ? console.error : console.log,
+      ask: async (prompt) => {
+        const rl = createInterface({ input, output: json ? process.stderr : output });
+        try { return await rl.question(prompt); } finally { rl.close(); }
+      },
+    });
+    checks = repaired.checks;
+    if (!repaired.ok && !checks.some((check) => !check.ok)) checks.push({ id: "openclaw-repair", ok: false, message: "OpenClaw repair was declined or failed.", fix: "nomarmy doctor --fix --yes" });
+  } else {
+    checks = verifyOpenclaw({ command: openclawCmd(), vendors });
+  }
+  await runDoctor({ json, exit: true, env: installEnv(), additionalChecks: checks,
+    runtime: { agents, armySummary, openclawCmd: openclawCmd() } });
 }
 commands.doctor = cmdDoctor;
 if (windowsFrontEnd() && windowsPlan(argv) === "FORWARD") {

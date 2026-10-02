@@ -28,14 +28,23 @@ Every command proposes before it writes: a `[y/N]` prompt, or an explicit flag u
 | `nomarmy sizing` | Recommends context, slots and workers. `--check` evaluates the loaded profile; `--noms N` sizes for a count. |
 | `nomarmy start` / `stop` | Starts or stops local inference. |
 | `nomarmy scan` | Reports the repo's execution environment. `--check` diffs it against `.nomarmy.yml`. |
-| `nomarmy acceptance check [file...] [--json] [--strict]` | Runs the tests named by each criterion in the feature contracts under `acceptance/` (or selected files). Reports met, broken, missing or unproven per criterion; `--json` prints the report as data, and `--strict` also fails on unproven. |
+| `nomarmy acceptance fill <run-id\|job-id> [--dry-run] [--json]` | Appends verified jobs' proposed tests to contract proofs without removing existing entries or comments. Skips duplicates; marks unproven criteria met only after their proofs pass in the same sandbox runner as the PR Acceptance row, using the working tree and a read-only snapshot of the proposed proofs. If the sandbox cannot verify, proposals are still appended, statuses stay unchanged, and the command says it could not verify. `--dry-run` previews without writing. |
+| `nomarmy acceptance check [file...] [--json] [--strict]` | Runs this repository's tests on this machine, like `npm test`, selecting those named by each criterion in the feature contracts under `acceptance/` (or selected files). Reports met, broken, missing or unproven per criterion; `--json` prints the report as data, and `--strict` also fails on unproven. |
 | `nomarmy validate` | Validates `.nomarmy.yml`. |
 | `nomarmy update` | Updates nomArmy and reconnects every coordinator it finds. From npm: installs the latest alpha. From a clone: pulls (fast-forward only). Then it names each open session still running an older nomArmy (app, terminal, start time) so you know which to restart; until you do, `army` and `local_worker_capacity` say so, and `nomarmy health` flags a coordinator still running an older copy. |
 | `nomarmy uninstall` | Removes the MCP registration and install. `--clear-agents`, `--clear-models` or `--all` go further. |
 
+## Acceptance contract format and execution
+
+Write one `acceptance/<feature>.yml` at plan time, with stable criterion IDs for durable promises, not job hygiene. Assign those IDs in each implement job brief through `criteria` before dispatch, including parallel jobs. Each criterion has `id`, `text`, `status` (`met`, `unproven`, `broken` or `retired`) and `proven_by`. Proofs may be `{ file: tests/example.test.mjs, test: "exact test name" }`, `{ command: "npm run build", cwd: packages/example }`, or `{ manual: "real install", checked_by: "Reviewer Name", date: "2026-09-30", expires_days: 90 }`. `cwd` and `expires_days` are optional. Any proof may set `platforms: [win32]` or another Node `process.platform` value; `posix` means every platform except `win32`. Out-of-platform proofs do not run. Current manual proof is reported as manual and can meet a criterion; expired proof is unproven with a note and cannot override broken automated evidence.
+
+`nomarmy acceptance check [file...] [--json] [--strict]` checks all contracts or selected files, reports each criterion and fails on broken or missing proofs; `--strict` also fails on unproven. CI runs it on every platform job. Every automatic check runs in the sandbox, never on the host. After integrating a run, use `nomarmy acceptance fill <run-id> --dry-run`, prune unrelated proposed mappings, then fill for real and commit the contract with the feature. A `CONTRACT BROKEN:` issue requires fixing the change or intentionally changing the contract in the same pull request.
+
+Acceptance checks for affected criteria require review when a promise breaks, but do not by themselves block nomArmy's commit on the worker's branch. Integration is the gate. Changed contract files are separately checked with `--strict`: unproven criteria fail verification (current manual proofs count as met). Removing or retiring a criterion, removing proofs, or downgrading met to unproven records `CONTRACT WEAKENED` and requires review; adding criteria or proofs is not weakening.
+
 ## MCP tools
 
-What the General uses. Every job takes the same shape: a `task`, optional `acceptance`, a `mode` and a timeout.
+What the General uses. Every job takes the same shape: a `task`, optional `acceptance` and contract `criteria` IDs (implement only), a `mode` and a timeout.
 
 | Tool | What it does |
 |---|---|

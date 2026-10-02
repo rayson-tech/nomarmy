@@ -588,6 +588,7 @@ test("cursorAlreadyConnected: true only when the file exists and has our entry",
 // The /feature playbook, rendered into each coordinator's own format.
 // ---------------------------------------------------------------------------
 import { installPlaybooks, renderPlaybook } from "../lib/connect.mjs";
+import { COORDINATOR_INSTRUCTIONS } from "../lib/coordinator-instructions.mjs";
 
 const REPO_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const FEATURE_BODY = fs.readFileSync(path.join(REPO_ROOT, "playbooks", "feature.md"), "utf8");
@@ -607,6 +608,25 @@ test("renderPlaybook: Claude gets a /feature command, Codex a skill, Cursor a co
     assert.ok(r.text.includes("<!-- nomarmy:feature"), "the marker that protects an operator's own file");
     assert.ok(!r.text.includes("{{REQUEST}}"), "the placeholder is always filled");
     assert.ok(r.text.includes("run_start") && r.text.includes("Never merge"), "the same playbook everywhere");
+  }
+});
+
+test("acceptance workflow is in the General instructions and rendered /feature playbook", () => {
+  const general = COORDINATOR_INSTRUCTIONS;
+  assert.match(general, /At feature planning, write acceptance\/<feature>\.yml/);
+  assert.match(general, /Assign stable criterion IDs in each job brief before parallel dispatch and pass them as criteria/);
+  assert.match(general, /jobs must not pick the next free ID/);
+  assert.match(general, /preview nomarmy acceptance fill <run-id> --dry-run/);
+  assert.match(general, /A CONTRACT BROKEN: issue means the change is wrong or the contract must intentionally change/);
+
+  for (const target of ["claude", "codex", "cursor"]) {
+    const { text } = renderPlaybook("feature", FEATURE_BODY, target);
+    assert.match(text, /write `acceptance\/<feature>\.yml`/);
+    assert.match(text, /Assign the stable IDs to pieces in the plan and each job brief before dispatch/);
+    assert.match(text, /`criteria: \["ACC-8"\]` naming the contract IDs/);
+    assert.match(text, /parallel jobs must not choose the next free ID themselves/);
+    assert.match(text, /nomarmy acceptance fill <run-id> --dry-run/);
+    assert.match(text, /A `CONTRACT BROKEN:` issue means either the change is wrong or the contract must intentionally change/);
   }
 });
 
