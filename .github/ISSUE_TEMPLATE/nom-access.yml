@@ -1,0 +1,34 @@
+name: Nom access
+description: Tell us what your nom needs to reach.
+title: "Nom access: "
+labels: [nom-access]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Workers never get credentials or network access. Verification-only access already exists: see [Verification-only external services](https://github.com/rayson-tech/nomarmy/blob/main/docs/your-repo.md#verification-only-external-services).
+  - type: textarea
+    id: destination
+    attributes:
+      label: What does the nom need to reach?
+      description: For example, AWS Athena, a database, an internal API, or a SaaS test tenant.
+    validations:
+      required: true
+  - type: dropdown
+    id: access-timing
+    attributes:
+      label: When is access needed?
+      options:
+        - verification only
+        - while building
+        - both
+        - not sure
+  - type: textarea
+    id: credential-issuance
+    attributes:
+      label: How are credentials issued today?
+      description: For example, AWS SSO, static keys, or an OAuth client. Describe the method, not the credential values.
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What do you do now instead?
