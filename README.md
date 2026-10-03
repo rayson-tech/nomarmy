@@ -9,6 +9,8 @@
 
 <p align="center"><em>Every byte verified.</em> 🍪</p>
 
+<p align="center"><a href="https://nomarmy.dev"><strong>nomarmy.dev</strong></a> · <a href="https://nomarmy.dev/docs/">Docs</a> · <a href="https://github.com/sponsors/rayson-tech">Sponsor</a></p>
+
 **Your coding assistant plans; sandboxed workers build; nothing counts until nomArmy has checked it.**
 
 AI coding workers are confident. Their "done, all tests pass" is a claim, not evidence. nomArmy lets your coding assistant (Claude Code, Codex or Cursor) hand work to workers called **noms**, then checks every change itself before anything is committed: the real diff, your tests run in a fresh sandbox, a check that those tests actually catch the change, and a secret scan.

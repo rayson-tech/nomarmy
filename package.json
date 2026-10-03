@@ -13,9 +13,13 @@
     "type": "git",
     "url": "git+https://github.com/rayson-tech/nomarmy.git"
   },
-  "homepage": "https://github.com/rayson-tech/nomarmy#readme",
+  "homepage": "https://nomarmy.dev",
   "bugs": {
     "url": "https://github.com/rayson-tech/nomarmy/issues"
+  },
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/rayson-tech"
   },
   "publishConfig": {
     "tag": "alpha"
