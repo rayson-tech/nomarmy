@@ -166,6 +166,8 @@ requires the operator-local opt-in described below.
 
 ## Verification-only external services
 
+If you need access this does not cover, such as AWS SSO credentials or access while the worker builds, open a [Nom access issue](https://github.com/rayson-tech/nomarmy/issues/new?template=nom-access.yml).
+
 Prefer the offline `services` harnesses. If a test genuinely needs a real
 external service, opt in from your coordinator checkout's **untracked,
 gitignored `.nomarmy.local.yml`**, never the committed `.nomarmy.yml`:
