@@ -68,7 +68,7 @@ syncBuiltinESMExports();
 
 for (const validator of ["jev", "judge"]) {
   for (const mode of ["interactive", "non-interactive", "json"]) {
-    test(`validators add ${validator} discloses trust before saving and after in ${mode} mode`, (t) => {
+    test(`validators add ${validator} discloses trust ${mode === "json" ? "before saving and in the JSON" : "once, before saving"} in ${mode} mode`, (t) => {
       const { configDir, run } = fixture(t);
       const interactive = mode === "interactive", json = mode === "json";
       const disclosure = validator === "jev" ? jevText : judgeText;
@@ -85,11 +85,11 @@ for (const validator of ["jev", "judge"]) {
         });
       } else {
         assert.equal(result.stderr, "");
-        assert.equal(result.stdout.split(disclosure).length - 1, 2);
+        assert.equal(result.stdout.split(disclosure).length - 1, 1, "the disclosure prints exactly once");
         assert.equal(result.stdout.includes(`Before saving: ${disclosure}\n`), true);
         const success = validator === "jev"
-          ? `✓ Saved the key to ${path.join(configDir, "secrets", "typesafe.key")} (readable only by you) and turned Jev on in ${path.join(configDir, "validators.yml")}. ${disclosure}`
-          : `✓ The judge is claude/sonnet, in ${path.join(configDir, "validators.yml")}. ${disclosure}`;
+          ? `✓ Saved the key to ${path.join(configDir, "secrets", "typesafe.key")} (readable only by you) and turned Jev on in ${path.join(configDir, "validators.yml")}.`
+          : `✓ The judge is claude/sonnet, in ${path.join(configDir, "validators.yml")}.`;
         assert.equal(result.stdout.split("\n").includes(success), true);
         if (interactive) assert.equal(result.stdout.includes(validator === "jev" ? "TypeSafe API key (not shown): " : "Allow claude to run as a judge with tools on this machine? [y/N] "), true);
       }

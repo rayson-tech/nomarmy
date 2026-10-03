@@ -11,6 +11,8 @@ import { createExecutor } from "../lib/execute.mjs";
 import { createVerificationFlow } from "../lib/verification-flow.mjs";
 import { classifyTestChanges } from "../lib/diff-checks.mjs";
 import { createProcess } from "../lib/process.mjs";
+import { reviewOf } from "../lib/suggestions.mjs";
+import { computeStats } from "../lib/stats.mjs";
 import { HIGH_STAKES_NOTE } from "../lib/outcome.mjs";
 import { plantWorktreePointer } from "./helpers/worktree-fixture.mjs";
 
@@ -142,7 +144,7 @@ test("changing the trust contract or any CODEOWNERS file is itself human-level",
   });
 });
 
-async function implement(t, { trustMap = null, config = null, workerConfig = config, changed = ["auth/check.py"], diffText = "", owners = null, workerOwners = null, untracked = false, workerFails = false, baseFiles = {}, newFiles = {}, entries = null, baseModes = {}, setupWorker = null, conversion = null, validatorDeps = {}, task = "change access check", stakes = null, trustAdmission = null } = {}) {
+async function implement(t, { trustMap = null, config = null, workerConfig = config, changed = ["auth/check.py"], diffText = "", owners = null, workerOwners = null, untracked = false, workerFails = false, baseFiles = {}, newFiles = {}, entries = null, baseModes = {}, setupWorker = null, conversion = null, validatorDeps = {}, workerProvider = null, task = "change access check", stakes = null, trustAdmission = null } = {}) {
   const root = fixture(t), projectDir = path.join(root, "checkout"), jobsRoot = path.join(root, "jobs");
   fs.mkdirSync(projectDir);
   if (config !== null) write(projectDir, ".nomarmy.yml", config);
@@ -225,7 +227,7 @@ async function implement(t, { trustMap = null, config = null, workerConfig = con
         catch (error) { setupError = error; throw error; }
       }
       if (workerFails) throw new Error("synthetic worker failure");
-      return { final: "STATUS: done\nTESTS: pass\nNOT_DONE: none\nNOTE: implemented" };
+      return { provider: workerProvider, final: "STATUS: done\nTESTS: pass\nNOT_DONE: none\nNOTE: implemented" };
     },
     ...flow, verificationFlow: flow, repoPolicy: () => ({}), buildMetrics: () => ({}), recordedBudgets: () => ({}),
     resolveReasoningApplied: () => "off", execution: {}, budgetState: { budgets: { report: { implement: 256 } } },
@@ -856,4 +858,37 @@ test("implement added bypass requires review with judgment disabled", async t =>
     judgment: { status: "disabled", validator: null, answers: {}, error: null },
   });
   assert.equal(manifest.reviewRequired, true);
+});
+
+
+test("high-stakes issue and stats agree on independent judge evidence", async (t) => {
+  const reviewed = "HIGH STAKES: independently reviewed by judge claude/sonnet. Still needs the General's acceptance.";
+  for (const entry of [
+    { provider: "Anthropic", answer: {}, error: null, reviewed: true },
+    { provider: "Anthropic", answer: {}, error: "judge failed", reviewed: false },
+    { provider: "Anthropic", answer: {}, error: null, skipped: true, reviewed: false },
+    { provider: "openai", answer: {}, error: null, reviewed: false },
+    { provider: "Anthropic", answer: null, error: null, reviewed: false },
+    { provider: null, answer: {}, error: null, reviewed: false },
+  ]) {
+    let calls = 0;
+    const { manifest, commitOutcome } = await implement(t, {
+      config: "trust: { judgment: false }\n", stakes: "high", workerProvider: "openai",
+      changed: ["app.js"], newFiles: { "app.js": "export const value = 1;\n" },
+      diffText: "+export const value = 1;\n",
+      validatorDeps: {
+        judgeSettings: () => ({ agent: "claude", model: "sonnet", provider: entry.provider }),
+        runJudge: async () => { calls++; return { answer: entry.answer, error: entry.error, flags: [], skipped: entry.skipped }; },
+      },
+    });
+    assert.equal(calls, 1);
+    assert.deepEqual(manifest.issues, [entry.reviewed ? reviewed : HIGH_STAKES_NOTE, "existing issue",
+      ...(entry.error ? ["Judge didn't answer (judge failed); this job's result doesn't depend on it"] : [])]);
+    assert.equal(manifest.reviewRequired, true);
+    assert.equal(commitOutcome.reviewRequired, true);
+    assert.deepEqual(reviewOf(manifest, []), entry.reviewed ? { by: "judge", provider: "Anthropic" } : null);
+    assert.deepEqual(computeStats([manifest]).highStakes, { jobs: 1, reviewed: Number(entry.reviewed) });
+    const scout = { mode: "scout", jobId: "review-job", reviews: manifest.jobId, outcome: "SCOUT_DONE", worker: { provider: "xai" } };
+    assert.deepEqual(reviewOf(manifest, [scout]), { by: "scout", jobId: "review-job", provider: "xai" });
+  }
 });
