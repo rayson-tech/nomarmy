@@ -3106,7 +3106,7 @@ async function cmdValidators() {
     let ok = false, why = null;
     try { ok = await testJev(jevSettings()); } catch (error) { why = error.message; }
     if (json) return out({ saved: true, keyFile: saved.keyFile, configPath: saved.configPath, test: ok ? "pass" : "fail", reason: why, trustJudgment });
-    console.log(c.green(`✓ Saved the key to ${saved.keyFile} (readable only by you) and turned Jev on in ${saved.configPath}. ${trustJudgment}`));
+    console.log(c.green(`✓ Saved the key to ${saved.keyFile} (readable only by you) and turned Jev on in ${saved.configPath}.`));
     console.log(ok ? c.green("✓ Test call answered. New jobs use it; restart open coordinator sessions to pick it up.") : c.red(`✗ Test call failed: ${why ?? "no answer"}. Check the key, then: nomarmy validators test jev`));
     if (!ok) process.exitCode = 1;
     return;
@@ -3181,7 +3181,7 @@ async function cmdValidatorsJudge(sub) {
     if (settings?.problem) throw new Error(settings.problem);
     const test = await probe(settings);
     if (json) return out({ saved: true, configPath: saved.configPath, test: test.ok ? "pass" : test.refused ? "refused" : "inconclusive", reason: test.reason, trustJudgment });
-    console.log(c.green(`✓ The judge is ${agent}/${model}, in ${saved.configPath}. ${trustJudgment}`));
+    console.log(c.green(`✓ The judge is ${agent}/${model}, in ${saved.configPath}.`));
     if (dominantBuilderVendor === null) {
       try {
         const roles = loadArmy({ projectDir: repoDir }).army.roles;

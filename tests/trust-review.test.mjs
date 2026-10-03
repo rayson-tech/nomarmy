@@ -133,3 +133,22 @@ test("review two uses bounded safe repository snapshots for unchanged importers"
   // Hitting a scan bound must not create a doc or test exclusion.
   await judged(fileChanges, [finding("validation", "test_access.py"), finding("tenant-filter", "queries.txt")], { repository: { files: [], incomplete: true } });
 });
+
+
+for (const parameter of ["$#", "${#x}", "${#arr[@]}"]) {
+  test(`shell parameter ${parameter} does not hide removed checks or later comments`, () => {
+    const file = "access.sh";
+    const guard = `count=${parameter}; if [ $tenant_id != $owner_id ]; then return 1; fi`;
+    const filter = `count=${parameter} query='SELECT * FROM items WHERE tenant_id = 1;';`;
+    for (const [before, kind] of [[guard, "guard"], [filter, "tenant-filter"]]) {
+      assert.deepEqual(detectRemovedChecks([{ file, before, after: "" }]), [finding(kind, file)]);
+      assert.deepEqual(detectRemovedChecks([{ file, before, after: before + "\necho done" }]), []);
+    }
+    for (const prefix of ["", " ", "\t", ";", "&", "|", "("]) {
+      const before = `${prefix}# ${guard}\ncount=${parameter}; # ${filter}`;
+      assert.deepEqual(detectRemovedChecks([{ file, before, after: "" }]), []);
+    }
+    assert.deepEqual(detectRemovedChecks([{ file, before: `word#value; ${guard}`, after: "" }]), [finding("guard", file)]);
+    assert.deepEqual(detectRemovedChecks([{ file: "access.rb", before: "puts 1# if tenant_id != owner_id; return; end", after: "" }]), []);
+  });
+}
