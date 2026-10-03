@@ -68,7 +68,7 @@ syncBuiltinESMExports();
 
 for (const validator of ["jev", "judge"]) {
   for (const mode of ["interactive", "non-interactive", "json"]) {
-    test(`validators add ${validator} discloses trust ${validator === "judge" && mode !== "json" ? "once before saving" : "before saving and after"} in ${mode} mode`, (t) => {
+    test(`validators add ${validator} discloses trust ${mode === "json" ? "before saving and in the JSON" : "once, before saving"} in ${mode} mode`, (t) => {
       const { configDir, run } = fixture(t);
       const interactive = mode === "interactive", json = mode === "json";
       const disclosure = validator === "jev" ? jevText : judgeText;
@@ -85,7 +85,7 @@ for (const validator of ["jev", "judge"]) {
         });
       } else {
         assert.equal(result.stderr, "");
-        if (validator === "judge") assert.equal(result.stdout.split(disclosure).length - 1, 1);
+        assert.equal(result.stdout.split(disclosure).length - 1, 1, "the disclosure prints exactly once");
         assert.equal(result.stdout.includes(`Before saving: ${disclosure}\n`), true);
         const success = validator === "jev"
           ? `✓ Saved the key to ${path.join(configDir, "secrets", "typesafe.key")} (readable only by you) and turned Jev on in ${path.join(configDir, "validators.yml")}.`
