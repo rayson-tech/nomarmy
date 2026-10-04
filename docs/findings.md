@@ -2,6 +2,34 @@
 
 Findings from real runs, kept here so the README can stay a guide. Each links to the experiment write-up it came from where there is one.
 
+## Measured in our own use: about 1 in 11 "done" claims wasn't true
+
+From September 18 to October 4, 2026, we ran nomArmy on one machine, on nomArmy itself and our own products: 547 jobs (387 implement, 139 scout, 19 verify, 2 decompose), on local models, Codex, Claude and Grok. `nomarmy stats --all-repos` reports, from nomArmy's verified job records rather than the workers' own reports:
+
+| | |
+|---|---|
+| Implement jobs whose worker reported "done, tests pass" | 265 |
+| Failed when nomArmy ran the verification profile itself in a fresh sandbox | 16 |
+| Passed, but the tests still passed with the production change reverted, so they proved nothing | 8 |
+| Passed verification, and the revert check either failed as it should or didn't apply | 236 |
+| Nothing nomArmy could run (verification `not_run`): neither confirmed nor caught | 5 |
+| Passed both, but still flagged by another check (mutants, Jev, the judge, a rewritten check) | 11 |
+| New test files, in committed jobs, shown to fail with their production change reverted | 140 |
+| High-stakes jobs committed / with a finished independent review | 38 / 33 |
+
+24 of 265 claims (9%, about 1 in 11) were not true. That is the number the website quotes.
+
+**How each number is counted.**
+- A claim is the worker's own report: `STATUS: done` with `TESTS: pass`. Anything else (partial, blocked, failed) isn't counted as a claim.
+- "Failed when nomArmy ran the tests" means the job's verification profile, run by nomArmy in a fresh sandbox against the worker's diff, failed.
+- The revert check runs only when a job changes production code: nomArmy reverts those files, reruns the same profile, and expects it to fail. Test-only and docs-only changes and declared refactors skip it, which is why it "didn't apply" to some of the 236.
+- "Independently reviewed" means a scout on a different vendor than the worker ran with `reviews: <job id>` and finished, or the job's model judge answered from a different vendor. A review that failed or timed out doesn't count.
+- Integration defects the coordinator found in its own review afterwards aren't in the records, so they aren't counted here.
+
+**What this is and isn't.** It is one team's use, on one machine, over 16 days, mostly building a developer tool and a data product. It is not a benchmark, and the rate will vary with the models, the briefs and the repository's tests. 223 jobs didn't finish cleanly (partial, failed, held for review, timed out); many of those were early local-model runs and sandbox limits whose work a later job finished, and a timed-out job's partial work is never committed. Five of the 38 high-stakes jobs were committed without a finished independent review and are listed by `stats` until they get one.
+
+To see the same numbers for your own repositories: `nomarmy stats` (this repository) or `nomarmy stats --all-repos`, with `--details` for the breakdown and `--share` for a pull-request block.
+
 ## The economics depend on task size, not model choice
 
 nomArmy's bet is to spend scarce frontier intelligence on intent and judgment, and abundant worker intelligence on implementation and repair. Measured so far ([model bake-off and economics](experiments/2026-09-20-model-bakeoff-and-economics.md)), whether that pays depends on the task:
