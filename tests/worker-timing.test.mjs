@@ -156,3 +156,15 @@ for (const mode of Object.keys(reports)) {
     });
   }
 }
+
+timingTest("the timeout's own aborted reply and turn-aborted marker are not worker activity", async t => {
+  const dir = fixture(t), { db, add } = transcript(dir);
+  // What OpenClaw writes when it cuts a request off at the deadline.
+  add(526, { type: "custom", customType: "openclaw.cache-ttl" });
+  add(527, { type: "message", message: { role: "assistant", content: [], stopReason: "aborted", errorMessage: "request timed out" } });
+  add(527, { type: "custom_message", customType: "openclaw:turn-aborted", content: "<turn_aborted>" });
+  db.close();
+  const timing = await readOpenClawTiming(dir, { startedMs: start, cutoffMs: start + 528000, idleBreakSeconds: 185, filesChanged: true });
+  assert.deepEqual(timing, expected());
+  assert.equal(timeoutTimingIssue(timing, { stopReason: "openclaw_internal_timeout" }), recent);
+});
