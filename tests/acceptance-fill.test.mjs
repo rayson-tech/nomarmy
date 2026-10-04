@@ -205,7 +205,7 @@ test("implement executor persists criterion IDs and proposals from its full-cont
     "reportRecoveryAttempted", "reportRecovered", "reviewRequired", "coordinatorStatus", "issues", "runnerNotes", "reportValidation",
     "independentVerification", "regressionCheck", "testSelectionRisk", "unwiredDefinitions", "testChanges", "metrics",
     "worktreePointerBefore", "worktreePointerAfterWorker", "worktreeRetained", "commit", "gitBeforeCoordinatorCommit", "git", "worker",
-    "workerError", "workerStopReason", "budgets", "timeBudget", "requestedProfile", "requestedReasoning", "reasoningApplied",
+    "workerError", "workerStopReason", "budgets", "timeBudget", "timing", "requestedProfile", "requestedReasoning", "reasoningApplied",
   ].sort());
   assert.deepEqual(manifest.criteria, ["ACC-1", "ACC-2"]);
   assert.deepEqual(manifest.acceptanceProposals, expectedProposals);
