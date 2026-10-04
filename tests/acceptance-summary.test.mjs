@@ -73,7 +73,9 @@ test("PR acceptance uses a detached HEAD sandbox and never a host test spawner",
       assert.equal(fs.existsSync(path.join(input.cwd, "uncommitted.txt")), false);
       assert.equal(fs.readFileSync(path.join(input.cwd, "committed.txt"), "utf8"), "HEAD");
       assert.equal(input.network, "none");
-      assert.equal(input.timeoutMs, 300_000);
+      // The runner passes the smaller of the command timeout and what's left of
+      // the overall budget, so a slow machine sees a few ms under 300000.
+      assert.ok(input.timeoutMs <= 300_000 && input.timeoutMs > 290_000, String(input.timeoutMs));
       return { started: true, exitCode: 0, stdout: output([criterion("ACC-1", "met")]) };
     } },
   });
