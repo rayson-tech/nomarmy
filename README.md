@@ -58,7 +58,7 @@ Failing verification stays failed, unconditionally. A malformed report isn't aut
 
 **Checking without building** costs nothing: `mode: verify` runs a verification profile against any branch, with no worker and no model tokens.
 
-**Want deeper checks?** Three optional [validators](https://github.com/rayson-tech/nomarmy/blob/main/docs/validators.md) go further, each only adding review flags: mutation testing (do the tests pin down the changed lines?), Jev (do a scout's citations support its findings, does a report match its diff?) and a model judge (acceptance criteria, weakened tests).
+**Want deeper checks?** Three optional [validators](https://github.com/rayson-tech/nomarmy/blob/main/docs/validators.md) go further, each only adding review flags: mutation testing (do the tests pin down the changed lines?), Jev (do a scout's citations support its findings, does a report match its diff?, on TypeSafe or a compatible server on your own machine) and a model judge (acceptance criteria, weakened tests).
 
 ## Where the work runs
 
