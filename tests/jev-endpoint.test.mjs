@@ -34,7 +34,7 @@ async function server(t, handler) {
 }
 function cli(dir, args, { input = "", env = {} } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["--import", path.join(dir, "local-only.mjs"), path.resolve("bin/nomarmy.mjs"), "validators", ...args], {
+    const child = spawn(process.execPath, ["--import", pathToFileURL(path.join(dir, "local-only.mjs")).href, path.resolve("bin/nomarmy.mjs"), "validators", ...args], {
       cwd: dir, env: { ...process.env, NOMARMY_CONFIG_DIR: dir, NOMARMY_AGENT_STATE: path.join(dir, "state"), NO_COLOR: "1", ...env },
       stdio: ["pipe", "pipe", "pipe"],
     });
