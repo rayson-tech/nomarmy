@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
 import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import * as validators from "../lib/validators.mjs";
 import * as health from "../lib/health.mjs";
