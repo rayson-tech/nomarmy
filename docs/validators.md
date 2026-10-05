@@ -123,6 +123,28 @@ mechanical check.
 `nomarmy update`, then restart those sessions so they run this version. Setup
 prints this reminder whenever it writes an endpoint.
 
+
+### Measure a local model before relying on it
+
+A local server keeps your code on your machine, but it only protects you if it catches what Jev catches. We measured on 2026-10-05 with `scripts/trust-measure.mjs` against a private corpus of 14 real defects that escaped review in one of our own products and 15 harmless commits, at nomArmy's normal threshold (0.5 for review):
+
+| Judgment | Defects caught (of 14) | False alarms (of 15) |
+|---|---|---|
+| None (the deterministic floor and detector only) | 1 | 0 |
+| [Von](https://github.com/wfzyx/von) 1.3 (395M), local | 5 | 0 |
+| [Kev](https://github.com/jaredpalmer/kev)-4B, local | 8 | 0 |
+| Jev (TypeSafe) | 14 | 0 |
+
+Neither local model separated real defects from harmless changes: their scores sat in a narrow middle band (Von 0.30 to 0.54, Kev-4B 0.2 to 0.6) that overlapped the harmless commits, so lowering the threshold only traded catches for false alarms. Larger Kev models (9B, 27B) weren't measured. One team's corpus is not a benchmark; your results will differ.
+
+So don't swap Jev for a local model on faith. Measure it on your own history: build a corpus of diffs that introduced real defects and harmless ones (`scripts/trust-measure.mjs` documents the format), point a throwaway config at the local server, and compare:
+
+```bash
+NOMARMY_CONFIG_DIR=/tmp/local-judge node scripts/trust-measure.mjs <corpus-dir> --judgment jev
+```
+
+Some servers download their weights on the first request, which can outlast Jev's 15-second call; nomArmy reports that judgment as unavailable, never as a pass. Send one request first, or wait for the download, before measuring.
+
 ## Model judge
 
 Jev is fast at narrow questions. For judgments that take a few steps, make one of your agents a judge:
