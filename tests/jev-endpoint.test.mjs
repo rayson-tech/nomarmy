@@ -187,7 +187,7 @@ for (const name of ["jev", "kev"]) {
     const disclosure = validators.validatorTrustDisclosure("Jev", "TypeSafe", endpoint);
     assert.deepEqual(JSON.parse(added.stdout), { saved: true, configPath: path.join(dir, "validators.yml"), test: "pass", reason: null, trustJudgment: disclosure });
     assert.equal(added.stderr, `Before saving: ${disclosure}\nEndpoint saved: open coordinator sessions must run this version before reading validators.yml. Run nomarmy update, then restart them; older versions reject the endpoint field.\n`);
-    assert.match(disclosure, /Code excerpts, diffs and briefs stay on this machine/);
+    assert.match(disclosure, /Code excerpts, diffs and briefs go only to the local server at .* on this machine; whether they go further is up to that server/);
     assert.deepEqual(requests, [{ route: "/v1/systemone", auth: null, model: "local-model" }]);
     assert.deepEqual(validators.loadValidators(dir), { jev: { enabled: true, endpoint, model: "local-model", checks } });
     const listed = await cli(dir, ["list", "--json"]);
@@ -229,9 +229,22 @@ test("CLI endpoint keys use stdin or environment and failed probes preserve exis
 test("disclosure names the actual HTTPS recipient and local server endpoint", () => {
   const tail = " to check for security-sensitive changes (access control, removed checks, personal data, secrets, money). It can only raise a job's review level. Turn it off for a repository with trust: { judgment: false } in its .nomarmy.yml.";
   for (const [endpoint, first, recipient] of [
-    ["http://[::1]:8000", "Code excerpts, diffs and briefs stay on this machine (sent to the local server at http://[::1]:8000/v1/systemone).", "the local server at http://[::1]:8000/v1/systemone"],
+    ["http://[::1]:8000", "Code excerpts, diffs and briefs go only to the local server at http://[::1]:8000/v1/systemone on this machine; whether they go further is up to that server.", "the local server at http://[::1]:8000/v1/systemone"],
     ["https://judge.example:8443", "Code excerpts, diffs and briefs are sent to judge.example:8443.", "judge.example:8443"],
     [validators.JEV_ENDPOINT, "Code excerpts, diffs and briefs are sent to api.typesafe.ai.", "api.typesafe.ai"],
   ]) assert.equal(validators.validatorTrustDisclosure("Jev", "TypeSafe", endpoint),
     `${first} Adding Jev also turns on nomArmy's trust judgment in every repository: each implement job's diff, and its brief at dispatch, is sent to ${recipient}${tail}`);
+});
+
+test("a server that answers 200 without the asked questions is an error, never a clean result", async () => {
+  const { checkReportClaims, checkTrustQuestions } = await import("../lib/jev-checks.mjs");
+  validators.resetJevBreaker();
+  const empty = async () => ({ answers: {}, usage: null });
+  const settings = { key: null, endpoint: "http://127.0.0.1:8000/v1/systemone", model: "m" };
+  const claims = await checkReportClaims({ report: { status: "done", tests: "pass", note: "n" }, diff: "+x", settings, ask: empty });
+  assert.match(claims.error, /the server answered without claims/);
+  assert.equal(claims.verdict, null);
+  validators.resetJevBreaker();
+  await assert.rejects(checkTrustQuestions({ settings, evidence: "+x", source: "diff", questions: { access: "q" }, instructions: "i", ask: empty }), /the server answered without access/);
+  validators.resetJevBreaker();
 });

@@ -103,8 +103,8 @@ require `key_env` or `key_file`. `--key-env NAME` saves only the variable name;
 the server-running coordinator must inherit that variable. `--key-stdin` stores
 the key in the same private key file used by TypeSafe setup.
 
-For loopback endpoints, code excerpts, diffs and briefs stay on this machine,
-sent to the local server at the displayed endpoint. For HTTPS endpoints on
+For loopback endpoints, code excerpts, diffs and briefs go only to the local
+server at the displayed endpoint; whether they go further is up to that server. For HTTPS endpoints on
 other hosts, setup names the recipient host. This describes nomArmy's request;
 configure the local server itself to run locally, without forwarding data.
 Listings include the endpoint and whether it is local, also as `endpoint` and
