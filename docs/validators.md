@@ -5,10 +5,10 @@ nomArmy's built-in checks run on every job: it reads the real diff, runs your ve
 | | Checks | Turn it on | Costs | Sends code off your machine |
 |---|---|---|---|---|
 | [Mutation testing](#mutation-testing) | Do the tests pin down what the changed lines do? | `mutation:` in `.nomarmy.yml` | One verification run per mutant | No |
-| [Jev](#jev) | Do a scout's cited lines support its finding? Does a worker's report match its diff? | `nomarmy validators add jev` | A fraction of a cent a job | Yes, to TypeSafe |
+| [Jev](#jev) | Do a scout's cited lines support its finding? Does a worker's report match its diff? | `nomarmy validators add jev` | A fraction of a cent a job | TypeSafe by default; no with a local server |
 | [Model judge](#model-judge) | Does the diff meet each acceptance criterion, match the report, keep its tests as strong? | `nomarmy validators add judge --agent <name> --model <model>` | One call to your agent a job | Yes, to that agent's vendor |
 
-`nomarmy validators list` shows which are on and, per validator, that it also drives the trust judgment, what is sent, the vendor, and the repository opt-out. Adding Jev or a model judge turns on nomArmy's trust judgment in every repository. Setup discloses this before saving (on stderr with `--json`) and repeats it in the saved result.
+`nomarmy validators list` shows which are on and, per validator, that it also drives the trust judgment, what is sent, the vendor, and the repository opt-out. Adding Jev or a model judge turns on nomArmy's trust judgment in every repository. Setup prints this once before saving (on stderr with `--json`); the JSON saved result also includes the disclosure.
 
 ## What every validator shares
 
@@ -59,6 +59,91 @@ The key is saved to `~/.config/nomarmy/secrets/typesafe.key`, readable only by y
 **What we measured** on real job records: every mismatched citation we planted was caught, and the real findings it flagged were real problems (a finding that misread its own cited line; true claims citing the wrong lines). It flagged none of 30 real reports against their own diffs and caught a worker's false claim. A job's checks cost a fraction of a cent.
 
 **What it sends to TypeSafe:** excerpts of your code (findings, cited lines, diffs, worker reports), plus each implement job's diff and its brief at dispatch for nomArmy's trust judgment in every repository. The trust judgment checks for security-sensitive changes (access control, removed checks, personal data, secrets, money). It can only raise a job's review level. Turn it off for a repository with `trust: { judgment: false }` in its `.nomarmy.yml`. A failed or slow call (15 seconds at most) skips Jev for every job for 10 minutes, and a job never spends more than 45 seconds on it.
+
+## Running the judgment locally
+
+Any System One-compatible server can replace the TypeSafe endpoint, including
+[Kev](https://github.com/jaredpalmer/kev). Install Kev and its model using that
+project's instructions, then start its `kev.serve` module in the environment
+where you installed it. For example, with port 8000:
+
+```bash
+python -m kev.serve --port 8000
+nomarmy validators add kev --endpoint http://127.0.0.1:8000
+# Equivalent: nomarmy validators add jev --endpoint http://127.0.0.1:8000
+nomarmy validators list
+nomarmy validators test jev
+```
+
+Keep the server bound to loopback. Set `--model <id>` if your server needs a
+particular model id; otherwise nomArmy sends `jev-latest`. Setup makes the same
+small test call as TypeSafe setup and saves only after it answers successfully.
+The `kev` alias writes a `jev` entry, not a separate validator:
+
+```yaml
+jev:
+  enabled: true
+  endpoint: http://127.0.0.1:8000/v1/systemone
+  model: jev-latest
+  checks: [scout-citations, report-claims]
+```
+
+Endpoints may use HTTPS with any host. Plain HTTP is accepted only when the
+host is exactly `127.0.0.1`, `::1` (written `[::1]` in a URL), or `localhost`,
+with any port. A base URL gets `/v1/systemone` appended; a path already ending
+in `/v1/systemone` is used directly. Credentials in URLs, query strings,
+fragments, other protocols, and non-loopback HTTP are rejected. Requests do not
+follow redirects. Without `endpoint`, the URL remains
+`https://api.typesafe.ai/v1/systemone`.
+
+Loopback servers need no key by default, and nomArmy sends no Authorization
+header without one. If you enable Kev's optional `KEV_API_KEY`, supply the same
+key with `--key-env KEV_API_KEY` or `--key-stdin`. Non-local endpoints still
+require `key_env` or `key_file`. `--key-env NAME` saves only the variable name;
+the server-running coordinator must inherit that variable. `--key-stdin` stores
+the key in the same private key file used by TypeSafe setup.
+
+For loopback endpoints, code excerpts, diffs and briefs go only to the local
+server at the displayed endpoint; whether they go further is up to that server. For HTTPS endpoints on
+other hosts, setup names the recipient host. This describes nomArmy's request;
+configure the local server itself to run locally, without forwarding data.
+Listings include the endpoint and whether it is local, also as `endpoint` and
+`local` in `--json` output. Health warns if the local server is unavailable and
+suggests its start command. Failed job checks and trust judgments remain
+unavailable/error, never a pass.
+
+**Measure accuracy before relying on a replacement.** Use representative code,
+known contradictions and sensitive changes, and measure false positives and
+missed flags. Protocol compatibility is not equivalent judgment quality.
+Validators still only add review flags; no verdict can clear a flag or pass a
+mechanical check.
+
+**Forward compatibility:** older nomArmy versions strictly reject the new
+`endpoint` field. Before open coordinator sessions read the updated file, run
+`nomarmy update`, then restart those sessions so they run this version. Setup
+prints this reminder whenever it writes an endpoint.
+
+
+### Measure a local model before relying on it
+
+A local server keeps your code on your machine, but it only protects you if it catches what Jev catches. We measured on 2026-10-05 with `scripts/trust-measure.mjs` against a private corpus of 14 real defects that escaped review in one of our own products and 15 harmless commits, at nomArmy's normal threshold (0.5 for review):
+
+| Judgment | Defects caught (of 14) | False alarms (of 15) |
+|---|---|---|
+| None (the deterministic floor and detector only) | 1 | 0 |
+| [Von](https://github.com/wfzyx/von) 1.3 (395M), local | 5 | 0 |
+| [Kev](https://github.com/jaredpalmer/kev)-4B, local | 8 | 0 |
+| Jev (TypeSafe) | 14 | 0 |
+
+Neither local model separated real defects from harmless changes: their scores sat in a narrow middle band (Von 0.30 to 0.54, Kev-4B 0.2 to 0.6) that overlapped the harmless commits, so lowering the threshold only traded catches for false alarms. Larger Kev models (9B, 27B) weren't measured. One team's corpus is not a benchmark; your results will differ.
+
+So don't swap Jev for a local model on faith. Measure it on your own history: build a corpus of diffs that introduced real defects and harmless ones (`scripts/trust-measure.mjs` documents the format), point a throwaway config at the local server, and compare:
+
+```bash
+NOMARMY_CONFIG_DIR=/tmp/local-judge node scripts/trust-measure.mjs <corpus-dir> --judgment jev
+```
+
+Some servers download their weights on the first request, which can outlast Jev's 15-second call; nomArmy reports that judgment as unavailable, never as a pass. Send one request first, or wait for the download, before measuring.
 
 ## Model judge
 

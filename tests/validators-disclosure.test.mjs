@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 const expected = (validator, vendor) => `Adding ${validator} also turns on nomArmy's trust judgment in every repository: each implement job's diff, and its brief at dispatch, is sent to ${vendor} to check for security-sensitive changes (access control, removed checks, personal data, secrets, money). It can only raise a job's review level. Turn it off for a repository with trust: { judgment: false } in its .nomarmy.yml.`;
-const jevText = expected("Jev", "TypeSafe");
+const jevText = "Code excerpts, diffs and briefs are sent to api.typesafe.ai. " + expected("Jev", "api.typesafe.ai");
 const judgeText = expected("the judge", "Anthropic");
 const cli = path.resolve("bin/nomarmy.mjs");
 
@@ -107,11 +107,11 @@ for (const json of [false, true]) {
     if (json) {
       assert.deepEqual(JSON.parse(result.stdout), {
         path: path.join(configDir, "validators.yml"),
-        jev: { enabled: true, checks: ["scout-citations", "report-claims"], model: "jev-latest", key: "env NOMARMY_DISCLOSURE_MISSING_KEY", keyReadable: false, trustJudgment: jevText },
+        jev: { enabled: true, checks: ["scout-citations", "report-claims"], model: "jev-latest", endpoint: "https://api.typesafe.ai/v1/systemone", local: false, key: "env NOMARMY_DISCLOSURE_MISSING_KEY", keyReadable: false, trustJudgment: jevText },
         judge: { enabled: true, agent: "claude", model: "sonnet", checks: ["acceptance", "report-claims", "test-weakening"], hostTools: true, trustJudgment: judgeText },
       });
     } else {
-      assert.equal(result.stdout, `Jev: on (jev-latest); checks: scout-citations, report-claims; key: env NOMARMY_DISCLOSURE_MISSING_KEY (not readable)\n  Also drives the trust judgment. ${jevText}\nJudge: on (claude/sonnet); checks: acceptance, report-claims, test-weakening; host tools allowed\n  Also drives the trust judgment. ${judgeText}\n`);
+      assert.equal(result.stdout, `Jev: on (jev-latest); checks: scout-citations, report-claims; endpoint: https://api.typesafe.ai/v1/systemone (remote); key: env NOMARMY_DISCLOSURE_MISSING_KEY (not readable)\n  Also drives the trust judgment. ${jevText}\nJudge: on (claude/sonnet); checks: acceptance, report-claims, test-weakening; host tools allowed\n  Also drives the trust judgment. ${judgeText}\n`);
     }
   });
 }

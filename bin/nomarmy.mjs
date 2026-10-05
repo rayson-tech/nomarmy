@@ -29,7 +29,7 @@ import { connectViaWsl, connectClaude, connectCodex, connectCursor, cursorAlread
 import { compareVersions, readPackageVersion, readInstallVersions, copyIsStale } from "../lib/install-freshness.mjs";
 import { loadJobRecords, computeStats, formatStats, formatStatsSummary, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
 import { requestJobStop } from "../lib/openclaw-run.mjs";
-import { loadValidators, saveJevKey, removeJev, jevSettings, askJev, validatorsPath, JEV_CHECKS, saveJudge, removeJudge, judgeSettings, judgeAgentChoices, chooseJudgeAgent, confirmJudgeHostTools, validatorTrustDisclosure } from "../lib/validators.mjs";
+import { loadValidators, saveJev, jevEndpoint, JEV_ENDPOINT, removeJev, jevSettings, askJev, validatorsPath, JEV_CHECKS, saveJudge, removeJudge, judgeSettings, judgeAgentChoices, chooseJudgeAgent, confirmJudgeHostTools, validatorTrustDisclosure } from "../lib/validators.mjs";
 import { probeModel } from "../lib/model-probe.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
 import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, agentProviderId, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
@@ -292,15 +292,17 @@ Usage: nomarmy <command> [options]
                   tokens and spend, how often a "done" report failed
                   independent verification, what didn't finish, reviewers,
                   and review flags. From verified records, never reports.
-  validators <list|add jev|test jev|remove jev|add judge|test judge|remove judge>
+  validators <list|add jev|add kev|test jev|remove jev|add judge|test judge|remove judge>
                   Optional semantic checks from a model you configure with
                   your own key. Jev checks focused claims with TypeSafe;
                   Judge reviews diffs with one of your configured agents.
                   Setup asks for any consent it needs. \`add jev\` asks for the
-                  key without echoing it (or reads --key-stdin), saves it
-                  where only you can read it, and makes one test call. Its
+                  key without echoing it (or reads --key-stdin), makes one
+                  test call, then saves it where only you can read it. Its
                   answers only add review flags, and it sends excerpts of
-                  your code to TypeSafe. \`add judge --agent <name> --model
+                  your code to TypeSafe by default. Use --endpoint <url>
+                  [--key-stdin|--key-env NAME] [--model <id>] for a System
+                  One server; add kev --endpoint <url> is an alias. \`add judge --agent <name> --model
                   <model>\` makes one of your agents a model judge: does the
                   diff meet each acceptance criterion, match the report, keep
                   its tests as strong? An agent whose tools run on this
@@ -3064,7 +3066,7 @@ async function readStdin() {
 
 // One tiny System One request, to prove the key and the route work.
 async function testJev(settings) {
-  const { answers } = await askJev({ key: settings.key, model: settings.model, state: { text: "The build finished and all 12 tests passed." },
+  const { answers } = await askJev({ key: settings.key, endpoint: settings.endpoint, model: settings.model, state: { text: "The build finished and all 12 tests passed." },
     questions: { passed: { type: "noul", instructions: "Does the text say the tests passed?", criteria: { true: "It says the tests passed", false: "It doesn't" } } } });
   return typeof answers.passed?.noul === "number";
 }
@@ -3075,8 +3077,8 @@ async function cmdValidators() {
     let config = {};
     try { config = loadValidators(); } catch (error) { if (json) return out({ error: error.message }); console.log(c.red(error.message)); process.exitCode = 1; return; }
     const judge = config.judge ? { enabled: config.judge.enabled, agent: config.judge.agent, model: config.judge.model, checks: config.judge.checks, hostTools: config.judge.host_tools } : null;
-    const jev = config.jev ? { enabled: config.jev.enabled, checks: config.jev.checks, model: config.jev.model, key: config.jev.key_env ? `env ${config.jev.key_env}` : config.jev.key_file, keyReadable: Boolean(jevSettings()) } : null;
-    if (jev) jev.trustJudgment = validatorTrustDisclosure("Jev", "TypeSafe");
+    const jev = config.jev ? { enabled: config.jev.enabled, checks: config.jev.checks, model: config.jev.model, ...jevEndpoint(config.jev.endpoint), key: config.jev.key_env ? `env ${config.jev.key_env}` : config.jev.key_file ?? null, keyReadable: Boolean(jevSettings()) } : null;
+    if (jev) jev.trustJudgment = validatorTrustDisclosure("Jev", "TypeSafe", config.jev.endpoint ?? JEV_ENDPOINT);
     if (judge) {
       const agents = loadAgents(globalConfigDir()).agents;
       const vendor = agentProviderId(agents[judge.agent]) ?? `the configured vendor for agent "${judge.agent}" (agent unavailable)`;
@@ -3084,31 +3086,52 @@ async function cmdValidators() {
     }
     if (json) return out({ path: validatorsPath(), jev, judge });
     if (!jev && !judge) { console.log("No validators configured. Add one with: nomarmy validators add jev, or nomarmy validators add judge --agent <name> --model <model>"); return; }
-    if (jev) console.log(`Jev: ${jev.enabled ? c.green("on") : "off"} (${jev.model}); checks: ${jev.checks.join(", ")}; key: ${jev.key}${jev.keyReadable ? "" : c.red(" (not readable)")}`);
+    if (jev) console.log(`Jev: ${jev.enabled ? c.green("on") : "off"} (${jev.model}); checks: ${jev.checks.join(", ")}; endpoint: ${jev.endpoint} (${jev.local ? "local" : "remote"}); key: ${jev.key ?? "none (local)"}${jev.keyReadable ? "" : c.red(" (not readable)")}`);
     if (jev) console.log(`  Also drives the trust judgment. ${jev.trustJudgment}`);
     if (judge) console.log(`Judge: ${judge.enabled ? c.green("on") : "off"} (${judge.agent}/${judge.model}); checks: ${judge.checks.join(", ")}${judge.hostTools ? c.yellow("; host tools allowed") : ""}`);
     if (judge) console.log(`  Also drives the trust judgment. ${judge.trustJudgment}`);
     return;
   }
   if (name === "judge") return cmdValidatorsJudge(sub);
-  if (name !== "jev") throw new Error("Usage: nomarmy validators <list|add jev|test jev|remove jev|add judge|test judge|remove judge>");
+  if (name !== "jev" && !(name === "kev" && sub === "add")) throw new Error("Usage: nomarmy validators <list|add jev|add kev|test jev|remove jev|add judge|test judge|remove judge>");
   if (sub === "add") {
+    for (const option of ["endpoint", "key-env", "model"]) {
+      if (flag(option) && !value(option)) throw new Error(`--${option} needs a value`);
+    }
+    if (name === "kev" && !value("endpoint")) throw new Error("Usage: nomarmy validators add kev --endpoint <url> [--key-stdin|--key-env NAME] [--model <id>]");
+    if (flag("key-stdin") && flag("key-env")) throw new Error("Choose only one of --key-stdin and --key-env NAME");
+    const target = jevEndpoint(value("endpoint", JEV_ENDPOINT));
+    const keyEnv = value("key-env");
+    if (keyEnv && !/^[A-Z_][A-Z0-9_]*$/.test(keyEnv)) throw new Error("--key-env must be an environment variable NAME, never the key itself");
+    const model = value("model", loadValidators().jev?.model ?? "jev-latest");
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(model)) throw new Error("--model must be a model id (letters, digits, dots, underscores or hyphens)");
     if (!json) {
-      console.log(c.bold("🍪 Jev (TypeSafe) for nomArmy's semantic checks\n"));
+      console.log(c.bold("Jev / System One for nomArmy's semantic checks\n"));
       console.log("It checks that a scout's cited lines support its finding, and that a worker's report matches its diff.");
       console.log("Its answers only add review flags; they never pass a check or allow a commit.");
-      console.log(c.yellow("It sends excerpts of your code (findings, cited lines, diffs, worker reports) to TypeSafe.\n"));
     }
-    const trustJudgment = validatorTrustDisclosure("Jev", "TypeSafe");
+    const trustJudgment = validatorTrustDisclosure("Jev", "TypeSafe", target.endpoint);
     (json ? console.error : console.log)(`Before saving: ${trustJudgment}`);
-    const key = flag("key-stdin") ? await readStdin() : await readHiddenLine("TypeSafe API key (not shown): ");
-    const saved = saveJevKey(key);
+    const key = keyEnv ? String(process.env[keyEnv] ?? "").trim()
+      : flag("key-stdin") ? await readStdin()
+        : target.local ? undefined : await readHiddenLine(`${target.endpoint === JEV_ENDPOINT ? "TypeSafe" : new URL(target.endpoint).host} API key (not shown): `);
+    if ((keyEnv || flag("key-stdin") || !target.local) && (!key || /\s/.test(key))) throw new Error("The API key is empty or contains spaces; check --key-env or --key-stdin");
     let ok = false, why = null;
-    try { ok = await testJev(jevSettings()); } catch (error) { why = error.message; }
-    if (json) return out({ saved: true, keyFile: saved.keyFile, configPath: saved.configPath, test: ok ? "pass" : "fail", reason: why, trustJudgment });
-    console.log(c.green(`✓ Saved the key to ${saved.keyFile} (readable only by you) and turned Jev on in ${saved.configPath}.`));
-    console.log(ok ? c.green("✓ Test call answered. New jobs use it; restart open coordinator sessions to pick it up.") : c.red(`✗ Test call failed: ${why ?? "no answer"}. Check the key, then: nomarmy validators test jev`));
-    if (!ok) process.exitCode = 1;
+    try { ok = await testJev({ key, model, endpoint: target.endpoint }); } catch (error) { why = error.message; }
+    if (!ok) {
+      process.exitCode = 1;
+      if (json) return out({ saved: false, test: "fail", reason: why ?? "no answer", trustJudgment });
+      console.log(c.red(`Test call failed: ${why ?? "no answer"}. Nothing saved.`));
+      return;
+    }
+    const saved = saveJev({ ...(keyEnv ? { keyEnv } : { key }), model,
+      ...(flag("endpoint") ? { endpoint: target.endpoint } : {}) });
+    if (flag("endpoint")) (json ? console.error : console.log)("Endpoint saved: open coordinator sessions must run this version before reading validators.yml. Run nomarmy update, then restart them; older versions reject the endpoint field.");
+    if (json) return out({ saved: true, keyFile: saved.keyFile, configPath: saved.configPath, test: "pass", reason: null, trustJudgment });
+    console.log(c.green(saved.keyFile
+      ? `✓ Saved the key to ${saved.keyFile} (readable only by you) and turned Jev on in ${saved.configPath}.`
+      : `✓ Turned Jev on in ${saved.configPath}.`));
+    console.log(c.green("✓ Test call answered. New jobs use it; restart open coordinator sessions to pick it up."));
     return;
   }
   if (sub === "test") {
