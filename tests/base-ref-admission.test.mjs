@@ -147,8 +147,12 @@ test("a missing git ref reaches failure issues and the finished event", async t 
     });
   });
   assert.equal(code, 0, stderr);
-  const issue = "git exited 255: fatal: not a valid object name: 'missing'";
   assert.equal(result.ok, false);
+  // git's wording and exit code vary by version ("invalid reference" with 128,
+  // "not a valid object name" with 255); what matters is that its own fatal:
+  // reason, naming the ref, comes through everywhere.
+  const issue = result.manifest.issues[0];
+  assert.match(issue, /^git exited \d+: fatal: [^\n]*missing/);
   assert.deepEqual(result.manifest.issues, [issue]);
   assert.equal(result.manifest.error, "Error: " + issue);
   const failure = JSON.parse(fs.readFileSync(path.join(dir, "failure.json")));
@@ -157,6 +161,7 @@ test("a missing git ref reaches failure issues and the finished event", async t 
   const finished = events[2];
   assert.deepEqual(Object.keys(finished).sort(), ["agent", "at", "detail", "event", "jobId", "model", "phase"]);
   assert.equal(finished.phase, "WORKER_FAILED");
-  assert.match(finished.detail, /^WORKER_FAILED after \d+s: git exited 255: fatal: not a valid object name: 'missing'$/);
+  assert.match(finished.detail, /^WORKER_FAILED after \d+s: /);
+  assert.equal(finished.detail.replace(/^WORKER_FAILED after \d+s: /, ""), issue);
   f.unchanged();
 });
