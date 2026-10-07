@@ -404,7 +404,7 @@ server.tool("local_worker", "Run one isolated local worker and wait for it. mode
     const { problems, admission } = await admit([args]);
     if (problems.length) return refusal(problems);
     const r = await launch(args).promise;
-    const refreshed = (admission.reasons ?? []).filter((line) => (line.startsWith("stale usage reading ") || line.startsWith("Brief trust:")));
+    const refreshed = (admission.reasons ?? []).filter((line) => (line.startsWith("stale usage reading ") || line.startsWith("Brief trust:") || line.startsWith("fetched ")));
     return toolText(refreshed.length ? `${coordinatorResult(r)}\n\n${refreshed.join("\n")}` : coordinatorResult(r), !r.ok);
   });
 server.tool("local_worker_start", "Start one worker or scout in the background and return immediately with a job_id. Poll it with local_worker_status (optionally long-polling with wait_seconds). Same admission rules as local_worker: refuses under memory pressure or when NOMARMY_MAX_WORKERS jobs are already running.", jobSchema.shape,
@@ -715,7 +715,7 @@ server.tool("local_workers", "Run independent jobs (implement or scout) with bou
     jobs: results.map(r => ({ jobId: r.manifest.jobId, workerId: r.manifest.workerId, mode: r.manifest.mode, outcome: r.manifest.outcome || OUTCOMES.WORKER_FAILED, recovered: Boolean(r.manifest.recovered), status: r.manifest.coordinatorStatus || "failed", branch: r.manifest.branch, commit: r.manifest.commit?.sha || null, worktree: r.manifest.worktree, jobDir: r.jobDir })),
     ...(union ? { union } : {}) };
   const unionSection = union ? `UNION\n\n${formatUnion(withWindowsPaths(union))}\n\n` : "";
-  const refreshed = (admission?.reasons ?? []).filter((line) => (line.startsWith("stale usage reading ") || line.startsWith("Brief trust:")));
+  const refreshed = (admission?.reasons ?? []).filter((line) => (line.startsWith("stale usage reading ") || line.startsWith("Brief trust:") || line.startsWith("fetched ")));
   const text = `BATCH EXECUTION RECORD\n${coordinatorJson(summary)}\n\n${unionSection}WORKER RESULTS\n\n${results.map((r, i) => `===== WORKER ${i + 1} =====\n${coordinatorResult(r)}`).join("\n\n")}${refreshed.length ? `\n\n${refreshed.join("\n")}` : ""}`;
   return toolText(text, results.some(r => !r.ok) || union?.status === "union_verification_failed" || union?.status === "union_error");
 });

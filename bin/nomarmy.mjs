@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { processErrorSummary } from "../lib/process-error.mjs";
 import { acknowledgeTrust, collectReviewEvidence, trustSuggestions, reviewTrustLearning, trustAcknowledgment } from "../lib/trust-learning.mjs";
 import { writeTrustScoutBrief, writeTrustProposal, loadTrustProposal, trustProposalOrigins } from "../lib/trust-map.mjs";
 import { fillAcceptance, gatherAcceptanceProposals } from "../lib/acceptance-fill.mjs";
@@ -2774,10 +2775,10 @@ function collectJobs({ recent = 8, runId = null, projectDir = null } = {}) {
   const jobs = names.map((name) => {
     const dir = path.join(root, name);
     const status = readJsonSafe(path.join(dir, "status.json")) ?? {};
-    const meta = readJsonSafe(path.join(dir, "metadata.json"));
+    const meta = readJsonSafe(path.join(dir, "metadata.json")) ?? readJsonSafe(path.join(dir, "failure.json"));
     const lease = readJsonSafe(path.join(agentStateRoot(), "leases", `${name}.json`));
     const jobRunId = meta?.labels?.runId ?? lease?.runId ?? null;
-    const jobProjectDir = meta?.projectDir ?? lease?.repo ?? null;
+    const jobProjectDir = meta?.projectDir ?? status.projectDir ?? lease?.repo ?? null;
     if ((runId && jobRunId !== runId) || (projectDir && (!jobProjectDir || path.resolve(jobProjectDir) !== projectDir))) return null;
     const started = Date.parse(status.startedAt ?? meta?.startedAt ?? "") || fs.statSync(dir).mtimeMs;
     const running = status.state === "running" && pidIsAlive(status.serverPid);
@@ -2790,6 +2791,7 @@ function collectJobs({ recent = 8, runId = null, projectDir = null } = {}) {
       filesChanged: status.filesChangedLive ?? meta?.git?.filesChanged?.length ?? null,
       heartbeatAgeSeconds: status.heartbeatAt ? Math.round((Date.now() - Date.parse(status.heartbeatAt)) / 1000) : null,
       ...(meta?.trust ? { trust: meta.trust } : {}),
+      issue: processErrorSummary(meta?.issues?.[0] ?? meta?.error ?? ""),
       started, dir,
     };
   }).filter(Boolean).sort((a, b) => b.started - a.started);
@@ -2855,7 +2857,7 @@ async function streamJobEvents() {
     }
     for (const [id, prev] of seen) {
       const j = now.get(id);
-      if (prev.running && j && !j.running) emit("finished", j, `${j.phase} after ${fmtSeconds(j.elapsedSeconds)}`);
+      if (prev.running && j && !j.running) emit("finished", j, `${j.phase} after ${fmtSeconds(j.elapsedSeconds)}${j.issue ? `: ${j.issue}` : ""}`);
     }
     // A finished record can briefly lack its run label after its lease is removed.
     // Keep the running snapshot until the stamped record becomes visible.
