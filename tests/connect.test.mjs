@@ -51,6 +51,23 @@ test("installMcpCopy: copies package.json, mcp/server.mjs and lib/ into installD
   }
 });
 
+test("installMcpCopy: removes a stale lockfile before npm install, so updates resolve dependencies fresh", () => {
+  const nomarmyRoot = fakeRoot();
+  const installDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-connect-install-"));
+  // An earlier install's lockfile pinned a vulnerable SDK the range still allowed.
+  fs.writeFileSync(path.join(installDir, "package-lock.json"), '{"packages":{"node_modules/@modelcontextprotocol/sdk":{"version":"1.30.1"}}}');
+  let lockAtInstall = null;
+  try {
+    installMcpCopy({ nomarmyRoot, installDir, run: (cmd, args, opts) => {
+      if (cmd === "npm") lockAtInstall = fs.existsSync(path.join(opts.cwd, "package-lock.json"));
+    } });
+    assert.equal(lockAtInstall, false, "npm install must not see the old lockfile");
+  } finally {
+    fs.rmSync(nomarmyRoot, { recursive: true, force: true });
+    fs.rmSync(installDir, { recursive: true, force: true });
+  }
+});
+
 test("installMcpCopy: also copies docker/ so a lazy Go/Rust image build works from the installed copy", () => {
   const nomarmyRoot = fakeRoot();
   fs.mkdirSync(path.join(nomarmyRoot, "docker"), { recursive: true });
