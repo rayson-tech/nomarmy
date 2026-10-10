@@ -44,6 +44,14 @@ Start a new session after installing. If `nomarmy` isn't on your PATH, the plugi
 - The `feature` skill: build a feature end to end with your army, or `resume <run-id>`.
 - A session-start check that `nomarmy` is installed (Claude Code and Codex).
 
+## What it runs and sends
+
+- **The plugin itself** runs two things, both on your machine: `nomarmy mcp` (the nomArmy CLI you installed with npm, not code inside this plugin) and, at session start, `hooks/check-nomarmy.mjs`, which only looks for `nomarmy` on your PATH. The plugin sends nothing anywhere and reads no credentials.
+- **nomArmy, once you use it,** sends the parts of your repository a job needs to the model providers you configured in `nomarmy setup`: a local model on your machine, or the api keys and subscriptions you added (for example OpenAI, Anthropic, xAI or Bedrock). Workers run in Podman sandboxes with no network access, and every model call is made by the host-side OpenClaw process; credentials stay on your machine and are never passed to a worker. Two exceptions, both off unless you choose them: a Claude subscription runs Claude Code's own tools on your machine rather than in the sandbox (so nomArmy uses it for reviews, not builds, unless you allow it), and the optional Jev validator sends code excerpts to TypeSafe unless you point it at a server on your own machine.
+- **Nothing is merged or pushed for you.** nomArmy commits verified work to worker branches in your repository; you review and merge.
+
+[Security](https://nomarmy.dev/docs/security/) has the full trust model.
+
 If you connected nomArmy with `nomarmy connect` before, run `nomarmy connect claude` (or `codex`) again after installing the plugin: it notices the plugin and removes its own registration, so the tools don't appear twice.
 
 [Documentation](https://nomarmy.dev/docs/) · [Source](https://github.com/rayson-tech/nomarmy) · Apache-2.0 · Rayson Technologies
