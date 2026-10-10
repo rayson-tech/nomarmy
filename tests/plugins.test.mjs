@@ -33,6 +33,7 @@ test("each tool registers the same portable server, and no plugin path escapes t
   assert.deepEqual(claude.mcpServers, { "nomarmy-local-worker": { command: "nomarmy", args: ["mcp"] } });
   assert.deepEqual(read("plugins/nomarmy/mcp.json").mcpServers, { "nomarmy-local-worker": { type: "stdio", command: "nomarmy", args: ["mcp"] } });
   const codex = read("plugins/nomarmy/plugin.json").extensions["com.openai"];
+  if (process.platform !== "win32") assert.ok(fs.statSync(path.join(root, "plugins/nomarmy/hooks/check-nomarmy.sh")).mode & 0o100, "the Claude hook script is executable");
   for (const ref of [claude.hooks, codex.hooks, codex.logo, read("plugins/nomarmy/.cursor-plugin/plugin.json").logo]) {
     assert.ok(!ref.includes(".."), ref);
     assert.ok(fs.existsSync(path.join(root, "plugins/nomarmy", ref)), `${ref} exists`);
@@ -53,17 +54,17 @@ test("the feature skill is the playbook, with the request placeholder resolved",
   assert.ok(skill.includes(fs.readFileSync(path.join(root, "playbooks/feature.md"), "utf8").split("{{REQUEST}}")[1]));
 });
 
-test("the session-start check speaks only when nomarmy is missing from PATH", (t) => {
-  const script = path.join(root, "plugins/nomarmy/hooks/check-nomarmy.mjs");
+for (const [name, interpreter] of [["check-nomarmy.mjs", process.execPath], ["check-nomarmy.sh", "/bin/sh"]]) test(`the session-start check (${name}) speaks only when nomarmy is missing from PATH`, { skip: name.endsWith(".sh") && process.platform === "win32" }, (t) => {
+  const script = path.join(root, "plugins/nomarmy/hooks", name);
   const bin = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-plugin-bin-"));
   t.after(() => fs.rmSync(bin, { recursive: true, force: true }));
   // Windows spells it Path; drop every spelling so only ours is seen.
   const base = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "PATH"));
-  const run = (PATH) => spawnSync(process.execPath, [script], { encoding: "utf8", env: { ...base, PATH } });
+  const run = (PATH) => spawnSync(interpreter, [script], { encoding: "utf8", env: { ...base, PATH } });
   const missing = run(bin);
   assert.equal(missing.status, 0);
   assert.match(missing.stdout, /npm install -g nomarmy/);
-  fs.writeFileSync(path.join(bin, process.platform === "win32" ? "nomarmy.cmd" : "nomarmy"), "");
+  fs.writeFileSync(path.join(bin, process.platform === "win32" ? "nomarmy.cmd" : "nomarmy"), "", { mode: 0o755 });
   const present = run(bin);
   assert.equal(present.status, 0);
   assert.equal(present.stdout, "");
