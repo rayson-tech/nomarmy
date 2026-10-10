@@ -676,3 +676,230 @@ test("installPlaybooks: installs, refreshes its own copy, and never overwrites t
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Namespace access lets the regression checks run against the pre-plugin
+// implementation too, without an import-time missing-export failure.
+import * as pluginConnect from "../lib/connect.mjs";
+
+function pluginFixture(t) {
+  const root = fakeRoot();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const claude = path.join(root, "claude");
+  const codex = path.join(root, "codex");
+  fs.mkdirSync(path.join(claude, "plugins"), { recursive: true });
+  fs.mkdirSync(codex);
+  const env = { CLAUDE_CONFIG_DIR: claude, CODEX_HOME: codex };
+  const installedPath = path.join(claude, "plugins", "installed_plugins.json");
+  const settingsPath = path.join(claude, "settings.json");
+  const codexConfigPath = path.join(codex, "config.toml");
+  const writeClaude = (plugins, settings = {}) => {
+    fs.writeFileSync(installedPath, JSON.stringify({ version: 2, plugins }));
+    fs.writeFileSync(settingsPath, JSON.stringify(settings));
+  };
+  return { root, env, installedPath, settingsPath, codexConfigPath, writeClaude };
+}
+
+test("plugin detection: Claude requires an enabled user install with the exact name", (t) => {
+  const f = pluginFixture(t);
+  const detect = () => pluginConnect.claudePluginInstalled({ env: f.env });
+  assert.equal(detect(), null);
+  for (const plugins of [
+    {}, { "nomarmy@m": [{ scope: "project" }, { scope: "local" }] },
+    { "nomarmy-extra@m": [{ scope: "user" }], "foo@nomarmy": [{ scope: "user" }] },
+    { "nomarmy@m": null }, { "nomarmy@m": { scope: "user" } },
+  ]) {
+    f.writeClaude(plugins);
+    assert.equal(detect(), null);
+  }
+  f.writeClaude({ "nomarmy@market": [{ scope: "local" }, { scope: "user" }] });
+  assert.equal(detect(), "nomarmy@market");
+  f.writeClaude({ "nomarmy@market": [{ scope: "user" }] }, { enabledPlugins: { "nomarmy@market": false } });
+  assert.equal(detect(), null);
+  f.writeClaude({
+    "nomarmy@disabled": [{ scope: "user" }], "nomarmy@enabled": [{ scope: "user" }],
+  }, { enabledPlugins: { "nomarmy@disabled": false, "nomarmy@enabled": true } });
+  assert.equal(detect(), "nomarmy@enabled");
+  for (const file of [f.installedPath, f.settingsPath]) {
+    for (const value of ["garbage", "null", "[]"]) {
+      f.writeClaude({ "nomarmy@m": [{ scope: "user" }] });
+      fs.writeFileSync(file, value);
+      assert.equal(detect(), null);
+    }
+    f.writeClaude({ "nomarmy@m": [{ scope: "user" }] });
+    fs.rmSync(file);
+    // No settings file means nothing disabled the plugin.
+    assert.equal(detect(), file === f.settingsPath ? "nomarmy@m" : null);
+  }
+});
+
+test("plugin detection: Codex scans exact plugin tables and their own boolean enable flags", (t) => {
+  const f = pluginFixture(t);
+  const detect = () => pluginConnect.codexPluginInstalled({ env: f.env });
+  assert.equal(detect(), null);
+  for (const [source, expected] of [
+    ['[plugins."nomarmy@m"]\nenabled = true\n', "nomarmy@m"],
+    [' [plugins . "nomarmy@market#one"] # comment\r\n enabled = true # yes\r\n[other]\nenabled = false', "nomarmy@market#one"],
+    ['[plugins."nomarmy@off"]\nenabled = false\n[plugins."nomarmy@on"]\nenabled = true', "nomarmy@on"],
+    ['[plugins."nomarmy@m"]\nenabled = false', null],
+    ['[plugins."nomarmy@m"]\n[other]\nenabled = true', null],
+    ['[plugins."nomarmy@m"]\n[plugins."nomarmy@m".nested]\nenabled = true', null],
+    ['[plugins."nomarmy-extra@m"]\nenabled = true\n[plugins."foo@nomarmy"]\nenabled = true', null],
+    ['# [plugins."nomarmy@m"]\nenabled = true', null],
+    ['[plugins."nomarmy@m"]\n# enabled = true', null],
+    ['[[plugins."nomarmy@m"]]\nenabled = true', null],
+    ['[plugins."nomarmy@m"]\nenabled = "true"', null],
+    ['[plugins."nomarmy@m"]\nenabled = true-ish', null],
+    ['[plugins."nomarmy@m"]\nenabled = true\nenabled = false', null],
+    ['[plugins."nomarmy@m"]\nenabled = true\n[plugins."nomarmy@m"]\nenabled = false', null],
+    ['[plugins."nomarmy@m"\nenabled = true', null],
+    ['[plugins."nomarmy@m"]\nenabled = true\ngarbage', null],
+    ['description = """\n[plugins."nomarmy@m"]\nenabled = true\n"""', null],
+    ["description = '''\n[plugins.\"nomarmy@m\"]\nenabled = true\n'''", null],
+    ['[plugins."nomarmy@m"]\nenabled = true\nnote = """unterminated', null],
+    ['garbage', null], ['', null],
+  ]) {
+    fs.writeFileSync(f.codexConfigPath, source);
+    assert.equal(detect(), expected, source);
+  }
+});
+
+for (const target of ["claude", "codex"]) {
+  test(`plugin connect: ${target} keeps the copy, removes only owned playbooks, and preserves other scopes`, (t) => {
+    const f = pluginFixture(t);
+    f.writeClaude({ "nomarmy@nomarmy": [{ scope: "user" }] });
+    fs.writeFileSync(f.codexConfigPath, '[plugins."nomarmy@nomarmy"]\nenabled = true\n');
+    fs.mkdirSync(path.join(f.root, "playbooks"));
+    fs.writeFileSync(path.join(f.root, "playbooks", "feature.md"), "feature {{REQUEST}}");
+    const installDir = path.join(f.root, "installed");
+    const commandsDir = path.join(f.root, "commands");
+    const skillsDir = path.join(f.root, "skills");
+    const legacySkillsDir = path.join(f.root, "legacy-skills");
+    const configDir = path.join(f.root, "user-config");
+    const calls = [];
+    const run = (cmd, args) => {
+      calls.push([cmd, ...args]);
+      if (cmd === "git") throw new Error("fixture has no repository");
+      if (args[1] === "remove") throw new Error("nothing registered");
+      return "";
+    };
+    const connect = target === "claude" ? connectClaude : connectCodex;
+    const options = { nomarmyRoot: f.root, installDir, commandsDir, skillsDir, legacySkillsDir,
+      settingsPath: f.settingsPath, env: f.env, configDir, run };
+    const file = target === "claude" ? path.join(commandsDir, "feature.md") : path.join(skillsDir, "nomarmy-feature", "SKILL.md");
+    const legacyFile = path.join(legacySkillsDir, "nomarmy-feature", "SKILL.md");
+    for (const content of [null, "<!-- nomarmy:feature --> old", "my own feature"]) {
+      calls.length = 0;
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+      if (content !== null) {
+        fs.writeFileSync(file, content);
+        fs.writeFileSync(legacyFile, content);
+      }
+      const result = connect(options);
+      assert.deepEqual(Object.keys(result).sort(), [
+        "installDir", "serverPath", "preservedEnv", "commands", "notifier", "plugin",
+        ...(target === "claude" ? ["statusLine", "scope"] : []),
+      ].sort());
+      assert.equal(result.plugin, "nomarmy@nomarmy");
+      assert.equal(result.installDir, installDir);
+      assert.equal(result.serverPath, null);
+      assert.deepEqual(result.preservedEnv, {});
+      assert.deepEqual(result.commands, { installed: [], skipped: [], dir: target === "claude" ? commandsDir : skillsDir });
+      assert.deepEqual(result.notifier, process.platform === "darwin"
+        ? { status: "skipped", reason: "notifications are off (NOMARMY_NOTIFY=0)" }
+        : { status: "skipped", reason: "not macOS" });
+      assert.deepEqual(calls, [
+        ["npm", "install", "--omit=dev"],
+        [process.execPath, "--check", "mcp/server.mjs"],
+        [target, "mcp", "remove", "nomarmy-local-worker", ...(target === "claude" ? ["--scope", "user"] : [])],
+      ]);
+      assert.equal(fs.readFileSync(path.join(installDir, "mcp", "server.mjs"), "utf8"), "// fake server");
+      assert.equal(fs.readFileSync(path.join(installDir, "lib", "verify.mjs"), "utf8"), "// fake lib file");
+      if (content === "my own feature") assert.equal(fs.readFileSync(file, "utf8"), content);
+      else assert.equal(fs.existsSync(file), false);
+      if (target === "codex") {
+        if (content === "my own feature") assert.equal(fs.readFileSync(legacyFile, "utf8"), content);
+        else {
+          assert.equal(fs.existsSync(legacyFile), false);
+          assert.equal(fs.existsSync(path.dirname(file)), content === null);
+        }
+      } else {
+        assert.equal(result.scope, "user");
+        assert.equal(result.statusLine, content === null ? "installed" : "unchanged");
+        assert.deepEqual(JSON.parse(fs.readFileSync(f.settingsPath, "utf8")).statusLine, {
+          type: "command", command: `node ${JSON.stringify(path.join(installDir, "lib", "statusline.mjs"))}`,
+          padding: 0, refreshInterval: 5,
+        });
+      }
+    }
+    // A user-scoped plugin must not intercept the existing repository paths.
+    for (const scope of ["local", "project"]) {
+      calls.length = 0;
+      if (target === "codex") {
+        assert.throws(() => connect({ ...options, scope }), /Codex registers MCP servers only for every project/);
+        assert.deepEqual(calls, []);
+      } else {
+        const projectDir = path.join(f.root, scope);
+        const result = connect({ ...options, scope, projectDir, warn: () => {} });
+        assert.equal(result.scope, scope);
+        assert.equal(Object.hasOwn(result, "plugin"), false);
+        assert.deepEqual(calls.filter((call) => call[0] === "claude" && call[2] === "add"), [[
+          "claude", "mcp", "add", "--scope", scope, "nomarmy-local-worker", "--",
+          ...(scope === "local" ? ["node", path.join(installDir, "mcp", "server.mjs")] : ["nomarmy", "mcp"]),
+        ]]);
+        assert.deepEqual(result.commands.installed, ["feature.md"]);
+      }
+    }
+    // Disabling/removing the plugin restores normal registration + playbooks.
+    for (const state of ["disabled", "absent"]) {
+      if (state === "disabled") {
+        f.writeClaude({ "nomarmy@nomarmy": [{ scope: "user" }] }, { enabledPlugins: { "nomarmy@nomarmy": false } });
+        fs.writeFileSync(f.codexConfigPath, '[plugins."nomarmy@nomarmy"]\nenabled = false');
+      } else {
+        fs.rmSync(f.installedPath);
+        fs.rmSync(f.codexConfigPath);
+      }
+      fs.rmSync(file, { force: true });
+      calls.length = 0;
+      const result = connect(options);
+      assert.equal(Object.hasOwn(result, "plugin"), false);
+      assert.equal(result.serverPath, path.join(installDir, "mcp", "server.mjs"));
+      assert.deepEqual(calls.filter((call) => call[0] === target && call[2] === "add"), [[
+        target, "mcp", "add", ...(target === "claude" ? ["--scope", "user"] : []),
+        "nomarmy-local-worker", "--", "node", result.serverPath,
+      ]]);
+      assert.deepEqual(result.commands.installed, [target === "claude" ? "feature.md" : path.join("nomarmy-feature", "SKILL.md")]);
+      assert.equal(fs.readFileSync(file, "utf8"), renderPlaybook("feature", "feature {{REQUEST}}", target).text);
+    }
+  });
+}
+
+test("plugin CLI: connect explains plugin ownership instead of claiming a second registration", {
+  skip: process.platform === "win32" ? "uses POSIX executable stubs" : false,
+}, async (t) => {
+  const { execFileSync } = await import("node:child_process");
+  const f = pluginFixture(t);
+  f.writeClaude({ "nomarmy@nomarmy": [{ scope: "user" }] });
+  fs.writeFileSync(f.codexConfigPath, '[plugins."nomarmy@nomarmy"]\nenabled = true');
+  const binDir = path.join(f.root, "bin");
+  fs.mkdirSync(binDir);
+  for (const cmd of ["claude", "codex", "npm"]) {
+    fs.writeFileSync(path.join(binDir, cmd), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  }
+  const stdout = execFileSync(process.execPath, [path.join(REPO_ROOT, "bin", "nomarmy.mjs"), "connect", "claude", "codex"], {
+    cwd: f.root, encoding: "utf8",
+    env: { ...process.env, ...f.env, PATH: `${binDir}${path.delimiter}${process.env.PATH}`,
+      NO_COLOR: "1", NOMARMY_AGENT_INSTALL_DIR: path.join(f.root, "installed"),
+      NOMARMY_CLAUDE_SETTINGS_PATH: f.settingsPath,
+      NOMARMY_CLAUDE_COMMANDS_DIR: path.join(f.root, "commands"),
+      NOMARMY_CODEX_SKILLS_DIR: path.join(f.root, "skills"),
+    },
+  });
+  assert.deepEqual(stdout.split("\n").filter((line) => line.includes("plugin")), [
+    "✓ nomArmy plugin nomarmy@nomarmy is installed: it registers the MCP server and /feature, so connect didn't add a second registration.",
+    "✓ nomArmy plugin nomarmy@nomarmy is installed: it registers the MCP server and /feature, so connect didn't add a second registration.",
+  ]);
+  assert.equal(stdout.includes("Registered nomarmy-local-worker"), false);
+  assert.equal(fs.existsSync(path.join(f.root, "commands", "feature.md")), false);
+  assert.equal(fs.existsSync(path.join(f.root, "skills", "nomarmy-feature")), false);
+});

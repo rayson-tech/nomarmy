@@ -42,6 +42,17 @@ The printed plan lists install mutations and read-only postflight commands. nomA
 
 Run it inside the repository. A committed registration can't carry your install path or your model settings, so it runs `nomarmy mcp`, which starts nomArmy with each person's own: every teammate needs nomArmy installed and set up. Codex registers servers only for every project, so it has no per-repository option. If nomArmy is also registered for all your projects, `connect` says so; `claude mcp remove nomarmy-local-worker -s user` removes that. `nomarmy update` keeps per-repository registrations current without adding a user-wide one.
 
+### As a plugin
+
+Claude Code and Codex can also get nomArmy as a plugin, from the marketplace in nomArmy's own repository (Cursor's listing is in review). It registers the same MCP server (`nomarmy mcp`) and the `feature` command, instead of `nomarmy connect` doing it. It can't install nomArmy, so `npm install -g nomarmy` and `nomarmy setup` come first either way.
+
+| | Add the plugin |
+|---|---|
+| Claude Code | `/plugin marketplace add rayson-tech/nomarmy`, then `/plugin install nomarmy@nomarmy`. The command is `/nomarmy:feature` (or `/feature` when nothing else has that name). |
+| Codex | `codex plugin marketplace add rayson-tech/nomarmy`, then install nomArmy from `/plugins` and start a new session. |
+
+Start a new session afterwards. At the start of each session the plugin checks that `nomarmy` is on your PATH, and if it isn't, the assistant tells you what to install. `nomarmy connect` and `nomarmy update` notice an installed plugin and leave the registration to it, removing their own so the tools don't appear twice; they still keep the installed copy (which `nomarmy mcp` runs) and Claude Code's status line current. Plugin updates follow nomArmy's releases: `/plugin marketplace update nomarmy` in Claude Code, `codex plugin marketplace upgrade nomarmy` in Codex.
+
 ## Hosted workers only
 
 No GPU and no local model: every job runs on an API key or a subscription (ChatGPT, Muse Code) you add as an agent. Git worktrees, the sandbox and verification still run on your machine, so you still need Git, Node and Podman. `nomarmy setup` walks these steps for you; by hand, they are:

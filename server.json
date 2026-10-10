@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.rayson-tech/nomarmy",
+  "title": "nomArmy",
+  "description": "Sandboxed coding workers, verified: tests rerun fresh and must fail with the change reverted.",
+  "repository": {
+    "url": "https://github.com/rayson-tech/nomarmy",
+    "source": "github"
+  },
+  "websiteUrl": "https://nomarmy.dev",
+  "version": "0.1.0-beta.2",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "nomarmy",
+      "version": "0.1.0-beta.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ]
+    }
+  ]
+}
