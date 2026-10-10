@@ -107,3 +107,18 @@ test("resolveRepo takes a path or a folder name, preferring an exact or trailing
   assert.throws(() => resolveRepo(recs, "zzz"), /no repository with jobs matches "zzz"/);
   assert.equal(resolveRepo(recs, os.tmpdir()), path.resolve(os.tmpdir()), "an existing path is taken as is");
 });
+
+
+test("preexisting claims with failed regression checks count only as caught claims", () => {
+  const job = regressionCheck => impl({ independentVerification: { status: "pass",
+    baseComparison: { classification: "preexisting" } }, regressionCheck });
+  const expected = { claimedDone: 1, verificationFailed: 0, failedOnlyOnBase: 0,
+    revertStillPassed: 1, passedBoth: 0, changedNothing: 0, flaggedAfterPassing: 0, provenTestFiles: 0 };
+  assert.deepEqual(computeStats([job({ status: "fail" })]).claimVsEvidence, expected);
+  for (const regressionCheck of [undefined, { status: "pass" }, { status: "not_run" }]) {
+    assert.deepEqual(computeStats([job(regressionCheck)]).claimVsEvidence,
+      { ...expected, failedOnlyOnBase: 1, revertStillPassed: 0 });
+  }
+  assert.deepEqual(computeStats([job({ status: "fail" }), job({ status: "pass" })]).claimVsEvidence,
+    { ...expected, claimedDone: 2, failedOnlyOnBase: 1 });
+});

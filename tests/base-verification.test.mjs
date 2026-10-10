@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { parseTestFailures, verificationEvidence, compareBaseVerification, failureList } from "../lib/base-verification.mjs";
+import { parseTestFailures, verificationEvidence, compareBaseVerification, failureList, verificationFingerprint } from "../lib/base-verification.mjs";
 import { createVerificationFlow } from "../lib/verification-flow.mjs";
 import { createVerificationRunner } from "../lib/verify.mjs";
 import { createExecutor } from "../lib/execute.mjs";
@@ -68,17 +68,17 @@ function workerTree(f) {
 
 test("failure parser attributes pytest and both node reporters, and rejects incomplete counts", () => {
   assert.equal(failureList(["one", "two", "three", "four", "five", "six"]), "one, two, three, four, five, ...");
-  assert.deepEqual(parseTestFailures(py()), { complete: true, format: "pytest", failures: [{ id: "tests/a.py::test_old", reason: "AssertionError: old bug" }] });
+  assert.deepEqual(parseTestFailures(py()), { complete: true, format: "pytest", passedCount: 100, failures: [{ id: "tests/a.py::test_old", reason: "AssertionError: old bug" }] });
   for (const output of ["not ok 1 - old test\n# fail 1\n", "✖ old test (1.25ms)\nℹ fail 1\n✖ failing tests:\n✖ old test (1.25ms)\n"]) {
-    assert.deepEqual(parseTestFailures(output), { complete: true, format: "node", failures: [{ id: "old test", reason: "" }] });
+    assert.deepEqual(parseTestFailures(output), { complete: true, format: "node", passedCount: null, failures: [{ id: "old test", reason: "" }] });
   }
-  assert.deepEqual(parseTestFailures(tap("old bug")), { complete: true, format: "node", failures: [{ id: "old test", reason: JSON.stringify([["code", "'ERR_ASSERTION'"], ["error", "'old bug'"], ["failureType", "'testCodeFailure'"]]) }] });
-  assert.deepEqual(compareBaseVerification(failed(tap("new bug")), failed(tap("old bug"))), { classification: "failure", preexistingFailures: [], newFailures: ["old test"] });
+  assert.deepEqual(parseTestFailures(tap("old bug")), { complete: true, format: "node", passedCount: 0, failures: [{ id: "old test", reason: JSON.stringify([["code", "'ERR_ASSERTION'"], ["error", "'old bug'"], ["failureType", "'testCodeFailure'"]]) }] });
+  assert.deepEqual(compareBaseVerification(failed(tap("new bug")), failed(tap("old bug"))), { classification: "failure", jobPassedCount: 0, basePassedCount: 0, reason: null, preexistingFailures: [], newFailures: ["old test"] });
   for (const output of [tap("old bug").replace("# cancelled 0", "# cancelled 1"), "make failed", "FAILED tests/a.py::test_old", py().replace("1 failed", "2 failed"), py() + "\n1 error", py() + "\n[nomarmy] output truncated", "not ok 1 - suite\nnot ok 2 - child\n# fail 1\n"]) {
     assert.deepEqual(parseTestFailures(output), { complete: false, format: null, failures: [] });
   }
-  assert.deepEqual(compareBaseVerification(failed(), failed()), { classification: "preexisting", preexistingFailures: ["tests/a.py::test_old"], newFailures: [] });
-  assert.deepEqual(compareBaseVerification(failed(py(undefined, "AssertionError: new bug")), failed()), { classification: "failure", preexistingFailures: [], newFailures: ["tests/a.py::test_old"] });
+  assert.deepEqual(compareBaseVerification(failed(), failed()), { classification: "preexisting", jobPassedCount: 100, basePassedCount: 100, reason: null, preexistingFailures: ["tests/a.py::test_old"], newFailures: [] });
+  assert.deepEqual(compareBaseVerification(failed(py(undefined, "AssertionError: new bug")), failed()), { classification: "failure", jobPassedCount: 100, basePassedCount: 100, reason: null, preexistingFailures: [], newFailures: ["tests/a.py::test_old"] });
 });
 
 test("real detached base comparison classifies all verdicts and keeps the job bytes unchanged", async t => {
@@ -111,7 +111,11 @@ test("real detached base comparison classifies all verdicts and keeps the job by
     });
     const result = await f.flow.compareWithBase(context, job);
     assert.equal(result.status, status, name);
-    assert.deepEqual(result.baseComparison, { baseSha: f.baseSha, cached: false, baseStatus: base.status, classification: status === "pass" ? "preexisting" : "failure", preexistingFailures, newFailures }, name);
+    assert.deepEqual(result.baseComparison, { baseSha: f.baseSha, cached: false, baseStatus: base.status, classification: status === "pass" ? "preexisting" : "failure",
+      jobPassedCount: job.failureEvidence?.passedCount ?? null, basePassedCount: base.failureEvidence?.passedCount ?? null,
+      reason: !job.failureEvidence || !base.failureEvidence
+        ? `missing or unparseable passed count (job: ${job.failureEvidence?.passedCount ?? "unknown"}, base: ${base.failureEvidence?.passedCount ?? "unknown"})` : null,
+      preexistingFailures, newFailures }, name);
     assert.equal(count, 1); assert.equal(fs.existsSync(snapshot), false);
     assert.equal(fs.readFileSync(path.join(context.cwd, "code.py"), "utf8"), "value = 2\n");
     assert.equal(result.issues.length, 1);
@@ -182,7 +186,7 @@ test("runner preserves parsed evidence and pins image and policy for the base", 
   });
   f.flow.registerVerificationRunner(runner);
   const job = await f.flow.runIndependentVerification(context);
-  assert.deepEqual(job.failureEvidence, { command: "pytest", exitCode: 1, complete: true, format: "pytest", failures: [{ id: "tests/a.py::test_old", reason: "AssertionError: old bug" }] });
+  assert.deepEqual(job.failureEvidence, { command: "pytest", exitCode: 1, complete: true, format: "pytest", passedCount: 100, failures: [{ id: "tests/a.py::test_old", reason: "AssertionError: old bug" }] });
   const result = await f.flow.compareWithBase(context, job);
   assert.equal(result.status, "pass"); assert.equal(calls.length, 2);
   assert.equal(calls[0].image, "fixture:default"); assert.equal(calls[1].image, calls[0].image);
@@ -284,5 +288,61 @@ test("preexisting regression gate requires complete runner evidence with a new f
     assert.equal(result.reason, reason, name);
     assert.equal(calls, 1, name);
     assert.equal(fs.readFileSync(path.join(context.cwd, "code.py"), "utf8"), "value = 2\n", name);
+  }
+});
+
+// Seed the trusted cache so count-policy tests need no repository operations.
+test("base comparison requires parsed pass totals for pytest, TAP and node spec", async t => {
+  const root = fs.mkdtempSync(path.join(process.cwd(), ".base-count-test-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const cwd = path.join(root, "worker"), jobsRoot = path.join(root, "jobs");
+  const cacheDir = path.join(jobsRoot, ".base-verification");
+  fs.mkdirSync(cwd); fs.mkdirSync(cacheDir, { recursive: true });
+  const baseSha = "a".repeat(40), profile = "quick";
+  const identity = { version: 1, baseSha, profile, ...env };
+  const cacheFile = path.join(cacheDir, verificationFingerprint(identity) + ".json");
+  const flow = createVerificationFlow({ projectDir: cwd, ensureJobsRoot: () => jobsRoot });
+  const reporters = [
+    ["pytest", n => `FAILED tests/a.py::test_old - AssertionError: old bug\n=== 1 failed${n === null ? "" : `, ${n} passed`} in 0.12s ===\n`, "tests/a.py::test_old"],
+    ["TAP", n => `TAP version 13\nnot ok 1 - old test\n1..101\n# tests 101\n${n === null ? "" : `# pass ${n}\n`}# fail 1\n`, "old test"],
+    ["spec", n => `✖ old test (1.25ms)\nℹ tests 101\n${n === null ? "" : `ℹ pass ${n}\n`}ℹ fail 1\n`, "old test"],
+  ];
+  for (const [reporter, output, id] of reporters) {
+    const cases = [[99, 100], [100, 100], [101, 100], [0, 0], [0, 100]];
+    for (const invalid of [null, "unknown", "-1", "1.5", "9007199254740992"]) {
+      cases.push([invalid, 100], [100, invalid]);
+    }
+    for (const [jobCount, baseCount] of cases) {
+      const job = failed(output(jobCount)), base = failed(output(baseCount));
+      fs.writeFileSync(cacheFile, JSON.stringify({ identity, result: base }));
+      const result = await flow.compareWithBase({ cwd, baseSha, profile }, job);
+      const jobPassedCount = typeof jobCount === "number" ? jobCount : null;
+      const basePassedCount = typeof baseCount === "number" ? baseCount : null;
+      const reason = jobPassedCount === null || basePassedCount === null
+        ? `missing or unparseable passed count (job: ${jobPassedCount ?? "unknown"}, base: ${basePassedCount ?? "unknown"})`
+        : jobPassedCount < basePassedCount ? `passed count decreased (job: ${jobPassedCount}, base: ${basePassedCount})` : null;
+      const label = `${reporter}: job=${jobCount}, base=${baseCount}`;
+      assert.equal(result.status, reason ? "fail" : "pass", label);
+      assert.deepEqual(result.baseComparison, { baseSha, cached: true, baseStatus: "fail",
+        classification: reason ? "failure" : "preexisting", jobPassedCount, basePassedCount, reason,
+        preexistingFailures: [id], newFailures: [] }, label);
+      assert.deepEqual(result.issues, [reason ? `base comparison kept verification failed (fail): ${reason}`
+        : `1 tests already failing on the base: ${id}`], label);
+      if (reason) assert.equal(result.reason, reason, label);
+    }
+  }
+});
+
+test("pass totals reject conflicting summaries and malformed cached evidence", () => {
+  for (const output of [py() + "1 failed, 99 passed\n", tap("old bug") + "# pass 1\n",
+    "✖ old test (1.25ms)\nℹ fail 1\nℹ pass 0\nℹ pass invalid\n"]) {
+    assert.equal(parseTestFailures(output).passedCount, null);
+    assert.equal(compareBaseVerification(failed(output), failed(output)).classification, "failure");
+  }
+  for (const count of [undefined, null, "100", -1, 1.5, Infinity, NaN]) {
+    const malformed = { ...failed(), failureEvidence: { ...evidence(py()), passedCount: count } };
+    for (const [job, base] of [[malformed, failed()], [failed(), malformed]]) {
+      assert.equal(compareBaseVerification(job, base).classification, "failure");
+    }
   }
 });
