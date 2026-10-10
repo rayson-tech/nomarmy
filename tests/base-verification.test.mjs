@@ -346,3 +346,14 @@ test("pass totals reject conflicting summaries and malformed cached evidence", (
     }
   }
 });
+
+test("pytest passed count ignores subtests and still fails closed on disagreeing totals", async () => {
+  const { parseTestFailures } = await import("../lib/base-verification.mjs");
+  const lines = "tests/a.py::test_one FAILED\ntests/b.py::test_two FAILED\n";
+  // The real summary shape from a repository using pytest-subtests.
+  const real = parseTestFailures(`${lines}2 failed, 8986 passed, 4 skipped, 24 warnings, 124 subtests passed in 267.59s (0:04:27)\n`);
+  assert.equal(real.complete, true);
+  assert.equal(real.passedCount, 8986);
+  const forged = parseTestFailures(`${lines}2 failed, 8986 passed in 1s\n2 failed, 12 passed in 1s\n`);
+  assert.equal(forged.passedCount, null, "two summaries with different pass totals stay unknown");
+});
