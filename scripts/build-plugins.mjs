@@ -23,7 +23,11 @@ export function pluginFiles(pkg = JSON.parse(fs.readFileSync(path.join(root, "pa
   const keywords = ["ai", "agents", "verification", "mcp", "sandbox", "testing", "code-review"];
   const meta = { name: "nomarmy", version: pkg.version, description, author, homepage: pkg.homepage, repository, license: pkg.license, keywords };
   const server = { command: "nomarmy", args: ["mcp"] };
-  const hook = { command: `node "\${CLAUDE_PLUGIN_ROOT}/hooks/check-nomarmy.mjs"` };
+  // Claude's directory follows only plain shell scripts, run by literal path;
+  // Codex keeps the Node check, which also runs on Windows without a shell.
+  const claudeHook = { command: `"\${CLAUDE_PLUGIN_ROOT}/hooks/check-nomarmy.sh"` };
+  const codexHook = { command: `node "\${CLAUDE_PLUGIN_ROOT}/hooks/check-nomarmy.mjs"` };
+  const sessionStart = (hook) => json({ hooks: { SessionStart: [{ hooks: [{ type: "command", ...hook, timeout: 10 }] }] } });
   const files = {};
 
   // Claude Code reads .claude-plugin/plugin.json; the MCP server is inline
@@ -34,14 +38,15 @@ export function pluginFiles(pkg = JSON.parse(fs.readFileSync(path.join(root, "pa
   files[`${PLUGIN_DIR}/plugin.json`] = json({
     $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", ...meta, author: { ...author }, extensions: {
       "com.openai": { displayName: "nomArmy", shortDescription: "Verify what coding workers claim before it counts", longDescription: description,
-        websiteURL: pkg.homepage, logo: "./assets/logo.png", hooks: "./hooks/session-start.json" },
+        websiteURL: pkg.homepage, logo: "./assets/logo.png", hooks: "./hooks/codex-session-start.json" },
     },
   });
   files[`${PLUGIN_DIR}/.cursor-plugin/plugin.json`] = json({ ...meta, displayName: "nomArmy", logo: "assets/logo.png" });
   files[`${PLUGIN_DIR}/mcp.json`] = json({ $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json", mcpServers: { [SERVER_NAME]: { type: "stdio", ...server } } });
   // Not hooks/hooks.json: Cursor discovers that path and expects its own
-  // format, so Claude Code and Codex are pointed here explicitly.
-  files[`${PLUGIN_DIR}/hooks/session-start.json`] = json({ hooks: { SessionStart: [{ hooks: [{ type: "command", ...hook, timeout: 10 }] }] } });
+  // format, so Claude Code and Codex are each pointed at theirs explicitly.
+  files[`${PLUGIN_DIR}/hooks/session-start.json`] = sessionStart(claudeHook);
+  files[`${PLUGIN_DIR}/hooks/codex-session-start.json`] = sessionStart(codexHook);
 
   for (const name of Object.keys(PLAYBOOKS)) {
     const playbook = PLAYBOOKS[name];

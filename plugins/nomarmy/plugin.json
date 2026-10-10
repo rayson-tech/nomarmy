@@ -26,7 +26,7 @@
       "longDescription": "Your coding assistant plans, sandboxed workers build, and nomArmy checks every change before it counts: the tests run again in a fresh sandbox, and must fail with the change reverted. Needs `npm install -g nomarmy` and `nomarmy setup` first.",
       "websiteURL": "https://nomarmy.dev",
       "logo": "./assets/logo.png",
-      "hooks": "./hooks/session-start.json"
+      "hooks": "./hooks/codex-session-start.json"
     }
   }
 }

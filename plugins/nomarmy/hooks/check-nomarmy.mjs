@@ -1,4 +1,4 @@
-// Session start: a plugin can register nomArmy's MCP server, but it can't
+// Session start (Codex): a plugin can register nomArmy's MCP server, but it can't
 // install nomArmy. When `nomarmy` isn't on PATH, tell the model so it can tell
 // the user what to run, instead of the tools silently failing to start.
 // Looks the command up rather than running it, so a session never waits on it.
