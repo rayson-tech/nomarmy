@@ -26,7 +26,7 @@ import { readGGUFMetadata, resolveModelPath, totalSplitBytes } from "../lib/gguf
 import { recommend, customRecommendation, evaluateConfig, bytesPerKvElementForCacheTypes, MIN_CONTEXT_PER_NOM } from "../lib/sizing.mjs";
 import { windowsFrontEnd, dropWindowsPath, markWindowsCoordinator, pickDistro, resolveWslNomarmy, mcpBridgeLaunch, writeWindowsSettings } from "../lib/wsl.mjs";
 import { windowsPlan, windowsForward, windowsSetup, windowsDoctor } from "../lib/wsl-cli.mjs";
-import { connectViaWsl, connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv, defaultInstallDir, installMcpCopy, SCOPES, claudeUserScoped, portableServerLaunch } from "../lib/connect.mjs";
+import { connectViaWsl, connectClaude, connectCodex, connectCursor, cursorAlreadyConnected, deriveWorkerModelEnv, defaultInstallDir, installMcpCopy, SCOPES, claudeUserScoped, portableServerLaunch, claudePluginInstalled, codexPluginInstalled } from "../lib/connect.mjs";
 import { compareVersions, readPackageVersion, readInstallVersions, copyIsStale } from "../lib/install-freshness.mjs";
 import { loadJobRecords, computeStats, formatStats, formatStatsSummary, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
 import { requestJobStop } from "../lib/openclaw-run.mjs";
@@ -655,7 +655,7 @@ function setupProfileState() {
   try { marker = JSON.parse(fs.readFileSync(path.join(root, "install.json"), "utf8")); } catch (error) { if (error.code !== "ENOENT") marker = {}; }
   const version = probeCommand("openclaw", ["--version"]);
   // `mcp list` would connect to every server; `mcp get` only looks this one up.
-  const registered = !marker && Boolean(version) && ["claude", "codex"].some((name) => spawnSync(name, ["mcp", "get", "nomarmy-local-worker"], { stdio: "ignore", timeout: 10000 }).status === 0);
+  const registered = !marker && Boolean(version) && (Boolean(claudePluginInstalled() || codexPluginInstalled()) || ["claude", "codex"].some((name) => spawnSync(name, ["mcp", "get", "nomarmy-local-worker"], { stdio: "ignore", timeout: 10000 }).status === 0));
   // An install from before setup recorded its profile: the marker's, else the
   // execution mode's, else (a working local install) install.sh's default.
   const execution = setting("NOMARMY_EXECUTION");
@@ -1969,7 +1969,7 @@ function reconnectCoordinators() {
 }
 
 function connectedTargets() {
-  return [commandExists("claude") && claudeUserScoped() && "claude", commandExists("codex") && "codex", cursorAlreadyConnected() && "cursor"].filter(Boolean);
+  return [commandExists("claude") && (claudePluginInstalled() || claudeUserScoped()) && "claude", commandExists("codex") && "codex", cursorAlreadyConnected() && "cursor"].filter(Boolean);
 }
 
 async function updateFromNpm() {
@@ -2094,7 +2094,8 @@ async function cmdConnect() {
       }
       const result = connectTarget(target, { nomarmyRoot, run, scope, projectDir });
       results.push({ target, connected: true, ...result });
-      if (!json) console.log(c.green(`✓ Registered nomarmy-local-worker with ${target}${scope === "user" ? "." : scope === "local" ? ` for ${projectDir} only (not committed).` : ` in ${path.relative(projectDir, result.configPath ?? path.join(projectDir, ".mcp.json"))}, for everyone who clones this repository.`}`));
+      if (!json && result.plugin) console.log(c.green(`✓ nomArmy plugin ${result.plugin} is installed: it registers the MCP server and /feature, so connect didn't add a second registration.`));
+      if (!json && !result.plugin) console.log(c.green(`✓ Registered nomarmy-local-worker with ${target}${scope === "user" ? "." : scope === "local" ? ` for ${projectDir} only (not committed).` : ` in ${path.relative(projectDir, result.configPath ?? path.join(projectDir, ".mcp.json"))}, for everyone who clones this repository.`}`));
       if (!json && scope === "local" && result?.excluded?.length) console.log(c.dim(`  Kept out of git (.git/info/exclude): ${result.excluded.join(", ")}`));
       if (!json && scope === "project") console.log(c.dim(`  Commit it along with the playbook in ${path.relative(projectDir, result.commands.dir)}. Each teammate needs nomArmy installed and set up (npm install -g nomarmy, then nomarmy setup); the registration runs \`nomarmy mcp\`, which uses their own settings.`));
       if (!json && scope !== "user" && target === "claude" && result?.userScoped) console.log(c.yellow(`  nomArmy is also registered for all your projects (user scope). To use it only where you register it per repository: claude mcp remove nomarmy-local-worker -s user`));
