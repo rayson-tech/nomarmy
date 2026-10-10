@@ -12,7 +12,5 @@ const found = (process.env.PATH || "").split(path.delimiter).filter(Boolean).som
   names.some((name) => { try { return fs.statSync(path.join(dir, name)).isFile(); } catch { return false; } }));
 
 if (!found) {
-  console.log("The nomArmy plugin is installed, but the `nomarmy` command isn't on PATH, so nomArmy's tools can't start. "
-    + "Tell the user to run `npm install -g nomarmy`, then `nomarmy setup` (it sets up the sandbox and their agents), and then restart this session. "
-    + "Guide: https://nomarmy.dev/docs/install/");
+  console.log("The nomArmy plugin is installed, but the nomarmy command is not on PATH, so nomArmy's tools cannot start. Tell the user to install the nomArmy CLI and run its setup by following https://nomarmy.dev/docs/install/ and then restart this session.");
 }
