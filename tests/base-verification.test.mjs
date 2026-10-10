@@ -212,10 +212,16 @@ test("runner preserves parsed evidence and pins image and policy for the base", 
 test("implement jobs commit pre-existing-only failures, retain the revert gate and report separate stats", async t => {
   const f = fixture(t);
   let reruns = 0;
-  f.flow.registerVerificationRunner(async input => {
-    if (input.jobId.endsWith("-regression-check")) { reruns++; return { status: input.jobId.startsWith("revert-bad") ? "pass" : "fail" }; }
-    return failed();
-  });
+  f.flow.registerVerificationRunner(createVerificationRunner({ hostProjectDir: f.projectDir, image: "fixture:default",
+    loadConfig: () => ({ found: true, config: { verification: { quick: { commands: ["pytest"] } } } }),
+    loadVerificationNetwork: () => null,
+    executor: { probe: async () => ({ available: true }), run: async input => {
+      const reverted = input.jobId.endsWith("-regression-check");
+      if (reverted) reruns++;
+      return { started: true, exitCode: 1, stdout: py(reverted && !input.jobId.startsWith("revert-bad")
+        ? ["tests/a.py::test_old", "tests/a.py::test_new"] : undefined) };
+    } },
+  }));
   const executor = createExecutor({ ...f, ...f.flow, verificationFlow: f.flow, VERSION: "test",
     ensureJobsRoot: () => f.jobsRoot, assertRepo: async () => {}, resolveBase: async () => ({ ref: "main", sha: f.baseSha }),
     sweepStaleSandboxContainers: async () => {}, repoPolicy: () => ({ require_verification: true }),
@@ -237,4 +243,46 @@ test("implement jobs commit pre-existing-only failures, retain the revert gate a
   assert.match(formatStats(stats), /Failed only on tests failing at base\s+1 \(100%\)/);
   assert.match(formatStats(stats), /all 1 "done, tests pass" claims held up/);
   assert.equal(JSON.parse(JSON.stringify(stats)).claimVsEvidence.failedOnlyOnBase, 1);
+});
+
+
+test("preexisting regression gate requires complete runner evidence with a new failing test id", async t => {
+  const f = fixture(t), context = workerTree(f);
+  const onlyOld = "reverted run failed only on tests already failing on the base -- no test demonstrably catches this regression";
+  const incomplete = "cannot rule out that the reverted run failed only on tests already failing on the base: failure evidence could not be parsed completely";
+  const caught = "reverting the production change failed a test not already failing on the base -- a test catches this regression";
+  const cases = [
+    ["old only", py(), {}, "fail", onlyOld],
+    ["same id different reason", py(undefined, "AssertionError: changed"), {}, "fail", onlyOld],
+    ["old and new", py(["tests/a.py::test_old", "tests/a.py::test_new"]), {}, "pass", caught],
+    ["new only", py(["tests/a.py::test_new"]), {}, "pass", caught],
+    ["unknown output", "pytest crashed", {}, "fail", incomplete],
+    ["incomplete count", py(["tests/a.py::test_new"]).replace("1 failed", "2 failed"), {}, "fail", incomplete],
+    ["truncated output", py(["tests/a.py::test_new"]) + "\n[nomarmy] output truncated", {}, "fail", incomplete],
+  ];
+  for (const [name, stdout, extra, status, reason] of cases) {
+    let calls = 0;
+    f.flow.registerVerificationRunner(createVerificationRunner({ hostProjectDir: f.projectDir, image: "fixture:default",
+      loadConfig: () => ({ found: true, config: { verification: { quick: { commands: ["pytest"] } } } }),
+      loadVerificationNetwork: () => null,
+      executor: { probe: async () => ({ available: true }), run: async input => {
+        calls++;
+        assert.equal(input.jobId, "job-regression-check");
+        assert.equal(fs.readFileSync(path.join(context.cwd, "code.py"), "utf8"), "value = 1\n");
+        return { started: true, exitCode: 1, stdout, ...extra };
+      } },
+    }));
+    const result = await f.flow.runRegressionCheck({ ...context, productionFiles: ["code.py"],
+      nameStatus: [{ status: "M", path: "code.py" }],
+      verificationResult: { status: "pass", baseComparison: {
+        classification: "preexisting", preexistingFailures: ["tests/a.py::test_old"], newFailures: [],
+      } },
+    });
+    assert.deepEqual(Object.keys(result).sort(), ["basis", "detail", "rawRerunStatus", "reason", "status"], name);
+    assert.equal(result.status, status, name);
+    assert.equal(result.rawRerunStatus, "fail", name);
+    assert.equal(result.reason, reason, name);
+    assert.equal(calls, 1, name);
+    assert.equal(fs.readFileSync(path.join(context.cwd, "code.py"), "utf8"), "value = 2\n", name);
+  }
 });
