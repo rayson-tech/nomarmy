@@ -67,7 +67,7 @@ export function pluginFiles(pkg = JSON.parse(fs.readFileSync(path.join(root, "pa
   // The MCP Registry: npm's published package must carry the same mcpName.
   files["server.json"] = json({
     $schema: "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-    name: pkg.mcpName, title: "nomArmy", description: "Sandboxed coding workers whose claims are checked: tests rerun in a fresh sandbox and must fail with the change reverted.",
+    name: pkg.mcpName, title: "nomArmy", description: "Sandboxed coding workers, verified: tests rerun fresh and must fail with the change reverted.",
     repository: { url: repository, source: "github" }, websiteUrl: pkg.homepage, version: pkg.version,
     packages: [{ registryType: "npm", identifier: pkg.name, version: pkg.version, transport: { type: "stdio" }, packageArguments: [{ type: "positional", value: "mcp" }] }],
   });

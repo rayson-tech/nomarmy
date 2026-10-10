@@ -24,6 +24,7 @@ test("every manifest carries the package version, and the MCP Registry name matc
   const server = read("server.json");
   assert.equal(pkg.mcpName, "io.github.rayson-tech/nomarmy");
   assert.equal(server.name, pkg.mcpName);
+  assert.ok(server.description.length <= 100, "the MCP Registry caps description at 100 characters");
   assert.deepEqual(server.packages.map((p) => [p.identifier, p.version, p.packageArguments[0].value]), [[pkg.name, pkg.version, "mcp"]]);
 });
 
