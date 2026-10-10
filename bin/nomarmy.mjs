@@ -155,7 +155,7 @@ Usage: nomarmy <command> [options]
                   --restart-inference with --json, also stop/start local
                                       inference (never done silently)
   update          Update nomArmy and reconnect your coordinators: installs
-                  npm's latest alpha, or for a git checkout pulls (fast-forward
+                  npm's latest release, or for a git checkout pulls (fast-forward
                   only; refuses on local changes). Then restart open sessions.
   trust map       Write a read-only review scout brief for the General.
                   --from <scout.yml> --scout-job <job-id> records the cited scout origin.
@@ -1975,9 +1975,9 @@ function connectedTargets() {
 async function updateFromNpm() {
   const current = readPackageVersion(nomarmyRoot);
   let latest = null;
-  try { latest = execFileSync("npm", ["view", "nomarmy", "dist-tags.alpha"], { encoding: "utf8", timeout: 20000 }).trim(); } catch { /* offline */ }
+  try { latest = execFileSync("npm", ["view", "nomarmy", "dist-tags.latest"], { encoding: "utf8", timeout: 20000 }).trim(); } catch { /* offline */ }
   if (!latest) {
-    const fix = "npm install -g nomarmy@alpha && nomarmy connect claude";
+    const fix = "npm install -g nomarmy && nomarmy connect claude";
     if (json) { out({ error: "could not read nomarmy's latest release from npm", fix }); process.exit(1); }
     console.log(c.red("Couldn't reach npm to find nomArmy's latest release.") + ` Update by hand:\n  ${fix}`);
     process.exit(1);
@@ -2096,7 +2096,7 @@ async function cmdConnect() {
       results.push({ target, connected: true, ...result });
       if (!json) console.log(c.green(`✓ Registered nomarmy-local-worker with ${target}${scope === "user" ? "." : scope === "local" ? ` for ${projectDir} only (not committed).` : ` in ${path.relative(projectDir, result.configPath ?? path.join(projectDir, ".mcp.json"))}, for everyone who clones this repository.`}`));
       if (!json && scope === "local" && result?.excluded?.length) console.log(c.dim(`  Kept out of git (.git/info/exclude): ${result.excluded.join(", ")}`));
-      if (!json && scope === "project") console.log(c.dim(`  Commit it along with the playbook in ${path.relative(projectDir, result.commands.dir)}. Each teammate needs nomArmy installed and set up (npm install -g nomarmy@alpha, then nomarmy setup); the registration runs \`nomarmy mcp\`, which uses their own settings.`));
+      if (!json && scope === "project") console.log(c.dim(`  Commit it along with the playbook in ${path.relative(projectDir, result.commands.dir)}. Each teammate needs nomArmy installed and set up (npm install -g nomarmy, then nomarmy setup); the registration runs \`nomarmy mcp\`, which uses their own settings.`));
       if (!json && scope !== "user" && target === "claude" && result?.userScoped) console.log(c.yellow(`  nomArmy is also registered for all your projects (user scope). To use it only where you register it per repository: claude mcp remove nomarmy-local-worker -s user`));
       if (!json && result?.commands?.installed?.length) console.log(c.green(`✓ Playbooks: ${result.commands.installed.join(", ")}`) + c.dim(` in ${result.commands.dir} (restart ${target} to pick up a new one)`));
       if (!json && result?.notifier?.status === "built") console.log(c.green("✓ Notifications: nomArmy.app, with nomArmy's icon") + c.dim(" (macOS asks once whether to allow it)"));

@@ -7,7 +7,7 @@
   "private": false,
   "type": "module",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=24.16.0 <25 || >=26.1.0"
   },
   "repository": {
     "type": "git",
@@ -22,7 +22,7 @@
     "url": "https://github.com/sponsors/rayson-tech"
   },
   "publishConfig": {
-    "tag": "alpha"
+    "tag": "latest"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",

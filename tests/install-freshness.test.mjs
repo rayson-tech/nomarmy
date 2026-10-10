@@ -59,11 +59,11 @@ test("installMcpCopy records its source, so health can compare the copy with the
   assert.deepEqual(readInstallVersions(installDir), { copyVersion: "0.1.0-alpha.7", sourceVersion: null });
 });
 
-test("runHealthChecks reports a stale install from npm's alpha tag, and skips npm without install info", async () => {
+test("runHealthChecks reports a stale install from npm's latest tag, and skips npm without install info", async () => {
   const calls = [];
   const run = async (cmd, args) => {
     calls.push([cmd, ...args].join(" "));
-    return cmd === "npm" && args.includes("dist-tags.alpha") ? { ok: true, stdout: "0.1.0-alpha.8\n" } : { ok: false, stdout: "" };
+    return cmd === "npm" && args.includes("dist-tags.latest") ? { ok: true, stdout: "0.1.0-alpha.8\n" } : { ok: false, stdout: "" };
   };
   const { issues } = await runHealthChecks({ run, install: { copyVersion: "0.1.0-alpha.6", sourceVersion: "0.1.0-alpha.7" } });
   assert.deepEqual(issues.filter((i) => i.id.startsWith("nomarmy-")).map((i) => i.id), ["nomarmy-copy:0.1.0-alpha.7", "nomarmy-update:0.1.0-alpha.8"]);

@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="https://github.com/rayson-tech/nomarmy/actions/workflows/ci.yml"><img src="https://github.com/rayson-tech/nomarmy/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://www.npmjs.com/package/nomarmy"><img src="https://img.shields.io/npm/v/nomarmy/alpha?label=npm%40alpha" alt="npm"></a>
+  <a href="https://www.npmjs.com/package/nomarmy"><img src="https://img.shields.io/npm/v/nomarmy?label=npm" alt="npm"></a>
   <a href="https://github.com/rayson-tech/nomarmy/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
   <a href="https://github.com/rayson-tech/nomarmy/blob/main/docs/feature-runs.md"><img src="https://raw.githubusercontent.com/rayson-tech/nomarmy/main/.github/nomarmy-badge.svg" alt="nomArmy: AI worker claims checked on this repository"></a>
 </p>
@@ -17,11 +17,11 @@ AI coding workers are confident. Their "done, all tests pass" is a claim, not ev
 
 ## TL;DR
 
-1. **Have** Git, Node 24.16+ (or 26.1+) and [Podman](https://podman.io). On macOS, give Podman 8 GiB: `brew install podman && podman machine init --memory 8192 && podman machine start`.
+1. **Have** Git, Node 24.16+ (or 26.1+), [Podman](https://podman.io), and Claude Code, Codex or Cursor installed and signed in. On macOS, give Podman 8 GiB: `brew install podman && podman machine init --memory 8192 && podman machine start`.
    Windows is supported with the engine in WSL2. Follow the [Windows setup](https://github.com/rayson-tech/nomarmy/blob/main/docs/install.md#windows).
 2. **Install and set up:**
    ```bash
-   npm install -g nomarmy@alpha
+   npm install -g nomarmy
    cd your-project
    nomarmy setup
    ```
@@ -71,7 +71,7 @@ Failing verification stays failed, unconditionally. A malformed report isn't aut
 
 **Have a GPU or a Mac with plenty of memory?** Choose "a local model" in `nomarmy setup`: no per-token bill and your code stays home, but you pay in hardware, power and speed. `nomarmy sizing` tells you what fits. A [shared model server](https://github.com/rayson-tech/nomarmy/blob/main/docs/install.md#a-shared-model-server) works too.
 
-Developed and maintained by Rayson Technologies. This is an alpha (`0.1.0-alpha`).
+Developed and maintained by Rayson Technologies. This is a beta (`0.1.0-beta`): settings carry across upgrades (see [config compatibility](https://github.com/rayson-tech/nomarmy/blob/main/CONTRIBUTING.md#config-compatibility-from-beta-on)).
 
 ## Docs
 
@@ -104,7 +104,7 @@ A nom gets a writable git worktree inside a Podman sandbox and nothing else: no 
 | Agents: API keys | Live-verified with xAI; other providers built to OpenClaw's documented interface |
 | Agents: subscriptions | ChatGPT (Codex) and Muse Code sandboxed and live-verified; Claude live-verified, but its tools run on the host (scout and review by default) |
 | Local (llama.cpp) and Bedrock profiles | Working |
-| The army and `/feature` | Driven by a real Claude Code General across three runs, about 18 implement jobs |
+| The army and `/feature` | Used daily on nomArmy itself and our own products: 783 jobs from September 18 to October 10, 2026 ([measured results](https://github.com/rayson-tech/nomarmy/blob/main/docs/findings.md)) |
 | Harnesses: Go, Rust, Python, Node and mixed repos; Playwright; fake services | Live-verified offline |
 | Private registries and a verification-only network allowlist | Live-verified; each passed an independent security review |
 | Validators: mutation testing, Jev, a model judge | Unit and live tested; Jev and the judge evaluated on real job records |
