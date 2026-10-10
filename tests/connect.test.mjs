@@ -727,7 +727,8 @@ test("plugin detection: Claude requires an enabled user install with the exact n
     }
     f.writeClaude({ "nomarmy@m": [{ scope: "user" }] });
     fs.rmSync(file);
-    assert.equal(detect(), null);
+    // No settings file means nothing disabled the plugin.
+    assert.equal(detect(), file === f.settingsPath ? "nomarmy@m" : null);
   }
 });
 
