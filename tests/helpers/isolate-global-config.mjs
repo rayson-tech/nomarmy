@@ -31,3 +31,7 @@ process.env.NOMARMY_CLAUDE_SETTINGS_PATH = path.join(fs.mkdtempSync(path.join(os
 // ...nor the developer's real OpenClaw config (lib/openclaw-config.mjs).
 process.env.OPENCLAW_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-test-openclaw-"));
 delete process.env.OPENCLAW_CONFIG_PATH;
+
+// Plugin detection must never read the developer's installed plugins.
+process.env.CLAUDE_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-test-claude-plugins-"));
+process.env.CODEX_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-test-codex-plugins-"));
