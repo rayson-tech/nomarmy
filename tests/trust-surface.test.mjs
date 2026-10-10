@@ -51,7 +51,24 @@ test("trust PR block shows gated count and short reasons only for scoped jobs", 
 test("trust stats counts human-gated jobs in summary and details", () => {
   const stats = computeStats([record("a", "run-x", human([access])), record("b", "run-x", human([rules])),
     record("c", "run-x", { level: "normal", reasons: [] })], { runId: "run-x" });
-  assert.deepEqual(stats.humanReview, { jobs: 2, reasons: [access.reason, rules.reason] });
-  assert.match(formatStatsSummary(stats), /HUMAN\s+2 job\(s\) need human review: changes auth\/check\.py/);
+  assert.deepEqual(stats.humanReview, { jobs: 2, jobIds: ["a", "b"], reasons: [access.reason, rules.reason] });
+  assert.match(formatStatsSummary(stats), /HUMAN\s+2 job\(s\) need human review: a  b/);
+  assert.match(formatStatsSummary(stats), /nomarmy trust ack <job>/);
   assert.match(formatStats(stats), /Human-gated jobs\s+2: changes auth\/check\.py/);
+});
+
+test("stats and the PR block stay short with many human-gated jobs and long reasons", () => {
+  const long = (i) => ({ rule: "judgment", reason: `The diff may change access control at ${Array.from({ length: 40 }, (_, n) => `lambda/rls/rewrite.py:${n + i}`).join(", ")} (jev, probability 1.00).` });
+  const records = Array.from({ length: 39 }, (_, i) => record(`job-${i}`, "run-x", human([long(i)])));
+  const stats = computeStats(records, { runId: "run-x" });
+  assert.equal(stats.humanReview.jobs, 39);
+  assert.equal(stats.humanReview.reasons.length, 39, "JSON keeps every reason");
+  const summary = formatStatsSummary(stats).split("\n").filter((line) => line.includes("human review"));
+  assert.ok(summary.every((line) => line.length < 300), "summary line is bounded");
+  assert.match(summary.join("\n"), /\+36 more/);
+  const details = formatStats(stats).split("\n").find((line) => line.includes("Human-gated jobs"));
+  assert.ok(details.length < 700, `details line is bounded (${details.length})`);
+  assert.match(details, /\+36 more \(--json lists every reason\)/);
+  const pr = shareMarkdown(stats).split("\n").find((line) => line.includes("Needs human review"));
+  assert.ok(pr.length < 600, `PR row is bounded (${pr.length})`);
 });

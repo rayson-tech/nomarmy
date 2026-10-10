@@ -62,7 +62,7 @@ test("trust ack appends human decisions and displays them across report jobs run
   assert.deepEqual(gatedJobs([expected, f.job("pending"), { ...f.job("other"), labels: { runId: "other" } }], "run-one"), [
     { jobId: initial.jobId, reasons, status: "acknowledged", ack: rejected }, { jobId: "pending", reasons, status: "pending" },
   ]);
-  assert.deepEqual(computeStats([expected, f.job("pending")], { runId: "run-one" }).humanReview, { jobs: 1, reasons: [reasons[0].reason] });
+  assert.deepEqual(computeStats([expected, f.job("pending")], { runId: "run-one" }).humanReview, { jobs: 1, jobIds: ["pending"], reasons: [reasons[0].reason] });
   assert.doesNotMatch(shareMarkdown(computeStats([expected], { runId: "run-one" })), /Needs human review/);
   assert.match(shareMarkdown(computeStats([expected, f.job("pending")], { runId: "run-one" })), /Needs human review \| 1 change:/);
   const listing = f.cli("jobs", "--json"); assert.equal(listing.status, 0, listing.stderr);
