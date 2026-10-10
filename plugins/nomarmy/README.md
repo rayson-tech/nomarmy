@@ -1,0 +1,49 @@
+# nomArmy plugin
+
+Your coding assistant plans, sandboxed workers build, and nomArmy checks every change before it counts: the tests run again in a fresh sandbox, and must fail with the change reverted. This plugin connects nomArmy to Claude Code, Codex or Cursor.
+
+## Install nomArmy first
+
+The plugin registers nomArmy's tools and the `feature` command. It can't install nomArmy, the sandbox or your agents, so do that first (Node 24.16+ or 26.1+, macOS, Linux or Windows):
+
+```bash
+npm install -g nomarmy
+nomarmy setup
+```
+
+`nomarmy setup` walks you through Podman, OpenClaw and the agents your workers run on (a local model, api keys or your subscriptions). The [install guide](https://nomarmy.dev/docs/install/) covers each step.
+
+## Add the plugin
+
+**Claude Code**
+
+```text
+/plugin marketplace add rayson-tech/nomarmy
+/plugin install nomarmy@nomarmy
+```
+
+**Codex**
+
+```bash
+codex plugin marketplace add rayson-tech/nomarmy
+```
+
+Then open `/plugins` in Codex, install nomArmy, and start a new session.
+
+**Cursor**: install nomArmy from the Cursor Marketplace.
+
+## Use it
+
+Ask for a feature: `/nomarmy:feature add rate limiting to the upload endpoint` in Claude Code (or `/feature` when no other command has that name), the `feature` command in Cursor, or ask Codex to have nomArmy build it. Your assistant becomes the General: it plans, dispatches workers, reviews what nomArmy verified, and comes back with a branch for you to merge. nomArmy never merges for you.
+
+Start a new session after installing. If `nomarmy` isn't on your PATH, the plugin says so at the start of each session.
+
+## What it adds
+
+- The `nomarmy-local-worker` MCP server, run as `nomarmy mcp`, so `nomarmy update` keeps it current.
+- The `feature` skill: build a feature end to end with your army, or `resume <run-id>`.
+- A session-start check that `nomarmy` is installed (Claude Code and Codex).
+
+If you connected nomArmy with `nomarmy connect` before, run `nomarmy connect claude` (or `codex`) again after installing the plugin: it notices the plugin and removes its own registration, so the tools don't appear twice.
+
+[Documentation](https://nomarmy.dev/docs/) · [Source](https://github.com/rayson-tech/nomarmy) · Apache-2.0 · Rayson Technologies

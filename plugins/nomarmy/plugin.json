@@ -1,0 +1,32 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "nomarmy",
+  "version": "0.1.0-beta.1",
+  "description": "Your coding assistant plans, sandboxed workers build, and nomArmy checks every change before it counts: the tests run again in a fresh sandbox, and must fail with the change reverted. Needs `npm install -g nomarmy` and `nomarmy setup` first.",
+  "author": {
+    "name": "Rayson Technologies",
+    "url": "https://rayson-tech.com"
+  },
+  "homepage": "https://nomarmy.dev",
+  "repository": "https://github.com/rayson-tech/nomarmy",
+  "license": "Apache-2.0",
+  "keywords": [
+    "ai",
+    "agents",
+    "verification",
+    "mcp",
+    "sandbox",
+    "testing",
+    "code-review"
+  ],
+  "extensions": {
+    "com.openai": {
+      "displayName": "nomArmy",
+      "shortDescription": "Verify what coding workers claim before it counts",
+      "longDescription": "Your coding assistant plans, sandboxed workers build, and nomArmy checks every change before it counts: the tests run again in a fresh sandbox, and must fail with the change reverted. Needs `npm install -g nomarmy` and `nomarmy setup` first.",
+      "websiteURL": "https://nomarmy.dev",
+      "logo": "./assets/logo.png",
+      "hooks": "./hooks/session-start.json"
+    }
+  }
+}

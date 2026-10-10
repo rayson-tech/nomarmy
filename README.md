@@ -38,6 +38,8 @@ AI coding workers are confident. Their "done, all tests pass" is a claim, not ev
    Stop anytime; `nomarmy setup` picks up where you left off. **Want every step spelled out?** [Example setup: Claude Code, Codex and an API key](https://github.com/rayson-tech/nomarmy/blob/main/docs/setup/example.md) goes command by command.
 3. **Use it:** restart Claude Code in the project and ask it to use nomArmy for one small bug that has a test. When that works, try `/feature <what you want built>`.
 
+Prefer a plugin? After step 2, Claude Code users can run `/plugin marketplace add rayson-tech/nomarmy` and `/plugin install nomarmy@nomarmy` instead of using `nomarmy connect`; Codex works too ([plugins](https://github.com/rayson-tech/nomarmy/blob/main/docs/install.md#as-a-plugin)).
+
 Stuck? `nomarmy doctor` checks the machine and `nomarmy health` checks everything nomArmy runs on. Upgrading later? `nomarmy update`.
 
 ## How every byte gets verified

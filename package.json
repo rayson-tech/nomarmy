@@ -1,5 +1,6 @@
 {
   "name": "nomarmy",
+  "mcpName": "io.github.rayson-tech/nomarmy",
   "description": "Every byte verified: a harness for AI coding workers whose claims are never trusted. Your coding assistant stays in charge while workers implement and test in sandboxes, and nomArmy checks every change before it is committed.",
   "author": "Rayson Technologies",
   "license": "Apache-2.0",
@@ -33,7 +34,9 @@
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "docs:harnesses": "node scripts/generate-harness-docs.mjs"
+    "docs:harnesses": "node scripts/generate-harness-docs.mjs",
+    "plugins:build": "node scripts/build-plugins.mjs",
+    "version": "node scripts/build-plugins.mjs && git add plugins .claude-plugin .cursor-plugin .agents server.json"
   },
   "bin": {
     "nomarmy": "bin/nomarmy.mjs"
