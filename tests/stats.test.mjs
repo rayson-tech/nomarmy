@@ -44,7 +44,7 @@ test("computeStats: this repo, this period, every section from the records", () 
   assert.equal(s.workerMinutes.median, 5);
   assert.equal(s.jobMinutes.p90, 950000 / 60000);
   assert.equal(s.spendUsd.total, 1.75);
-  assert.deepEqual(s.claimVsEvidence, { claimedDone: 4, verificationFailed: 1, revertStillPassed: 1, passedBoth: 2, changedNothing: 0, flaggedAfterPassing: 1, provenTestFiles: s.claimVsEvidence.provenTestFiles });
+  assert.deepEqual(s.claimVsEvidence, { claimedDone: 4, verificationFailed: 1, failedOnlyOnBase: 0, revertStillPassed: 1, passedBoth: 2, changedNothing: 0, flaggedAfterPassing: 1, provenTestFiles: s.claimVsEvidence.provenTestFiles });
   assert.deepEqual(s.notCompleted, { NEEDS_REVIEW: 2, WORKER_TIMEOUT: 1, SCOUT_UNSUPPORTED: 1 });
   assert.deepEqual(s.reviewers["security-analyst"], { runs: 1, outcomes: { SCOUT_DONE: 1 }, findings: 2 });
   assert.equal(s.signals["scoped test selection risk"], 1);
@@ -106,4 +106,19 @@ test("resolveRepo takes a path or a folder name, preferring an exact or trailing
   assert.throws(() => resolveRepo(recs, "rayson"), /matches several repositories: rayson-senti, rayson-senti-shared-services/);
   assert.throws(() => resolveRepo(recs, "zzz"), /no repository with jobs matches "zzz"/);
   assert.equal(resolveRepo(recs, os.tmpdir()), path.resolve(os.tmpdir()), "an existing path is taken as is");
+});
+
+
+test("preexisting claims with failed regression checks count only as caught claims", () => {
+  const job = regressionCheck => impl({ independentVerification: { status: "pass",
+    baseComparison: { classification: "preexisting" } }, regressionCheck });
+  const expected = { claimedDone: 1, verificationFailed: 0, failedOnlyOnBase: 0,
+    revertStillPassed: 1, passedBoth: 0, changedNothing: 0, flaggedAfterPassing: 0, provenTestFiles: 0 };
+  assert.deepEqual(computeStats([job({ status: "fail" })]).claimVsEvidence, expected);
+  for (const regressionCheck of [undefined, { status: "pass" }, { status: "not_run" }]) {
+    assert.deepEqual(computeStats([job(regressionCheck)]).claimVsEvidence,
+      { ...expected, failedOnlyOnBase: 1, revertStillPassed: 0 });
+  }
+  assert.deepEqual(computeStats([job({ status: "fail" }), job({ status: "pass" })]).claimVsEvidence,
+    { ...expected, claimedDone: 2, failedOnlyOnBase: 1 });
 });

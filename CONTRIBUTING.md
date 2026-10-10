@@ -18,6 +18,17 @@ npm test
 - Add or update a test for the behavior you changed. `tests/*.test.mjs` is organized roughly one file per `lib/*.mjs` module; put a new test next to the code it covers.
 - If you touched `mcp/server.mjs` and are testing against a real Claude Code or Codex session locally, remember the running MCP process needs `nomarmy connect claude` (or `codex`) rerun and the session restarted to pick up the change: it's a long-running process, not something reloaded per-request.
 
+## Config compatibility (from beta on)
+
+From `0.1.0-beta.1`, people's settings must survive an upgrade. That covers `~/.config/nomarmy/agents.yml`, `validators.yml` and `config.yml`, a repository's `.nomarmy.yml` and `.nomarmy.local.yml`, and the environment variables nomArmy reads. A change to any of them:
+
+- **Never breaks silently.** Either the old file keeps working, a migration rewrites it (and says so), or nomArmy stops with an error that names the file, the key and the fix. A setting that is quietly ignored or reinterpreted counts as silent breakage.
+- **Never adds a key to a file older versions validate strictly** (`config.yml`, `validators.yml`, `.nomarmy.local.yml`). Several sessions often run different nomArmy versions at once, and a session still on an older copy refuses the whole file. A draft of alpha.16 put `limits:` in `config.yml` and broke role dispatch in every open alpha.15 session. Put a new setting in a new file, or first ship a release whose loader ignores unknown keys, and only add the key in a later one. If neither is possible, the command that writes the key must say that open sessions need `nomarmy update` and a restart (as `validators add jev --endpoint` does).
+- **Deprecates before it removes.** A renamed or retired key keeps working, with a warning that names its replacement, for at least one release (as `RAYSON_*` variables are translated to `NOMARMY_*`).
+- **Comes with a test.** A PR that changes one of these schemas includes a test that loads a file written by the previous release and checks it still works, migrates, or fails with the documented error.
+
+Note the change in the release notes, with what to do, under its own heading.
+
 ## Adding a harness
 
 1. Copy `harnesses/_template/` to `harnesses/<name>/` and fill in `harness.yml` and every README section. Use a kebab-case name equal to the folder name.

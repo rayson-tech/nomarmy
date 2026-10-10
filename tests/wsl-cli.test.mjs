@@ -5,7 +5,7 @@ import { windowsPlan, windowsForwardCommand, windowsForward, windowsSetup, windo
 const WSL_FIX = "WSL isn't installed. In an administrator PowerShell run: wsl --install, restart Windows, then run nomarmy setup again.";
 const DISTRO_FIX = "Install a Linux distro: wsl --install -d Ubuntu, open it once to create your user, then run nomarmy setup again.";
 const NODE_FIX = "Install Node 24 (24.16+) inside Ubuntu:\ncurl -o- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash\nThen reopen the distro shell and run: nvm install 24\nThen run nomarmy setup again.";
-const NOMARMY_FIX = "nomArmy isn't installed in WSL distro Ubuntu: inside it run `npm install -g nomarmy@alpha` (Node 24.16+), then run nomarmy connect again";
+const NOMARMY_FIX = "nomArmy isn't installed in WSL distro Ubuntu: inside it run `npm install -g nomarmy` (Node 24.16+), then run nomarmy connect again";
 const NEXT = "Register your coordinators on Windows: nomarmy connect claude (or codex, cursor)";
 const RESOLVE = 'printf "NOMARMY_NODE=%s\\n" "$(command -v node)"; printf "NOMARMY_SCRIPT=%s\\n" "$(readlink -f "$(command -v nomarmy)")"';
 const driveMessage = "A Windows-drive repository works, but a repo inside WSL (for example ~/src in Ubuntu, opened as \\\\wsl.localhost\\Ubuntu\\src) is much faster for jobs.";
@@ -27,7 +27,7 @@ function fixture({ listing = "* Ubuntu    Running    2\n", installed = true, nod
     calls.push([command, args, opts]);
     assert.equal(command, "wsl.exe");
     if (opts.stdio === "inherit") {
-      const installing = args.at(-1) === "npm install -g nomarmy@alpha";
+      const installing = args.at(-1) === "npm install -g nomarmy";
       const code = installing ? installStatus : status;
       if (installing && code === 0) installed = true;
       return { status: code };
@@ -123,7 +123,7 @@ for (const answer of ["", "y", "Yes"]) {
     assert.deepEqual(f.prompts, ["Install nomArmy inside Ubuntu now? [Y/n]"]);
     const setup = { command: "wsl.exe", args: ["-d", "Ubuntu", "--exec", "/usr/bin/node", "/usr/lib/node_modules/nomarmy/bin/nomarmy.mjs", "setup"] };
     assert.deepEqual(f.calls.filter((call) => call[2].stdio === "inherit"), [
-      ["wsl.exe", ["-d", "Ubuntu", "--exec", "bash", "-lic", "npm install -g nomarmy@alpha"], { stdio: "inherit" }],
+      ["wsl.exe", ["-d", "Ubuntu", "--exec", "bash", "-lic", "npm install -g nomarmy"], { stdio: "inherit" }],
       [setup.command, setup.args, { stdio: "inherit" }],
     ]);
     assert.deepEqual(f.printed, [NEXT]);
@@ -147,7 +147,7 @@ test("setup stops on installation failure", async () => {
   assert.equal(await windowsSetup(["setup"], f), 3);
   assert.deepEqual(f.printed, []);
   assert.deepEqual(f.calls.filter((call) => call[2].stdio === "inherit"), [
-    ["wsl.exe", ["-d", "Ubuntu", "--exec", "bash", "-lic", "npm install -g nomarmy@alpha"], { stdio: "inherit" }],
+    ["wsl.exe", ["-d", "Ubuntu", "--exec", "bash", "-lic", "npm install -g nomarmy"], { stdio: "inherit" }],
   ]);
 });
 

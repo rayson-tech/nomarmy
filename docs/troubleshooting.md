@@ -9,6 +9,6 @@
 | `No API key found for provider "llama-cpp"` during `e2e.sh` | `./scripts/configure-openclaw.sh <profile>`, then rerun |
 | A job fails with, or is refused for, `model_not_found` | Your plan or OpenClaw can't run that model (nomArmy tests an unproven model before its first job). `nomarmy agents list` shows which roles use it; `nomarmy army assign <role> <agent> <model>` moves the role and tests the new model |
 | Verification fails on a missing package | Node: commit each package's `package-lock.json` (yarn, pnpm and workspaces aren't installed yet). Python: list your requirements files under `environment.python.requirements` |
-| A config change didn't take effect | `nomarmy stop && nomarmy start` for inference; restart your coordinator after `nomarmy connect` or an update |
+| A config change didn't take effect | `nomarmy stop <profile> && nomarmy start <profile>` for local inference (hosted setups have none); restart your coordinator after `nomarmy connect` or an update |
 | `git worktree add` fails with `Filename too long` (Git for Windows) | `git config --global core.longpaths true`. Job worktrees on Windows are made by Git inside WSL, which has no such limit |
 | Not sure a setting fits your hardware | `nomarmy sizing`, or `nomarmy sizing --check` |

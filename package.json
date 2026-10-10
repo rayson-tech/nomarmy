@@ -3,11 +3,11 @@
   "description": "Every byte verified: a harness for AI coding workers whose claims are never trusted. Your coding assistant stays in charge while workers implement and test in sandboxes, and nomArmy checks every change before it is committed.",
   "author": "Rayson Technologies",
   "license": "Apache-2.0",
-  "version": "0.1.0-alpha.25",
+  "version": "0.1.0-beta.1",
   "private": false,
   "type": "module",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=24.16.0 <25 || >=26.1.0"
   },
   "repository": {
     "type": "git",
@@ -22,7 +22,7 @@
     "url": "https://github.com/sponsors/rayson-tech"
   },
   "publishConfig": {
-    "tag": "alpha"
+    "tag": "latest"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",

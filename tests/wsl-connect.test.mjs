@@ -13,7 +13,7 @@ const script = "/home/me/.nvm/versions/node/v24.16.0/lib/node_modules/nomarmy/bi
 const WSLENV = "CLAUDE_PROJECT_DIR/pu:NOMARMY_PROJECT_DIR/pu";
 const args = ["-d", distro, "--exec", node, script, "mcp"];
 const listing = "* Ubuntu    Running    2\r\n  Debian    Stopped    2\r\n";
-const missing = "nomArmy isn't installed in WSL distro Ubuntu: inside it run `npm install -g nomarmy@alpha` (Node 24.16+), then run nomarmy connect again";
+const missing = "nomArmy isn't installed in WSL distro Ubuntu: inside it run `npm install -g nomarmy` (Node 24.16+), then run nomarmy connect again";
 
 function fixture(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-wsl-connect-"));

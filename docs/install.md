@@ -18,9 +18,9 @@ Every platform needs Git and Podman. `nomarmy doctor` checks the host and prints
 
 `install.sh` builds llama.cpp when you run a local model, installs a pinned [OpenClaw](https://github.com/openclaw/openclaw) release from npm (the host-side broker every model call goes through; the tested version is defined once in `lib/openclaw-install.mjs`) and configures it, builds the sandbox image, and registers the MCP server if Claude Code is installed. `nomarmy connect` (run by `install.sh`, or by hand for Codex and Cursor) also installs the `/feature` command, Claude Code's status line and, on macOS, nomArmy's notifier. The coordinator gets nomArmy's instructions from the MCP server itself, so there's nothing to copy into your projects.
 
-**From npm or a clone:** `npm install -g nomarmy@alpha` (or `git clone` and `npm install && npm link`) gives you the `nomarmy` command, and `nomarmy setup` does the rest. `nomarmy install` runs the bundled `install.sh` for the profile setup chose; the per-platform guides below show the same steps by hand.
+**From npm or a clone:** `npm install -g nomarmy` (or `git clone` and `npm install && npm link`) gives you the `nomarmy` command, and `nomarmy setup` does the rest. `nomarmy install` runs the bundled `install.sh` for the profile setup chose; the per-platform guides below show the same steps by hand.
 
-**Updating:** `nomarmy update` installs the latest alpha (or pulls, in a clone) and reconnects Claude Code, Codex and Cursor. Then restart every open coordinator session: each one runs the copy of nomArmy it started with. Until you do, `army` and `local_worker_capacity` tell that session to restart, and `nomarmy health` flags any coordinator still running an older copy.
+**Updating:** `nomarmy update` installs the latest release (or pulls, in a clone) and reconnects Claude Code, Codex and Cursor. Then restart every open coordinator session: each one runs the copy of nomArmy it started with. Until you do, `army` and `local_worker_capacity` tell that session to restart, and `nomarmy health` flags any coordinator still running an older copy.
 
 ### OpenClaw repairs
 
@@ -114,14 +114,14 @@ Windows is supported with a native front end and the nomArmy engine inside a WSL
    Podman runs natively inside the distro, so there is no `podman machine` to create on Windows.
 4. With Node 24.16 or newer installed on Windows too, install the front end in Windows PowerShell and allow long Git paths:
    ```powershell
-   npm install -g nomarmy@alpha
+   npm install -g nomarmy
    git config --global core.longpaths true
    ```
 5. From your project in Windows, run setup:
    ```powershell
    nomarmy setup
    ```
-   Setup checks WSL, chooses a distro, checks for Node 24.16 or newer inside it, and offers to run `npm install -g nomarmy@alpha` there. It then runs the normal setup inside WSL: where models run, agents, and `nomarmy install` (OpenClaw and the sandbox image, built with the distro's Podman). nomArmy inside WSL uses only the distro's own tools, so a Windows install of nomArmy or OpenClaw doesn't stand in for it.
+   Setup checks WSL, chooses a distro, checks for Node 24.16 or newer inside it, and offers to run `npm install -g nomarmy` there. It then runs the normal setup inside WSL: where models run, agents, and `nomarmy install` (OpenClaw and the sandbox image, built with the distro's Podman). nomArmy inside WSL uses only the distro's own tools, so a Windows install of nomArmy or OpenClaw doesn't stand in for it.
 6. Register each coordinator you use. For example:
    ```powershell
    nomarmy connect claude
@@ -168,7 +168,7 @@ The Windows front end passes `--llama-url` through to setup inside WSL.
 | `choose a default WSL 2 distro` | Run `wsl --set-default <distro>`, then run `nomarmy setup` or `nomarmy connect` again. |
 | `<distro> uses WSL 1.` | Run `wsl --set-version <distro> 2`. |
 | `Install Node 24 (24.16+) inside <distro>` | In that distro, install nvm with the command above, reopen its shell, run `nvm install 24`, then run `nomarmy setup` again. |
-| `nomArmy wasn't found in <distro>.` | Inside that distro run `npm install -g nomarmy@alpha`, then run `nomarmy setup` or `nomarmy connect` again. |
+| `nomArmy wasn't found in <distro>.` | Inside that distro run `npm install -g nomarmy`, then run `nomarmy setup` or `nomarmy connect` again. |
 | `Repository location cannot be forwarded to the chosen WSL distro.` | Use a Windows-drive repository, or open one in the selected distro through `\\wsl.localhost\<distro>\`. |
 | `A Windows-drive repository works` | No fix is required. Move the repository into WSL for much faster jobs. |
 
