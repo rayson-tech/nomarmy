@@ -169,6 +169,8 @@ test("base cache reuses trusted results, isolates environment keys and rejects p
   assert.equal(refused.status, "fail"); assert.equal(refused.baseComparison.baseStatus, "not_run"); assert.equal(calls, 4);
   fs.unlinkSync(cacheDir); fs.renameSync(poisoned, cacheDir);
   f.flow.registerVerificationRunner(async input => {
+    // Git for Windows hides .git, and Node cannot truncate a hidden file.
+    fs.rmSync(path.join(input.cwd, ".git"), { force: true });
     fs.writeFileSync(path.join(input.cwd, ".git"), "gitdir: forged-pointer\n");
     return failed();
   });
