@@ -63,7 +63,7 @@ for (const [name, interpreter] of [["check-nomarmy.mjs", process.execPath], ["ch
   const run = (PATH) => spawnSync(interpreter, [script], { encoding: "utf8", env: { ...base, PATH } });
   const missing = run(bin);
   assert.equal(missing.status, 0);
-  assert.match(missing.stdout, /npm install -g nomarmy/);
+  assert.match(missing.stdout, /nomarmy.dev\/docs\/install/);
   fs.writeFileSync(path.join(bin, process.platform === "win32" ? "nomarmy.cmd" : "nomarmy"), "", { mode: 0o755 });
   const present = run(bin);
   assert.equal(present.status, 0);
