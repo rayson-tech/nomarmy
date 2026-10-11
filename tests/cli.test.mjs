@@ -1073,7 +1073,7 @@ test("agents add subscription declines an older OpenClaw without running npm or 
     });
     assert.equal(result.exitCode, 1, result.stdout);
     assert.equal(result.sent, 1, result.stdout);
-    assert.match(result.stdout, /Upgrade OpenClaw to 2026\.9\.6/);
+    assert.ok(result.stdout.includes(`Upgrade OpenClaw to ${PINNED_OPENCLAW_VERSION}`), result.stdout);
     assert.match(result.stdout, /Apply these changes\? \[y\/N\]/);
     assert.match(result.stdout, /No changes made\./);
     assert.doesNotMatch(result.stdout, /Default model|Whose subscription|Agent name/);

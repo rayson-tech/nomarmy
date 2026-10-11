@@ -11,7 +11,9 @@ import { PINNED_OPENCLAW_VERSION } from "../lib/openclaw-install.mjs";
 // scripts/install-openclaw.mjs --update, as `nomarmy update` runs it, against
 // a fake openclaw and npm: silent at the pin, asks (or needs --yes) below it.
 const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "install-openclaw.mjs");
-const skip = process.platform === "win32" && "fake commands are shell scripts";
+const [major, minor] = process.versions.node.split(".").map(Number);
+const nodeOk = (major === 24 && minor >= 16) || (major === 26 && minor >= 1) || major > 26;
+const skip = process.platform === "win32" ? "fake commands are shell scripts" : !nodeOk && "OpenClaw needs Node 24.16+ or 26.1+, so the script refuses below the pin";
 
 function fakes({ version, globalPrefixWritable = true }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-openclaw-update-"));
@@ -44,7 +46,7 @@ esac
   return { run, npmCalls, installed, home };
 }
 
-test("--update is silent and installs nothing at or past the pin", { skip }, () => {
+test("--update is silent and installs nothing at or past the pin", { skip: process.platform === "win32" && "fake commands are shell scripts" }, () => {
   for (const version of [PINNED_OPENCLAW_VERSION, "2099.1.1"]) {
     const f = fakes({ version });
     const r = f.run();
@@ -59,7 +61,7 @@ test("--update below the pin without a terminal or --yes changes nothing and exi
   const f = fakes({ version: "2026.9.6" });
   const r = f.run();
   assert.equal(r.status, 2, r.stderr);
-  assert.match(r.stdout, new RegExp(`tested with OpenClaw ${PINNED_OPENCLAW_VERSION.replace(/\./g, "\\.")}; this machine has OpenClaw 2026\\.9\\.6`));
+  assert.ok(r.stdout.includes(`tested with OpenClaw ${PINNED_OPENCLAW_VERSION}; this machine has OpenClaw 2026.9.6`), r.stdout);
   assert.match(r.stdout, /Non-interactive repair requires --yes/);
   assert.equal(f.npmCalls().some((call) => call.startsWith("install")), false);
   assert.equal(f.installed(), "2026.9.6");
@@ -79,4 +81,12 @@ test("--update --yes falls back to ~/.npm-global when npm's global prefix isn't 
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.deepEqual(f.npmCalls().filter((call) => call.startsWith("install")),
     [`install -g openclaw@${PINNED_OPENCLAW_VERSION} --prefix ${path.join(f.home, ".npm-global")}`]);
+});
+
+test("--update below the pin on an old Node refuses without installing", { skip: (process.platform === "win32" || nodeOk) && "needs a Node older than OpenClaw supports" }, () => {
+  const f = fakes({ version: "2026.9.6" });
+  const r = f.run("--yes");
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /needs Node 24\.16\+ or 26\.1\+/);
+  assert.deepEqual(f.npmCalls(), []);
 });
