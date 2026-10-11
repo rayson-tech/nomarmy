@@ -156,7 +156,9 @@ Usage: nomarmy <command> [options]
                                       inference (never done silently)
   update          Update nomArmy and reconnect your coordinators: installs
                   npm's latest release, or for a git checkout pulls (fast-forward
-                  only; refuses on local changes). Then restart open sessions.
+                  only; refuses on local changes). Then upgrades OpenClaw to
+                  the release nomArmy is tested with, if it's older (asks first;
+                  --yes to skip asking; waits while jobs run). Restart open sessions.
   trust map       Write a read-only review scout brief for the General.
                   --from <scout.yml> --scout-job <job-id> records the cited scout origin.
   trust review    Accept, drop or edit scout and evidence-backed proposals.
@@ -1306,7 +1308,11 @@ function probeWorker(provider, model) {
     return outcome.ok;
   } finally {
     reapProbeSandbox(stateDir);
-    fs.rmSync(dir, { recursive: true, force: true });
+    // OpenClaw 2026.10.1's Codex runtime can still be writing its state
+    // when the call returns ("state ownership retained until this process
+    // exits"), so a single rm races it (ENOTEMPTY). A leftover probe dir is
+    // harmless; a probe that throws after the model answered is not.
+    try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); } catch { /* leftover dir; see above */ }
   }
 }
 function agentStateRoot() {
@@ -1877,6 +1883,34 @@ function git(args) {
  * until that copy step reruns.
  */
 async function cmdUpdate() {
+  await updateNomarmy();
+  syncOpenclaw();
+}
+
+/**
+ * After nomArmy itself, bring OpenClaw up to the release nomArmy is tested
+ * with. Runs the UPDATED code's scripts/install-openclaw.mjs (this process
+ * still holds the old pin), never downgrades, and asks first unless --yes.
+ * Waits while jobs run: replacing OpenClaw under a job breaks it.
+ */
+function syncOpenclaw() {
+  if (json && !flag("yes")) return;
+  const stateRoot = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
+  const running = liveLeases(path.join(stateRoot, "leases")).length;
+  const later = "Run `nomarmy doctor --fix` to upgrade OpenClaw to the tested release.";
+  if (running) {
+    console.error(c.yellow(`\n${running} nomArmy job(s) running, so OpenClaw was left as is. ${later}`));
+    return;
+  }
+  const r = spawnSync(process.execPath, [path.join(nomarmyRoot, "scripts", "install-openclaw.mjs"), "--update", ...(flag("yes") ? ["--yes"] : [])],
+    { stdio: json ? ["ignore", 2, 2] : "inherit" });
+  if (r.status === 0) return;
+  if (r.status === 2) { console.error(c.yellow(later)); return; }
+  console.error(c.red(`✗ OpenClaw wasn't upgraded. ${later}`));
+  process.exitCode = 1;
+}
+
+async function updateNomarmy() {
   const say = (s) => { if (!json) console.log(s); };
   // Installed from npm: npm updates the package, then connect resyncs the
   // copy each coordinator runs.

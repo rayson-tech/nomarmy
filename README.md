@@ -28,7 +28,7 @@ AI coding workers are confident. Their "done, all tests pass" is a claim, not ev
    `nomarmy setup` is a playbook. It shows a checklist and runs the next step each time you say yes:
    ```text
    ✓ Where models run: hosted
-   ✓ Installed: OpenClaw 2026.9.6
+   ✓ Installed: OpenClaw 2026.10.1
    → Agents: add a hosted agent
      Roles: add an agent first
      This repo: configure this project
