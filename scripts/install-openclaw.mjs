@@ -1,23 +1,52 @@
 // install.sh has already installed nomArmy's dependencies. Nothing is ready
 // until the configured vendors and read-only OpenClaw diagnostics pass.
+//
+// --update (from `nomarmy update`, run from the freshly updated code so the
+// pin is the new release's): silent when OpenClaw is already at or past the
+// pin; otherwise asks first, or applies with --yes. Exit 2 when it made no
+// change because nobody said yes.
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { createInterface } from "node:readline/promises";
 import { loadAgents } from "../lib/agents.mjs";
 import { globalConfigDir } from "../lib/army.mjs";
 import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
 import { configuredSubscriptionVendors, openclawInstallPlan, repairOpenclaw, runOpenclawCommand, PINNED_OPENCLAW_VERSION } from "../lib/openclaw-install.mjs";
 
+const update = process.argv.includes("--update");
 ensureOpenClawOnPath();
 const command = process.env.NOMARMY_OPENCLAW_CMD || "openclaw";
 const version = runOpenclawCommand(command, ["--version"]);
+const needed = openclawInstallPlan(version.ok ? version.stdout : null).length > 0;
 const [major, minor] = process.versions.node.split(".").map(Number);
-if (openclawInstallPlan(version.ok ? version.stdout : null).length &&
-    !((major === 24 && minor >= 16) || (major === 26 && minor >= 1) || major > 26)) {
+if (update && !needed) {
+  process.exitCode = 0;
+} else if (needed && !((major === 24 && minor >= 16) || (major === 26 && minor >= 1) || major > 26)) {
   console.error(`OpenClaw ${PINNED_OPENCLAW_VERSION} needs Node 24.16+ or 26.1+. Upgrade Node first.`);
   process.exitCode = 1;
 } else {
   const prefixIndex = process.argv.indexOf("--prefix");
-  const result = await repairOpenclaw({
-    command, yes: true, prefix: prefixIndex < 0 ? null : process.argv[prefixIndex + 1],
-    vendors: configuredSubscriptionVendors(loadAgents(globalConfigDir()).agents),
-  });
-  process.exitCode = result.ok ? 0 : 1;
+  const prefix = prefixIndex >= 0 ? process.argv[prefixIndex + 1] : update ? userPrefixUnlessGlobalWritable() : null;
+  const isTTY = update && Boolean(process.stdin.isTTY);
+  const rl = isTTY ? createInterface({ input: process.stdin, output: process.stdout }) : null;
+  try {
+    if (update) console.log(`\nnomArmy is tested with OpenClaw ${PINNED_OPENCLAW_VERSION}; this machine has ${version.ok ? version.stdout.trim() : "no working OpenClaw"}.`);
+    const result = await repairOpenclaw({
+      command, prefix, yes: !update || process.argv.includes("--yes"), isTTY,
+      ask: (prompt) => rl.question(prompt),
+      vendors: configuredSubscriptionVendors(loadAgents(globalConfigDir()).agents),
+    });
+    process.exitCode = result.ok ? 0 : result.declined ? 2 : 1;
+  } finally {
+    rl?.close();
+  }
+}
+
+// install.sh's rule: npm's global prefix when it's writable, else ~/.npm-global.
+function userPrefixUnlessGlobalWritable() {
+  const global = runOpenclawCommand("npm", ["prefix", "-g"]);
+  const dir = global.ok ? global.stdout.trim() : "";
+  try { if (dir) { fs.accessSync(dir, fs.constants.W_OK); return null; } } catch { /* not writable */ }
+  return path.join(os.homedir(), ".npm-global");
 }
