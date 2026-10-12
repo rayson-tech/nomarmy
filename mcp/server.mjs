@@ -213,7 +213,7 @@ export function resolveReasoningApplied({ result, profile, reasoning, workerMode
 
 const agentConfig = createAgentConfig({ projectDir });
 const { agentsConfig, dispatchConfig, subscriptionConfig, currentArmy, ensureCatalogRefresh, modelCatalog, modelCatalogReady } = agentConfig;
-const { budgetsForPool, budgetsForJob, recordedBudgets, budgetsForSubscriptionWorker } = createJobBudgets({ budgetState, dispatchConfig, subscriptionConfig, modelCatalog });
+const { budgetsForPool, budgetsForJob, recordedBudgets, budgetsForSubscriptionWorker, catalogKeysForJob } = createJobBudgets({ budgetState, dispatchConfig, subscriptionConfig, modelCatalog });
 const { resolvePoolSelection, resolveSubscriptionSelection, withPoolEntrySlot, assertNoProviderConflict } = createSelection({ dispatchConfig, subscriptionConfig, profileConfig });
 export { resolvePoolSelection, resolveSubscriptionSelection };
 
@@ -313,7 +313,7 @@ export { executeJob };
 const { WORKER_START_STAGGER_MS, activeJobs, runningCount, agentMaxConcurrent, withAgentSlot, track, notifyJobFinished, capacitySnapshot, displayedCapacity, admit, refusal, runBrief, recordJobInRun, trackInRun, launch, liveProgress, summarize } = createJobRuntime({
   jevSettings: () => jevSettings(),
   judgeSettings: () => judgeSettings({ agents: agentsConfig().agents, providerOf: agentProviderId, runsOnHost: agentRunsToolsOnHost }),
-  projectDir, stateRoot, jobsRoot, runsRoot, leasesRoot, slotsRoot, run, currentMaxWorkers, slug, agentsConfig, modelCatalogReady, budgetsForJob, resolveSubscriptionSelection, executeJob, subscriptionJobFieldProblems, repoPolicy, jobArgs,
+  projectDir, stateRoot, jobsRoot, runsRoot, leasesRoot, slotsRoot, run, currentMaxWorkers, slug, agentsConfig, modelCatalogReady, budgetsForJob, catalogKeysForJob, resolveSubscriptionSelection, executeJob, subscriptionJobFieldProblems, repoPolicy, jobArgs,
   env: process.env, budgetState, getActiveRunId: () => activeRunId,
   sandboxProblem: () => podmanChecks?.problem() ?? null,
   probeModel,

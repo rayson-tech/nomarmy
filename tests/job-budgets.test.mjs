@@ -41,3 +41,17 @@ test("frontier scouts default to full reports while explicit, local, and impleme
     jobBudgets.budgetsForJob(apiImplement).reportSize,
   ], ["full", "full", "brief", "standard", "standard"]);
 });
+
+test("catalog keys cover a job's hosted model unless context_window overrides it", () => {
+  const budgets = createJobBudgets({
+    budgetState,
+    dispatchConfig: () => ({ found: true, config: { pools: { api: [{ id: "api", provider: "xai", model: "grok-4.7", weight: 1 }] } } }),
+    subscriptionConfig: () => ({ found: true, config: { workers: { sub: { provider: "openai", model: "gpt-6-astra", owner: "owner@example.com" } } } }),
+    modelCatalog: () => new Map(),
+  });
+  assert.deepEqual(budgets.catalogKeysForJob({ pool: "api" }), ["xai/grok-4.7"]);
+  assert.deepEqual(budgets.catalogKeysForJob({ subscription_worker: "sub", model: "gpt-6.1-sol" }), ["openai/gpt-6.1-sol"]);
+  assert.deepEqual(budgets.catalogKeysForJob({ subscription_worker: "missing" }), []);
+  assert.deepEqual(jobBudgets.catalogKeysForJob({ pool: "api" }), []);
+  assert.deepEqual(jobBudgets.catalogKeysForJob({ task: "local" }), []);
+});
