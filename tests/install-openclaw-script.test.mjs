@@ -15,16 +15,29 @@ const [major, minor] = process.versions.node.split(".").map(Number);
 const nodeOk = (major === 24 && minor >= 16) || (major === 26 && minor >= 1) || major > 26;
 const skip = process.platform === "win32" ? "fake commands are shell scripts" : !nodeOk && "OpenClaw needs Node 24.16+ or 26.1+, so the script refuses below the pin";
 
-function fakes({ version, globalPrefixWritable = true }) {
+function fakes({ version, globalPrefixWritable = true, codexPlugin = null }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-openclaw-update-"));
   const globalPrefix = path.join(dir, "global");
   fs.mkdirSync(globalPrefix);
   if (!globalPrefixWritable) fs.chmodSync(globalPrefix, 0o555);
   fs.writeFileSync(path.join(dir, "version"), `${version}\n`);
+  // codexPlugin: a configured Codex subscription whose OpenClaw plugin is at that version.
+  const configDir = path.join(dir, "config");
+  fs.mkdirSync(configDir);
+  if (codexPlugin) {
+    fs.writeFileSync(path.join(dir, "codex-plugin"), `${codexPlugin}\n`);
+    fs.writeFileSync(path.join(configDir, "agents.yml"), "agents:\n  codex:\n    kind: subscription\n    provider: openai\n    owner: dev@example.com\n");
+  }
   fs.writeFileSync(path.join(dir, "openclaw"), `#!/bin/sh
 case "$1" in
   --version) echo "OpenClaw $(cat "${dir}/version") (abc1234)";;
   update) echo '{"migrationWarnings":[]}';;
+  plugins)
+    echo "$*" >> "${dir}/plugins.log"
+    case "$2" in
+      inspect) v=$(cat "${dir}/codex-plugin"); printf '{"plugin":{"id":"%s","enabled":true,"version":"%s","builtWithOpenClawVersion":"%s"}}\n' "$3" "$v" "$v";;
+      update) echo "${PINNED_OPENCLAW_VERSION}" > "${dir}/codex-plugin";;
+    esac;;
   *) exit 1;;
 esac
 `, { mode: 0o755 });
@@ -39,11 +52,12 @@ esac
   fs.mkdirSync(home);
   const run = (...args) => spawnSync(process.execPath, [script, "--update", ...args], {
     encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, HOME: home, PATH: `${dir}${path.delimiter}${process.env.PATH}`, NOMARMY_OPENCLAW_CMD: path.join(dir, "openclaw") },
+    env: { ...process.env, HOME: home, PATH: `${dir}${path.delimiter}${process.env.PATH}`, NOMARMY_OPENCLAW_CMD: path.join(dir, "openclaw"), NOMARMY_CONFIG_DIR: configDir },
   });
   const npmCalls = () => { try { return fs.readFileSync(path.join(dir, "npm.log"), "utf8").trim().split("\n"); } catch { return []; } };
   const installed = () => fs.readFileSync(path.join(dir, "version"), "utf8").trim();
-  return { run, npmCalls, installed, home };
+  const pluginUpdates = () => { try { return fs.readFileSync(path.join(dir, "plugins.log"), "utf8").trim().split("\n").filter((l) => l.startsWith("plugins update")); } catch { return []; } };
+  return { run, npmCalls, installed, home, pluginUpdates };
 }
 
 test("--update is silent and installs nothing at or past the pin", { skip: process.platform === "win32" && "fake commands are shell scripts" }, () => {
@@ -89,4 +103,21 @@ test("--update below the pin on an old Node refuses without installing", { skip:
   assert.equal(r.status, 1);
   assert.match(r.stderr, /needs Node 24\.16\+ or 26\.1\+/);
   assert.deepEqual(f.npmCalls(), []);
+});
+
+test("--update with OpenClaw at the pin but a configured vendor's plugin behind it updates that plugin", { skip: process.platform === "win32" && "fake commands are shell scripts" }, () => {
+  const current = fakes({ version: PINNED_OPENCLAW_VERSION, codexPlugin: PINNED_OPENCLAW_VERSION });
+  assert.equal(current.run().stdout, "", "silent when the plugin is at the pin too");
+  assert.deepEqual(current.pluginUpdates(), []);
+
+  const f = fakes({ version: PINNED_OPENCLAW_VERSION, codexPlugin: "2026.9.7" });
+  const asked = f.run();
+  assert.equal(asked.status, 2, asked.stderr);
+  assert.match(asked.stdout, /Update OpenClaw plugin codex 2026\.9\.7 to the tested release: \S*openclaw plugins update codex/);
+  assert.deepEqual(f.pluginUpdates(), []);
+
+  const applied = f.run("--yes");
+  assert.equal(applied.status, 0, applied.stdout + applied.stderr);
+  assert.deepEqual(f.pluginUpdates(), ["plugins update codex"]);
+  assert.deepEqual(f.npmCalls().filter((call) => call.startsWith("install")), [], "OpenClaw itself is left alone");
 });

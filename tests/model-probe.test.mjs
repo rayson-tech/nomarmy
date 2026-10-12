@@ -94,3 +94,21 @@ test("admission: an answering model is proven once and never probed again; an in
   recordProbeSuccess(proven.root, "openai/gpt-5.6-terra");
   assert.deepEqual((await proven.runtime.admit([job("gpt-5.6-terra")])).problems, []);
 });
+
+test("probeModel: an answer stays ok when its scratch dir can't be removed", { skip: (process.platform === "win32" || process.getuid?.() === 0) && "needs POSIX permissions that bind the test user" }, async (t) => {
+  // OpenClaw 2026.10.1's Codex runtime can still be writing when the call
+  // returns (ENOTEMPTY); a directory that can't be emptied stands in for it.
+  let locked;
+  t.after(() => { if (locked) fs.chmodSync(locked, 0o755); }); // before stateRoot's cleanup, which runs after it
+  const root = stateRoot(t);
+  const exec = async (file, args) => {
+    if (file !== "openclaw") return { error: null, stdout: "", stderr: "" };
+    locked = path.join(args[args.indexOf("--state-dir") + 1], "codex-home");
+    fs.mkdirSync(locked);
+    fs.writeFileSync(path.join(locked, "state.json"), "{}");
+    fs.chmodSync(locked, 0o555);
+    return { error: null, stdout: JSON.stringify({ ok: true, status: "ok", final: "ok" }), stderr: "" };
+  };
+  const r = await probeModel({ provider: "openai", model: "gpt-6.1-sol", stateRoot: root, openclawCmd: "openclaw", exec });
+  assert.deepEqual(r, { ok: true, refused: false, reason: null });
+});
