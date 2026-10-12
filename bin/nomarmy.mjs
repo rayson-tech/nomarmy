@@ -156,8 +156,9 @@ Usage: nomarmy <command> [options]
                                       inference (never done silently)
   update          Update nomArmy and reconnect your coordinators: installs
                   npm's latest release, or for a git checkout pulls (fast-forward
-                  only; refuses on local changes). Then upgrades OpenClaw to
-                  the release nomArmy is tested with, if it's older (asks first;
+                  only; refuses on local changes). Then upgrades OpenClaw and
+                  your subscriptions' OpenClaw plugins to the release nomArmy
+                  is tested with, if they're older (asks first;
                   --yes to skip asking; waits while jobs run). Restart open sessions.
   trust map       Write a read-only review scout brief for the General.
                   --from <scout.yml> --scout-job <job-id> records the cited scout origin.
@@ -1312,7 +1313,7 @@ function probeWorker(provider, model) {
     // when the call returns ("state ownership retained until this process
     // exits"), so a single rm races it (ENOTEMPTY). A leftover probe dir is
     // harmless; a probe that throws after the model answered is not.
-    try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); } catch { /* leftover dir; see above */ }
+    try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* leftover dir; see above */ }
   }
 }
 function agentStateRoot() {
