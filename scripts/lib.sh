@@ -211,6 +211,14 @@ install_build_dependencies(){
   esac
 }
 
+# The CNI dnsname plugin, when apt's podman runs the CNI backend without it.
+install_podman_dnsname(){
+  [[ "$(linux_package_manager)" == apt ]] || return 0
+  [[ "$(podman info --format '{{.Host.NetworkBackend}}' 2>/dev/null)" == cni ]] || return 0
+  local dir; for dir in /usr/lib/cni /usr/libexec/cni /opt/cni/bin /usr/local/lib/cni /usr/local/libexec/cni; do [[ -x "$dir/dnsname" ]] && return 0; done
+  run_as_root apt-get install -y golang-github-containernetworking-plugin-dnsname || echo 'NOTE: the CNI dnsname plugin is not installed; nomarmy doctor checks for it.'
+}
+
 # Podman is required on every Linux profile, cloud included -- unlike the
 # build toolchain above, which cloud profiles skip entirely.
 install_podman(){
@@ -224,7 +232,9 @@ install_podman(){
   case "$manager" in
     # catatonit is only Recommended by Ubuntu's podman, and OpenClaw's
     # sandboxes need it (podman --init); older releases don't package it.
-    apt) run_as_root apt-get update; run_as_root apt-get install -y podman; run_as_root apt-get install -y catatonit || echo 'NOTE: catatonit not installed; nomarmy doctor checks for it.' ;;
+    # Ubuntu's podman uses CNI, which resolves container names on a private
+    # network (harness services) only with the dnsname plugin.
+    apt) run_as_root apt-get update; run_as_root apt-get install -y podman; run_as_root apt-get install -y catatonit || echo 'NOTE: catatonit not installed; nomarmy doctor checks for it.'; install_podman_dnsname ;;
     dnf) run_as_root dnf install -y podman ;;
     yum) run_as_root yum install -y podman ;;
     zypper) run_as_root zypper --non-interactive install podman ;;

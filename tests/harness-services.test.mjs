@@ -72,7 +72,10 @@ test('verification services lifecycle is internal, ordered, bounded and cleaned 
     });
     const result = await runner({ cwd, jobId: 'job-42', profile: 'quick' });
     assert.equal(result.status, failure === 'verification' ? 'fail' : failure ? 'not_run' : 'pass', failure);
-    const args = calls.map((call) => call.args);
+    // podman info (the name-resolution check) is covered by its own test below.
+    const kept = calls.filter((call) => call.args[0] !== 'info');
+    assert.equal(calls.filter((call) => call.args[0] === 'info').length, 1);
+    const args = kept.map((call) => call.args);
     assert.deepEqual(args[2], ['network', 'create', '--internal', 'nomarmy-job-42']);
     assert.deepEqual(args.find(a => a[0] === 'ps'), ['ps', '-aq', '--filter', 'label=nomarmy.job=job-42']);
     if (failure === 'network') { assert.equal(args.length, 4); continue; }
@@ -86,7 +89,7 @@ test('verification services lifecycle is internal, ordered, bounded and cleaned 
     assert.deepEqual(args[6].slice(0, -1), ['run', '--rm', '--name', 'nomarmy-job-42-health-mock-oidc', '--network', 'nomarmy-job-42', '--user=1000:1000', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--entrypoint', 'node', 'sandbox:1', '--input-type=module', '-e']);
     assert.match(args[6].at(-1), /http:\/\/mock-oidc:8080\/default\/\.well-known\/openid-configuration/);
     assert.match(args[6].at(-1), /r.status>=200&&r.status<300/);
-    assert.equal(calls[6].options.timeoutMs, 5037);
+    assert.equal(kept[6].options.timeoutMs, 5037);
     assert.deepEqual(args.at(-3), ['rm', '--force', '--ignore', 'nomarmy-job-42-health-mock-oidc']);
     const commands = args.filter((a) => a.includes('/bin/sh'));
     assert.equal(commands.length, failure === 'health' ? 0 : failure ? 1 : 2);
@@ -120,7 +123,7 @@ test('multiple services use distinct container names and local images without pu
   assert.deepEqual(Object.keys(run).sort(), ['cleanup', 'network']);
   assert.equal(run.network, 'nomarmy-multi');
   await run.cleanup();
-  assert.deepEqual(calls.map((args) => args[0]), ['network', 'image', 'run', 'image', 'run', 'run', 'ps', 'rm', 'rm', 'rm', 'network']);
+  assert.deepEqual(calls.map((args) => args[0]), ['info', 'network', 'image', 'run', 'image', 'run', 'run', 'ps', 'rm', 'rm', 'rm', 'network']);
   assert.deepEqual(calls.filter((args) => args[0] === 'run').map((args) => args[args.indexOf('--name') + 1]), ['nomarmy-multi-service-mock-oidc', 'nomarmy-multi-service-mock-oidc-health', 'nomarmy-multi-health-mock-oidc']);
   assert.deepEqual(calls.slice(-4), [
     ['rm', '--force', '--ignore', 'nomarmy-multi-health-mock-oidc'],
@@ -155,4 +158,17 @@ test('mock OIDC fixture consumes exported verification env without real network'
   const result = await runner({ cwd, profile: 'quick', jobId: 'fixture' });
   assert.equal(result.status, 'pass', result.output);
   assert.equal(cleaned, true);
+});
+
+
+test("services are refused up front when Podman networks can't resolve container names", async () => {
+  const calls = [];
+  const cni = JSON.stringify({ host: { networkBackend: 'cni', networkBackendInfo: { backend: 'cni', dns: {} } } });
+  const executor = createPodmanExecutor({ collect: async (_file, args) => {
+    calls.push(args);
+    return { spawned: true, code: 0, stdout: args[0] === 'info' ? cni : '', stderr: '', timedOut: false };
+  } });
+  await assert.rejects(executor.startServices({ jobId: 'dns', image: 'sandbox:1', services: [service] }),
+    /CNI network backend without the dnsname plugin.*Fix: sudo apt install golang-github-containernetworking-plugin-dnsname/);
+  assert.deepEqual(calls.map((args) => args[0]), ['info'], 'nothing is created');
 });
