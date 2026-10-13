@@ -45,7 +45,7 @@ test("browser recipe uses the installed root or nested Playwright, after node, w
     assert.equal(browser, `# harness: browser-playwright
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN mkdir -p /ms-playwright
-RUN (cd '/deps${prefix ? "/" + prefix.slice(0, -1) : ""}' && npx --no-install playwright install --with-deps chromium) || touch /ms-playwright/.nomarmy-playwright-install-failed
+RUN (cd '/deps${prefix ? "/" + prefix.slice(0, -1) : ""}' && for attempt in 1 2; do timeout -k 30 300 npx --no-install playwright install --with-deps chromium && exit 0; done; exit 1) || touch /ms-playwright/.nomarmy-playwright-install-failed
 RUN chmod -R a+rX /ms-playwright
 USER node
 WORKDIR /workspace
@@ -119,4 +119,29 @@ test("independent implement and verify runners retain exact screenshot evidence 
     assert.equal(capped.detail, "artifact collection capped at 200 files / 50 MB");
     assert.equal(capped.status, "fail");
   }
+});
+
+test("exclude_harnesses keeps a detected browser out of the image and is validated", async (t) => {
+  const cwd = temporary(t);
+  packageAt(cwd);
+  write(cwd, "playwright.config.ts", "export default {};\n");
+  assert.ok(images.sandboxHarnesses(cwd).matched.includes("browser-playwright"));
+  const config = { exclude_harnesses: ["browser-playwright"] };
+  assert.deepEqual(images.sandboxHarnesses(cwd, config).matched, ["node"]);
+  const recipe = images.composeSandboxImage(cwd, config);
+  assert.ok(recipe.dockerfile.includes("# harness: node"));
+  assert.equal(recipe.dockerfile.includes("browser-playwright"), false);
+  assert.equal(verify.verificationShmMb(cwd, config), 0);
+
+  const { validateConfig } = await import("../lib/config.mjs");
+  assert.equal(validateConfig({ exclude_harnesses: ["browser-playwright"] }).valid, true);
+  assert.match(validateConfig({ exclude_harnesses: ["browser"] }).errors.join("\n"), /unknown harness 'browser' in exclude_harnesses/);
+  assert.match(validateConfig({ harnesses: ["mock-oidc"], exclude_harnesses: ["mock-oidc"] }).errors.join("\n"), /both harnesses and exclude_harnesses/);
+});
+
+test("image builds are capped, 30 minutes unless NOMARMY_IMAGE_BUILD_TIMEOUT_MINUTES says otherwise", () => {
+  assert.equal(images.imageBuildTimeoutMs({}), 30 * 60_000);
+  assert.equal(images.imageBuildTimeoutMs({ NOMARMY_IMAGE_BUILD_TIMEOUT_MINUTES: "45" }), 45 * 60_000);
+  assert.equal(images.imageBuildTimeoutMs({ NOMARMY_IMAGE_BUILD_TIMEOUT_MINUTES: "nope" }), 30 * 60_000);
+  assert.equal(images.imageBuildTimeoutMs({ NOMARMY_IMAGE_BUILD_TIMEOUT_MINUTES: "0" }), 30 * 60_000);
 });
