@@ -66,6 +66,23 @@ test("askJudge sends the prompt as a file, on the job's route, in an empty works
   assert.deepEqual(fs.readdirSync(root), []);
 });
 
+test("askJudge keeps the answer when the sandbox left files it can't remove", { skip: process.getuid?.() === 0 && "root can remove anything" }, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-judge-"));
+  let locked = null;
+  t.after(() => { if (locked) fs.chmodSync(locked, 0o755); fs.rmSync(root, { recursive: true, force: true }); });
+  const exec = async (file, args) => {
+    if (file !== "openclaw") return { stdout: "", stderr: "" };
+    // Stands in for files a container wrote under a mapped uid.
+    locked = path.join(args[args.indexOf("--state-dir") + 1], "sandbox-owned");
+    fs.mkdirSync(locked);
+    fs.writeFileSync(path.join(locked, "file"), "x");
+    fs.chmodSync(locked, 0o555);
+    return { stdout: JSON.stringify({ ok: true, final: '{"report":{"verdict":"consistent"}}' }), stderr: "" };
+  };
+  const r = await askJudge({ provider: "xai", model: "grok-4.7", prompt: "P", stateRoot: root, openclawCmd: "openclaw", exec });
+  assert.deepEqual(r, { answer: { report: { verdict: "consistent" } }, error: null });
+});
+
 test("judgeSettings: a host-tool agent needs host_tools, the local model and unknown agents are refused", (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-judge-cfg-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
