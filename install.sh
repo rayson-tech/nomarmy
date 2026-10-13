@@ -43,6 +43,7 @@ case "$OS_NAME" in
     # Podman runs rootless, directly on the host kernel here -- no daemon to
     # enable or start, unlike Docker Engine.
     command -v podman >/dev/null 2>&1 || install_podman
+    if [[ "$SERVER" == 1 ]]; then install_podman_dnsname; fi
     ;;
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
     cat >&2 <<'MSG'

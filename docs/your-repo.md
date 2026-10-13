@@ -162,7 +162,7 @@ harness runs its pinned fake services on a private, internal Podman network
 only during nomArmy verification, with bounded health checks and cleanup.
 Its non-secret `env` values are exported to the verification container; see
 [mock-oidc](../harnesses/mock-oidc/README.md) for issuer configuration.
-No ports are published and workers stay offline (`--network none`).
+No ports are published and workers stay offline (`--network none`). On Linux, Podman's CNI backend needs its `dnsname` plugin for the containers to find each other by name; without it, verification is `not_run` and says so.
 `allowlist` harnesses cannot be enabled by committed `.nomarmy.yml`; that rung
 requires the operator-local opt-in described below.
 
