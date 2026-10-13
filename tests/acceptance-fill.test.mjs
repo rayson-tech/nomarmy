@@ -54,6 +54,45 @@ test("contract criteria schema, admission and report preserve IDs and name unkno
   assert.deepEqual(reportView(meta), { ...meta, reviewRequired: false, issues: [], report: null, verification: null, revertCheck: null, commit: null, changedFiles: [], additions: null, deletions: null });
 });
 
+test("admission reads criteria from the job's base_ref, not the working tree", async t => {
+  const f = fixture(t);
+  const git = (...args) => {
+    const result = spawnSync("git", args, { cwd: f.repoDir, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  const commit = message => git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", message);
+  git("init", "-q", "-b", "main");
+  git("add", ".");
+  commit("main contracts");
+  git("checkout", "-q", "-b", "story");
+  fs.writeFileSync(path.join(f.repoDir, "acceptance/story.yml"), 'feature: Story\ncriteria:\n  - { id: STORY-1, text: promise, proven_by: [], status: unproven }\n');
+  git("add", ".");
+  commit("story contract");
+  git("checkout", "-q", "main");
+  const run = async (command, args, { cwd } = {}) => {
+    const result = spawnSync(command, args, { cwd, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr);
+    return { stdout: result.stdout };
+  };
+  const budgets = deriveBudgets({ env: {} });
+  const runtime = createJobRuntime({ env: { NOMARMY_EXECUTION: "hosted" }, projectDir: f.repoDir, projectDirProblem: () => null, run,
+    stateRoot: f.repoDir, jobsRoot: f.repoDir, leasesRoot: path.join(f.repoDir, "leases"), budgetState: { refresh: async () => {}, budgets, contextInfo: { slots: 3 } },
+    currentMaxWorkers: () => 2, budgetsForJob: () => budgets, subscriptionJobFieldProblems: () => [], repoPolicy: () => ({}) });
+  assert.deepEqual((await runtime.admit([{ task: "t", criteria: ["STORY-1"], base_ref: "story" }])).problems, []);
+  assert.deepEqual((await runtime.admit([{ task: "t", criteria: ["STORY-1"] }])).problems,
+    ["Unknown acceptance criteria: STORY-1. Contract files searched: acceptance/example.yml"]);
+  assert.deepEqual((await runtime.admit([{ task: "t", criteria: ["STORY-1"], base_ref: "main" }])).problems,
+    ["Unknown acceptance criteria: STORY-1. Contract files searched at main: acceptance/example.yml"]);
+  // An uncommitted contract on the story branch's checkout doesn't count for a job based on main.
+  fs.writeFileSync(path.join(f.repoDir, "acceptance/story.yml"), 'feature: Story\ncriteria:\n  - { id: STORY-1, text: promise, proven_by: [], status: unproven }\n');
+  assert.equal((await runtime.admit([{ task: "t", criteria: ["STORY-1"], base_ref: "main" }])).problems.length, 1);
+  // A base_ref that doesn't exist is reported once, by the base check.
+  const missing = (await runtime.admit([{ task: "t", criteria: ["STORY-1"], base_ref: "nope" }])).problems;
+  assert.equal(missing.length, 1);
+  assert.match(missing[0], /^base_ref nope not found/);
+});
+
 const diff = [
   'diff --git a/tests/example.test.mjs b/tests/example.test.mjs', '--- a/tests/example.test.mjs', '+++ b/tests/example.test.mjs', '@@ -1,10 +1,12 @@',
   '-test("removed entirely", () => {});',

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import YAML from "yaml";
-import { contractSchema, criterionIdSchema, loadContract, loadContracts, checkContract, contractDisplayPath } from "../lib/acceptance.mjs";
+import { contractSchema, criterionIdSchema, loadContract, loadContracts, loadContractsAtCommit, checkContract, contractDisplayPath } from "../lib/acceptance.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const cli = path.join(root, "bin/nomarmy.mjs");
@@ -371,4 +371,45 @@ test("acceptance CLI reports skipped proofs and strict rejects scoped-out criter
 test("criterion IDs accept ticket keys and Jira-style suffixes, nothing looser", () => {
   for (const id of ["WIN-6", "BASE-3-AC1", "A1-20-X-2"]) assert.equal(criterionIdSchema.safeParse(id).success, true, id);
   for (const id of ["win-6", "WIN", "WIN-", "WIN-6-", "WIN-AC1", "WIN-6-ac1", "WIN 6", "6-WIN"]) assert.equal(criterionIdSchema.safeParse(id).success, false, id);
+});
+
+test("acceptance schema accepts a retirement record only on retired criteria", () => {
+  const retired = { decision: "defer", decided_by: "Lee Todd", comment_url: "https://example.com/c/1", date: "2026-10-13", reason: "Next sprint", moved_to: "ABC-13" };
+  const parse = (extra) => contractSchema.safeParse(contract([criterion("ABC-12-AC4", [], extra)]));
+  assert.equal(parse({ status: "retired", retired }).success, true);
+  assert.equal(parse({ status: "retired", retired: { ...retired, decision: "drop", reason: undefined, moved_to: undefined } }).success, true);
+  assert.equal(parse({ status: "retired" }).success, true, "the record stays optional");
+  const misplaced = parse({ status: "met", retired });
+  assert.equal(misplaced.success, false);
+  assert.match(misplaced.error.issues[0].message, /only allowed on a retired criterion/);
+  for (const invalid of [{ ...retired, decision: "postpone" }, { ...retired, date: "2026-02-30" }, { ...retired, decided_by: undefined }, { ...retired, extra: true }]) {
+    assert.equal(parse({ status: "retired", retired: invalid }).success, false);
+  }
+});
+
+test("acceptance loads contracts as committed at a commit, reported under the repo", async (t) => {
+  const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-acceptance-commit-"));
+  t.after(() => fs.rmSync(repoDir, { recursive: true, force: true }));
+  const git = (...args) => {
+    const result = spawnSync("git", args, { cwd: repoDir, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  git("init", "-q", "-b", "main");
+  git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "base");
+  const empty = git("rev-parse", "HEAD").trim();
+  fs.mkdirSync(path.join(repoDir, "acceptance"));
+  fs.writeFileSync(path.join(repoDir, "acceptance/story.yml"), YAML.stringify(contract([criterion("STORY-1")])));
+  git("add", ".");
+  git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "contract");
+  const committed = git("rev-parse", "HEAD").trim();
+  fs.writeFileSync(path.join(repoDir, "acceptance/story.yml"), YAML.stringify(contract([criterion("STORY-2")])));
+  const run = async (args) => git(...args);
+  const loaded = await loadContractsAtCommit({ repoDir, commit: committed, git: run });
+  assert.deepEqual(loaded.map((c) => [contractDisplayPath(repoDir, c.file), c.criteria.map((x) => x.id)]), [["acceptance/story.yml", ["STORY-1"]]]);
+  assert.deepEqual(await loadContractsAtCommit({ repoDir, commit: empty, git: run }), []);
+  fs.writeFileSync(path.join(repoDir, "acceptance/story.yml"), "feature: x\ncriteria: [{ id: bad }]\n");
+  git("add", ".");
+  git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "broken");
+  await assert.rejects(loadContractsAtCommit({ repoDir, commit: "HEAD", git: run }), (error) => error.message.startsWith(path.join(repoDir, "acceptance/story.yml")));
 });
