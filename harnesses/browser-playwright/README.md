@@ -4,9 +4,16 @@ Installs Chromium and its OS dependencies using the repository's installed
 @playwright/test version, after the Node dependency layer. Commit a supported
 Node lockfile. Root and discovered nested packages are supported; browsers live
 in /ms-playwright and are readable by the node user. Each install attempt is
-limited to 5 minutes and retried once, since Playwright's downloader can stall
-on an open connection; a failure leaves a .nomarmy-playwright-install-failed
-marker in /ms-playwright and the rest of the image still builds.
+limited to 5 minutes and retried once; a failure leaves a
+.nomarmy-playwright-install-failed marker in /ms-playwright and the rest of the
+image still builds.
+
+Playwright before 1.60 can't extract its browser on Node 24.16 or later (the
+sandbox runs Node 26): the download completes, then extraction hangs forever
+(nodejs/node#63487). For those versions nomArmy runs the install with
+unzip-extract.cjs preloaded, which hands that one step to the system `unzip`;
+the preload is removed from the image afterwards. Upgrading to Playwright 1.60
+or later makes it unnecessary.
 
 If your end-to-end suite runs outside nomArmy and the sandbox doesn't need a
 browser, add `exclude_harnesses: [browser-playwright]` to .nomarmy.yml.
