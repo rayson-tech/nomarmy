@@ -516,7 +516,9 @@ async function virtualFacts(t, { platform = "linux", podman = true, files = {}, 
   return { facts, reads, accesses };
 }
 
-test("collectFacts finds executable catatonit in each helper directory and on PATH", async (t) => {
+const posixPaths = { skip: process.platform === "win32" && "virtual POSIX paths, but path.join builds backslash paths on Windows" };
+
+test("collectFacts finds executable catatonit in each helper directory and on PATH", posixPaths, async (t) => {
   for (const dir of ["/usr/local/libexec/podman", "/usr/local/lib/podman", "/usr/libexec/podman", "/usr/lib/podman", "/doctor/bin"]) {
     await t.test(dir, async (t) => {
       const { facts } = await virtualFacts(t, { executable: [`${dir}/catatonit`] });
@@ -530,7 +532,7 @@ test("collectFacts rejects missing or non-executable catatonit", async (t) => {
   assert.equal(facts.podmanInitFound, false);
 });
 
-test("collectFacts honors executable init_path in system, XDG and fallback containers.conf", async (t) => {
+test("collectFacts honors executable init_path in system, XDG and fallback containers.conf", posixPaths, async (t) => {
   for (const file of ["/etc/containers/containers.conf", "/usr/share/containers/containers.conf", "/doctor/config/containers/containers.conf", "/doctor/home/.config/containers/containers.conf"]) {
     await t.test(file, async (t) => {
       const { facts } = await virtualFacts(t, {
@@ -566,7 +568,7 @@ const hostedAgents = {
   "/doctor/config/nomarmy/agents.yml": "agents:\n  api-worker:\n    kind: api\n    provider: openai\n    auth_env: TEST_API_KEY\n  subscriber:\n    kind: subscription\n    provider: codex\n    owner: tester\n  custom-local:\n    kind: local\n",
 };
 
-test("collectFacts recognizes API and subscription armies without local roles", async (t) => {
+test("collectFacts recognizes API and subscription armies without local roles", posixPaths, async (t) => {
   for (const agent of ["api-worker", "subscriber"]) {
     await t.test(agent, async (t) => {
       const { facts } = await virtualFacts(t, { files: { ...hostedAgents,
