@@ -15,6 +15,7 @@ Local inference is configured in two files, and a shell-exported variable overri
 | `max_jobs` | `~/.config/nomarmy/limits.yml` (`nomarmy config max-jobs <n>`) | `4` | How many api and subscription jobs run at once, across every session. `NOMARMY_MAX_POOL_WORKERS` still works when limits.yml doesn't set it |
 | `NOMARMY_EXECUTION` | common.env | `local` | `local` or `bedrock` |
 | `NOMARMY_ORCHESTRATOR_TRUST` | common.env | `frontier` | `frontier` or `degraded`: see `policies/reviewer.md` |
+| `NOMARMY_IMAGE_BUILD_TIMEOUT_MINUTES` | the MCP server's environment (its registration, or your service unit) | `30` | How long a sandbox image build may run before nomArmy stops it and reports why |
 
 **The coupling that trips people up**: `NOMARMY_LLAMA_CONTEXT` is divided by `NOMARMY_LLAMA_PARALLEL`, not given to each slot whole. `65536` across 2 slots is `32768` per nom.
 
