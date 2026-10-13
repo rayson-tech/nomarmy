@@ -324,7 +324,7 @@ export const jobSchema = z.object({
   task: z.string().min(1).max(maxTaskChars,
     `Objective exceeds the ${maxTaskChars}-character worker context budget. This length limit does not by itself mean the job is too broad: a single-purpose objective that inlines file contents can hit it just from being verbose. If that's the case here, reference exact paths and line ranges instead (the worker can read them, or use \`evidence\` to hand it the answer already resolved) rather than pasting the file into the brief. If the objective genuinely covers multiple files or concerns, split it into separate jobs.`
   ).describe("implement: the OBJECTIVE the worker must achieve, not the edit it should make. scout: the QUESTION to answer from the repository. decompose: the broad OBJECTIVE to propose a split for."),
-  criteria: z.array(criterionIdSchema).optional().describe("implement: contract IDs from acceptance/*.yml served by this job."),
+  criteria: z.array(criterionIdSchema).optional().describe("implement: contract IDs from acceptance/*.yml served by this job, read at base_ref when set (else the working tree)."),
   acceptance: z.array(z.string().min(1).max(maxAcceptanceItemChars,
     `Acceptance item exceeds ${maxAcceptanceItemChars} characters. Keep each criterion to one concrete, checkable statement.`
   )).max(20).optional().describe("implement: acceptance criteria the worker must satisfy. scout: points a complete answer must cover. decompose: constraints a good split must respect."),
