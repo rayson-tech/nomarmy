@@ -5,7 +5,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$ROOT/scripts/lib.sh"
 PROFILE=""
 WITH_CLAUDE=1
-while [[ $# -gt 0 ]]; do case "$1" in --profile) PROFILE="$2"; shift 2;; --no-claude) WITH_CLAUDE=0; shift;; *) echo "Unknown arg: $1"; exit 2;; esac; done
+SERVER=0
+while [[ $# -gt 0 ]]; do case "$1" in --profile) PROFILE="$2"; shift 2;; --no-claude) WITH_CLAUDE=0; shift;; --server) SERVER=1; shift;; *) echo "Unknown arg: $1"; exit 2;; esac; done
+# --server: a headless machine that runs jobs on api and subscription agents.
+# The hosted profile, OpenClaw at the pin with the configured vendors'
+# plugins, and the sandbox image; no local model and no editor connections.
+if [[ "$SERVER" == 1 ]]; then
+  if [[ -n "$PROFILE" && "$PROFILE" != hosted ]]; then echo "ERROR: --server installs the hosted profile, not '$PROFILE'." >&2; exit 2; fi
+  PROFILE=hosted; WITH_CLAUDE=0
+fi
 load_profile "$PROFILE"
 echo "==> nomArmy install ($NOMARMY_PROFILE)"
 OS_NAME="$(uname -s)"
@@ -82,8 +90,15 @@ need node; need npm
 # dependencies. Without this a fresh clone cannot run `nomarmy` at all -- the
 # first import of `yaml` fails. This is separate from the copy the worker setup
 # scripts install into $NOMARMY_AGENT_INSTALL_DIR.
-echo '==> Installing nomArmy dependencies'
-(cd "$ROOT" && npm install --omit=dev --no-audit --no-fund)
+# An npm-installed copy already has its dependencies, and its directory can
+# be root-owned (a global install under /usr/local): npm install there failed
+# with EACCES on package-lock.json.
+if [[ "$ROOT" == */node_modules/* ]]; then
+  : # Installed from npm: dependencies came with the package.
+else
+  echo '==> Installing nomArmy dependencies'
+  (cd "$ROOT" && npm install --omit=dev --no-audit --no-fund)
+fi
 
 # Put `nomarmy` on PATH. Non-fatal by design: linking needs a writable npm
 # global prefix, and the CLI is equally usable as `node bin/nomarmy.mjs`.
@@ -95,6 +110,9 @@ else
   echo 'NOTE: could not link the nomarmy CLI (npm global prefix not writable).'
   echo "      Run it directly instead: node $ROOT/bin/nomarmy.mjs <command>"
 fi
+# Record the hosted mode where doctor and the MCP server read it
+# (~/.config/nomarmy/common.env), as `nomarmy setup --hosted` does.
+if [[ "$SERVER" == 1 ]]; then node "$ROOT/bin/nomarmy.mjs" setup --hosted --json >/dev/null; fi
 # The sandbox is required on every profile, cloud included: it is what keeps
 # repository content away from host credentials. Podman readiness (starting
 # the macOS VM if needed) is verified later, in scripts/setup-sandbox.sh --
@@ -116,7 +134,9 @@ if nomarmy_has_local_model; then openclaw plugins install @openclaw/llama-cpp-pr
 # Bedrock credential unless the coder sandbox is already network-isolated.
 "$ROOT/scripts/setup-sandbox.sh"
 "$ROOT/scripts/configure-openclaw.sh" "$NOMARMY_PROFILE"
-if [[ "${NOMARMY_COORDINATOR_OS:-}" == windows ]]; then
+if [[ "$SERVER" == 1 ]]; then
+  echo 'NOTE: server install: no editor connections. Register one later with: nomarmy connect claude (or codex, cursor)'
+elif [[ "${NOMARMY_COORDINATOR_OS:-}" == windows ]]; then
   # Run from the Windows front end: the coordinators are Windows programs,
   # registered from Windows, not looked for inside this distro.
   echo 'NOTE: register your coordinators from Windows PowerShell: nomarmy connect claude (or codex, cursor)'
@@ -127,6 +147,13 @@ else
   if command -v codex >/dev/null 2>&1; then node "$ROOT/bin/nomarmy.mjs" connect codex; else echo 'NOTE: Codex not found; run: nomarmy connect codex (after installing Codex)'; fi
 fi
 "$ROOT/scripts/verify-install.sh" "$NOMARMY_PROFILE"
+if [[ "$(nomarmy_execution_mode)" == hosted ]]; then
+  # OpenClaw's model catalog starts empty, and until it's refreshed a job is
+  # budgeted at a conservative 24k-token context. Best-effort: a provider
+  # with no credential yet simply lists nothing.
+  echo '==> Refreshing OpenClaw model catalog'
+  openclaw models list --all --refresh >/dev/null 2>&1 || echo 'NOTE: catalog refresh failed; nomArmy refreshes it before the first job.'
+fi
 if nomarmy_is_cloud && [[ "${NOMARMY_ORCHESTRATOR_RUNTIME:-}" == "claude-code" ]]; then
   echo
   echo "==> Next: point the orchestrator at Bedrock"

@@ -2240,6 +2240,7 @@ test("resolveWorkerSandboxOverride: every job's config turns OpenClaw's memory s
   assert.equal(written.agents.defaults.sandbox.docker.image, undefined, "the default image isn't pinned");
   assert.equal(written.agents.defaults.sandbox.docker.env.NPM_CONFIG_CACHE, "/tmp/.npm");
   assert.deepEqual(written.auth, { kept: true });
+  assert.equal(written.logging.file, path.join(runtimeDir, "openclaw.log"), "the job's OpenClaw log stays with the job, not in /tmp/openclaw");
   assert.equal(ambient.memory.search.enabled, undefined, "the ambient config object itself is never modified");
 
   // No ambient config at all: still memory off (OpenClaw's defaults would turn it on).

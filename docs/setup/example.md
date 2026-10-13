@@ -127,7 +127,7 @@ nomarmy army assign data-architect grok grok-4.7
 nomarmy army general claude
 ```
 
-Each `assign` with a model makes one real test call on the exact route jobs take, so a model your plan refuses is caught here rather than in the middle of a job. (On a ChatGPT plan, for example, Codex runs gpt-6-astra and the gpt-5.6 models but refuses gpt-6-sol.)
+Each `assign` with a model makes one real test call on the exact route jobs take, so a model your plan refuses is caught here rather than in the middle of a job. (Which models a ChatGPT plan runs depends on the plan and on OpenClaw's Codex plugin version, so test rather than assume.)
 
 See the result:
 

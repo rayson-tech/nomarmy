@@ -48,7 +48,7 @@ import { linkCodex } from "../lib/codex-link.mjs";
 import { recordProbeSuccess, parseOpenclawAuthProfiles, codexImportRecovery } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
 import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, openclawSignInFailure, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
-import { PINNED_OPENCLAW_VERSION, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors } from "../lib/openclaw-install.mjs";
+import { PINNED_OPENCLAW_VERSION, pluginInstallArgs, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors } from "../lib/openclaw-install.mjs";
 import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
 import { fileURLToPath } from "node:url";
@@ -143,6 +143,10 @@ Usage: nomarmy <command> [options]
   install         Run the bundled installer for the chosen setup profile.
                   --profile <name>       override NOMARMY_SETUP_PROFILE
                   --no-claude            skip Claude Code registration
+                  --server               a headless server: the hosted profile,
+                                         OpenClaw and your agents' plugins, the
+                                         sandbox image; no local model, no
+                                         editor connections
   model           Change the configured model later, without the rest of
                   setup's questions. Offers to also resync the MCP
                   registration's worker-routing env vars, and to restart
@@ -697,10 +701,11 @@ function runSetupChild(args) {
 }
 
 function cmdInstall() {
-  const profile = value("profile", null) ?? setupProfileState().profile;
-  if (!profile) throw new Error("Choose a profile first: nomarmy setup --choose (or install --profile <name>).");
-  if (!value("profile", null)) console.log(`Installing for profile ${profile} (from nomarmy setup; pass --profile to choose another).`);
-  const result = spawnSync("bash", [path.join(nomarmyRoot, "install.sh"), "--profile", profile, ...(flag("no-claude") ? ["--no-claude"] : [])], { stdio: "inherit", cwd: nomarmyRoot });
+  const server = flag("server");
+  const profile = value("profile", null) ?? (server ? "hosted" : setupProfileState().profile);
+  if (!profile) throw new Error("Choose a profile first: nomarmy setup --choose (or install --profile <name>, or install --server).");
+  if (!value("profile", null) && !server) console.log(`Installing for profile ${profile} (from nomarmy setup; pass --profile to choose another).`);
+  const result = spawnSync("bash", [path.join(nomarmyRoot, "install.sh"), "--profile", profile, ...(flag("no-claude") ? ["--no-claude"] : []), ...(server ? ["--server"] : [])], { stdio: "inherit", cwd: nomarmyRoot });
   process.exitCode = result.status ?? 1;
 }
 
@@ -1230,9 +1235,10 @@ async function ensureVendorAuth(rl, vendorKey) {
       if (!repaired.ok) return { ok: false };
     }
     if (!runQuiet(openclawCmd(), ["plugins", "inspect", vendor.plugin.id]).ok) {
-      console.log(c.dim(`Installing ${vendor.plugin.spec}...`));
-      if (!runInteractive(openclawCmd(), ["plugins", "install", vendor.plugin.spec])) {
-        console.log(c.red(`✗ Plugin install failed. Run \`openclaw plugins install ${vendor.plugin.spec}\` yourself to see why.`));
+      const installArgs = pluginInstallArgs(vendor.plugin);
+      console.log(c.dim(`Installing ${installArgs[2]}...`));
+      if (!runInteractive(openclawCmd(), installArgs)) {
+        console.log(c.red(`✗ Plugin install failed. Run \`openclaw ${installArgs.join(" ")}\` yourself to see why.`));
         return { ok: false };
       }
       runQuiet(openclawCmd(), ["plugins", "registry", "--refresh"]);

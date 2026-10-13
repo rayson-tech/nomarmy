@@ -24,3 +24,17 @@ test("a job's model missing from the catalog refreshes it, at most every ten min
   await config.modelCatalogReady(1000, ["openai/not-listed"]);
   assert.equal(refreshes, 2);
 });
+
+test("a job whose model is missing waits longer for a refresh already running", async () => {
+  let finish;
+  const config = createAgentConfig({
+    projectDir: process.cwd(),
+    queryCatalog: () => new Map(),
+    queryCatalogAsync: () => new Promise((resolve) => { finish = resolve; }),
+    now: () => 11 * 60 * 1000,
+    missingModelWaitMs: 2000,
+  });
+  const ready = config.modelCatalogReady(10, ["openai/gpt-6-astra"]);
+  setTimeout(() => finish(new Map([["openai/gpt-6-astra", 872000]])), 100);
+  assert.equal((await ready).get("openai/gpt-6-astra"), 872000, "past the 10ms wait, within the missing-model one");
+});

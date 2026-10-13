@@ -65,6 +65,8 @@ nomarmy army init --agent <name>     # every role on that agent (add --model <mo
 nomarmy doctor
 ```
 
+**On a server** (no editor, a global npm install that may be owned by root), use `nomarmy install --server` instead of `setup --hosted` plus `install`. It records the hosted mode, installs OpenClaw at the tested release and the plugin for each subscription in `agents.yml`, builds the sandbox image and refreshes OpenClaw's model catalog, and registers no editor. Copy or write `~/.config/nomarmy/agents.yml` first if you want the plugins installed in the same step. On Linux, OpenClaw's sandboxes need `catatonit` (`sudo apt install catatonit` on Ubuntu, where podman only recommends it); `nomarmy doctor` checks for it.
+
 A hosted install refuses a job that names no role or agent, rather than falling back to a local model that isn't there. `nomarmy health` warns about any role still on `local`. `e2e.sh` tests the local model, so it has nothing to do here; `nomarmy army assign` tests each role's route instead.
 
 ## macOS (Apple Silicon)
@@ -91,7 +93,7 @@ If `e2e.sh` says `No API key found for provider "llama-cpp"`, run `./scripts/con
 
 ## Linux
 
-`install.sh` installs the toolchain, CMake, Git and Node when they're missing. Install Podman yourself first (`apt`, `dnf`, `zypper`, `pacman` or `apk install podman`).
+`install.sh` installs the toolchain, CMake, Git and Node when they're missing. Install Podman yourself first (`apt`, `dnf`, `zypper`, `pacman` or `apk install podman`). On Ubuntu and Debian, also install `catatonit`, which OpenClaw's sandboxes need and podman only recommends.
 
 ```bash
 # no NVIDIA GPU

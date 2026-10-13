@@ -2,12 +2,15 @@
 //
 // The check functions are pure: they take a facts object and return a
 // verdict. Facts are hand-built here rather than collected from the real
-// filesystem/network/subprocess, so these tests run with no node_modules and
-// no live podman/llama-server/AWS.
+// filesystem/network/subprocess, so these tests need no live
+// podman/llama-server/AWS. Fact collection uses a virtual filesystem below.
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
+import * as doctor from "../lib/doctor.mjs";
 
 import {
   parseNodeVersion,
@@ -178,7 +181,11 @@ test("checkEndpoint (local) fails with a concrete fix when unreachable", () => {
   });
   assert.equal(result.ok, false);
   assert.match(result.message, /ECONNREFUSED/);
-  assert.match(result.fix, /nomarmy setup --choose.*nomarmy start <profile>/);
+  assert.deepEqual(result, {
+    ok: false,
+    message: "llama-server health check failed at http://127.0.0.1:8080/health: connect ECONNREFUSED",
+    fix: "Run 'nomarmy setup --hosted' if your jobs run on API keys or subscriptions. To run a model on this machine: 'nomarmy start <profile>'. Then re-run 'nomarmy doctor'.",
+  });
 });
 
 test("checkEndpoint (hosted) passes because there is no local model by design", () => {
@@ -314,6 +321,7 @@ function passingFacts() {
     gitFound: true,
     gitLongPaths: null,
     podmanFound: true,
+    podmanInitFound: true,
     podmanDaemonReachable: true,
     podmanDaemonError: null,
     execution: "local",
@@ -323,9 +331,9 @@ function passingFacts() {
 
 test("evaluateChecks reports overall ok when every check passes", () => {
   const checks = evaluateChecks(passingFacts());
-  assert.equal(checks.length, 9);
+  assert.equal(checks.length, 10);
   assert.ok(checks.every((c) => c.ok));
-  assert.deepEqual(checks.map((c) => c.id), ["node", "git", "git-longpaths", "podman", "podman-daemon", "podman-vm-memory", "podman-vm-jobs", "podman-idmap", "endpoint"]);
+  assert.deepEqual(checks.map((c) => c.id), ["node", "git", "git-longpaths", "podman", "podman-daemon", "podman-init", "podman-vm-memory", "podman-vm-jobs", "podman-idmap", "endpoint"]);
 });
 
 test("evaluateChecks fails the whole report when one check fails (defect #4 - no contradictory output)", () => {
@@ -376,7 +384,7 @@ test("runDoctor --json (injected facts) produces machine-readable, consistent ou
     const parsed = JSON.parse(printed);
     assert.equal(parsed.ok, true);
     assert.ok(Array.isArray(parsed.checks));
-    assert.equal(parsed.checks.length, 9);
+    assert.equal(parsed.checks.length, 10);
   } finally {
     console.log = originalLog;
   }
@@ -404,7 +412,7 @@ test("doctor's Podman and local-model advice fits the platform (Windows got brew
   assert.match(installPodmanHint("darwin"), /brew install podman.*podman machine init --memory 8192/);
   assert.match(installPodmanHint("linux"), /package manager/);
   const r = checkEndpoint({ execution: "local", endpoint: { url: "http://127.0.0.1:8080", healthy: false, error: "fetch failed" }, platform: "win32" });
-  assert.match(r.fix, /nomarmy setup --choose/);
+  assert.match(r.fix, /^Run 'nomarmy setup --hosted' if your jobs run on API keys or subscriptions/);
   assert.match(r.fix, /docs\/install\.md#windows/);
   assert.doesNotMatch(r.fix, /\.sh/);
 });
@@ -421,5 +429,170 @@ test("doctor JSON fails overall when an OpenClaw postflight check fails", async 
     assert.deepEqual(JSON.parse(printed), result);
   } finally {
     console.log = originalLog;
+  }
+});
+
+// --- Linux init helper and hosted-only fact collection -----------------------
+
+test("checkPodmanInit diagnoses missing catatonit and is wired after podman-daemon", () => {
+  const facts = { ...passingFacts(), podmanInitFound: false };
+  const expected = {
+    ok: false,
+    message: 'Podman init helper not found; sandboxes fail with SandboxProvisioningError: lookup init binary: exec: "catatonit".',
+    fix: "sudo apt install catatonit (or your distro's catatonit package), then re-run 'nomarmy doctor'",
+  };
+  assert.deepEqual(doctor.checkPodmanInit(facts), expected);
+  const checks = evaluateChecks(facts);
+  const index = checks.findIndex((check) => check.id === "podman-daemon");
+  assert.deepEqual(checks[index + 1], { id: "podman-init", ...expected });
+});
+
+test("checkPodmanInit passes for executable helpers and skips VM platforms or missing podman", () => {
+  assert.deepEqual(doctor.checkPodmanInit(passingFacts()), { ok: true, message: "Podman init helper is available." });
+  for (const platform of ["darwin", "win32"]) {
+    assert.deepEqual(doctor.checkPodmanInit({ platform, podmanFound: true, podmanInitFound: false }), {
+      ok: true, message: "Podman init helper: not needed on this platform.",
+    });
+  }
+  assert.deepEqual(doctor.checkPodmanInit({ platform: "linux", podmanFound: false, podmanInitFound: null }), {
+    ok: true, message: "Podman init helper: skipped, podman not found.",
+  });
+});
+
+test("checkEndpoint accepts an unhealthy local endpoint only for hosted-only roles", () => {
+  const facts = {
+    execution: "local", platform: "linux", hostedOnly: true,
+    endpoint: { url: "http://127.0.0.1:8080/health", healthy: false, error: "connect ECONNREFUSED" },
+  };
+  assert.deepEqual(checkEndpoint(facts), {
+    ok: true,
+    message: "No local model running; every role runs on api or subscription agents, so none is needed. Run 'nomarmy setup --hosted' to make that explicit.",
+  });
+  assert.deepEqual(checkEndpoint({ ...facts, hostedOnly: false }), {
+    ok: false,
+    message: "llama-server health check failed at http://127.0.0.1:8080/health: connect ECONNREFUSED",
+    fix: "Run 'nomarmy setup --hosted' if your jobs run on API keys or subscriptions. To run a model on this machine: 'nomarmy start <profile>'. Then re-run 'nomarmy doctor'.",
+  });
+});
+
+// Virtual files keep fact collection away from host config, subprocesses and network.
+async function virtualFacts(t, { platform = "linux", podman = true, files = {}, executable = [], xdg = "/doctor/config" } = {}) {
+  const originalPath = process.env.PATH;
+  const originalConfig = process.env.NOMARMY_CONFIG_DIR;
+  process.env.PATH = "/doctor/bin";
+  process.env.NOMARMY_CONFIG_DIR = "/doctor/config/nomarmy";
+  t.after(() => {
+    if (originalPath === undefined) delete process.env.PATH; else process.env.PATH = originalPath;
+    if (originalConfig === undefined) delete process.env.NOMARMY_CONFIG_DIR; else process.env.NOMARMY_CONFIG_DIR = originalConfig;
+  });
+  t.mock.method(os, "platform", () => platform);
+  t.mock.method(os, "homedir", () => "/doctor/home");
+  t.mock.method(process, "cwd", () => "/doctor/project");
+  const podmanFile = platform === "win32" ? "\\doctor\\bin\\podman.exe" : "/doctor/bin/podman";
+  const present = (file) => Object.hasOwn(files, file) || executable.includes(file) || (podman && file === podmanFile);
+  const reads = [];
+  const accesses = [];
+  t.mock.method(fs, "existsSync", present);
+  t.mock.method(fs, "statSync", (file) => {
+    if (!present(file)) throw new Error("ENOENT");
+    return { isFile: () => true, uid: process.getuid?.(), mode: 0o600 };
+  });
+  t.mock.method(fs, "accessSync", (file, mode) => {
+    accesses.push({ file, mode });
+    if (!executable.includes(file)) throw new Error("EACCES");
+  });
+  t.mock.method(fs, "readFileSync", (file) => {
+    reads.push(file);
+    if (!Object.hasOwn(files, file)) throw new Error("ENOENT");
+    return files[file];
+  });
+  const facts = await doctor.collectFacts({ NOMARMY_EXECUTION: "hosted", PATH: "/doctor/bin", ...(xdg ? { XDG_CONFIG_HOME: xdg } : {}) });
+  assert.deepEqual(Object.keys(facts).sort(), [
+    "nodeVersion", "platform", "gitFound", "gitLongPaths", "podmanFound", "podmanInitFound",
+    "podmanDaemonReachable", "podmanDaemonError", "podmanMachineMemoryMb", "maxJobs",
+    "podmanIdMappings", "hostedOnly", "execution", "endpoint",
+  ].sort());
+  assert.equal(facts.podmanFound, podman);
+  return { facts, reads, accesses };
+}
+
+test("collectFacts finds executable catatonit in each helper directory and on PATH", async (t) => {
+  for (const dir of ["/usr/local/libexec/podman", "/usr/local/lib/podman", "/usr/libexec/podman", "/usr/lib/podman", "/doctor/bin"]) {
+    await t.test(dir, async (t) => {
+      const { facts } = await virtualFacts(t, { executable: [`${dir}/catatonit`] });
+      assert.equal(facts.podmanInitFound, true);
+    });
+  }
+});
+
+test("collectFacts rejects missing or non-executable catatonit", async (t) => {
+  const { facts } = await virtualFacts(t, { files: { "/usr/lib/podman/catatonit": "not executable", "/doctor/bin/catatonit": "not executable" } });
+  assert.equal(facts.podmanInitFound, false);
+});
+
+test("collectFacts honors executable init_path in system, XDG and fallback containers.conf", async (t) => {
+  for (const file of ["/etc/containers/containers.conf", "/usr/share/containers/containers.conf", "/doctor/config/containers/containers.conf", "/doctor/home/.config/containers/containers.conf"]) {
+    await t.test(file, async (t) => {
+      const { facts } = await virtualFacts(t, {
+        files: { [file]: '# init_path = "/ignored"\n[engine]\ninit_path = "/doctor/custom-init"\n' },
+        executable: ["/doctor/custom-init"],
+        xdg: file.includes("/.config/") ? null : "/doctor/config",
+      });
+      assert.equal(facts.podmanInitFound, true);
+    });
+  }
+});
+
+test("collectFacts rejects non-executable configured init_path", async (t) => {
+  const { facts } = await virtualFacts(t, { files: {
+    "/etc/containers/containers.conf": 'init_path = "/doctor/custom-init"',
+    "/doctor/custom-init": "not executable",
+  } });
+  assert.equal(facts.podmanInitFound, false);
+});
+
+test("collectFacts does no catatonit probing on VM platforms or without podman", async (t) => {
+  for (const options of [{ platform: "darwin" }, { platform: "win32" }, { podman: false }]) {
+    await t.test(JSON.stringify(options), async (t) => {
+      const { facts, reads, accesses } = await virtualFacts(t, options);
+      assert.equal(facts.podmanInitFound, null);
+      assert.deepEqual(accesses, []);
+      assert.deepEqual(reads.filter((file) => file.endsWith("containers.conf")), []);
+    });
+  }
+});
+
+const hostedAgents = {
+  "/doctor/config/nomarmy/agents.yml": "agents:\n  api-worker:\n    kind: api\n    provider: openai\n    auth_env: TEST_API_KEY\n  subscriber:\n    kind: subscription\n    provider: codex\n    owner: tester\n  custom-local:\n    kind: local\n",
+};
+
+test("collectFacts recognizes API and subscription armies without local roles", async (t) => {
+  for (const agent of ["api-worker", "subscriber"]) {
+    await t.test(agent, async (t) => {
+      const { facts } = await virtualFacts(t, { files: { ...hostedAgents,
+        "/doctor/config/nomarmy/config.yml": `army:\n  roles:\n    builder:\n      agent: ${agent}\n`,
+      } });
+      assert.equal(facts.hostedOnly, true);
+    });
+  }
+});
+
+test("collectFacts requires a hosted agent and refuses built-in or custom local roles", async (t) => {
+  for (const agent of [null, "local", "custom-local"]) {
+    await t.test(String(agent), async (t) => {
+      const files = agent ? { ...hostedAgents, "/doctor/config/nomarmy/config.yml": `army:\n  roles:\n    builder:\n      agent: api-worker\n    reviewer:\n      agent: ${agent}\n` }
+        : { "/doctor/config/nomarmy/agents.yml": "agents:\n  custom-local:\n    kind: local\n" };
+      const { facts } = await virtualFacts(t, { files });
+      assert.equal(facts.hostedOnly, false);
+    });
+  }
+});
+
+test("collectFacts keeps hostedOnly false if either config load throws", async (t) => {
+  for (const file of ["agents.yml", "config.yml"]) {
+    await t.test(file, async (t) => {
+      const { facts } = await virtualFacts(t, { files: { ...hostedAgents, [`/doctor/config/nomarmy/${file}`]: "[invalid yaml" } });
+      assert.equal(facts.hostedOnly, false);
+    });
   }
 });
