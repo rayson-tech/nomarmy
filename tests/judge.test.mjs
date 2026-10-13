@@ -69,7 +69,7 @@ test("askJudge sends the prompt as a file, on the job's route, in an empty works
 test("askJudge keeps the answer when the sandbox left files it can't remove", { skip: process.getuid?.() === 0 && "root can remove anything" }, async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-judge-"));
   let locked = null;
-  t.after(() => { if (locked) fs.chmodSync(locked, 0o755); fs.rmSync(root, { recursive: true, force: true }); });
+  t.after(() => { if (locked && fs.existsSync(locked)) fs.chmodSync(locked, 0o755); fs.rmSync(root, { recursive: true, force: true }); });
   const exec = async (file, args) => {
     if (file !== "openclaw") return { stdout: "", stderr: "" };
     // Stands in for files a container wrote under a mapped uid.
