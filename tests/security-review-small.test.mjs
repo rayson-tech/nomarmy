@@ -71,7 +71,8 @@ test('Codex import requires explicit noninteractive consent and asks once in a t
   for (const scenario of [{}, { removeEmailProfiles: true }, { isTTY: true, answer: false }, { isTTY: true, answer: true }, { importLogin: true }]) {
     const calls = [], questions = [], printed = []; let profiles = [];
     const allowed = scenario.importLogin === true || scenario.answer === true;
-    const result = await linkCodex({ ...scenario, codexDir: '/fixture/codex', print: s => printed.push(s), confirm: async (...args) => { questions.push(args); return scenario.answer; }, run: async (_cmd, args) => {
+    const backupDir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'nomarmy-test-openclaw-')), 'backups');
+    const result = await linkCodex({ ...scenario, codexDir: '/fixture/codex', backupDir, print: s => printed.push(s), confirm: async (...args) => { questions.push(args); return scenario.answer; }, run: async (_cmd, args) => {
       calls.push(args);
       if (args[0] === 'migrate') { profiles = [{ id: 'openai:account-test', provider: 'openai', type: 'oauth', label: '(Codex import)', expiresAt: '2099-01-01T00:00:00Z' }]; return { ok: true, stdout: 'SECRET_SENTINEL' }; }
       return { ok: true, stdout: JSON.stringify({ profiles }) };
@@ -79,8 +80,8 @@ test('Codex import requires explicit noninteractive consent and asks once in a t
     assert.equal(result, allowed);
     assert.deepEqual(questions, scenario.isTTY ? [[question, { defaultYes: true }]] : []);
     const list = ['models', 'auth', 'list', '--json'];
-    assert.deepEqual(calls, allowed ? [list, ['migrate', 'apply', 'codex', '--from', '/fixture/codex', '--agent', 'main', '--include-secrets', '--item', 'auth:openai', '--yes'], list] : [list]);
-    assert.deepEqual(printed, allowed ? ['Linking OpenClaw: openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --yes', "Imported the ChatGPT credential stored by Codex into OpenClaw's auth store.", 'Confirmed an unexpired openai:account- (Codex import) profile.'] : ['Nothing imported; use --link-openclaw to authorize the Codex login import non-interactively.']);
+    assert.deepEqual(calls, allowed ? [list, ['migrate', 'apply', 'codex', '--from', '/fixture/codex', '--agent', 'main', '--include-secrets', '--item', 'auth:openai', '--backup-output', backupDir, '--yes'], list] : [list]);
+    assert.deepEqual(printed, allowed ? ['Linking OpenClaw: openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw/backups --yes', "Imported the ChatGPT credential stored by Codex into OpenClaw's auth store.", 'Confirmed an unexpired openai:account- (Codex import) profile.'] : ['Nothing imported; use --link-openclaw to authorize the Codex login import non-interactively.']);
   }
 });
 

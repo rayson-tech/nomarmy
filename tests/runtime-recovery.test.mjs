@@ -1,6 +1,9 @@
 import "./helpers/isolate-global-config.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { linkCodex } from "../lib/codex-link.mjs";
 import { runHealthChecks } from "../lib/health.mjs";
 import { runDoctor } from "../lib/doctor.mjs";
@@ -8,10 +11,11 @@ import { runDoctor } from "../lib/doctor.mjs";
 const now = Date.parse("2026-10-01T12:00:00Z");
 const imported = { id: "openai:account-123", provider: "openai", type: "oauth", label: "(Codex import)", expiresAt: "2099-01-01T00:00:00.000Z" };
 const email = { id: "openai:person@example.com", provider: "openai", type: "oauth", expiresAt: "2099-01-01T00:00:00.000Z" };
-const migrate = "openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --yes";
+const migrate = "openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw/backups --yes";
 const fix = `openclaw models auth logout ${email.id} && ${migrate}`;
 const list = ["models", "auth", "list", "--json"];
-const migration = ["migrate", "apply", "codex", "--from", "/sandbox/codex", "--agent", "main", "--include-secrets", "--item", "auth:openai", "--yes"];
+const backupDir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-test-openclaw-")), "backups");
+const migration = ["migrate", "apply", "codex", "--from", "/sandbox/codex", "--agent", "main", "--include-secrets", "--item", "auth:openai", "--backup-output", backupDir, "--yes"];
 function linkRunner(initial, final = [imported], fail = null) {
   let profiles = initial;
   const calls = [];
@@ -23,7 +27,7 @@ function linkRunner(initial, final = [imported], fail = null) {
     return { ok: !(fail === "logout" && args[2] === "logout") && !(fail === "migrate" && args[0] === "migrate"), stdout: "SECRET_SENTINEL" };
   } };
 }
-const options = { command: "stub", codexDir: "/sandbox/codex", now, importLogin: true };
+const options = { command: "stub", codexDir: "/sandbox/codex", backupDir, now, importLogin: true };
 
 test("Codex link removes capturing email before migration and confirms the account import without logging output", async () => {
   const r = linkRunner([email, imported]); const printed = []; const questions = [];
@@ -64,7 +68,7 @@ test("Codex link rejects missing, email, expired, and mislabeled imports and fai
 });
 
 const agents = { codex: { kind: "subscription", provider: "openai", model: "gpt-6-astra" }, grok: { kind: "api", provider: "xai", model: "grok-4.7" } };
-const facts = { nodeVersion: "v20.11.3", platform: "linux", gitFound: true, gitLongPaths: null, podmanFound: true, podmanDaemonReachable: true, podmanDaemonError: null, execution: "local", endpoint: { mode: "local", url: "http://127.0.0.1:8080/health", healthy: true, error: null } };
+const facts = { nodeVersion: "v20.11.3", platform: "linux", gitFound: true, gitLongPaths: null, podmanFound: true, podmanInitFound: true, podmanDaemonReachable: true, podmanDaemonError: null, execution: "local", endpoint: { mode: "local", url: "http://127.0.0.1:8080/health", healthy: true, error: null } };
 const paths = ["agents.entries.main.modelPolicy.allow", "agents.defaults.modelPolicy.allow"];
 async function checks(kind, profiles, allows = [null, null], armySummary = null) {
   const calls = [];
@@ -81,6 +85,9 @@ async function checks(kind, profiles, allows = [null, null], armySummary = null)
     const old = console.log; console.log = () => {};
     try {
       const result = await runDoctor({ facts, runtime });
+      assert.deepEqual(result.checks.find((c) => c.id === "podman-init"), {
+        id: "podman-init", ok: true, message: "Podman init helper is available.",
+      });
       issues = result.checks.filter((c) => !c.ok);
       assert.deepEqual(Object.keys(result).sort(), ["checks", "ok"]);
       assert.equal(result.ok, issues.length === 0);
@@ -119,3 +126,11 @@ for (const kind of ["health", "doctor"]) {
     assert.deepEqual((await checks(kind, [imported], [[], null])).map((i) => i.id), ["model-policy:agents.entries.main.modelPolicy.allow"]);
   });
 }
+
+test("the Codex import's backup goes inside OpenClaw's state, never the current directory", async () => {
+  const r = linkRunner([]);
+  assert.equal(await linkCodex({ ...options, run: r.run }), true);
+  const args = r.calls.find((call) => call[0] === "migrate");
+  assert.equal(args[args.indexOf("--backup-output") + 1], backupDir);
+  assert.equal(fs.statSync(backupDir).mode & 0o777, process.platform === "win32" ? fs.statSync(backupDir).mode & 0o777 : 0o700);
+});

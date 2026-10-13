@@ -36,7 +36,7 @@ case "$1" in
     echo "$*" >> "${dir}/plugins.log"
     case "$2" in
       inspect) v=$(cat "${dir}/codex-plugin"); printf '{"plugin":{"id":"%s","enabled":true,"version":"%s","builtWithOpenClawVersion":"%s"}}\n' "$3" "$v" "$v";;
-      update) echo "${PINNED_OPENCLAW_VERSION}" > "${dir}/codex-plugin";;
+      install) v=\${3##*@}; echo "$v" > "${dir}/codex-plugin";;
     esac;;
   *) exit 1;;
 esac
@@ -56,7 +56,7 @@ esac
   });
   const npmCalls = () => { try { return fs.readFileSync(path.join(dir, "npm.log"), "utf8").trim().split("\n"); } catch { return []; } };
   const installed = () => fs.readFileSync(path.join(dir, "version"), "utf8").trim();
-  const pluginUpdates = () => { try { return fs.readFileSync(path.join(dir, "plugins.log"), "utf8").trim().split("\n").filter((l) => l.startsWith("plugins update")); } catch { return []; } };
+  const pluginUpdates = () => { try { return fs.readFileSync(path.join(dir, "plugins.log"), "utf8").trim().split("\n").filter((l) => l.startsWith("plugins install")); } catch { return []; } };
   return { run, npmCalls, installed, home, pluginUpdates };
 }
 
@@ -113,11 +113,11 @@ test("--update with OpenClaw at the pin but a configured vendor's plugin behind 
   const f = fakes({ version: PINNED_OPENCLAW_VERSION, codexPlugin: "2026.9.7" });
   const asked = f.run();
   assert.equal(asked.status, 2, asked.stderr);
-  assert.match(asked.stdout, /Update OpenClaw plugin codex 2026\.9\.7 to the tested release: \S*openclaw plugins update codex/);
+  assert.ok(asked.stdout.includes(`Update OpenClaw plugin codex 2026.9.7 to ${PINNED_OPENCLAW_VERSION}: `) && asked.stdout.includes(`openclaw plugins install clawhub:@openclaw/codex@${PINNED_OPENCLAW_VERSION} --force`), asked.stdout);
   assert.deepEqual(f.pluginUpdates(), []);
 
   const applied = f.run("--yes");
   assert.equal(applied.status, 0, applied.stdout + applied.stderr);
-  assert.deepEqual(f.pluginUpdates(), ["plugins update codex"]);
+  assert.deepEqual(f.pluginUpdates(), [`plugins install clawhub:@openclaw/codex@${PINNED_OPENCLAW_VERSION} --force`]);
   assert.deepEqual(f.npmCalls().filter((call) => call.startsWith("install")), [], "OpenClaw itself is left alone");
 });

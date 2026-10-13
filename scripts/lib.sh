@@ -222,7 +222,9 @@ install_podman(){
 
   echo "==> Installing Podman with $manager"
   case "$manager" in
-    apt) run_as_root apt-get update; run_as_root apt-get install -y podman ;;
+    # catatonit is only Recommended by Ubuntu's podman, and OpenClaw's
+    # sandboxes need it (podman --init); older releases don't package it.
+    apt) run_as_root apt-get update; run_as_root apt-get install -y podman; run_as_root apt-get install -y catatonit || echo 'NOTE: catatonit not installed; nomarmy doctor checks for it.' ;;
     dnf) run_as_root dnf install -y podman ;;
     yum) run_as_root yum install -y podman ;;
     zypper) run_as_root zypper --non-interactive install podman ;;

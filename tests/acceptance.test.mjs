@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import YAML from "yaml";
-import { contractSchema, loadContract, loadContracts, checkContract, contractDisplayPath } from "../lib/acceptance.mjs";
+import { contractSchema, criterionIdSchema, loadContract, loadContracts, checkContract, contractDisplayPath } from "../lib/acceptance.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const cli = path.join(root, "bin/nomarmy.mjs");
@@ -366,4 +366,9 @@ test("acceptance CLI reports skipped proofs and strict rejects scoped-out criter
   const strict = f.invoke("--strict", "--json");
   assert.equal(strict.status, 1);
   assert.deepEqual(JSON.parse(strict.stdout), report);
+});
+
+test("criterion IDs accept ticket keys and Jira-style suffixes, nothing looser", () => {
+  for (const id of ["WIN-6", "BASE-3-AC1", "A1-20-X-2"]) assert.equal(criterionIdSchema.safeParse(id).success, true, id);
+  for (const id of ["win-6", "WIN", "WIN-", "WIN-6-", "WIN-AC1", "WIN-6-ac1", "WIN 6", "6-WIN"]) assert.equal(criterionIdSchema.safeParse(id).success, false, id);
 });
