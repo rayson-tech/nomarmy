@@ -85,7 +85,7 @@ test("versionIssues: OpenClaw behind npm, and a plugin behind OpenClaw -- the re
   assert.equal(behind[0].id, "openclaw-update:2026.9.6");
   assert.equal(behind[0].fix, "nomarmy doctor --fix  (installs the tested OpenClaw release, when no nomArmy jobs are running)");
   assert.deepEqual(versionIssues({ installed: "OpenClaw 2026.9.6", latest: "2026.9.6" }), []);
-  assert.equal(versionIssues({ installed: "OpenClaw 2026.10.1", latest: "2026.10.2" })[0].fix, "No automatic upgrade: nomArmy keeps the tested release or a newer installed version");
+  assert.equal(versionIssues({ installed: "OpenClaw 2026.10.2", latest: "2026.10.3" })[0].fix, "No automatic upgrade: nomArmy keeps the tested release or a newer installed version");
   const skew = versionIssues({ installed: "OpenClaw 2026.9.6", latest: "2026.9.6", plugins: [{ id: "codex", version: "2026.9.5" }] });
   assert.equal(skew[0].id, "plugin-skew:codex:2026.9.5");
   assert.equal(skew[0].severity, "info");
