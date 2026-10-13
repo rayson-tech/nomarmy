@@ -40,6 +40,8 @@ agents:
 
 Changes apply to the next job with no restart. The exception is a **new** api agent, which needs one `nomarmy connect claude` so the MCP server sees its key variable (`agents add` offers to do it).
 
+**Writing `agents.yml` by hand** (on a server, say) skips registering api keys with OpenClaw, and jobs on those agents fail with `No API key found`. Export each agent's `auth_env` variable and run `nomarmy agents register`: it saves every api agent's key that OpenClaw doesn't have yet (`agents register <name>` saves one again, after rotating it). `nomarmy health` and `nomarmy doctor` flag an api agent with no saved key.
+
 **Why subscriptions are individual, never pooled.** Anthropic's terms separate "individual experimentation and automation" (sanctioned, including third-party apps through the Agent SDK, per seat and non-transferable) from "teams running shared production automation" (use the metered API). So a subscription agent belongs to one named person, a job on it must say `on_behalf_of: "<owner>"` or it's refused, and nothing ever load-balances across subscriptions. xAI subscriptions are out of scope until its terms are clear; an xAI API key is fine.
 
 **One credential per provider id.** OpenAI, Meta and xAI keep a subscription and an API key under the same OpenClaw provider id, so `agents.yml` refuses an api agent and a subscription agent on the same one. Claude never collides: its subscription is `claude-cli`, its API key `anthropic`. A ChatGPT plan runs as `openai/<model>` through the Codex login.
