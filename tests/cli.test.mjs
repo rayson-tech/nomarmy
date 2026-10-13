@@ -326,6 +326,7 @@ import fs from "node:fs";
 let stdin = "";
 try { stdin = fs.readFileSync(0, "utf8"); } catch {}
 fs.appendFileSync(process.env.FAKE_OPENCLAW_LOG, JSON.stringify({ argv: process.argv.slice(2), stdin }) + "\\n");
+if (process.argv.slice(2, 5).join(" ") === "models auth list" && process.env.FAKE_OPENCLAW_AUTH) process.stdout.write(process.env.FAKE_OPENCLAW_AUTH);
 process.exit(0);
 `);
   fs.chmodSync(scriptPath, 0o755);
@@ -377,6 +378,32 @@ test("agents add --json refuses a missing field, a reserved name, and an api/sub
     assert.notEqual(clash.exitCode, 0);
     assert.match(JSON.parse(clash.stdout).errors.join("\n"), /OpenClaw provider "xai" is used by both api agent grok and subscription agent grok-sub/);
     assert.deepEqual(Object.keys(JSON.parse(runAgentsCLI(root, ["list", "--json"]).stdout).agents), ["local", "grok"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("agents register saves unregistered api keys from auth_env, skips saved ones, and fails on an unset variable", posixStubOnly, () => {
+  const root = scratchNomarmyRoot();
+  const fake = withFakeOpenclaw(root);
+  try {
+    runAgentsCLI(root, ["add", "--json", "--name", "grok", "--kind", "api", "--provider", "xai", "--model", "grok-4.7", "--auth-env", "NOMARMY_TEST_KEY_XAI"]);
+    runAgentsCLI(root, ["add", "--json", "--name", "deep", "--kind", "api", "--provider", "deepinfra", "--model", "m", "--auth-env", "NOMARMY_TEST_KEY_DEEP"]);
+    runAgentsCLI(root, ["add", "--json", "--name", "oai", "--kind", "api", "--provider", "openai", "--model", "m", "--auth-env", "NOMARMY_TEST_KEY_OAI"]);
+    const auth = JSON.stringify({ profiles: [{ id: "deepinfra:nomarmy", provider: "deepinfra", type: "api_key" }] });
+    const all = runAgentsCLI(root, ["register"], { ...fake.env, FAKE_OPENCLAW_AUTH: auth, NOMARMY_TEST_KEY_XAI: "sk-test-xai" });
+    assert.equal(all.exitCode, 1, "oai's variable isn't set");
+    assert.match(all.stdout, /deep: key already saved/);
+    assert.match(all.stdout, /oai: NOMARMY_TEST_KEY_OAI isn't set/);
+    const pastes = fake.calls().filter((call) => call.argv[2] === "paste-api-key");
+    assert.deepEqual(pastes.map((call) => call.argv[4]), ["xai"]);
+    assert.equal(pastes[0].stdin.trim(), "sk-test-xai");
+    assert.ok(!all.stdout.includes("sk-test-xai"));
+
+    const named = runAgentsCLI(root, ["register", "deep"], { ...fake.env, FAKE_OPENCLAW_AUTH: auth, NOMARMY_TEST_KEY_DEEP: "sk-test-deep" });
+    assert.equal(named.exitCode, 0, named.stdout);
+    assert.equal(fake.calls().filter((call) => call.argv[2] === "paste-api-key").at(-1).argv[4], "deepinfra", "a named agent registers again (a rotated key)");
+    assert.notEqual(runAgentsCLI(root, ["register", "nope"], fake.env).exitCode, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

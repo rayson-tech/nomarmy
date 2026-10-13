@@ -24,6 +24,7 @@ import {
   collectEndpointFacts,
   probeRemoteEndpoint,
   evaluateChecks,
+  checkPrivateTmp,
   runDoctor,
 } from "../lib/doctor.mjs";
 
@@ -331,9 +332,9 @@ function passingFacts() {
 
 test("evaluateChecks reports overall ok when every check passes", () => {
   const checks = evaluateChecks(passingFacts());
-  assert.equal(checks.length, 10);
+  assert.equal(checks.length, 11);
   assert.ok(checks.every((c) => c.ok));
-  assert.deepEqual(checks.map((c) => c.id), ["node", "git", "git-longpaths", "podman", "podman-daemon", "podman-init", "podman-vm-memory", "podman-vm-jobs", "podman-idmap", "endpoint"]);
+  assert.deepEqual(checks.map((c) => c.id), ["node", "git", "git-longpaths", "podman", "podman-daemon", "podman-init", "podman-vm-memory", "podman-vm-jobs", "podman-idmap", "private-tmp", "endpoint"]);
 });
 
 test("evaluateChecks fails the whole report when one check fails (defect #4 - no contradictory output)", () => {
@@ -384,7 +385,7 @@ test("runDoctor --json (injected facts) produces machine-readable, consistent ou
     const parsed = JSON.parse(printed);
     assert.equal(parsed.ok, true);
     assert.ok(Array.isArray(parsed.checks));
-    assert.equal(parsed.checks.length, 10);
+    assert.equal(parsed.checks.length, 11);
   } finally {
     console.log = originalLog;
   }
@@ -510,7 +511,7 @@ async function virtualFacts(t, { platform = "linux", podman = true, files = {}, 
   assert.deepEqual(Object.keys(facts).sort(), [
     "nodeVersion", "platform", "gitFound", "gitLongPaths", "podmanFound", "podmanInitFound",
     "podmanDaemonReachable", "podmanDaemonError", "podmanMachineMemoryMb", "maxJobs",
-    "podmanIdMappings", "hostedOnly", "execution", "endpoint",
+    "podmanIdMappings", "hostedOnly", "execution", "endpoint", "privateTmp",
   ].sort());
   assert.equal(facts.podmanFound, podman);
   return { facts, reads, accesses };

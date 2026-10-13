@@ -242,3 +242,21 @@ test("model refusals are kept past a day, until a test call or a job on the mode
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("apiKeyIssues flags api agents whose provider has no saved OpenClaw key", async () => {
+  const { apiKeyIssues, apiKeyProvider } = await import("../lib/health.mjs");
+  const agents = {
+    grok: { kind: "api", provider: "xai", auth_env: "NOMARMY_XAI_API_KEY" },
+    gen: { kind: "api", provider: "openclaw", openclaw_provider: "deepseek", auth_env: "DS_KEY" },
+    custom: { kind: "api", provider: "openai-compatible", base_url: "https://x/v1", auth_env: "C_KEY" },
+    codex: { kind: "subscription", provider: "openai", owner: "a@b.c" },
+    local: { kind: "local", slot: "coder" },
+  };
+  assert.equal(apiKeyProvider("gen", agents.gen), "deepseek");
+  assert.equal(apiKeyProvider("custom", agents.custom), "custom", "a custom endpoint is registered under the agent's own name");
+  const issues = apiKeyIssues([{ provider: "deepseek" }, { provider: "openai" }], agents);
+  assert.deepEqual(issues.map((i) => i.id), ["api-key:grok", "api-key:custom"]);
+  assert.equal(issues[0].fix, "export NOMARMY_XAI_API_KEY=<key>, then nomarmy agents register grok");
+  assert.match(issues[0].detail, /No API key found/);
+  assert.deepEqual(apiKeyIssues(null, agents), [], "unreadable profiles: no claim either way");
+});

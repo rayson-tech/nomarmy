@@ -11,7 +11,7 @@
     {
       "name": "nomarmy",
       "description": "Your coding assistant plans, sandboxed workers build, and nomArmy checks every change before it counts: the tests run again in a fresh sandbox, and must fail with the change reverted. Needs `npm install -g nomarmy` and `nomarmy setup` first.",
-      "version": "0.1.0-beta.4",
+      "version": "0.1.0-beta.5",
       "author": {
         "name": "Rayson Technologies",
         "url": "https://rayson-tech.com"

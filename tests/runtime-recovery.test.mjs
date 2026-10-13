@@ -69,12 +69,14 @@ test("Codex link rejects missing, email, expired, and mislabeled imports and fai
 
 const agents = { codex: { kind: "subscription", provider: "openai", model: "gpt-6-astra" }, grok: { kind: "api", provider: "xai", model: "grok-4.7" } };
 const facts = { nodeVersion: "v20.11.3", platform: "linux", gitFound: true, gitLongPaths: null, podmanFound: true, podmanInitFound: true, podmanDaemonReachable: true, podmanDaemonError: null, execution: "local", endpoint: { mode: "local", url: "http://127.0.0.1:8080/health", healthy: true, error: null } };
+const grokKey = { id: "xai:nomarmy", provider: "xai", type: "api_key" };
 const paths = ["agents.entries.main.modelPolicy.allow", "agents.defaults.modelPolicy.allow"];
 async function checks(kind, profiles, allows = [null, null], armySummary = null) {
   const calls = [];
   const run = async (_cmd, args) => {
     calls.push(args);
-    if (args.join(" ") === list.join(" ")) return { ok: true, stdout: `note\n${JSON.stringify({ profiles })}` };
+    // grok's api key is saved; api-key issues are tested in health.test.mjs.
+    if (args.join(" ") === list.join(" ")) return { ok: true, stdout: `note\n${JSON.stringify({ profiles: [...profiles, grokKey] })}` };
     if (args[0] === "config") return { ok: true, stdout: JSON.stringify(allows[paths.indexOf(args[2])]) };
     return { ok: false, stdout: "" };
   };

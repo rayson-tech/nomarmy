@@ -114,6 +114,8 @@ Run the narrow pass on the touched files for a fast, sharp signal, *and* the bro
 
 **Both variables are empty when nothing changed**, as in `mode: verify` on a branch, so guarded commands like these exit 0 without running anything. nomArmy counts such a command as skipped, not passed: it exits 0, prints nothing, and every `NOMARMY_CHANGED_*` variable it names is empty. If every command in a profile skipped, verification is `not_run`, never a pass. Keep an unscoped profile (`python3 -m pytest tests/ -q`) for running the full suite on demand.
 
+**Verification commands can write in the checkout** (`tsc -b` with project references, fixtures, caches). Afterwards nomArmy puts the worktree back the way it found it, so nothing a command wrote reaches the job's commit. Files your `.gitignore` covers are left as they are, since they're never committed. On Linux with rootless Podman this needs Podman 4.3 or later; older versions run commands as a user that can't write your files, so they fail with `EACCES`.
+
 ## What else nomArmy checks
 
 - **Tests that prove nothing.** With `verify_regression` (on whenever a job has a verification profile), nomArmy reverts the production change and re-runs the tests: a test that still passes is flagged.
@@ -163,6 +165,16 @@ Its non-secret `env` values are exported to the verification container; see
 No ports are published and workers stay offline (`--network none`).
 `allowlist` harnesses cannot be enabled by committed `.nomarmy.yml`; that rung
 requires the operator-local opt-in described below.
+
+To leave out a harness nomArmy detected, list it under `exclude_harnesses`. For
+example, a repository whose end-to-end suite runs in its own Playwright
+container doesn't need Chromium in the sandbox image:
+
+```yaml
+exclude_harnesses: [browser-playwright]
+```
+
+An unknown name, or one listed under both keys, is refused.
 
 ## Verification-only external services
 

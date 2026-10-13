@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import * as images from "../lib/sandbox-images.mjs";
 import * as verify from "../lib/verify.mjs";
 import { loadHarnesses } from "../lib/harnesses.mjs";
@@ -45,7 +46,9 @@ test("browser recipe uses the installed root or nested Playwright, after node, w
     assert.equal(browser, `# harness: browser-playwright
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN mkdir -p /ms-playwright
-RUN (cd '/deps${prefix ? "/" + prefix.slice(0, -1) : ""}' && npx --no-install playwright install --with-deps chromium) || touch /ms-playwright/.nomarmy-playwright-install-failed
+COPY playwright/unzip-extract.cjs /opt/nomarmy-playwright-unzip.cjs
+RUN (cd '/deps${prefix ? "/" + prefix.slice(0, -1) : ""}' && if node -e 'const v=s=>s.split(".").map(Number),[a,b]=v(require("playwright-core/package.json").version),[n,m]=v(process.versions.node);process.exit(a===1&&b<60&&(n>24||(n===24&&m>=16))?0:1)' 2>/dev/null; then export NODE_OPTIONS="--require=/opt/nomarmy-playwright-unzip.cjs"; command -v unzip >/dev/null || { apt-get update && apt-get install -y --no-install-recommends unzip && rm -rf /var/lib/apt/lists/*; }; fi; for attempt in 1 2; do timeout -k 30 300 npx --no-install playwright install --with-deps chromium && exit 0; done; exit 1) || touch /ms-playwright/.nomarmy-playwright-install-failed
+RUN rm -f /opt/nomarmy-playwright-unzip.cjs
 RUN chmod -R a+rX /ms-playwright
 USER node
 WORKDIR /workspace
@@ -119,4 +122,50 @@ test("independent implement and verify runners retain exact screenshot evidence 
     assert.equal(capped.detail, "artifact collection capped at 200 files / 50 MB");
     assert.equal(capped.status, "fail");
   }
+});
+
+test("exclude_harnesses keeps a detected browser out of the image and is validated", async (t) => {
+  const cwd = temporary(t);
+  packageAt(cwd);
+  write(cwd, "playwright.config.ts", "export default {};\n");
+  assert.ok(images.sandboxHarnesses(cwd).matched.includes("browser-playwright"));
+  const config = { exclude_harnesses: ["browser-playwright"] };
+  assert.deepEqual(images.sandboxHarnesses(cwd, config).matched, ["node"]);
+  const recipe = images.composeSandboxImage(cwd, config);
+  assert.ok(recipe.dockerfile.includes("# harness: node"));
+  assert.equal(recipe.dockerfile.includes("browser-playwright"), false);
+  assert.equal(verify.verificationShmMb(cwd, config), 0);
+
+  const { validateConfig } = await import("../lib/config.mjs");
+  assert.equal(validateConfig({ exclude_harnesses: ["browser-playwright"] }).valid, true);
+  assert.match(validateConfig({ exclude_harnesses: ["browser"] }).errors.join("\n"), /unknown harness 'browser' in exclude_harnesses/);
+  assert.match(validateConfig({ harnesses: ["mock-oidc"], exclude_harnesses: ["mock-oidc"] }).errors.join("\n"), /both harnesses and exclude_harnesses/);
+});
+
+test("image builds are capped, 30 minutes unless NOMARMY_IMAGE_BUILD_TIMEOUT_MINUTES says otherwise", () => {
+  assert.equal(images.imageBuildTimeoutMs({}), 30 * 60_000);
+  assert.equal(images.imageBuildTimeoutMs({ NOMARMY_IMAGE_BUILD_TIMEOUT_MINUTES: "45" }), 45 * 60_000);
+  assert.equal(images.imageBuildTimeoutMs({ NOMARMY_IMAGE_BUILD_TIMEOUT_MINUTES: "nope" }), 30 * 60_000);
+  assert.equal(images.imageBuildTimeoutMs({ NOMARMY_IMAGE_BUILD_TIMEOUT_MINUTES: "0" }), 30 * 60_000);
+});
+
+test("Playwright before 1.60 extracts its browser with the system unzip, since its own extraction hangs on Node 26", async (t) => {
+  const cwd = temporary(t);
+  packageAt(cwd);
+  const recipe = images.composeSandboxImage(cwd);
+  const preload = recipe.files.find((f) => f.destination === "playwright/unzip-extract.cjs");
+  assert.ok(preload, "the preload ships in the build context");
+  assert.equal(String(preload.content), fs.readFileSync(new URL("../harnesses/browser-playwright/unzip-extract.cjs", import.meta.url), "utf8"));
+
+  // The preload swaps only playwright-core's zipBundle extract for unzip.
+  const dir = temporary(t);
+  const core = path.join(dir, "node_modules", "playwright-core", "lib");
+  fs.mkdirSync(path.join(core, "server"), { recursive: true });
+  fs.writeFileSync(path.join(core, "zipBundle.js"), "exports.extract = () => 'yauzl'; exports.other = 1;");
+  fs.writeFileSync(path.join(core, "server", "main.js"), "module.exports = require('../zipBundle');");
+  fs.writeFileSync(path.join(dir, "elsewhere.js"), "module.exports = require('./node_modules/playwright-core/lib/zipBundle');");
+  const { execFileSync } = await import("node:child_process");
+  const probe = `const a=require(${JSON.stringify(path.join(core, "server", "main.js"))}),b=require(${JSON.stringify(path.join(dir, "elsewhere.js"))});console.log(JSON.stringify([a.extract.toString().includes("unzip"),a.other,b.extract()]))`;
+  const out = execFileSync(process.execPath, ["--require", fileURLToPath(new URL("../harnesses/browser-playwright/unzip-extract.cjs", import.meta.url)), "-e", probe], { encoding: "utf8" });
+  assert.deepEqual(JSON.parse(out), [true, 1, "yauzl"], "playwright-core gets unzip; other importers are untouched");
 });

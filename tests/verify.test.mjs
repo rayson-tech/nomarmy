@@ -17,6 +17,7 @@ import {
   DEFAULT_WORKDIR,
   TRUNCATION_MARKER,
   buildPodmanArgs,
+  verificationUserns,
   capOutput,
   classifyResults,
   createVerificationRunner,
@@ -215,6 +216,23 @@ test("buildPodmanArgs isolates the container and passes the command as one argv 
   assert.equal(args.at(-2), "-c");
   assert.equal(args.at(-3), DEFAULT_AGENT_IMAGE);
   assert.equal(args.filter((a) => a === "npm test; echo $(whoami)").length, 1);
+});
+
+test("verificationUserns maps the operator to the container user only on rootless Linux with Podman 4.3+", () => {
+  const linux = (version, extra = {}) => verificationUserns("1000:1000", { platform: "linux", uid: 1001, podmanVersion: () => version, ...extra });
+  assert.equal(linux("podman version 4.9.3"), "--userns=keep-id:uid=1000,gid=1000");
+  assert.equal(linux("podman version 5.0.1"), "--userns=keep-id:uid=1000,gid=1000");
+  assert.equal(linux("podman version 4.3.0"), "--userns=keep-id:uid=1000,gid=1000");
+  assert.equal(linux("podman version 4.2.1"), null, "keep-id:uid= needs 4.3");
+  assert.equal(linux("podman version 3.4.4"), null);
+  assert.equal(linux(""), null, "no Podman found: leave the args alone");
+  assert.equal(linux("podman version 4.9.3", { uid: 0 }), null, "rootful Podman maps uids one to one");
+  assert.equal(verificationUserns("1000:1000", { platform: "darwin", uid: 501, podmanVersion: () => "podman version 6.1.2" }), null);
+  assert.equal(verificationUserns("node", { platform: "linux", uid: 1001, podmanVersion: () => "podman version 4.9.3" }), null);
+
+  const args = buildPodmanArgs({ cwd: "/w", command: "tsc -b", userns: "--userns=keep-id:uid=1000,gid=1000" });
+  assert.equal(args[args.indexOf("--user=1000:1000") + 1], "--userns=keep-id:uid=1000,gid=1000");
+  assert.equal(buildPodmanArgs({ cwd: "/w", command: "tsc -b", userns: null }).some(a => a.startsWith("--userns")), false);
 });
 
 test("buildPodmanArgs adds extra env vars as real --env args, and none at all when env is omitted", () => {

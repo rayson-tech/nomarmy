@@ -18,7 +18,7 @@ Every command proposes before it writes: a `[y/N]` prompt, or an explicit flag u
 | `nomarmy jobs --stop <job> [--reason <text>]` | Stops a running job's worker, keeping its worktree for `continue_from`. |
 | `nomarmy mcp` | Starts nomArmy's MCP server on stdio with this machine's settings: what a `--scope project` registration runs. |
 | `nomarmy init` | Proposes a `.nomarmy.yml` from what the repo contains. |
-| `nomarmy agents list\|add\|update\|remove` | Where jobs can run. See [Agents](agents-and-army.md#agents-where-a-job-can-run). |
+| `nomarmy agents list\|add\|update\|register\|remove` | Where jobs can run. `agents register [name]` saves api agents' keys in OpenClaw from their `auth_env`, for an `agents.yml` written by hand. See [Agents](agents-and-army.md#agents-where-a-job-can-run). |
 | `nomarmy army show\|init\|assign\|general` | The General and the roster. See [The army](agents-and-army.md#the-army-who-does-what). |
 | `nomarmy jobs [--watch\|--events\|--prune\|--wait <jobId>]` | What's running across every session, and what just finished. `--wait <jobId> [--timeout <seconds>]` waits for one cross-session job (default 1800 seconds; add `--json` for structured output). |
 | `nomarmy health` | Runs the health checks now. |

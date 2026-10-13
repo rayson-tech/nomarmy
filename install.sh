@@ -134,6 +134,9 @@ if nomarmy_has_local_model; then openclaw plugins install @openclaw/llama-cpp-pr
 # Bedrock credential unless the coder sandbox is already network-isolated.
 "$ROOT/scripts/setup-sandbox.sh"
 "$ROOT/scripts/configure-openclaw.sh" "$NOMARMY_PROFILE"
+# An agents.yml copied onto a server names keys OpenClaw hasn't saved yet:
+# register each api agent's key from its auth_env when that's exported.
+if [[ "$SERVER" == 1 ]]; then node "$ROOT/bin/nomarmy.mjs" agents register || echo 'NOTE: some api agent keys are not registered; export them and run: nomarmy agents register'; fi
 if [[ "$SERVER" == 1 ]]; then
   echo 'NOTE: server install: no editor connections. Register one later with: nomarmy connect claude (or codex, cursor)'
 elif [[ "${NOMARMY_COORDINATOR_OS:-}" == windows ]]; then

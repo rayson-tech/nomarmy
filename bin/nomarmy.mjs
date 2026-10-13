@@ -45,7 +45,7 @@ import { MIN_PODMAN_VM_MB } from "../lib/doctor.mjs";
 import { liveLeases } from "../lib/slots.mjs";
 import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
 import { linkCodex } from "../lib/codex-link.mjs";
-import { recordProbeSuccess, parseOpenclawAuthProfiles, codexImportRecovery } from "../lib/health.mjs";
+import { recordProbeSuccess, parseOpenclawAuthProfiles, codexImportRecovery, apiKeyProvider } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
 import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, openclawSignInFailure, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
 import { PINNED_OPENCLAW_VERSION, pluginInstallArgs, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors } from "../lib/openclaw-install.mjs";
@@ -217,6 +217,11 @@ Usage: nomarmy <command> [options]
                             role or job names its own.
                             (--json with the matching flags; --probe to
                             test-call the agent; without a name, all agents)
+                  register [name]
+                            save api agents' keys in OpenClaw from each
+                            one's auth_env (for an agents.yml written by
+                            hand). Without a name, only agents with no
+                            saved key; with one, that agent's key again.
                   remove <name>
                             remove one agent
   army <show|init|assign|general>
@@ -1447,6 +1452,32 @@ async function cmdAgentsList() {
   console.log(c.dim(`\nAdd one with \`nomarmy agents add\`. Give roles an agent with \`nomarmy army assign <role> <agent>\`, or dispatch with agent: "<name>".`));
 }
 
+// An agents.yml written by hand (a server's) names keys OpenClaw never saved.
+// Registers each api agent's key from its auth_env: all unregistered ones, or
+// the named agent even when one is already saved (a rotated key).
+async function cmdAgentsRegister() {
+  const name = argv[2] && !argv[2].startsWith("--") ? argv[2] : null;
+  const agents = fileAgentsOrExit();
+  const api = Object.entries(agents).filter(([n, a]) => a.kind === "api" && (!name || n === name));
+  if (name && !api.length) throw new Error(Object.prototype.hasOwnProperty.call(agents, name) ? `"${name}" isn't an api agent; only api agents have a key to register.` : `Unknown agent "${name}". Your agents: ${Object.keys(agents).join(", ")}`);
+  const listed = runQuiet(openclawCmd(), ["models", "auth", "list", "--json"]);
+  const saved = new Set((listed.ok ? parseOpenclawAuthProfiles(listed.stdout) ?? [] : []).map((p) => p.provider));
+  const results = [];
+  for (const [n, agent] of api) {
+    const provider = apiKeyProvider(n, agent);
+    if (!name && saved.has(provider)) { results.push({ name: n, status: "already" }); continue; }
+    if (!process.env[agent.auth_env]) { results.push({ name: n, status: "missing", env: agent.auth_env }); continue; }
+    results.push({ name: n, status: registerProviderWithOpenClaw(apiAgentAsPoolEntry(n, agent)) ? "registered" : "failed" });
+  }
+  // Text only: registration itself prints as it goes.
+  if (!api.length) console.log(c.dim("No api agents in agents.yml."));
+  for (const r of results) {
+    if (r.status === "already") console.log(c.dim(`${r.name}: key already saved in OpenClaw.`));
+    if (r.status === "missing") console.log(c.yellow(`${r.name}: ${r.env} isn't set; export it and run \`nomarmy agents register ${r.name}\`.`));
+  }
+  if (results.some((r) => r.status === "failed" || r.status === "missing")) process.exitCode = 1;
+}
+
 async function cmdAgentsRemove() {
   const name = argv[2];
   if (!name) throw new Error("Usage: nomarmy agents remove <name>");
@@ -1872,7 +1903,8 @@ async function cmdAgents() {
   if (sub === "add") return cmdAgentsAdd();
   if (sub === "update") return cmdAgentsUpdate();
   if (sub === "remove") return cmdAgentsRemove();
-  throw new Error(`Unknown agents subcommand "${sub}". Use: nomarmy agents <list|add|update|remove>`);
+  if (sub === "register") return cmdAgentsRegister();
+  throw new Error(`Unknown agents subcommand "${sub}". Use: nomarmy agents <list|add|update|register|remove>`);
 }
 
 function git(args) {
