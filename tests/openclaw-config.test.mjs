@@ -8,7 +8,7 @@ import path from "node:path";
 import { after, test } from "node:test";
 
 import { ensureProviderConfig, providerConfigured } from "../lib/openclaw-config.mjs";
-import { providerConfigIssues } from "../lib/health.mjs";
+import { providerConfigIssues, providerModelIssues } from "../lib/health.mjs";
 import { SUBSCRIPTION_VENDORS } from "../lib/subscription-setup.mjs";
 
 const dirs = [];
@@ -35,11 +35,28 @@ test("ensureProviderConfig: adds the missing Meta entry with the plugin's own st
   assert.deepEqual(JSON.parse(fs.readFileSync(out.backup, "utf8")), before);
 });
 
-test("ensureProviderConfig: an existing entry is left alone, the plugin isn't even loaded", async () => {
+test("ensureProviderConfig: an existing entry is left alone when the plugin can't be asked", async () => {
   const config = { models: { providers: { meta: { baseUrl: "mine" } } } };
   const home = fakeHome({ config, plugin: "throw new Error('must not load')" });
   assert.deepEqual(await ensureProviderConfig({ ...META, home }), { changed: false });
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, "openclaw.json"), "utf8")), config);
+});
+
+test("ensureProviderConfig: an existing entry gets only the models a newer plugin lists, and a dry run writes nothing", async () => {
+  const WONDER = `export function applyMetaConfig(c) { return { ...c, gateway: { port: 9 }, models: { ...c.models, providers: { ...c.models.providers, meta: { baseUrl: "theirs", models: [{ id: "muse-spark-1.3" }, { id: "muse-wonder-1.0", name: "Muse Wonder" }] } } } }; }`;
+  const config = { models: { providers: { meta: { baseUrl: "mine", models: [{ id: "muse-spark-1.3", note: "kept" }] }, ollama: { baseUrl: "x" } } }, gateway: { port: 1 } };
+  const home = fakeHome({ config, plugin: WONDER });
+  assert.deepEqual(await ensureProviderConfig({ ...META, home, dryRun: true }), { changed: false, wouldChange: true, added: ["muse-wonder-1.0"] });
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, "openclaw.json"), "utf8")), config);
+  const out = await ensureProviderConfig({ ...META, home });
+  assert.deepEqual(out.added, ["muse-wonder-1.0"]);
+  assert.match(out.backup, /before-nomarmy-meta-models$/);
+  const after = JSON.parse(fs.readFileSync(path.join(home, "openclaw.json"), "utf8"));
+  assert.deepEqual(after, { ...config, models: { providers: { ...config.models.providers,
+    meta: { baseUrl: "mine", models: [{ id: "muse-spark-1.3", note: "kept" }, { id: "muse-wonder-1.0", name: "Muse Wonder" }] } } } });
+  assert.deepEqual(await ensureProviderConfig({ ...META, home }), { changed: false }, "nothing left to add");
+  const noList = fakeHome({ config: { models: { providers: { meta: { baseUrl: "mine" } } } }, plugin: WONDER });
+  assert.deepEqual(await ensureProviderConfig({ ...META, home: noList }), { changed: false }, "an entry without its own list already allows every model");
 });
 
 test("ensureProviderConfig: refuses, and writes nothing, when the step would drop a section or add no entry", async () => {
@@ -62,4 +79,18 @@ test("providerConfigIssues: a Meta subscription agent with no provider entry is 
   assert.equal(providerConfigIssues({ agents, openclawConfig: { models: { providers: { meta: {} } } }, vendors: SUBSCRIPTION_VENDORS }).length, 0);
   assert.equal(providerConfigIssues({ agents: { codex: agents.codex }, openclawConfig: {}, vendors: SUBSCRIPTION_VENDORS }).length, 0);
   assert.equal(providerConfigured({ models: { providers: { meta: {} } } }, "meta"), true);
+});
+
+test("providerModelIssues: flags models a plugin lists that the configured entry lacks, only for vendors in use", async () => {
+  const agents = { muse: { kind: "subscription", provider: "meta" } };
+  const configured = { models: { providers: { meta: { models: [] } } } };
+  const asked = [];
+  const check = async (spec) => { asked.push(spec.provider); return { changed: false, wouldChange: true, added: ["muse-wonder-1.0"] }; };
+  const issues = await providerModelIssues({ agents, openclawConfig: configured, vendors: SUBSCRIPTION_VENDORS, check });
+  assert.deepEqual(issues.map((i) => [i.id, i.severity]), [["provider-models:meta:muse-wonder-1.0", "info"]]);
+  assert.match(issues[0].fix, /^nomarmy doctor --fix/);
+  assert.deepEqual(asked, ["meta"]);
+  assert.deepEqual(await providerModelIssues({ agents: {}, openclawConfig: configured, vendors: SUBSCRIPTION_VENDORS, check }), []);
+  assert.deepEqual(await providerModelIssues({ agents, openclawConfig: { models: { providers: {} } }, vendors: SUBSCRIPTION_VENDORS, check }), [], "a missing entry is providerConfigIssues' job");
+  assert.deepEqual(await providerModelIssues({ agents, openclawConfig: configured, vendors: SUBSCRIPTION_VENDORS, check: async () => ({ changed: false }) }), []);
 });
