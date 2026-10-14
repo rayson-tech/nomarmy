@@ -260,3 +260,24 @@ test("apiKeyIssues flags api agents whose provider has no saved OpenClaw key", a
   assert.match(issues[0].detail, /No API key found/);
   assert.deepEqual(apiKeyIssues(null, agents), [], "unreadable profiles: no claim either way");
 });
+
+test("subscriptionKeyIssues flags an OpenClaw sign-in subscription whose provider also has a saved API key", async () => {
+  const { subscriptionKeyIssues } = await import("../lib/health.mjs");
+  const { competingProviderProfiles, OPENCLAW_SIGN_IN_PRESETS } = await import("../lib/subscription-setup.mjs");
+  const profiles = [
+    { id: "xai:nomarmy", provider: "xai", type: "api_key" }, { id: "xai:default", provider: "xai", type: "oauth" },
+    { id: "meta:subscription", provider: "meta", type: "api_key" }, { id: "qwen:plan", provider: "qwen", type: "token" },
+  ];
+  assert.deepEqual(competingProviderProfiles(profiles, "xai").map((p) => p.id), ["xai:nomarmy"]);
+  assert.deepEqual(competingProviderProfiles(profiles, "qwen"), [], "a token plan's token isn't a competing key");
+  assert.equal(OPENCLAW_SIGN_IN_PRESETS.grok.provider, "xai");
+  const agents = {
+    grok: { kind: "subscription", provider: "xai", owner: "me@example.com" },
+    muse: { kind: "subscription", provider: "meta", owner: "me@example.com" },
+    qwen: { kind: "subscription", provider: "qwen", owner: "me@example.com" },
+    key: { kind: "api", provider: "xai", auth_env: "K" },
+  };
+  const issues = subscriptionKeyIssues(profiles, agents);
+  assert.deepEqual(issues.map((i) => [i.id, i.fix]), [["subscription-key:grok", "openclaw models auth logout xai:nomarmy"]]);
+  assert.deepEqual(subscriptionKeyIssues(null, agents), []);
+});
