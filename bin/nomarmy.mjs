@@ -3541,6 +3541,14 @@ async function cmdDoctor() {
     });
     checks = repaired.checks;
     if (!repaired.ok && !checks.some((check) => !check.ok)) checks.push({ id: "openclaw-repair", ok: false, message: "OpenClaw repair was declined or failed.", fix: "nomarmy doctor --fix --yes" });
+    if (repaired.ok) {
+      const { refreshProviderConfigs } = await import("../lib/openclaw-config.mjs");
+      for (const result of await refreshProviderConfigs(vendors.map((key) => SUBSCRIPTION_VENDORS[key]))) {
+        const line = result.added?.length ? `Added ${result.added.join(", ")} to OpenClaw's ${result.provider} provider (backup: ${result.backup}).`
+          : result.changed ? `Added the ${result.provider} provider to OpenClaw's config (backup: ${result.backup}).` : null;
+        if (line) (json ? console.error : console.log)(line);
+      }
+    }
   } else {
     checks = verifyOpenclaw({ command: openclawCmd(), vendors });
   }

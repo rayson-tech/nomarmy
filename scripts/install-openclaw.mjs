@@ -13,6 +13,8 @@ import { loadAgents } from "../lib/agents.mjs";
 import { globalConfigDir } from "../lib/army.mjs";
 import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
 import { configuredSubscriptionVendors, openclawInstallPlan, pluginUpdatePlan, repairOpenclaw, runOpenclawCommand, PINNED_OPENCLAW_VERSION } from "../lib/openclaw-install.mjs";
+import { refreshProviderConfigs } from "../lib/openclaw-config.mjs";
+import { SUBSCRIPTION_VENDORS } from "../lib/subscription-setup.mjs";
 
 const update = process.argv.includes("--update");
 ensureOpenClawOnPath();
@@ -43,6 +45,16 @@ if (update && !needed && !pluginsBehind) {
     process.exitCode = result.ok ? 0 : result.declined ? 2 : 1;
   } finally {
     rl?.close();
+  }
+}
+
+// A plugin updated here or by hand lists models its provider entry predates
+// (Meta's 2026.10.3 added muse-wonder-1.0); add them so they aren't "Unknown model".
+if (process.exitCode === 0) {
+  for (const result of await refreshProviderConfigs(vendors.map((key) => SUBSCRIPTION_VENDORS[key]))) {
+    if (result.added?.length) console.log(`Added ${result.added.join(", ")} to OpenClaw's ${result.provider} provider (backup: ${result.backup}).`);
+    else if (result.changed) console.log(`Added the ${result.provider} provider to OpenClaw's config (backup: ${result.backup}).`);
+    else if (result.error) console.log(`Couldn't refresh OpenClaw's ${result.provider} provider: ${result.error}`);
   }
 }
 
