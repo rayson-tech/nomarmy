@@ -47,7 +47,7 @@ import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
 import { linkCodex } from "../lib/codex-link.mjs";
 import { recordProbeSuccess, parseOpenclawAuthProfiles, codexImportRecovery, apiKeyProvider } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
-import { SUBSCRIPTION_VENDORS, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, openclawSignInFailure, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
+import { SUBSCRIPTION_VENDORS, OPENCLAW_SIGN_IN_PRESETS, competingProviderProfiles, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, openclawSignInFailure, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
 import { PINNED_OPENCLAW_VERSION, pluginInstallArgs, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors } from "../lib/openclaw-install.mjs";
 import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
@@ -177,21 +177,26 @@ Usage: nomarmy <command> [options]
                                   anthropic, deepinfra, bedrock, azure,
                                   any OpenClaw provider by id ("openclaw",
                                   e.g. DeepSeek), or an OpenAI-compatible URL
-                    subscription  ONE person's own Claude, ChatGPT or Muse
-                                  Code plan; never pooled, and every job
+                    subscription  ONE person's own plan: Claude, ChatGPT,
+                                  Muse Code, Grok, or any provider OpenClaw
+                                  signs in to; never pooled, and every job
                                   must name its owner in on_behalf_of
                   Changes apply to the next job, no restart.
                   list      show your agents
                   An api or subscription agent is an account; its
                   model is only an optional default, since each role
                   (or the General, per job) picks the model.
-                  add [local|api|subscription] [claude|codex|meta]
+                  add [local|api|subscription] [claude|codex|meta|grok|openclaw]
                             walks through what that kind needs: an API
                             key registered with OpenClaw (over stdin,
                             never saved to a file), or the vendor's own
                             CLI install and login, OpenClaw's plugin and
                             login, and for Meta the key Muse Code's login
-                            left in the macOS keychain. Then a real test
+                            left in the macOS keychain. grok, and openclaw
+                            for any other provider (--provider <id>
+                            [--method <id>]), use OpenClaw's own sign-in
+                            and offer to remove a saved API key for that
+                            provider, which jobs could bill. Then a real test
                             call before saving. Interactive, or --json
                             --name <n> --kind <kind> plus that kind's
                             fields: --slot coder|gpt (local); --provider
@@ -1513,7 +1518,7 @@ async function cmdAgentsAdd() {
       console.log("\n" + c.bold("What kind of agent?"));
       console.log(`  ${c.cyan("1.")} local         ${c.dim("the local model on this machine (no per-token bill, private; slower)")}`);
       console.log(`  ${c.cyan("2.")} api           ${c.dim("a metered API key (xAI, OpenAI, Anthropic, DeepSeek, ...)")}`);
-      console.log(`  ${c.cyan("3.")} subscription  ${c.dim("your own Claude, ChatGPT or Muse Code plan (never shared)")}`);
+      console.log(`  ${c.cyan("3.")} subscription  ${c.dim("your own Claude, ChatGPT, Muse Code or Grok plan, or another (never shared)")}`);
       kind = AGENT_KINDS[await askChoice(rl, AGENT_KINDS.length)];
     }
     if (kind === "local") return await addLocalAgent(rl, agents);
@@ -1629,19 +1634,20 @@ const SUBSCRIPTION_AGENT_DEFAULT_NAMES = { claude: "claude", codex: "codex", met
 
 async function addSubscriptionAgent(rl, agents) {
   console.log(c.dim("Connects ONE person's own subscription. Never pooled, never shared."));
-  const vendorKeys = Object.keys(SUBSCRIPTION_VENDORS);
+  const choices = [...Object.entries(SUBSCRIPTION_VENDORS), ...Object.entries(OPENCLAW_SIGN_IN_PRESETS)];
   let vendorKey = argv[3];
-  if (!SUBSCRIPTION_VENDORS[vendorKey]) {
+  if (!choices.some(([key]) => key === vendorKey)) {
     console.log("\n" + c.bold("Which subscription?"));
-    vendorKeys.forEach((k, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${SUBSCRIPTION_VENDORS[k].label}`));
-    vendorKey = vendorKeys[await askChoice(rl, vendorKeys.length)];
+    choices.forEach(([, v], i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${v.label}`));
+    vendorKey = choices[await askChoice(rl, choices.length)][0];
   }
+  if (OPENCLAW_SIGN_IN_PRESETS[vendorKey]) return addOpenclawSignInAgent(rl, agents, vendorKey);
   const vendor = SUBSCRIPTION_VENDORS[vendorKey];
 
   // Checked before any login: an api agent on the same OpenClaw provider id
   // would share the one credential slot, and the save would be refused
   // anyway -- don't walk the operator through a browser flow first.
-  const clash = Object.entries(agents).find(([, a]) => a.kind === "api" && (a.provider === "openclaw" ? a.openclaw_provider : a.provider) === vendor.provider);
+  const clash = apiAgentOnProvider(agents, vendor.provider);
   if (clash) {
     console.log(c.red(`\n✗ Api agent "${clash[0]}" already uses OpenClaw provider "${vendor.provider}", and OpenClaw holds one credential per provider. Remove it first (\`nomarmy agents remove ${clash[0]}\`), or keep using it instead.`));
     return;
@@ -1717,6 +1723,94 @@ async function addSubscriptionAgent(rl, agents) {
     }
   }
   const written = saveAgents({ ...agents, [name]: { kind: "subscription", provider: vendor.provider, owner, ...(model ? { model } : {}) } });
+  savedAgentMessage(name, written);
+  console.log(c.dim(`Jobs on it need on_behalf_of: "${owner}".`));
+}
+
+function apiAgentOnProvider(agents, provider) {
+  return Object.entries(agents).find(([, a]) => a.kind === "api" && (a.provider === "openclaw" ? a.openclaw_provider : a.provider) === provider);
+}
+
+/**
+ * A subscription OpenClaw signs in to by itself (OPENCLAW_SIGN_IN_PRESETS):
+ * no vendor CLI, just `openclaw models auth login --provider <id>`, then
+ * the same owner, name and real test call as every subscription.
+ */
+async function addOpenclawSignInAgent(rl, agents, presetKey) {
+  const preset = OPENCLAW_SIGN_IN_PRESETS[presetKey];
+  let provider = value("provider") ?? preset.provider;
+  if (!provider) {
+    console.log(c.dim("OpenClaw's id for the provider; `openclaw onboard --help` lists its sign-in choices (xai-oauth, openrouter-oauth, ...)."));
+    provider = await askUntilValid(rl, "OpenClaw provider id: ", {
+      pattern: OPENCLAW_PROVIDER_ID_RE, invalidMessage: "must be an OpenClaw provider id (lowercase letters, digits, dot, underscore, hyphen).",
+    });
+  }
+  const known = Object.entries(SUBSCRIPTION_VENDORS).find(([, v]) => v.provider === provider);
+  if (known) { console.log(c.red(`\n✗ ${known[1].label} has its own setup: \`nomarmy agents add subscription ${known[0]}\`.`)); process.exitCode = 1; return; }
+  const clash = apiAgentOnProvider(agents, provider);
+  if (clash) {
+    console.log(c.red(`\n✗ Api agent "${clash[0]}" already uses OpenClaw provider "${provider}", and OpenClaw holds one credential per provider. Remove it first (\`nomarmy agents remove ${clash[0]}\`), or keep using it instead.`));
+    process.exitCode = 1; return;
+  }
+  console.log(c.yellow(`\nnomArmy runs this as one person's own plan, for their own work: every job names you in on_behalf_of, and it's never shared or pooled. Whether ${provider}'s terms let a tool like nomArmy use your plan is between you and ${provider}; check them first.`));
+  if (!(await confirm(rl, "Continue?"))) { console.log(c.dim("Stopped; nothing was written.")); return; }
+
+  console.log(`\n${c.bold("→")} Sign-in`);
+  const plugin = presetKey === "openclaw" ? (await rl.question(c.bold("Plugin to install first, if it isn't built in (blank = none): "))).trim() : "";
+  if (plugin && !runInteractive(openclawCmd(), ["plugins", "install", plugin])) {
+    console.log(c.red(`✗ Installing ${plugin} failed. Run \`openclaw plugins install ${plugin}\` yourself to see why.`)); process.exitCode = 1; return;
+  }
+  const profiles = () => parseOpenclawAuthProfiles(runQuiet(openclawCmd(), ["models", "auth", "list", "--json"]).stdout) ?? [];
+  const signedIn = () => profiles().some((profile) => profile.provider === provider && profile.type !== "api_key"
+    && (profile.expiresAt == null || Date.parse(profile.expiresAt) > Date.now()));
+  if (!signedIn() || await confirm(rl, `OpenClaw already has a ${provider} sign-in. Sign in again (a different account, or to refresh it)?`, { defaultYes: false })) {
+    const method = value("method");
+    console.log(c.dim(`Opening OpenClaw's sign-in (\`openclaw models auth login --provider ${provider}${method ? ` --method ${method}` : ""}\`); follow its prompts:`));
+    const ok = runInteractive(openclawCmd(), ["models", "auth", "login", "--provider", provider, ...(method ? ["--method", method] : [])]);
+    runQuiet(openclawCmd(), ["plugins", "registry", "--refresh"]);
+    if (!ok || !signedIn()) {
+      console.log(c.red(`✗ Sign-in failed or was canceled. Retry with \`nomarmy agents add subscription ${presetKey}\`.`)); process.exitCode = 1; return;
+    }
+  }
+  console.log(c.green(`✓ OpenClaw is signed in to ${provider}.`));
+  // An API key saved for the same provider may be what OpenClaw picks.
+  const keys = competingProviderProfiles(profiles(), provider);
+  if (keys.length) {
+    console.log(c.yellow(`OpenClaw also has an API key for ${provider} (${keys.map((p) => p.id).join(", ")}). Jobs could run on that key, billed by the token, instead of your plan.`));
+    if (await confirm(rl, "Remove the saved API key from OpenClaw? (The key itself isn't revoked.)")) {
+      for (const profile of keys) runQuiet(openclawCmd(), ["models", "auth", "logout", profile.id, "--yes"]);
+      const left = competingProviderProfiles(profiles(), provider);
+      if (left.length) { console.log(c.red(`✗ Couldn't remove ${left.map((p) => p.id).join(", ")}. Run \`openclaw models auth logout <id>\` yourself.`)); process.exitCode = 1; return; }
+      console.log(c.green("✓ Removed. OpenClaw uses your sign-in for this provider."));
+    } else {
+      console.log(c.dim(`Kept. Remove it later with \`openclaw models auth logout ${keys[0].id}\`.`));
+    }
+  }
+
+  console.log(`\n${c.bold("→")} Models`);
+  const models = catalogModelsFor(provider);
+  if (models.length) models.forEach((m, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${m}`));
+  else console.log(c.dim(`OpenClaw isn't listing ${provider} models yet.`));
+  const pick = (await rl.question(c.bold(`Default model, optional${models.length ? " (a number or an id)" : ""}; blank = pick per role: `))).trim();
+  const model = /^\d+$/.test(pick) && models.length ? models[Number(pick) - 1] : pick || null;
+  if (pick && !model) throw new Error(`Not a valid choice: "${pick}".`);
+  const ownerDefault = gitUserEmail();
+  const owner = await askUntilValid(rl, `Whose subscription is this (the account you signed in with)${ownerDefault ? ` [${ownerDefault}]` : ""}: `, {
+    allowEmpty: Boolean(ownerDefault), fallback: ownerDefault, pattern: OWNER_EMAIL_RE,
+    invalidMessage: "enter an email address (one @, no spaces).",
+  });
+  const name = await askAgentName(rl, agents, preset.defaultName ?? provider);
+  if (!name) { console.log(c.dim("Stopped; nothing was written.")); return; }
+
+  console.log(`\n${c.bold("→")} Test call`);
+  const probeModel = model ?? models[0];
+  if (probeModel && probeWorker(provider, probeModel)) console.log(c.green(`✓ ${provider}/${probeModel} answered a real test prompt.`));
+  else {
+    console.log(c.yellow(probeModel ? `⚠ ${provider}/${probeModel} didn't answer a real test prompt${lastProbeFailure ? `: ${lastProbeFailure}` : ""}.` : "⚠ No model is available for a test call."));
+    console.log(c.dim(`You can retry later with \`nomarmy agents update ${name} --probe\`.`));
+    if (!(await confirm(rl, "Save the agent anyway?", { defaultYes: false }))) { console.log(c.dim("Stopped; nothing was written.")); process.exitCode = 1; return; }
+  }
+  const written = saveAgents({ ...agents, [name]: { kind: "subscription", provider, owner, ...(model ? { model } : {}) } });
   savedAgentMessage(name, written);
   console.log(c.dim(`Jobs on it need on_behalf_of: "${owner}".`));
 }

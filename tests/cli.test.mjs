@@ -999,6 +999,46 @@ test("agents add subscription owner defaults to signed-in email and re-asks inva
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("agents add subscription grok signs in through OpenClaw, offers to drop the competing API key, and saves the plan", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const state = path.join(root, "fake-openclaw-state");
+    const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const S=${JSON.stringify(state)}; const has=(f)=>fs.existsSync(S+"-"+f); const mark=(f)=>fs.writeFileSync(S+"-"+f, process.argv.slice(2).join(" "));
+const a=process.argv.slice(2), j=a.join(" ");
+if(j==="models auth list --json"){const p=[]; if(!has("logout")) p.push({id:"xai:nomarmy",provider:"xai",type:"api_key"}); if(has("login")) p.push({id:"xai:default",provider:"xai",type:"oauth"}); console.log(JSON.stringify({profiles:p}));}
+else if(j.startsWith("models auth login")) mark("login");
+else if(j.startsWith("models auth logout")) mark("logout");
+else if(j.startsWith("models list")) console.log("xai/grok-4.7   text");
+else if(a[0]==="agent") console.log(JSON.stringify({ok:true,final:"ok"}));`);
+    const result = await runInteractiveAgents(root, ["add", "subscription", "grok"], [
+      ["Continue?", "y"], ["Remove the saved API key", "y"], ["Default model", "1"],
+      ["Whose subscription is this", "me@example.com"], ["Agent name", ""],
+    ], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+    assert.equal(result.exitCode, 0, result.stdout);
+    assert.equal(fs.readFileSync(`${state}-login`, "utf8"), "models auth login --provider xai");
+    assert.equal(fs.readFileSync(`${state}-logout`, "utf8"), "models auth logout xai:nomarmy --yes");
+    assert.match(result.stdout, /xai\/grok-4\.7 answered a real test prompt/);
+    const agent = JSON.parse(runAgentsCLI(root, ["list", "--json"]).stdout).agents.grok;
+    assert.deepEqual({ kind: agent.kind, provider: agent.provider, owner: agent.owner, model: agent.model }, { kind: "subscription", provider: "xai", owner: "me@example.com", model: "grok-4.7" });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("agents add subscription openclaw sends known vendors to their own setup and refuses a provider an api agent holds", ttyOnly, async () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const openclaw = fakeExecutable(root, "fake-openclaw", `if(process.argv.slice(2).join(" ").startsWith("models auth login")) process.exit(1);`);
+    const env = { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") };
+    const vendor = await runInteractiveAgents(root, ["add", "subscription", "openclaw"], [["OpenClaw provider id", "meta"]], env);
+    assert.equal(vendor.exitCode, 1, vendor.stdout);
+    assert.match(vendor.stdout, /has its own setup: .nomarmy agents add subscription meta/);
+    assert.equal(runAgentsCLI(root, ["add", "--json", "--name", "grok", "--kind", "api", "--provider", "xai", "--auth-env", "XAI_KEY"]).exitCode, 0);
+    const clash = await runInteractiveAgents(root, ["add", "subscription", "grok"], [], env);
+    assert.equal(clash.exitCode, 1, clash.stdout);
+    assert.match(clash.stdout, /Api agent "grok" already uses OpenClaw provider "xai"/);
+    assert.doesNotMatch(clash.stdout, /Sign-in/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("agents add --json rejects invalid --owner naming the flag", () => {
   const root = scratchNomarmyRoot();
   try {

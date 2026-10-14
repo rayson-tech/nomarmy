@@ -6,8 +6,9 @@ The worker gets a writable worktree inside Podman and nothing else: no Podman so
 
 | Agent | Its tools run |
 |---|---|
-| `local`, api keys (xAI, OpenAI, Anthropic, ...), ChatGPT via Codex, Muse Code | in the sandbox: Linux, `/workspace`, no network |
+| `local`, api keys (xAI, OpenAI, Anthropic, ...), ChatGPT via Codex, Muse Code, subscriptions OpenClaw signs in to (Grok, ...) | in the sandbox: Linux, `/workspace`, no network |
 | Claude subscription (`claude-cli`) | **on this machine**: your real paths, with network |
+| any other subscription provider named `*-cli` | assumed **on this machine** until its route is checked, and treated like the Claude subscription |
 
 So nomArmy refuses **implement** jobs on a Claude subscription unless that agent says `allow_host_tools: true` in `agents.yml`; scouts and reviews still run, labeled. `nomarmy health` and the `army` tool flag any build role on it, and `agents list` says so. If a job's worktree comes back with a real `node_modules` where nomArmy's dependency link was (packages installed where the sandbox couldn't have), nomArmy flags the job for review and verifies against the sandbox's own dependencies. Sandboxing the Claude route properly needs OpenClaw to run it with only OpenClaw's own (sandboxed) tools, which it supports internally but doesn't expose yet. An Anthropic **api key** runs through OpenClaw's own loop and is sandboxed like the rest.
 
