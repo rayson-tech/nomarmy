@@ -196,3 +196,9 @@ test("agentRunsToolsOnHost / hostToolsImplementProblem: only the Claude CLI subs
   assert.match(describeAgent({ ...claude, allow_host_tools: true }), /tools run on this machine \(allowed\)$/);
   assert.equal(validateAgents({ agents: { claude: { ...claude, allow_host_tools: true } } }).ok ?? true, true);
 });
+
+test("agentRunsToolsOnHost: an unprobed CLI-backed provider is assumed to run on the host; OpenClaw sign-in providers aren't", () => {
+  for (const provider of ["gemini-cli", "cli"]) assert.equal(agentRunsToolsOnHost({ kind: "subscription", provider, owner: "x" }), true, provider);
+  for (const provider of ["xai", "openrouter", "clinic", "qwen-cli-plan"]) assert.equal(agentRunsToolsOnHost({ kind: "subscription", provider, owner: "x" }), false, provider);
+  assert.equal(agentRunsToolsOnHost({ kind: "api", provider: "openclaw", openclaw_provider: "gemini-cli", auth_env: "K" }), false);
+});

@@ -55,7 +55,7 @@ Start a new session afterwards. At the start of each session the plugin checks t
 
 ## Hosted workers only
 
-No GPU and no local model: every job runs on an API key or a subscription (ChatGPT, Muse Code) you add as an agent. Git worktrees, the sandbox and verification still run on your machine, so you still need Git, Node and Podman. `nomarmy setup` walks these steps for you; by hand, they are:
+No GPU and no local model: every job runs on an API key or a subscription (Claude, ChatGPT, Muse Code, Grok, ...) you add as an agent. Git worktrees, the sandbox and verification still run on your machine, so you still need Git, Node and Podman. `nomarmy setup` walks these steps for you; by hand, they are:
 
 ```bash
 nomarmy setup --hosted               # records that this install has no local model

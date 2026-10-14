@@ -64,7 +64,7 @@ Failing verification stays failed, unconditionally. A malformed report isn't aut
 
 ## Where the work runs
 
-- **Agents** say where a job can run: an API key, your own ChatGPT or Muse Code subscription, or a local model on llama.cpp.
+- **Agents** say where a job can run: an API key, your own Claude, ChatGPT, Muse Code or Grok subscription (or another OpenClaw provider), or a local model on llama.cpp.
 - **The army** says which role runs on which agent: Sr and Jr devs build, a security analyst and a data architect review, a PM checks the plan, a PO accepts.
 - **`/feature`** runs a whole feature end to end, from plan through build, review and acceptance, and hands you a branch to merge.
 - **Harnesses** give each repo the right sandbox: Go, Rust, Python and Node (mixed repos too), Playwright browser tests, and fake services like a mock login server, all offline. [Adding one](https://github.com/rayson-tech/nomarmy/blob/main/CONTRIBUTING.md#adding-a-harness) never touches core code.
