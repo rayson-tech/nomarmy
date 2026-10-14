@@ -49,7 +49,7 @@ import { recordProbeSuccess, parseOpenclawAuthProfiles, codexImportRecovery, api
 import { pruneJobRuntime } from "../lib/prune.mjs";
 import { SUBSCRIPTION_VENDORS, OPENCLAW_SIGN_IN_PRESETS, competingProviderProfiles, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, openclawSignInFailure, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
 import { PINNED_OPENCLAW_VERSION, pluginInstallArgs, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors } from "../lib/openclaw-install.mjs";
-import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
+import { ensureOpenClawOnPath, ensureVendorClisOnPath } from "../lib/openclaw-path.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
 import { fileURLToPath } from "node:url";
 // Inside WSL, only the distro's own tools (see lib/wsl.mjs).
@@ -58,6 +58,8 @@ dropWindowsPath();
 if (windowsFrontEnd()) markWindowsCoordinator();
 // OpenClaw in ~/.npm-global/bin (no writable npm prefix) is found without the operator editing PATH.
 ensureOpenClawOnPath();
+// So are the subscription CLIs (claude in ~/.local/bin under WSL, with no login shell).
+ensureVendorClisOnPath(Object.values(SUBSCRIPTION_VENDORS).map((vendor) => vendor.cli.bin));
 // Windows starts the engine as `wsl.exe --exec <node> nomarmy.mjs`, with no
 // login shell, so an nvm Node's directory isn't on PATH. Children that need
 // `node` (install.sh, OpenClaw's `#!/usr/bin/env node`) get the one running.
