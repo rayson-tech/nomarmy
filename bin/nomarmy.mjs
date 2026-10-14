@@ -260,6 +260,13 @@ Usage: nomarmy <command> [options]
                   how many api and subscription jobs run at once, across
                   every session (default 4); with n, sets it in limits.yml.
                   Warns when the Podman VM is too small for that many.
+  config openclaw [tested|latest]
+                  which OpenClaw release updates keep: tested (the
+                  release nomArmy is tested with, the default) or latest
+                  (npm's latest and matching vendor plugins, so new models
+                  arrive without a nomArmy release; never below tested,
+                  your roles' models are test-called before and after,
+                  and a release that breaks one is rolled back and skipped)
   jobs [--watch|--events [--until-done] [--run <run-id>] [--repo <path>]|--prune|--wait <jobId> [<jobId> ...]|--stop <jobId> [--reason <text>]] [--interval N] [--older-than DAYS]
                   what's running across every session (agent, model, phase,
                   last tool call, files changed, heartbeat) and what just
@@ -2797,6 +2804,19 @@ async function cmdConfigPaths() {
   for (const a of army) console.log(`  ${a.exists ? c.green("●") : c.dim("○")} ${a.layer.padEnd(8)} ${c.dim(a.path)}`);
 }
 
+// `nomarmy config openclaw [tested|latest]`: which OpenClaw release updates keep.
+async function cmdConfigOpenclaw() {
+  const { openclawChannel, setOpenclawChannel } = await import("../lib/openclaw-channel.mjs");
+  const given = argv[2];
+  const channel = given === undefined ? openclawChannel() : setOpenclawChannel(given);
+  if (json) return out({ openclaw: channel, tested: PINNED_OPENCLAW_VERSION });
+  console.log(given === undefined ? `openclaw: ${channel}` : c.green(`✓ openclaw: ${channel}`));
+  console.log(c.dim(channel === "latest"
+    ? `\`nomarmy update\` and \`nomarmy doctor --fix\` install npm's latest OpenClaw and matching vendor plugins (never below the tested ${PINNED_OPENCLAW_VERSION}), test-call your roles' models before and after, and roll back if one that worked stops.`
+    : `Updates keep OpenClaw at the release nomArmy is tested with (${PINNED_OPENCLAW_VERSION}). \`nomarmy config openclaw latest\` follows npm's latest instead, with a rollback if it breaks a model.`));
+  if (given !== undefined) console.log(c.dim("Run `nomarmy update` (or `nomarmy doctor --fix`) to apply it."));
+}
+
 // `nomarmy config max-jobs [n]`: api and subscription jobs at once, machine-wide.
 async function cmdConfigMaxJobs() {
   const { maxJobs, setMaxJobs, jobsThatFit, vmGibFor } = await import("../lib/limits.mjs");
@@ -2822,7 +2842,8 @@ async function cmdConfig() {
   const sub = argv[1] ?? "paths";
   if (sub === "paths") return cmdConfigPaths();
   if (sub === "max-jobs") return cmdConfigMaxJobs();
-  throw new Error(`Unknown config subcommand "${sub}". Use: nomarmy config <paths|max-jobs [n]>`);
+  if (sub === "openclaw") return cmdConfigOpenclaw();
+  throw new Error(`Unknown config subcommand "${sub}". Use: nomarmy config <paths|max-jobs [n]|openclaw [tested|latest]>`);
 }
 
 // --- `nomarmy jobs [--watch]`: what's running, from any session -----------
@@ -3437,13 +3458,18 @@ async function cmdDoctor() {
   try { armySummary = describeArmy(loadArmy({ projectDir: repoDir }), { agents }); } catch { /* other doctor checks still run */ }
   let checks;
   if (flag("fix")) {
-    const repaired = await repairOpenclaw({
-      command: openclawCmd(), vendors, yes: flag("yes"), isTTY: Boolean(input.isTTY),
+    const { openclawChannel, upgradeOpenclaw, modelsToCheck } = await import("../lib/openclaw-channel.mjs");
+    const { probeModel } = await import("../lib/model-probe.mjs");
+    const repaired = await upgradeOpenclaw({
+      channel: openclawChannel(), command: openclawCmd(), vendors, yes: flag("yes"), isTTY: Boolean(input.isTTY),
       print: json ? console.error : console.log,
       ask: async (prompt) => {
         const rl = createInterface({ input, output: json ? process.stderr : output });
         try { return await rl.question(prompt); } finally { rl.close(); }
       },
+      skipFile: path.join(agentStateRoot(), "openclaw-skipped.json"),
+      models: modelsToCheck({ agents, roles: armySummary?.roles ?? {}, providerOf: agentProviderId }),
+      probe: ({ provider, model }) => probeModel({ provider, model, stateRoot: agentStateRoot(), openclawCmd: openclawCmd() }),
     });
     checks = repaired.checks;
     if (!repaired.ok && !checks.some((check) => !check.ok)) checks.push({ id: "openclaw-repair", ok: false, message: "OpenClaw repair was declined or failed.", fix: "nomarmy doctor --fix --yes" });

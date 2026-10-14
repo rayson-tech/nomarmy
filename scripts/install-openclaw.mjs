@@ -12,7 +12,11 @@ import { createInterface } from "node:readline/promises";
 import { loadAgents } from "../lib/agents.mjs";
 import { globalConfigDir } from "../lib/army.mjs";
 import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
-import { configuredSubscriptionVendors, openclawInstallPlan, pluginUpdatePlan, repairOpenclaw, runOpenclawCommand, PINNED_OPENCLAW_VERSION } from "../lib/openclaw-install.mjs";
+import { configuredSubscriptionVendors, openclawInstallPlan, pluginUpdatePlan, runOpenclawCommand, PINNED_OPENCLAW_VERSION } from "../lib/openclaw-install.mjs";
+import { openclawChannel, resolveOpenclawTarget, skippedReleases, upgradeOpenclaw, modelsToCheck } from "../lib/openclaw-channel.mjs";
+import { probeModel } from "../lib/model-probe.mjs";
+import { agentProviderId } from "../lib/agents.mjs";
+import { loadArmy, describeArmy } from "../lib/army.mjs";
 import { refreshProviderConfigs } from "../lib/openclaw-config.mjs";
 import { SUBSCRIPTION_VENDORS } from "../lib/subscription-setup.mjs";
 
@@ -20,14 +24,21 @@ const update = process.argv.includes("--update");
 ensureOpenClawOnPath();
 const command = process.env.NOMARMY_OPENCLAW_CMD || "openclaw";
 const version = runOpenclawCommand(command, ["--version"]);
-const vendors = configuredSubscriptionVendors(loadAgents(globalConfigDir()).agents);
-const needed = openclawInstallPlan(version.ok ? version.stdout : null).length > 0;
-const pluginsBehind = !needed && version.ok && pluginUpdatePlan({ command, vendors }).length > 0;
+const agents = loadAgents(globalConfigDir()).agents;
+const vendors = configuredSubscriptionVendors(agents);
+// `openclaw: latest` in limits.yml follows npm's latest instead of the pin.
+const channel = openclawChannel();
+const stateRoot = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
+const skipFile = path.join(stateRoot, "openclaw-skipped.json");
+const installed = version.ok ? version.stdout.match(/\d+\.\d+\.\d+/)?.[0] ?? null : null;
+const { target } = resolveOpenclawTarget(channel, { skipped: skippedReleases(skipFile), installed });
+const needed = openclawInstallPlan(version.ok ? version.stdout : null, { target }).length > 0;
+const pluginsBehind = !needed && version.ok && pluginUpdatePlan({ command, vendors, target }).length > 0;
 const [major, minor] = process.versions.node.split(".").map(Number);
 if (update && !needed && !pluginsBehind) {
   process.exitCode = 0;
 } else if (needed && !((major === 24 && minor >= 16) || (major === 26 && minor >= 1) || major > 26)) {
-  console.error(`OpenClaw ${PINNED_OPENCLAW_VERSION} needs Node 24.16+ or 26.1+. Upgrade Node first.`);
+  console.error(`OpenClaw ${target} needs Node 24.16+ or 26.1+. Upgrade Node first.`);
   process.exitCode = 1;
 } else {
   const prefixIndex = process.argv.indexOf("--prefix");
@@ -35,12 +46,17 @@ if (update && !needed && !pluginsBehind) {
   const isTTY = update && Boolean(process.stdin.isTTY);
   const rl = isTTY ? createInterface({ input: process.stdin, output: process.stdout }) : null;
   try {
-    if (update) console.log(needed ? `\nnomArmy is tested with OpenClaw ${PINNED_OPENCLAW_VERSION}; this machine has ${version.ok ? version.stdout.trim() : "no working OpenClaw"}.`
-      : `\nnomArmy is tested with OpenClaw ${PINNED_OPENCLAW_VERSION}, and some of its vendor plugins here are older.`);
-    const result = await repairOpenclaw({
-      command, prefix, yes: !update || process.argv.includes("--yes"), isTTY,
+    const wanted = channel === "latest" ? `follows npm's latest OpenClaw, ${target} (tested with ${PINNED_OPENCLAW_VERSION})` : `is tested with OpenClaw ${PINNED_OPENCLAW_VERSION}`;
+    if (update) console.log(needed ? `\nnomArmy ${wanted}; this machine has ${version.ok ? version.stdout.trim() : "no working OpenClaw"}.`
+      : `\nnomArmy ${wanted}, and some of its vendor plugins here are older.`);
+    let roles = {};
+    try { roles = describeArmy(loadArmy({ projectDir: process.cwd() }), { agents }).roles ?? {}; } catch { /* no army: agents' defaults only */ }
+    const result = await upgradeOpenclaw({
+      channel, command, prefix, yes: !update || process.argv.includes("--yes"), isTTY,
       ask: (prompt) => rl.question(prompt),
-      vendors,
+      vendors, skipFile,
+      models: modelsToCheck({ agents, roles, providerOf: agentProviderId }),
+      probe: ({ provider, model }) => probeModel({ provider, model, stateRoot, openclawCmd: command }),
     });
     process.exitCode = result.ok ? 0 : result.declined ? 2 : 1;
   } finally {

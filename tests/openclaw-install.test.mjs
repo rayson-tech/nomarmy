@@ -374,3 +374,16 @@ test("a plugin install saved but not hot-reloaded by the running Gateway is relo
   assert.deepEqual(result.changed, [`Update OpenClaw plugin codex 2026.9.7 to ${PINNED_OPENCLAW_VERSION}`]);
   assert.ok(calls.includes("plugins reload codex"));
 });
+
+test("a rollback installs the exact earlier release of OpenClaw and its plugins; a target past the pin upgrades to it", () => {
+  assert.deepEqual(openclawInstallPlan("OpenClaw 2099.1.1", { target: "2026.10.3", exact: true }), [{ description: "Roll back OpenClaw to 2026.10.3", command: "npm", args: ["install", "-g", "openclaw@2026.10.3"] }]);
+  assert.deepEqual(openclawInstallPlan("OpenClaw 2026.10.3", { target: "2026.10.3", exact: true }), []);
+  assert.deepEqual(openclawInstallPlan("OpenClaw 2099.1.1", { target: "2026.10.3" }), [], "never a downgrade without exact");
+  assert.equal(openclawInstallPlan("OpenClaw 2026.10.3", { target: "2099.1.1" })[0].description, "Upgrade OpenClaw to 2099.1.1");
+  const inspect = (version) => () => ({ ok: true, stdout: JSON.stringify({ plugin: { id: "meta", enabled: true, version, builtWithOpenClawVersion: version } }), stderr: "" });
+  assert.deepEqual(pluginUpdatePlan({ run: inspect("2099.1.1"), vendors: ["meta"], target: "2026.10.3", exact: true }).map((a) => [a.description, a.args.join(" ")]),
+    [["Roll back OpenClaw plugin meta 2099.1.1 to 2026.10.3", "plugins install clawhub:@openclaw/meta-provider@2026.10.3 --force"]]);
+  assert.deepEqual(pluginUpdatePlan({ run: inspect("2026.10.3"), vendors: ["meta"], target: "2099.1.1" }).map((a) => a.args.join(" ")),
+    ["plugins install clawhub:@openclaw/meta-provider@2099.1.1 --force"]);
+  assert.deepEqual(pluginUpdatePlan({ run: inspect("2099.1.1"), vendors: ["meta"], target: "2026.10.3" }), []);
+});
