@@ -15,7 +15,7 @@ const [major, minor] = process.versions.node.split(".").map(Number);
 const nodeOk = (major === 24 && minor >= 16) || (major === 26 && minor >= 1) || major > 26;
 const skip = process.platform === "win32" ? "fake commands are shell scripts" : !nodeOk && "OpenClaw needs Node 24.16+ or 26.1+, so the script refuses below the pin";
 
-function fakes({ version, globalPrefixWritable = true, codexPlugin = null }) {
+function fakes({ version, globalPrefixWritable = true, codexPlugin = null, npmLatest = null, channel = null }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-openclaw-update-"));
   const globalPrefix = path.join(dir, "global");
   fs.mkdirSync(globalPrefix);
@@ -24,6 +24,8 @@ function fakes({ version, globalPrefixWritable = true, codexPlugin = null }) {
   // codexPlugin: a configured Codex subscription whose OpenClaw plugin is at that version.
   const configDir = path.join(dir, "config");
   fs.mkdirSync(configDir);
+  if (npmLatest) fs.writeFileSync(path.join(dir, "npm-latest"), `${npmLatest}\n`);
+  if (channel) fs.writeFileSync(path.join(configDir, "limits.yml"), `openclaw: ${channel}\n`);
   if (codexPlugin) {
     fs.writeFileSync(path.join(dir, "codex-plugin"), `${codexPlugin}\n`);
     fs.writeFileSync(path.join(configDir, "agents.yml"), "agents:\n  codex:\n    kind: subscription\n    provider: openai\n    owner: dev@example.com\n");
@@ -45,6 +47,7 @@ esac
 echo "$*" >> "${dir}/npm.log"
 case "$1" in
   prefix) echo "${globalPrefix}";;
+  view) cat "${dir}/npm-latest" 2>/dev/null || exit 1;;
   install) for a; do case "$a" in openclaw@*) echo "\${a#openclaw@}" > "${dir}/version";; esac; done;;
 esac
 `, { mode: 0o755 });
@@ -120,4 +123,18 @@ test("--update with OpenClaw at the pin but a configured vendor's plugin behind 
   assert.equal(applied.status, 0, applied.stdout + applied.stderr);
   assert.deepEqual(f.pluginUpdates(), [`plugins install clawhub:@openclaw/codex@${PINNED_OPENCLAW_VERSION} --force`]);
   assert.deepEqual(f.npmCalls().filter((call) => call.startsWith("install")), [], "OpenClaw itself is left alone");
+});
+
+test("--update --yes on openclaw: latest installs npm's latest OpenClaw and the matching vendor plugin", { skip }, () => {
+  const f = fakes({ version: PINNED_OPENCLAW_VERSION, codexPlugin: PINNED_OPENCLAW_VERSION, npmLatest: "2099.1.1", channel: "latest" });
+  const r = f.run("--yes");
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /follows npm's latest OpenClaw, 2099\.1\.1/);
+  assert.deepEqual(f.npmCalls().filter((call) => call.startsWith("install")), ["install -g openclaw@2099.1.1"]);
+  assert.equal(f.installed(), "2099.1.1");
+  assert.deepEqual(f.pluginUpdates(), ["plugins install clawhub:@openclaw/codex@2099.1.1 --force"]);
+  const tested = fakes({ version: PINNED_OPENCLAW_VERSION, npmLatest: "2099.1.1" });
+  const quiet = tested.run("--yes");
+  assert.equal(quiet.status, 0, quiet.stderr);
+  assert.equal(tested.installed(), PINNED_OPENCLAW_VERSION, "tested (the default) stays at the pin");
 });
