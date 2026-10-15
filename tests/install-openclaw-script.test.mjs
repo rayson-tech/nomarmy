@@ -34,6 +34,7 @@ function fakes({ version, globalPrefixWritable = true, codexPlugin = null, npmLa
 case "$1" in
   --version) echo "OpenClaw $(cat "${dir}/version") (abc1234)";;
   update) echo '{"migrationWarnings":[]}';;
+  doctor) echo "$*" >> "${dir}/doctor.log";;
   plugins)
     echo "$*" >> "${dir}/plugins.log"
     case "$2" in
@@ -60,7 +61,8 @@ esac
   const npmCalls = () => { try { return fs.readFileSync(path.join(dir, "npm.log"), "utf8").trim().split("\n"); } catch { return []; } };
   const installed = () => fs.readFileSync(path.join(dir, "version"), "utf8").trim();
   const pluginUpdates = () => { try { return fs.readFileSync(path.join(dir, "plugins.log"), "utf8").trim().split("\n").filter((l) => l.startsWith("plugins install")); } catch { return []; } };
-  return { run, npmCalls, installed, home, pluginUpdates };
+  const doctorCalls = () => { try { return fs.readFileSync(path.join(dir, "doctor.log"), "utf8").trim().split("\n"); } catch { return []; } };
+  return { run, npmCalls, installed, home, pluginUpdates, doctorCalls };
 }
 
 test("--update is silent and installs nothing at or past the pin", { skip: process.platform === "win32" && "fake commands are shell scripts" }, () => {
@@ -90,6 +92,7 @@ test("--update --yes installs exactly the pin into npm's writable global prefix"
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.deepEqual(f.npmCalls().filter((call) => call.startsWith("install")), [`install -g openclaw@${PINNED_OPENCLAW_VERSION}`]);
   assert.equal(f.installed(), PINNED_OPENCLAW_VERSION);
+  assert.deepEqual(f.doctorCalls(), ["doctor --fix --non-interactive"], "the upgrade migrates OpenClaw's state");
 });
 
 test("--update --yes falls back to ~/.npm-global when npm's global prefix isn't writable", { skip: skip || (process.getuid?.() === 0 && "root can write anywhere") }, () => {
