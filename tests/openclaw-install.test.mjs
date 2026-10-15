@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { PINNED_OPENCLAW_VERSION, runOpenclawCommand, openclawInstallPlan, pluginUpdatePlan, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors } from "../lib/openclaw-install.mjs";
 
 const action = { description: "Upgrade OpenClaw to 2026.10.3", command: "npm", args: ["install", "-g", "openclaw@2026.10.3"] };
+const migrate = { description: "Migrate OpenClaw's state to the new release", command: "openclaw", args: ["doctor", "--fix", "--non-interactive"], timeoutMs: 300000 };
 // Trimmed stdout captured from OpenClaw 2026.9.6, its versions moved forward with the pin.
 const statusEvidence = {"update":{"root":"/Users/jasonpugh/.npm-global/lib/node_modules/openclaw","installKind":"package","packageManager":"npm","registry":{"latestVersion":"2026.10.3","tag":"latest"}},"channel":{"value":"stable","source":"default"},"availability":{"available":true,"hasRegistryUpdate":true,"latestVersion":"2026.10.3"},"migrationWarnings":["Plugin \"codex\" data/settings upgrade is unfinished: The installed plugin has not confirmed that its saved data and settings are ready for this version. If Doctor cannot finish the upgrade, report this warning to the plugin maintainer. Your existing data and settings have been kept. Run \"openclaw doctor --fix\" to retry the upgrade."]};
 const pluginEvidence = {"workspaceDir":"/Users/jasonpugh/.openclaw/workspace","plugin":{"id":"codex","name":"Codex","packageVersion":"2026.10.3","version":"2026.10.3","builtWithOpenClawVersion":"2026.10.3","packageName":"@openclaw/codex","format":"openclaw","origin":"global","enabled":true,"explicitlyEnabled":true}};
@@ -22,7 +23,7 @@ const lintEvidence = { ok: false, stdout: JSON.stringify({schemaVersion:1,ok:fal
   {checkId:"core/doctor/skill-workshop-tool-policy",severity:"warning"},
 ]}) };
 function fixture({ installed = "2026.9.4", plugin = true, pluginVersion = "2026.10.3", pluginResult,
-  status = { ok: true, stdout: JSON.stringify({ ...statusEvidence, migrationWarnings: [] }) }, installOk = true } = {}) {
+  status = { ok: true, stdout: JSON.stringify({ ...statusEvidence, migrationWarnings: [] }) }, installOk = true, doctorOk = true } = {}) {
   const calls = [], output = [];
   let current = installed;
   const run = (command, args) => {
@@ -31,6 +32,7 @@ function fixture({ installed = "2026.9.4", plugin = true, pluginVersion = "2026.
     if (args[0] === "--version") return { ok: Boolean(current), stdout: current ? `OpenClaw ${current}` : "" };
     if (args[0] === "plugins") return pluginResult ?? { ok: plugin, stdout: plugin ? JSON.stringify({ ...pluginEvidence, plugin: { ...pluginEvidence.plugin, id: args[2], builtWithOpenClawVersion: pluginVersion } }) : "" };
     if (args.join(" ") === "update status --json") return status;
+    if (args.join(" ") === "doctor --fix --non-interactive") return { ok: doctorOk, stdout: "" };
     if (args.join(" ") === "doctor --help") return { ok: true, stdout: "--lint Read-only diagnostics" };
     if (args.join(" ") === "doctor --lint") return lintEvidence;
     throw new Error(`Unexpected command: ${command} ${args.join(" ")}`);
@@ -43,7 +45,7 @@ test("old-version repair installs exactly the one tested pin and verifies config
   const result = await repairOpenclaw({ ...f, yes: true, vendors: ["codex", "meta", "claude"] });
   assert.equal(PINNED_OPENCLAW_VERSION, "2026.10.3");
   assert.deepEqual(result, {
-    ok: true, actions: [action], changed: [action.description], checks: [
+    ok: true, actions: [action, migrate], changed: [action.description, migrate.description], checks: [
       { id: "openclaw", ok: true, message: "OpenClaw 2026.10.3.", fix: "npm install -g openclaw@2026.10.3" },
       { id: "openclaw-plugin:codex", ok: true, message: "OpenClaw plugin codex 2026.10.3 is ready (built for 2026.10.3; OpenClaw is 2026.10.3).", fix: `openclaw plugins install clawhub:@openclaw/codex@${PINNED_OPENCLAW_VERSION} --force` },
       { id: "openclaw-plugin:meta", ok: true, message: "OpenClaw plugin meta 2026.10.3 is ready (built for 2026.10.3; OpenClaw is 2026.10.3).", fix: `openclaw plugins install clawhub:@openclaw/meta-provider@${PINNED_OPENCLAW_VERSION} --force` },
@@ -52,21 +54,21 @@ test("old-version repair installs exactly the one tested pin and verifies config
   });
   assert.deepEqual(f.calls, [
     ["openclaw", ["--version"]], ["openclaw", ["plugins", "inspect", "codex", "--json"]], ["openclaw", ["plugins", "inspect", "meta", "--json"]],
-    ["npm", ["install", "-g", "openclaw@2026.10.3"]],
+    ["npm", ["install", "-g", "openclaw@2026.10.3"]], ["openclaw", ["doctor", "--fix", "--non-interactive"]],
     ["openclaw", ["--version"]], ["openclaw", ["plugins", "inspect", "codex", "--json"]],
     ["openclaw", ["plugins", "inspect", "meta", "--json"]], ["openclaw", ["update", "status", "--json"]],
   ]);
   assert.deepEqual(f.output.slice(0, 8), [
     "Planned changes:",
     "  Upgrade OpenClaw to 2026.10.3: npm install -g openclaw@2026.10.3",
+    "  Migrate OpenClaw's state to the new release: openclaw doctor --fix --non-interactive",
     "Postflight checks (read-only):",
     "  openclaw --version",
     "  openclaw plugins inspect codex --json",
     "  openclaw plugins inspect meta --json",
     "  openclaw update status --json",
-    "  Migration repairs are not run automatically. If needed, run openclaw update repair --yes separately.",
   ]);
-  assert.equal(f.output.includes("Changed: Upgrade OpenClaw to 2026.10.3."), true);
+  assert.equal(f.output.includes("Changed: Upgrade OpenClaw to 2026.10.3; Migrate OpenClaw's state to the new release."), true);
 });
 
 test("newer installed OpenClaw is reported without any install or downgrade", async () => {
@@ -92,7 +94,7 @@ test("missing codex after install fails with the exact plugin fix command", asyn
 });
 
 test("pending migrations even with a zero exit fail with the exact repair command", async () => {
-  const f = fixture({ status: { ok: true, stdout: JSON.stringify(statusEvidence) } });
+  const f = fixture({ installed: "2026.10.3", status: { ok: true, stdout: JSON.stringify(statusEvidence) } });
   const result = await repairOpenclaw({ ...f, yes: true });
   assert.equal(result.ok, false);
   assert.deepEqual(result.checks.at(-1), {
@@ -113,16 +115,16 @@ test("doctor fix prints the complete plan before one default-no terminal prompt"
       assert.deepEqual(f.output, [
         "Planned changes:",
         "  Upgrade OpenClaw to 2026.10.3: npm install -g openclaw@2026.10.3",
+        "  Migrate OpenClaw's state to the new release: openclaw doctor --fix --non-interactive",
         "Postflight checks (read-only):",
         "  openclaw --version",
         "  openclaw update status --json",
-        "  Migration repairs are not run automatically. If needed, run openclaw update repair --yes separately.",
       ]);
       assert.deepEqual(f.calls, [["openclaw", ["--version"]]]);
       return answer;
     } });
     assert.equal(prompts, 1);
-    assert.deepEqual(result, { ok: false, declined: true, actions: [action], changed: [], checks: [] });
+    assert.deepEqual(result, { ok: false, declined: true, actions: [action, migrate], changed: [], checks: [] });
     assert.deepEqual(f.calls, [["openclaw", ["--version"]]]);
     assert.equal(f.output.at(-1), "No changes made.");
   }
@@ -131,7 +133,7 @@ test("doctor fix prints the complete plan before one default-no terminal prompt"
 test("noninteractive doctor fix without yes makes no changes and does not prompt", async () => {
   const f = fixture();
   const result = await repairOpenclaw({ ...f, ask: () => assert.fail("must not prompt") });
-  assert.deepEqual(result, { ok: false, declined: true, actions: [action], changed: [], checks: [] });
+  assert.deepEqual(result, { ok: false, declined: true, actions: [action, migrate], changed: [], checks: [] });
   assert.deepEqual(f.calls, [["openclaw", ["--version"]]]);
   assert.equal(f.output.at(-1), "No changes made. Non-interactive repair requires --yes.");
 });
@@ -142,9 +144,25 @@ test("terminal yes applies only listed actions and reports them", async () => {
   const result = await repairOpenclaw({ ...f, isTTY: true, ask: async () => { prompts++; return "yes"; } });
   assert.equal(prompts, 1);
   assert.equal(result.ok, true);
-  assert.deepEqual(result.changed, ["Upgrade OpenClaw to 2026.10.3"]);
+  assert.deepEqual(result.changed, ["Upgrade OpenClaw to 2026.10.3", "Migrate OpenClaw's state to the new release"]);
   assert.deepEqual(f.calls.filter(([command]) => command === "npm"), [["npm", ["install", "-g", "openclaw@2026.10.3"]]]);
-  assert.equal(f.output.includes("Changed: Upgrade OpenClaw to 2026.10.3."), true);
+  assert.equal(f.output.includes("Changed: Upgrade OpenClaw to 2026.10.3; Migrate OpenClaw's state to the new release."), true);
+});
+
+test("a failed state migration after an upgrade stops before postflight, with Doctor's command as the fix", async () => {
+  const f = fixture({ doctorOk: false });
+  const result = await repairOpenclaw({ ...f, yes: true });
+  assert.deepEqual(result, { ok: false, actions: [action, migrate], changed: [action.description], checks: [] });
+  assert.equal(f.output.at(-2), "Failed: Migrate OpenClaw's state to the new release. Fix: openclaw doctor --fix --non-interactive");
+});
+
+test("doctor --fix runs only after an upgrade: never on a fresh install, at the pin, or on a rollback", async () => {
+  for (const [installed, exact] of [[null, false], ["2026.10.3", false], ["2026.11.1", true]]) {
+    const f = fixture({ installed });
+    const result = await repairOpenclaw({ ...f, yes: true, exact });
+    assert.equal(f.calls.some(([, args]) => args[0] === "doctor" && args.includes("--fix")), false, String(installed));
+    assert.equal(result.actions.some((x) => x.args[0] === "doctor"), false, String(installed));
+  }
 });
 
 test("failed or malformed migration status fails verification with a manual command", () => {
@@ -184,7 +202,7 @@ test("a meta plugin older than OpenClaw is ready at or past the pin, and needs a
 test("a failed npm install is reported without a successful change or postflight", async () => {
   const f = fixture({ installOk: false });
   const result = await repairOpenclaw({ ...f, yes: true });
-  assert.deepEqual(result, { ok: false, actions: [action], changed: [], checks: [] });
+  assert.deepEqual(result, { ok: false, actions: [action, migrate], changed: [], checks: [] });
   assert.deepEqual(f.calls, [["openclaw", ["--version"]], ["npm", action.args]]);
   assert.equal(f.output.at(-1), "Completed changes: none. The failed install may have partially modified OpenClaw.");
 });
