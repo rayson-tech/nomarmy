@@ -19,7 +19,7 @@ const AUTH = { profiles: [
   { id: "openai:account-1", provider: "openai", type: "oauth", expiresAt: "2026-10-03T21:10:37.000Z" },
 ] };
 
-const CODEX_RECOVERY = "openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw/backups --yes";
+const CODEX_RECOVERY = "openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-backups --yes";
 
 test("loginExpiryIssues: quiet 9 days out, a warning inside 7, an error once expired", () => {
   assert.deepEqual(loginExpiryIssues(AUTH, { now: Date.parse("2026-09-24T12:00:00Z") }), []);
