@@ -1683,7 +1683,10 @@ async function addSubscriptionAgent(rl, agents) {
   }
   // Catalog entries can be cached, and a particular model can refuse a
   // working login. Check OpenClaw's auth profile before asking for details.
-  if (needsOpenclawLogin && !hasUsableOpenclawAuthProfile(vendor.provider)) {
+  // linkCodex has just confirmed an unexpired profile itself; asking again
+  // failed once on a real box right after `openclaw doctor --fix`.
+  const verifiedNow = vendorKey === "codex" && linkedOpenclaw;
+  if (needsOpenclawLogin && !verifiedNow && !hasUsableOpenclawAuthProfile(vendor.provider)) {
     if (linkedOpenclaw || !(await openclawProviderLogin(vendor, rl)) || !hasUsableOpenclawAuthProfile(vendor.provider)) {
       console.log(c.red(`✗ Sign-in has no usable auth profile. Retry with \`nomarmy agents add subscription ${vendorKey}\`.`));
       process.exitCode = 1;
