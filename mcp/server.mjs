@@ -49,7 +49,8 @@ import { jevSettings, judgeSettings } from "../lib/validators.mjs";
 import { agentRunsToolsOnHost } from "../lib/dispatch-schema.mjs";
 import { createBuildMetrics, resolveOutcome, finalText, workerMetadata, usageMetrics, policyAdmissionProblems, applyRefactorContract, applyVerificationPolicy, resolveVerifyRegression } from "../lib/outcome.mjs";
 import { jobLabel, compactJobRecord, formatResult, reportView, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner } from "../lib/job-format.mjs";
-import { ensureOpenClawOnPath } from "../lib/openclaw-path.mjs";
+import { ensureOpenClawOnPath, ensureVendorClisOnPath } from "../lib/openclaw-path.mjs";
+import { SUBSCRIPTION_VENDORS } from "../lib/subscription-setup.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
 import { samePath } from "../lib/same-path.mjs";
 import { withWindowsPaths, dropWindowsPath } from "../lib/wsl.mjs";
@@ -66,6 +67,8 @@ function coordinatorResult(result) {
 dropWindowsPath();
 // OpenClaw in ~/.npm-global/bin (no writable npm prefix) is found without the operator editing PATH.
 ensureOpenClawOnPath();
+// So are the subscription CLIs OpenClaw runs (claude in ~/.local/bin under WSL, with no login shell).
+ensureVendorClisOnPath(Object.values(SUBSCRIPTION_VENDORS).map((vendor) => vendor.cli.bin));
 
 export { run, mapLimit };
 export { readsMeasurable, measureReads };

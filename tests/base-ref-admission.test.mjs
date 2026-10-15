@@ -26,9 +26,10 @@ function fixture(t) {
   fs.writeFileSync(path.join(repo, ".nomarmy.yml"), "verification:\n  quick:\n    commands: ['true']\n");
   git("add", "."); git("commit", "-qm", "initial");
   git("init", "--bare", "-q", remote);
-  git("remote", "add", "origin", remote);
-  // Seed a remote-only branch without creating a local tracking ref.
+  // Seed a remote-only branch without creating a local tracking ref: pushed
+  // before origin exists, since Git 2.56 updates origin/* on a push to its URL.
   git("push", remote, "HEAD:refs/heads/topic/nested");
+  git("remote", "add", "origin", remote);
   fs.writeFileSync(path.join(repo, "content"), "operator's uncommitted work\n");
   fs.writeFileSync(path.join(repo, "untracked"), "keep me\n");
   const before = { head: git("rev-parse", "HEAD"), branch: git("symbolic-ref", "HEAD"), status: git("status", "--porcelain=v1") };

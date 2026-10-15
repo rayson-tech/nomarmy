@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
-import { armyIssues, leftoverIssues, unknownModelIssues, loginExpiryIssues, recordHealth, runHealthChecks, versionIssues, recentModelRefusal, recordProbeSuccess, refusedModelIn, recordModelRefusal, clearModelRefusal, modelRefusals } from "../lib/health.mjs";
+import { armyIssues, leftoverIssues, unknownModelIssues, loginExpiryIssues, recordHealth, runHealthChecks, versionIssues, recentModelRefusal, recordProbeSuccess, refusedModelIn, recordModelRefusal, clearModelRefusal, modelRefusals, parseOpenclawAuthProfiles } from "../lib/health.mjs";
 
 const dirs = [];
 function tmp() { const d = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-health-")); dirs.push(d); return d; }
@@ -19,7 +19,7 @@ const AUTH = { profiles: [
   { id: "openai:account-1", provider: "openai", type: "oauth", expiresAt: "2026-10-03T21:10:37.000Z" },
 ] };
 
-const CODEX_RECOVERY = "openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw/backups --yes";
+const CODEX_RECOVERY = "openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-backups --yes";
 
 test("loginExpiryIssues: quiet 9 days out, a warning inside 7, an error once expired", () => {
   assert.deepEqual(loginExpiryIssues(AUTH, { now: Date.parse("2026-09-24T12:00:00Z") }), []);
@@ -281,4 +281,12 @@ test("subscriptionKeyIssues flags an OpenClaw sign-in subscription whose provide
   const issues = subscriptionKeyIssues(profiles, agents);
   assert.deepEqual(issues.map((i) => [i.id, i.fix]), [["subscription-key:grok", "openclaw models auth logout xai:nomarmy"]]);
   assert.deepEqual(subscriptionKeyIssues(null, agents), []);
+});
+
+test("auth profile JSON is found after a log line that contains a brace", () => {
+  const json = JSON.stringify({ profiles: [{ id: "openai:account-1", provider: "openai" }] }, null, 2);
+  assert.deepEqual(parseOpenclawAuthProfiles(json), [{ id: "openai:account-1", provider: "openai" }]);
+  assert.deepEqual(parseOpenclawAuthProfiles(`[plugins] loaded {codex}\n${json}`), [{ id: "openai:account-1", provider: "openai" }]);
+  assert.equal(parseOpenclawAuthProfiles("Gateway is not running."), null);
+  assert.equal(parseOpenclawAuthProfiles('{"profiles":"none"}'), null);
 });
