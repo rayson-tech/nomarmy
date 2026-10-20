@@ -32,7 +32,11 @@ export function pluginFiles(pkg = JSON.parse(fs.readFileSync(path.join(root, "pa
 
   // Claude Code reads .claude-plugin/plugin.json; the MCP server is inline
   // because Claude reads .mcp.json, not the shared mcp.json below.
-  files[`${PLUGIN_DIR}/.claude-plugin/plugin.json`] = json({ ...meta, mcpServers: { [SERVER_NAME]: server }, hooks: "./hooks/session-start.json" });
+  // Claude Code starts it through a script the plugin ships (bin/nomarmy-mcp.mjs),
+  // which the directory's validator can read, and which says what to install
+  // when nomarmy is missing. It runs the same `nomarmy mcp`.
+  const claudeServer = { command: "node", args: ["${CLAUDE_PLUGIN_ROOT}/bin/nomarmy-mcp.mjs"] };
+  files[`${PLUGIN_DIR}/.claude-plugin/plugin.json`] = json({ ...meta, mcpServers: { [SERVER_NAME]: claudeServer }, hooks: "./hooks/session-start.json" });
   // Codex reads the portable Agent Plugins manifest (Cursor does too, and
   // ignores the com.openai block).
   files[`${PLUGIN_DIR}/plugin.json`] = json({

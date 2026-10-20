@@ -20,9 +20,9 @@
   ],
   "mcpServers": {
     "nomarmy-local-worker": {
-      "command": "nomarmy",
+      "command": "node",
       "args": [
-        "mcp"
+        "${CLAUDE_PLUGIN_ROOT}/bin/nomarmy-mcp.mjs"
       ]
     }
   },
