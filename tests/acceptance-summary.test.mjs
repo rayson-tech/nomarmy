@@ -105,12 +105,15 @@ test("PR acceptance without a sandbox reports unavailable and cleans up HEAD", a
 
 test("PR acceptance sandbox timeout discards even valid JSON and removes HEAD", async t => {
   const repo = fixture(t), calls = [];
-  assert.equal(await acceptanceSummary(repo, { timeoutMs: 100, run: fixtureWorktree(repo, calls), executor: {
+  // The executor reports the timeout itself. A real 100ms budget raced the
+  // setup before the sandbox command on slow CI runners, which then read as
+  // "sandbox unavailable" instead.
+  assert.equal(await acceptanceSummary(repo, { timeoutMs: 60_000, run: fixtureWorktree(repo, calls), executor: {
     probe: async () => ({ available: true }), run: async input => {
-      assertChecker(input); assert.equal(input.timeoutMs, 100);
+      assertChecker(input); assert.equal(input.timeoutMs, 60_000);
       return { started: true, timedOut: true, exitCode: 0, stdout: output([criterion("ACC-1", "met")]) };
     },
-  } }), "couldn't run: timed out after 100ms");
+  } }), "couldn't run: timed out after 60000ms");
   assert.equal(calls.length, 2);
   assert.equal(fs.existsSync(path.dirname(calls[0][1][3])), false);
 });
