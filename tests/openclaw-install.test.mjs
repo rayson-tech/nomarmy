@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { PINNED_OPENCLAW_VERSION, runOpenclawCommand, openclawInstallPlan, pluginUpdatePlan, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors } from "../lib/openclaw-install.mjs";
+import { PINNED_OPENCLAW_VERSION, runOpenclawCommand, openclawInstallPlan, pluginUpdatePlan, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors, codexBinaryCheck } from "../lib/openclaw-install.mjs";
+import os from "node:os";
+import path from "node:path";
+
+// Never this machine's own OpenClaw: codexBinaryCheck reads the plugin from OpenClaw's home.
+process.env.OPENCLAW_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-openclaw-home-"));
 
 const action = { description: "Upgrade OpenClaw to 2026.10.3", command: "npm", args: ["install", "-g", "openclaw@2026.10.3"] };
 const migrate = { description: "Migrate OpenClaw's state to the new release", command: "openclaw", args: ["doctor", "--fix", "--non-interactive"], timeoutMs: 300000 };
@@ -404,4 +409,20 @@ test("a rollback installs the exact earlier release of OpenClaw and its plugins;
   assert.deepEqual(pluginUpdatePlan({ run: inspect("2026.10.3"), vendors: ["meta"], target: "2099.1.1" }).map((a) => a.args.join(" ")),
     ["plugins install clawhub:@openclaw/meta-provider@2099.1.1 --force"]);
   assert.deepEqual(pluginUpdatePlan({ run: inspect("2099.1.1"), vendors: ["meta"], target: "2026.10.3" }), []);
+});
+
+test("codexBinaryCheck: flags the Codex plugin missing its platform binary, with a copy-in fix; silent without a bundled Codex", (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-codexbin-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  assert.equal(codexBinaryCheck({ home, platform: "darwin", arch: "arm64" }), null);
+  const modules = path.join(home, "extensions", "codex", "node_modules", "@openai");
+  fs.mkdirSync(path.join(modules, "codex"), { recursive: true });
+  fs.writeFileSync(path.join(modules, "codex", "package.json"), JSON.stringify({ version: "0.160.0" }));
+  const missing = codexBinaryCheck({ home, platform: "darwin", arch: "arm64" });
+  assert.equal(missing.ok, false);
+  assert.match(missing.message, /missing @openai\/codex-darwin-arm64/);
+  assert.equal(missing.fix, `d=$(mktemp -d) && npm install --prefix "$d" --no-save @openai/codex-darwin-arm64@npm:@openai/codex@0.160.0-darwin-arm64 && cp -R "$d/node_modules/@openai/codex-darwin-arm64" "${modules}/" && rm -rf "$d"`);
+  fs.mkdirSync(path.join(modules, "codex-darwin-arm64"));
+  assert.equal(codexBinaryCheck({ home, platform: "darwin", arch: "arm64" }).ok, true);
+  assert.equal(codexBinaryCheck({ home, platform: "linux", arch: "x64" }).ok, false);
 });

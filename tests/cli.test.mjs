@@ -1089,6 +1089,18 @@ test("agents update --probe uses the first catalog model when no role or vendor 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("agents update --probe names Claude Code's re-login when the Claude subscription answers 401", posixStubOnly, () => {
+  const root = scratchNomarmyRoot();
+  try {
+    assert.equal(runAgentsCLI(root, ["add", "--json", "--name", "claude", "--kind", "subscription", "--provider", "claude-cli", "--model", "sonnet", "--owner", "you@example.com"]).exitCode, 0);
+    const openclaw = fakeExecutable(root, "fake-openclaw", `const a=process.argv.slice(2); if(a[0]==="agent") { console.log(JSON.stringify({ok:false,status:"error",final:"",error:{message:"HTTP 401: invalid authentication credentials"}})); process.exit(1); }`);
+    const result = runAgentsCLI(root, ["update", "claude", "--probe"], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+    assert.equal(result.exitCode, 1, result.stdout);
+    assert.match(result.stdout, /^✗ claude  claude-cli\/sonnet  failed: .*401/m);
+    assert.match(result.stdout, /^  fix: claude auth logout && claude auth login /m);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("agents update --probe fails with a model-setting command only when no model can be found", posixStubOnly, () => {
   const root = scratchNomarmyRoot();
   try {
@@ -1185,7 +1197,7 @@ test("agents add subscription codex stops as a sign-in failure when a valid prof
     assert.equal(result.exitCode, 1, result.stdout);
     assert.equal(result.sent, 3, result.stdout);
     assert.match(result.stdout, /Sign-in failed: 401 Unauthorized/);
-    assert.match(result.stdout, /fix: openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --backup-output ~\/\.openclaw-backups --yes[\r\n]/);
+    assert.match(result.stdout, /fix: openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --backup-output ~\/\.openclaw-backups --overwrite --yes[\r\n]/);
     assert.doesNotMatch(result.stdout, /openclaw configure|migrate plan/);
     assert.doesNotMatch(result.stdout, /Save the agent anyway|login works|nomarmy agents add/);
     assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
@@ -1202,7 +1214,7 @@ test("agents add subscription codex treats missing bearer, no usable profiles, a
       assert.equal(result.exitCode, 1, `${message}\n${result.stdout}`);
       assert.equal(result.sent, 3, result.stdout);
       assert.match(result.stdout, new RegExp(`Sign-in failed: ${message.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-      assert.match(result.stdout, /openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --backup-output ~\/\.openclaw-backups --yes/);
+      assert.match(result.stdout, /openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --backup-output ~\/\.openclaw-backups --overwrite --yes/);
       assert.doesNotMatch(result.stdout, /openclaw configure|migrate plan/);
       assert.doesNotMatch(result.stdout, /Save the agent anyway|login works|nomarmy agents add/);
       assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
@@ -1392,7 +1404,7 @@ if(a.startsWith("migrate apply codex")) { fs.writeFileSync(file,JSON.stringify([
     const migration = commands.findIndex((s) => s.startsWith("migrate apply codex --from "));
     const probe = commands.findIndex((s) => s.startsWith("agent exec "));
     assert.ok(logout >= 0 && logout < migration && migration < probe, commands.join("\n"));
-    assert.match(commands[migration], / --agent main --include-secrets --item auth:openai --backup-output \S+-backups --yes$/);
+    assert.match(commands[migration], / --agent main --include-secrets --item auth:openai --backup-output \S+-backups --overwrite --yes$/);
     assert.equal(commands[migration + 1], "models auth list --json");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -1449,8 +1461,8 @@ test("health and doctor CLI fail on Codex and model-policy runtime blockers", po
       const selected = issues.filter((i) => i.id.startsWith("codex-import:") || i.id.startsWith("model-policy:"));
       assert.deepEqual(selected.map((i) => i.id), ["codex-import:missing", "codex-import:shadowed", "model-policy:agents.entries.main.modelPolicy.allow"]);
       assert.deepEqual(selected.map((i) => i.fix), [
-        "openclaw models auth logout openai:person@example.com && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-backups --yes",
-        "openclaw models auth logout openai:person@example.com && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-backups --yes",
+        "openclaw models auth logout openai:person@example.com && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-backups --overwrite --yes",
+        "openclaw models auth logout openai:person@example.com && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-backups --overwrite --yes",
         "openclaw config unset agents.entries.main.modelPolicy (or add the missing models to agents.entries.main.modelPolicy.allow)",
       ]);
     }
