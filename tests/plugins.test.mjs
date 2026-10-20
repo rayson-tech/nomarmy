@@ -30,7 +30,8 @@ test("every manifest carries the package version, and the MCP Registry name matc
 
 test("each tool registers the same portable server, and no plugin path escapes the plugin", () => {
   const claude = read("plugins/nomarmy/.claude-plugin/plugin.json");
-  assert.deepEqual(claude.mcpServers, { "nomarmy-local-worker": { command: "nomarmy", args: ["mcp"] } });
+  assert.deepEqual(claude.mcpServers, { "nomarmy-local-worker": { command: "node", args: ["${CLAUDE_PLUGIN_ROOT}/bin/nomarmy-mcp.mjs"] } });
+  assert.ok(fs.existsSync(path.join(root, "plugins/nomarmy/bin/nomarmy-mcp.mjs")), "the launcher ships in the plugin");
   assert.deepEqual(read("plugins/nomarmy/mcp.json").mcpServers, { "nomarmy-local-worker": { type: "stdio", command: "nomarmy", args: ["mcp"] } });
   const codex = read("plugins/nomarmy/plugin.json").extensions["com.openai"];
   if (process.platform !== "win32") assert.ok(fs.statSync(path.join(root, "plugins/nomarmy/hooks/check-nomarmy.sh")).mode & 0o100, "the Claude hook script is executable");
@@ -68,4 +69,24 @@ for (const [name, interpreter] of [["check-nomarmy.mjs", process.execPath], ["ch
   const present = run(bin);
   assert.equal(present.status, 0);
   assert.equal(present.stdout, "");
+});
+
+test("the Claude plugin's launcher runs `nomarmy mcp` with stdio and exit code passed through, and names the install when it's missing", (t) => {
+  const script = path.join(root, "plugins/nomarmy/bin/nomarmy-mcp.mjs");
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-plugin-launch-"));
+  t.after(() => fs.rmSync(bin, { recursive: true, force: true }));
+  const base = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "PATH"));
+  const run = () => spawnSync(process.execPath, [script], { encoding: "utf8", input: "ping\n", env: { ...base, PATH: bin } });
+  const missing = run();
+  assert.equal(missing.status, 1);
+  assert.equal(missing.stdout, "");
+  assert.match(missing.stderr, /npm install -g nomarmy && nomarmy setup/);
+  // A stand-in nomarmy: echoes its arguments and stdin, exits 7.
+  const fake = path.join(bin, "fake-nomarmy.mjs");
+  fs.writeFileSync(fake, 'let s = ""; process.stdin.on("data", (c) => s += c).on("end", () => { process.stdout.write(process.argv.slice(2).join(" ") + "|" + s); process.exit(7); });');
+  if (process.platform === "win32") fs.writeFileSync(path.join(bin, "nomarmy.cmd"), `@"${process.execPath}" "${fake}" %*\r\n`);
+  else fs.writeFileSync(path.join(bin, "nomarmy"), `#!/bin/sh\nexec "${process.execPath}" "${fake}" "$@"\n`, { mode: 0o755 });
+  const present = run();
+  assert.equal(present.status, 7, present.stderr);
+  assert.equal(present.stdout, "mcp|ping\n");
 });
