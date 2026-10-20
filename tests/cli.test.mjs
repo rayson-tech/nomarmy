@@ -1197,7 +1197,7 @@ test("agents add subscription codex stops as a sign-in failure when a valid prof
     assert.equal(result.exitCode, 1, result.stdout);
     assert.equal(result.sent, 3, result.stdout);
     assert.match(result.stdout, /Sign-in failed: 401 Unauthorized/);
-    assert.match(result.stdout, /fix: openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --backup-output ~\/\.openclaw-backups --yes[\r\n]/);
+    assert.match(result.stdout, /fix: openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --backup-output ~\/\.openclaw-backups --overwrite --yes[\r\n]/);
     assert.doesNotMatch(result.stdout, /openclaw configure|migrate plan/);
     assert.doesNotMatch(result.stdout, /Save the agent anyway|login works|nomarmy agents add/);
     assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
@@ -1214,7 +1214,7 @@ test("agents add subscription codex treats missing bearer, no usable profiles, a
       assert.equal(result.exitCode, 1, `${message}\n${result.stdout}`);
       assert.equal(result.sent, 3, result.stdout);
       assert.match(result.stdout, new RegExp(`Sign-in failed: ${message.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-      assert.match(result.stdout, /openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --backup-output ~\/\.openclaw-backups --yes/);
+      assert.match(result.stdout, /openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --backup-output ~\/\.openclaw-backups --overwrite --yes/);
       assert.doesNotMatch(result.stdout, /openclaw configure|migrate plan/);
       assert.doesNotMatch(result.stdout, /Save the agent anyway|login works|nomarmy agents add/);
       assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
@@ -1404,7 +1404,7 @@ if(a.startsWith("migrate apply codex")) { fs.writeFileSync(file,JSON.stringify([
     const migration = commands.findIndex((s) => s.startsWith("migrate apply codex --from "));
     const probe = commands.findIndex((s) => s.startsWith("agent exec "));
     assert.ok(logout >= 0 && logout < migration && migration < probe, commands.join("\n"));
-    assert.match(commands[migration], / --agent main --include-secrets --item auth:openai --backup-output \S+-backups --yes$/);
+    assert.match(commands[migration], / --agent main --include-secrets --item auth:openai --backup-output \S+-backups --overwrite --yes$/);
     assert.equal(commands[migration + 1], "models auth list --json");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
