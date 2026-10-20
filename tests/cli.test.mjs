@@ -1089,6 +1089,18 @@ test("agents update --probe uses the first catalog model when no role or vendor 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("agents update --probe names Claude Code's re-login when the Claude subscription answers 401", posixStubOnly, () => {
+  const root = scratchNomarmyRoot();
+  try {
+    assert.equal(runAgentsCLI(root, ["add", "--json", "--name", "claude", "--kind", "subscription", "--provider", "claude-cli", "--model", "sonnet", "--owner", "you@example.com"]).exitCode, 0);
+    const openclaw = fakeExecutable(root, "fake-openclaw", `const a=process.argv.slice(2); if(a[0]==="agent") { console.log(JSON.stringify({ok:false,status:"error",final:"",error:{message:"HTTP 401: invalid authentication credentials"}})); process.exit(1); }`);
+    const result = runAgentsCLI(root, ["update", "claude", "--probe"], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+    assert.equal(result.exitCode, 1, result.stdout);
+    assert.match(result.stdout, /^✗ claude  claude-cli\/sonnet  failed: .*401/m);
+    assert.match(result.stdout, /^  fix: claude auth logout && claude auth login /m);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("agents update --probe fails with a model-setting command only when no model can be found", posixStubOnly, () => {
   const root = scratchNomarmyRoot();
   try {
@@ -1449,8 +1461,8 @@ test("health and doctor CLI fail on Codex and model-policy runtime blockers", po
       const selected = issues.filter((i) => i.id.startsWith("codex-import:") || i.id.startsWith("model-policy:"));
       assert.deepEqual(selected.map((i) => i.id), ["codex-import:missing", "codex-import:shadowed", "model-policy:agents.entries.main.modelPolicy.allow"]);
       assert.deepEqual(selected.map((i) => i.fix), [
-        "openclaw models auth logout openai:person@example.com && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-backups --yes",
-        "openclaw models auth logout openai:person@example.com && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-backups --yes",
+        "openclaw models auth logout openai:person@example.com && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-backups --overwrite --yes",
+        "openclaw models auth logout openai:person@example.com && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-backups --overwrite --yes",
         "openclaw config unset agents.entries.main.modelPolicy (or add the missing models to agents.entries.main.modelPolicy.allow)",
       ]);
     }

@@ -11,11 +11,11 @@ import { runDoctor } from "../lib/doctor.mjs";
 const now = Date.parse("2026-10-01T12:00:00Z");
 const imported = { id: "openai:account-123", provider: "openai", type: "oauth", label: "(Codex import)", expiresAt: "2099-01-01T00:00:00.000Z" };
 const email = { id: "openai:person@example.com", provider: "openai", type: "oauth", expiresAt: "2099-01-01T00:00:00.000Z" };
-const migrate = "openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-backups --yes";
+const migrate = "openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-backups --overwrite --yes";
 const fix = `openclaw models auth logout ${email.id} && ${migrate}`;
 const list = ["models", "auth", "list", "--json"];
 const backupDir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-test-openclaw-")), "backups");
-const migration = ["migrate", "apply", "codex", "--from", "/sandbox/codex", "--agent", "main", "--include-secrets", "--item", "auth:openai", "--backup-output", backupDir, "--yes"];
+const migration = ["migrate", "apply", "codex", "--from", "/sandbox/codex", "--agent", "main", "--include-secrets", "--item", "auth:openai", "--backup-output", backupDir, "--overwrite", "--yes"];
 function linkRunner(initial, final = [imported], fail = null) {
   let profiles = initial;
   const calls = [];

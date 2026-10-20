@@ -1718,10 +1718,10 @@ async function addSubscriptionAgent(rl, agents) {
   const probed = Boolean(probeModel);
   const works = probed ? probeWorker(vendor.provider, probeModel) : false;
   if (works) console.log(c.green(`✓ ${vendor.provider}/${probeModel} answered a real test prompt.`));
-  else if (needsOpenclawLogin && probed && openclawSignInFailure(`${lastProbeFailure ?? ""}\n${lastProbeText}`)) {
+  else if ((needsOpenclawLogin || vendorKey === "claude") && probed && openclawSignInFailure(`${lastProbeFailure ?? ""}\n${lastProbeText}`)) {
     const why = lastProbeFailure ? `: ${lastProbeFailure}` : "";
     console.log(c.red(`✗ Sign-in failed${why}.`));
-    console.log(`  fix: ${codexImportRecovery()}`);
+    console.log(`  fix: ${signInFix(vendor.provider)}`);
     console.log(c.dim("Stopped; nothing was written."));
     process.exitCode = 1;
     return;
@@ -1898,7 +1898,16 @@ function probeConfiguredAgent(name, agent) {
   const elapsed = ((performance.now() - start) / 1000).toFixed(1);
   console.log(ok ? c.green(`✓ ${name}  ${selected}  answered in ${elapsed}s`)
     : c.red(`✗ ${name}  ${selected}  failed: ${lastProbeFailure ?? "no answer"}`));
+  const fix = !ok && openclawSignInFailure(`${lastProbeFailure ?? ""}\n${lastProbeText}`) ? signInFix(provider) : null;
+  if (fix) console.log(`  fix: ${fix}`);
   if (!ok) process.exitCode = 1;
+}
+
+/** The command that renews a subscription's login after a test call was refused as signed out (401). */
+function signInFix(provider) {
+  if (provider === "claude-cli") return "claude auth logout && claude auth login  (Claude Code's saved login can be refused while `claude auth status` still says logged in)";
+  if (provider === "openai") return codexImportRecovery();
+  return null;
 }
 
 function cmdAgentsProbeAll() {
