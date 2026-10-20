@@ -88,3 +88,6 @@ $RECYCLE.BIN/
 # A developer may keep a machine-specific profile without committing it.
 config/profiles/*.local.env
 .nomarmy.local.yml
+
+# Local site work kept beside the checkout, not part of nomArmy
+sites/

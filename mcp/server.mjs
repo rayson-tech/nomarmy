@@ -54,6 +54,7 @@ import { SUBSCRIPTION_VENDORS } from "../lib/subscription-setup.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
 import { samePath } from "../lib/same-path.mjs";
 import { withWindowsPaths, dropWindowsPath } from "../lib/wsl.mjs";
+import { reclaimSandboxOwnership, worktreeRemovalHint } from "../lib/sandbox-ownership.mjs";
 export { withWindowsPaths };
 
 function coordinatorJson(value) { return JSON.stringify(withWindowsPaths(value), null, 2); }
@@ -757,6 +758,9 @@ server.tool("local_worker_jobs", "List recent job records for review/recovery, i
 // has already exited, so it is safe to strip here; best-effort and non-fatal,
 // since a worktree with no such lock has nothing to clear.
 async function releaseSandboxLocks(dir) {
+  // Files the sandbox made under a subordinate id (Linux, rootless Podman)
+  // would refuse the chmod below and git's delete alike.
+  reclaimSandboxOwnership(dir);
   if (process.platform === "darwin") {
     await run("chmod", ["-R", "-N", dir], { cwd: projectDir }).catch(() => {});
   } else {
@@ -876,7 +880,7 @@ server.tool("local_worker_sweep", "Bulk-reap job worktrees/branches that are PRO
       }
       reaped.push({ jobId, worktree, branch, branchDeleted });
     } catch (error) {
-      skipped.push({ jobId, reason: `removal failed: ${error.message}` });
+      skipped.push({ jobId, reason: `removal failed: ${worktreeRemovalHint(error.message, worktree) ?? error.message}` });
     }
   }
   return toolText(coordinatorJson({ examined: dirs.length, reapedCount: reaped.length, skippedCount: skipped.length, dryRun: dry_run, reaped, skipped }));
@@ -898,7 +902,8 @@ server.tool("local_worker_cleanup", "Remove a retained worker worktree and optio
     await releaseSandboxLocks(worktree);
     if (!force) await stripRuntimeJunk(worktree);
     assertRegisteredWorktree(worktree);
-    await run("git", ["worktree", "remove", ...(force ? ["--force"] : []), worktree], { cwd: projectDir });
+    try { await run("git", ["worktree", "remove", ...(force ? ["--force"] : []), worktree], { cwd: projectDir }); }
+    catch (error) { const hint = worktreeRemovalHint(error.message, worktree); if (hint) error.message = `${error.message}\n${hint}`; throw error; }
   }
   let branchDeleteMode = null;
   if (delete_branch && branch) {
