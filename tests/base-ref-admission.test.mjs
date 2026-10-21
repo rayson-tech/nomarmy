@@ -83,7 +83,10 @@ test("batch admission fetches each missing remote base once, notes it, and leave
   assert.equal(f.git("rev-parse", "origin/topic/nested"), f.git("rev-parse", "HEAD"));
   f.calls.length = 0;
   assert.deepEqual((await f.runtime.admit([job("verify"), job("verify", "origin/topic/nested")])).problems, []);
-  assert.deepEqual(f.calls.map(c => c.args), [["rev-parse", "--verify", "--end-of-options", "origin/topic/nested^{commit}"]]);
+  // Then the verification-contract check (lib/job-contract.mjs): read-only,
+  // and it stops at once since that base is the checkout's HEAD.
+  assert.deepEqual(f.calls.map(c => c.args), [["rev-parse", "--verify", "--end-of-options", "origin/topic/nested^{commit}"],
+    ["rev-parse", "--verify", "--end-of-options", "origin/topic/nested^{commit}"], ["rev-parse", "HEAD"]]);
   assert.equal(fs.existsSync(f.jobsRoot), false);
   f.unchanged();
 });
@@ -195,4 +198,21 @@ test("reviews: a review scout with no base_ref reads the reviewed job's commit, 
   await f.runtime.admit([held]);
   assert.equal(held.base_ref, undefined, "an uncommitted job has no commit to read; its diff file carries the change");
   f.unchanged();
+});
+
+test("admission notes a base whose verification profile differs from the checkout's, before any model time is spent", async t => {
+  const f = fixture(t);
+  const initial = f.git("rev-parse", "HEAD");
+  fs.writeFileSync(path.join(f.repo, ".nomarmy.yml"), "verification:\n  quick:\n    commands: ['node scripts/ci/quiet-test.mjs']\n");
+  f.git("add", ".nomarmy.yml"); f.git("commit", "-qm", "new profile");
+  const short = initial.slice(0, 12);
+  const result = await f.runtime.admit([job("implement", initial)]);
+  assert.deepEqual(result.problems, []);
+  assert.deepEqual(result.admission.reasons.filter(n => n.includes("verification profile")),
+    [`This job starts at ${short}, whose verification profile quick differs from the checkout's: it verifies with ${short}'s own commands. To verify against the current profile, redo it on the current head with reference_commits`]);
+  // At the checkout's HEAD, or for a scout, there's nothing to note.
+  for (const j of [job("implement", "HEAD"), job("scout", initial)]) {
+    assert.deepEqual((await f.runtime.admit([j])).admission.reasons.filter(n => n.includes("verification profile")), []);
+  }
+  assert.equal(f.runtime.activeJobs.size, 0);
 });

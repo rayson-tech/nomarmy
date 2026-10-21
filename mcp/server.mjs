@@ -972,13 +972,19 @@ if (isMain) {
   // import this module and inject their own runner, and an unregistered runner
   // yields `not_run`, which can never produce a recovered success.
   const { createVerificationRunner } = await import("../lib/verify.mjs");
-  // The environment contract is the operator's checkout's .nomarmy.yml --
+  // The environment contract is the operator's .nomarmy.yml --
   // what local_worker_config shows -- never the job worktree's copy: a
   // job cut from a branch without the file ran with no contract at all (a
   // real Senti run on `refinement`: no Python requirements, so no ruff or
   // sqlglot, so verification could never pass), and a worker could edit its
   // own worktree's copy to weaken the checks that judge it.
-  registerVerificationRunner(createVerificationRunner({ hostProjectDir: projectDir, loadConfig: () => loadConfig(projectDir) }));
+  // Read at the job's starting commit when that isn't the checkout's HEAD
+  // (lib/job-contract.mjs): the commands run against that commit's files.
+  const { loadJobContract } = await import("../lib/job-contract.mjs");
+  registerVerificationRunner(createVerificationRunner({ hostProjectDir: projectDir, loadConfig: async (cwd, context = {}) => {
+    const { loaded, note } = await loadJobContract({ projectDir, baseSha: context.baseSha ?? null, profile: context.profile ?? null, git: (args) => gitRaw(args, projectDir) });
+    return note ? { ...loaded, contractNote: note } : loaded;
+  } }));
   // A healthy answer is reused for 20 seconds, so a batch doesn't ask Podman per job.
   let podmanOkUntil = 0;
   podmanChecks = {
