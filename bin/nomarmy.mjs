@@ -267,6 +267,10 @@ Usage: nomarmy <command> [options]
                   how many api and subscription jobs run at once, across
                   every session (default 4); with n, sets it in limits.yml.
                   Warns when the Podman VM is too small for that many.
+  config max-verifications [n|off]
+                  how many verification runs (whole test suites) run at
+                  once on this machine, across every session; unset by
+                  default (only max-jobs applies). Jobs past it wait.
   config openclaw [tested|latest]
                   which OpenClaw release updates keep: tested (the
                   release nomArmy is tested with, the default) or latest
@@ -2946,12 +2950,30 @@ async function cmdConfigMaxJobs() {
   if (given === undefined) console.log(c.dim("Change it with `nomarmy config max-jobs <n>` (1 to 32)."));
 }
 
+// `nomarmy config max-verifications [n|off]`: verification runs at once, machine-wide.
+async function cmdConfigMaxVerifications() {
+  const { maxVerifications, setMaxVerifications, limitsPath } = await import("../lib/limits.mjs");
+  const given = argv[2];
+  if (given !== undefined) {
+    if (given !== "off" && !/^\d+$/.test(given)) throw new Error(`max-verifications must be a whole number or off, got "${given}"`);
+    setMaxVerifications(given === "off" ? null : Number(given));
+  }
+  const value = maxVerifications();
+  if (json) return out({ maxVerifications: value, path: limitsPath() });
+  console.log(value
+    ? `${given !== undefined ? c.green("✓ ") : ""}Up to ${c.bold(String(value))} verification runs at once on this machine; jobs past that wait for one to finish (${limitsPath()}).`
+    : `${given !== undefined ? c.green("✓ ") : ""}No limit of its own on verification runs: max-jobs bounds them.`);
+  if (given !== undefined) console.log(c.dim("Applies to the next verification in every session on this version, no restart."));
+  else console.log(c.dim("Change it with `nomarmy config max-verifications <n>` (1 to 32), or `off`."));
+}
+
 async function cmdConfig() {
   const sub = argv[1] ?? "paths";
   if (sub === "paths") return cmdConfigPaths();
   if (sub === "max-jobs") return cmdConfigMaxJobs();
+  if (sub === "max-verifications") return cmdConfigMaxVerifications();
   if (sub === "openclaw") return cmdConfigOpenclaw();
-  throw new Error(`Unknown config subcommand "${sub}". Use: nomarmy config <paths|max-jobs [n]|openclaw [tested|latest]>`);
+  throw new Error(`Unknown config subcommand "${sub}". Use: nomarmy config <paths|max-jobs [n]|max-verifications [n|off]|openclaw [tested|latest]>`);
 }
 
 // --- `nomarmy jobs [--watch]`: what's running, from any session -----------

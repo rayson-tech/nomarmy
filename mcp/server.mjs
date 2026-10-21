@@ -14,6 +14,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import fs from "node:fs";
+import { diffFor, patchText, registerJobRecordWorktree, COMMIT_SHOW_MAX_BYTES } from "../lib/commit-diff.mjs";
+import { maxVerifications } from "../lib/limits.mjs";
+import { startDetachedJob, readDetachedJob } from "../lib/detached-job.mjs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -32,7 +35,7 @@ import { loadConfig, ConfigError } from "../lib/config.mjs";
 import { expandArmyRole, describeArmy, globalConfigDir } from "../lib/army.mjs";
 import { notify } from "../lib/notify.mjs";
 import { checkAndRecordHealth } from "../lib/health.mjs";
-import { liveLeases } from "../lib/slots.mjs";
+import { liveLeases, writeLease, pidAlive } from "../lib/slots.mjs";
 import { createRun, loadRun, runTotals, finishRun, resolveRunLimits, describeLoweredLimits } from "../lib/runs.mjs";
 import { agentDispatchFields, resolveAgentModel, agentProviderId, describeAgent } from "../lib/agents.mjs";
 import { OUTCOMES, COORDINATOR_STATUS_BY_OUTCOME } from "../lib/outcomes.mjs";
@@ -295,7 +298,7 @@ export function expandJobs(jobs, { getArmy = currentArmy, getAgents = () => agen
 }
 
 const verificationFlow = createVerificationFlow({
-  run, git, projectDir, VERSION, collectGitRecord, ensureJobsRoot,
+  run, git, projectDir, VERSION, collectGitRecord, ensureJobsRoot, slotsRoot, maxVerifications: () => maxVerifications(),
 });
 const { registerVerificationRunner, normalizeVerification, runIndependentVerification, runRegressionCheck, selectUnionCandidates, buildUnionBranch } = verificationFlow;
 export { registerVerificationRunner, normalizeVerification, runRegressionCheck, selectUnionCandidates, buildUnionBranch };
@@ -347,7 +350,7 @@ export const jobSchema = z.object({
   run_id: z.string().regex(/^run-[a-z0-9-]{1,80}$/).optional().describe("The /feature run this job belongs to (from run_start). Admission then enforces the run's limits (jobs, api spend, hours) and refuses an agent the run has paused after a vendor usage-limit error; the finished job is recorded into the run."),
   report: z.enum(["brief", "standard", "full"]).optional().describe("How much the worker may report back, capped by its agent's tier: brief (today's local-sized report), standard (the default), full (the frontier ceiling: about 2k tokens for implement, 4k for a scout). An api or subscription scout defaults to full because its findings are the point; other jobs default to standard. The report lands in your own context and is re-read every later turn. No effect on the local model, whose caps are calibrated."),
   stakes: z.enum(["normal", "high"]).optional().describe("implement: how much a mistake would cost, separate from how hard the work is. high for anything touching security or access control, personal or tenant data, data loss, money, or changes that can't be undone: a verification profile is then required, the revert check can't be turned off, and the job always comes back needing review until an independent review (a scout on another vendor with reviews: <job id>, or a judge on another vendor) has looked at it. A one-line auth change is simple and high-stakes."),
-  reviews: z.string().regex(/^[A-Za-z0-9._-]{1,120}$/).optional().describe("scout: the job id this scout independently reviews, so the review is recorded against that job (nomarmy stats shows high-stakes jobs with and without one). Use a different vendor than the job's worker."),
+  reviews: z.string().regex(/^[A-Za-z0-9._-]{1,120}$/).optional().describe("scout: the job id this scout independently reviews, so the review is recorded against that job (nomarmy stats shows high-stakes jobs with and without one). Use a different vendor than the job's worker. The scout gets that job's diff as .openclaw/reference/reviewed-<job id>.patch, and without base_ref it reads the tree at the job's commit, not the default branch."),
   commit_subject: z.string().max(200).optional().describe("implement: the subject line of the commit nomArmy makes on the worker branch, e.g. \"Keep held-back tables in the list_tables cache\". Defaults to the task's first sentence; the body is the worker's NOTE, and the job id is a trailer."),
   army_role: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).optional().describe("Dispatch by army role (e.g. \"sr-dev\", \"security-analyst\"): nomArmy runs it on the agent this repo assigns to that role and puts the role's description at the top of the brief. Call the `army` tool first to see this repo's roles. Mutually exclusive with agent. Add on_behalf_of in case the role's agent is a subscription; it's ignored otherwise."),
   confirm_over_limit: z.boolean().optional().describe("Override a reached usage limit: the General must ask the operator before resubmitting with confirm_over_limit: true, or send the job to another agent. nomArmy never sets it itself."),
@@ -355,7 +358,9 @@ export const jobSchema = z.object({
   evidence: z.string().max(maxEvidenceChars,
     `Evidence exceeds the ${maxEvidenceChars}-character budget. This is for facts already resolved (e.g. with repo_evidence), not more description of the task -- if it needs more than this, resolve less per job or put the pointer (a path and line range) here instead of the material itself.`
   ).optional().describe("implement only: facts YOU already resolved (e.g. via repo_evidence) that the worker should trust and not re-derive -- exact signatures, call sites, line ranges, existing behavior. Cuts exploration that would otherwise burn the worker's own context budget on something you already know. Not a substitute for a clear objective and acceptance criteria."),
+  reference_commits: z.array(z.string().regex(/^[A-Za-z0-9._-]{1,120}$/, "must be a job id or a commit SHA")).min(1).max(5).optional().describe("Earlier changes this job's worker reads as patch files under .openclaw/reference/ (git history isn't available in the sandbox): a job id (that job's change against its base, committed or not) or a commit SHA. For example the accepted job whose commit conflicted, when redoing it on the current head. A file whose diff matches a secret rule is withheld, and each patch is capped at 200 KB with a TRUNCATED marker. Name the job or SHA instead of pasting the diff into the brief. Not for verify. A scout with reviews gets the reviewed job's diff this way without asking."),
   continue_from: z.string().regex(/^[A-Za-z0-9._-]{1,120}$/).optional().describe("implement only: the job id of a retained, uncommitted implement job (partial, blocked, or failed verification) whose unfinished work this job should finish. The new worktree starts from that job's base with its changes in place, so brief only the correction; the finished whole, that work included, is verified and committed together. Use this instead of fixing a worker's files yourself, which would land them unverified. Leave base_ref out."),
+  detach: z.boolean().optional().describe("local_worker_start only: run the job in its own process instead of this session's MCP server, so it keeps running (and records its result) after this session ends. For a General that ends between wakes: start it detached, end, and read it later with local_worker_status or nomarmy jobs --wait from any session. local_worker_stop still stops it."),
   worker_id: z.string().regex(/^[A-Za-z0-9._-]+$/).optional()
 });
 // A plain function, not jobSchema.superRefine: server.tool(...) registers
@@ -399,7 +404,7 @@ function jobArgs(args, workerId) {
   return { task: args.task, acceptance: args.acceptance, criteria: args.criteria, verification: args.verification, mode: args.mode, baseRef: args.base_ref,
     timeoutSeconds: args.timeout_seconds, profile: args.profile, reasoning: args.reasoning, pool: args.pool,
     subscriptionWorker, onBehalfOf: args.on_behalf_of, model: args.model ?? null, reportSize: args.report ?? null, evidence: args.evidence,
-    verifyRegression: resolveVerifyRegression(args), commitSubject: args.commit_subject ?? null, refactor: Boolean(args.refactor), continueFrom: args.continue_from ?? null, stakes: args.stakes ?? null, trustAdmission: args.trustAdmission ?? null, reviews: args.reviews ?? null, workerId };
+    verifyRegression: resolveVerifyRegression(args), commitSubject: args.commit_subject ?? null, refactor: Boolean(args.refactor), continueFrom: args.continue_from ?? null, stakes: args.stakes ?? null, trustAdmission: args.trustAdmission ?? null, reviews: args.reviews ?? null, referenceCommits: args.reference_commits ?? null, workerId };
 }
 server.tool("local_worker", "Run one isolated local worker and wait for it. mode=implement edits in its own worktree and the coordinator commits only on a valid done report (or a recovered job that passed independent verification); failed or incomplete worktrees are retained. mode=scout answers a question from a read-only snapshot with mandatory [path:line] citations that nomArmy verifies and expands. mode=decompose (also read-only) proposes 2+ independent subtasks for a broad objective instead of one worker turn trying to do too much; the proposal is never auto-dispatched, review it and make a separate call with the subtasks you choose. Refuses under memory pressure or over capacity; use local_worker_start + local_worker_status to avoid blocking.", jobSchema.shape,
   async rawArgs => {
@@ -419,8 +424,17 @@ server.tool("local_worker_start", "Start one worker or scout in the background a
     const [args] = expanded.jobs;
     const { problems, admission } = await admit([args]);
     if (problems.length) return refusal(problems);
-    const entry = launch(args);
+    let entry;
+    if (args.detach) {
+      // Its own process (lib/detached-job.mjs); the lease it takes on start
+      // is written now too, so the next admission counts it.
+      const jobId = slug(args.worker_id || (args.mode === "scout" ? "scout" : args.mode === "decompose" ? "decompose" : "worker"));
+      if (jobLane(args)) writeLease(leasesRoot, jobId, { lane: jobLane(args), agent: args.agentName ?? null, runId: args.run_id ?? null, role: args.armyRole ?? null, model: args.model ?? null, repo: projectDir });
+      const pid = startDetachedJob({ args, jobId, jobsRoot: ensureJobsRoot(), serverFile: fileURLToPath(import.meta.url) });
+      entry = { jobId, workerId: args.worker_id || jobId, mode: args.mode ?? "implement", detachedPid: pid };
+    } else entry = launch(args);
     return toolText(coordinatorJson({ started: true, jobId: entry.jobId, workerId: entry.workerId, mode: entry.mode, state: "running",
+      ...(entry.detachedPid ? { detached: { pid: entry.detachedPid, note: "Runs in its own process: this session can end. Read it later with local_worker_status or nomarmy jobs --wait from any session." } } : {}),
       jobDir: path.join(jobsRoot, entry.jobId), timeoutSeconds: args.timeout_seconds,
       poll: { tool: "local_worker_status", job_id: entry.jobId, wait_seconds: MAX_STATUS_WAIT_SECONDS },
       wait: `nomarmy jobs --wait ${entry.jobId}`,
@@ -445,12 +459,19 @@ server.tool("local_worker_start", "Start one worker or scout in the background a
 // always crossed; 110s returns in-line with margin. Raise it only for a
 // client that neither backgrounds nor times out that early.
 export const MAX_STATUS_WAIT_SECONDS = Number.parseInt(process.env.NOMARMY_MAX_STATUS_WAIT_SECONDS ?? "", 10) || 110;
-server.tool("local_worker_status", `Status of one job started by this server: phase (starting, worktree, worker, verification, commit, record, finished), elapsed time against its timeout, and the result once finished. wait_seconds long-polls up to that long for completion (max ${MAX_STATUS_WAIT_SECONDS}, to stay inside MCP client request timeouts; poll again for longer jobs). report=true returns just the worker's report (a scout's findings with their verified citations), the outcome, issues, verification and commit. full=true returns the complete execution record.`, {
+server.tool("local_worker_status", `Status of one job, started by this session or any other (a detached job included): phase (starting, worktree, worker, verification, commit, record, finished), elapsed time against its timeout, and the result once finished. wait_seconds long-polls up to that long for completion (max ${MAX_STATUS_WAIT_SECONDS}, to stay inside MCP client request timeouts; poll again for longer jobs). report=true returns just the worker's report (a scout's findings with their verified citations), the outcome, issues, verification and commit. full=true returns the complete execution record.`, {
   job_id: z.string().min(1), wait_seconds: z.number().int().min(0).max(MAX_STATUS_WAIT_SECONDS).default(0), full: z.boolean().default(false),
   report: z.boolean().default(false).describe("Just the report and nomArmy's verdict on it, without the rest of the record. Prefer this to full."),
 }, async ({ job_id, wait_seconds, full, report }) => {
   const jobId = path.basename(job_id), entry = activeJobs.get(jobId), jobDir = path.join(ensureJobsRoot(), jobId);
   if (entry && !entry.settled && wait_seconds > 0) await Promise.race([entry.promise.catch(() => {}), sleep(wait_seconds * 1000)]);
+  else if (!entry && wait_seconds > 0) {
+    // Another process runs it (a detached job, or another session's): wait
+    // on its record instead, which it writes when it finishes.
+    const deadline = Date.now() + wait_seconds * 1000;
+    while (Date.now() < deadline && !fs.existsSync(path.join(jobDir, "metadata.json")) && !fs.existsSync(path.join(jobDir, "failure.json"))
+      && (({ state, serverPid } = readJson(path.join(jobDir, "status.json")) ?? {}) => state === "running" && pidAlive(serverPid))()) await sleep(Math.min(2000, Math.max(0, deadline - Date.now())));
+  }
   const files = { status: readJson(path.join(jobDir, "status.json")), meta: readJson(path.join(jobDir, "metadata.json")), failure: readJson(path.join(jobDir, "failure.json")) };
   if (!entry && !files.status && !files.meta && !files.failure) return toolText(`Unknown job: ${job_id}`, true);
   // A hard deadline on building the answer: live progress is best-effort,
@@ -737,6 +758,21 @@ server.tool("repo_evidence", `Deterministic repository evidence with exact [path
     return toolText(args.json ? JSON.stringify(result, null, 2) : formatCitations(result));
   } catch (error) { return toolText(`repo_evidence ${args.op}: ${error.message}`, true); }
 });
+server.tool("commit_show", "Read-only: what a job or a commit changed. A job id gives that job's change against the base it started from (its commit, or a retained worktree's uncommitted changes); a commit gives its message and diff against its first parent, or with `base` the diff from base to it (a branch diff). For a General without a shell: review what an earlier job committed, or decide what a redo needs. Size-capped; files over the cap are listed, not shown, and a file whose diff matches a secret rule is withheld and named. To hand a commit to a worker, pass reference_commits on its job instead of pasting the diff into the brief.", {
+  ref: z.string().min(1).max(200).regex(/^[A-Za-z0-9._\/~^@{}-]+$/).describe("A job id (for example worker-20261019-134317-214b60), or a commit SHA, branch or tag in this repository."),
+  base: z.string().min(1).max(200).regex(/^[A-Za-z0-9._\/~^@{}-]+$/).optional().describe("A commit to compare against instead of the first parent (not with a job id)."),
+  paths: z.array(z.string().min(1).max(1024)).max(50).optional().describe("Only these paths."),
+  max_bytes: z.number().int().min(1000).max(200000).default(COMMIT_SHOW_MAX_BYTES),
+}, async ({ ref, base, paths, max_bytes }) => {
+  try {
+    const gitIn = (cwd) => async (args) => (await run("git", args, { cwd, trim: false })).stdout;
+    const shown = await diffFor({ ref, gitIn, projectDir, jobsRoot, base: base ?? null, paths: paths ?? [], maxBytes: max_bytes, registerWorktree: registerJobRecordWorktree(projectDir) });
+    const summary = { ...(shown.jobId ? { jobId: shown.jobId } : {}), sha: shown.sha, base: shown.base, files: shown.files, bytes: shown.bytes, truncated: shown.truncated,
+      ...(shown.notShown.length ? { notShown: shown.notShown, note: `over the ${max_bytes}-byte cap; pass paths to see them` } : {}),
+      ...(shown.withheld.length ? { withheld: shown.withheld } : {}) };
+    return toolText(`${JSON.stringify(summary, null, 2)}\n\n${patchText(shown)}`);
+  } catch (error) { return toolText(`commit_show: ${error.message}`, true); }
+});
 server.tool("local_worker_jobs", "List recent job records for review/recovery, including jobs still running or orphaned by a server restart. Does not modify repositories. Returns a small PROJECTION per job by default (jobId, outcome, branch/commit, worktreeRetained, filesChanged, timing, issues) -- enough to decide what needs recovery or cleanup without pulling every job's full execution record (objective text, budgets, git records, ...) into context, which can exceed the tool result size past a handful of jobs. Pass full: true only for the specific job(s) you already know need deep inspection.", { limit: z.number().int().min(1).max(50).default(10), full: z.boolean().default(false).describe("Return each job's complete, uncompacted manifest instead of the small default projection. Requesting this across many jobs at once risks exceeding the tool result size cap -- prefer the default projection first, then a targeted look (e.g. local_worker_status) at just the job(s) that need it.") }, async ({ limit, full }) => {
   const dirs = fs.readdirSync(ensureJobsRoot(), { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name).sort().reverse().slice(0, limit);
   const rows = await Promise.all(dirs.map(async name => {
@@ -956,6 +992,27 @@ if (isMain) {
   // Start the model-catalog refresh now, so it's ready by the first
   // `army` call or remote job rather than kicked off by it.
   try { ensureCatalogRefresh(); } catch { /* best-effort */ }
+  // `--run-job <id>`: a detached job (lib/detached-job.mjs). Runs that one
+  // job through the same launch path, then exits; no stdio server.
+  const detachedAt = process.argv.indexOf("--run-job");
+  if (detachedAt !== -1) {
+    const jobId = process.argv[detachedAt + 1];
+    const { recordServerStop } = await import("../lib/server-stop.mjs");
+    for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+      process.once(signal, () => { recordServerStop(jobsRoot, `its detached process was stopped (${signal})`); process.exit(128 + os.constants.signals[signal]); });
+    }
+    try {
+      const { args } = readDetachedJob(jobsRoot, jobId);
+      await Promise.race([budgetState.refresh(), sleep(30000)]).catch(() => {});
+      await Promise.race([modelCatalogReady(30000), sleep(31000)]).catch(() => {});
+      await launch(args, { jobId }).promise.catch(() => {});
+      process.exit(0);
+    } catch (error) {
+      recordServerStop(jobsRoot, `its detached process failed to start the job: ${error.message}`);
+      console.error(error.stack ?? error.message);
+      process.exit(1);
+    }
+  }
   // Health checks (lib/health.mjs): soon after start, then every 6 hours.
   // New warnings notify once across all sessions; the status line shows
   // them. Unref'd, so they never keep the process alive.

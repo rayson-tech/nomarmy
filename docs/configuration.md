@@ -14,6 +14,7 @@ Local inference is configured in two files, and a shell-exported variable overri
 | `NOMARMY_MAX_WORKERS` | profile | `1` | How many local jobs run at once |
 | `openclaw` | `~/.config/nomarmy/limits.yml` (`nomarmy config openclaw <tested\|latest>`) | `tested` | Which OpenClaw release updates keep. `latest` follows npm's latest and matching vendor plugins, so new models arrive between nomArmy releases; never below tested, and a release that breaks one of your roles' models is rolled back and skipped |
 | `max_jobs` | `~/.config/nomarmy/limits.yml` (`nomarmy config max-jobs <n>`) | `4` | How many api and subscription jobs run at once, across every session. `NOMARMY_MAX_POOL_WORKERS` still works when limits.yml doesn't set it |
+| `max_verifications` | `~/.config/nomarmy/limits.yml` (`nomarmy config max-verifications <n|off>`) | unset | How many verification runs (whole test suites) run at once on this machine, across every session. Jobs past it wait for a slot. Unset, only `max_jobs` bounds them |
 | `NOMARMY_EXECUTION` | common.env | `local` | `local` or `bedrock` |
 | `NOMARMY_ORCHESTRATOR_TRUST` | common.env | `frontier` | `frontier` or `degraded`: see `policies/reviewer.md` |
 | `NOMARMY_IMAGE_BUILD_TIMEOUT_MINUTES` | the MCP server's environment (its registration, or your service unit) | `30` | How long a sandbox image build may run before nomArmy stops it and reports why |
