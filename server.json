@@ -8,12 +8,12 @@
     "source": "github"
   },
   "websiteUrl": "https://nomarmy.dev",
-  "version": "0.1.0-beta.10",
+  "version": "0.1.0-beta.11",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "nomarmy",
-      "version": "0.1.0-beta.10",
+      "version": "0.1.0-beta.11",
       "transport": {
         "type": "stdio"
       },
