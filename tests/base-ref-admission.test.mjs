@@ -166,3 +166,33 @@ test("a missing git ref reaches failure issues and the finished event", async t 
   assert.equal(finished.detail.replace(/^WORKER_FAILED after \d+s: /, ""), issue);
   f.unchanged();
 });
+
+test("reference_commits: a commit here is admitted; an unknown SHA, or any on a verify job, is refused before anything starts", async t => {
+  const f = fixture(t);
+  const head = f.git("rev-parse", "HEAD");
+  assert.deepEqual((await f.runtime.admit([{ ...job("implement"), reference_commits: [head.slice(0, 10)] }])).problems, []);
+  assert.deepEqual((await f.runtime.admit([{ ...job("implement"), reference_commits: ["deadbeefdeadbeef"] }])).problems,
+    ['reference_commits: "deadbeefdeadbeef" is neither a finished job nor a commit in this repository']);
+  assert.deepEqual((await f.runtime.admit([{ ...job("verify"), reference_commits: [head] }])).problems,
+    ["reference_commits is for jobs with a worker; a verify job runs no worker to read them"]);
+  assert.equal(f.runtime.activeJobs.size, 0);
+  f.unchanged();
+});
+
+test("reviews: a review scout with no base_ref reads the reviewed job's commit, not the default branch (BASE-183)", async t => {
+  const f = fixture(t);
+  const head = f.git("rev-parse", "HEAD");
+  const record = (id, commit) => { fs.mkdirSync(path.join(f.jobsRoot, id), { recursive: true }); fs.writeFileSync(path.join(f.jobsRoot, id, "metadata.json"), JSON.stringify({ jobId: id, commit })); };
+  record("worker-reviewed", { created: true, sha: head });
+  record("worker-held", { created: false, sha: null });
+  const scout = { task: "Review it", mode: "scout", reviews: "worker-reviewed" };
+  assert.deepEqual((await f.runtime.admit([scout])).problems, []);
+  assert.equal(scout.base_ref, head);
+  const pinned = { ...scout, base_ref: "main" };
+  await f.runtime.admit([pinned]);
+  assert.equal(pinned.base_ref, "main", "an explicit base_ref stands");
+  const held = { task: "Review it", mode: "scout", reviews: "worker-held" };
+  await f.runtime.admit([held]);
+  assert.equal(held.base_ref, undefined, "an uncommitted job has no commit to read; its diff file carries the change");
+  f.unchanged();
+});
