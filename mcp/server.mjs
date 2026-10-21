@@ -14,6 +14,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -533,7 +534,7 @@ export function buildConfigSummary(repoDir, loadConfigFn = loadConfig) {
     usedBy: "every job's sandbox image and every verification, whichever branch the job starts from: this checkout's copy, including uncommitted edits, never the job's own worktree copy",
     note: profiles.length ? null : ".nomarmy.yml exists but defines no verification profiles; verification/union_verification/verify_regression will report not_run." };
 }
-server.tool("run_start", "Start a /feature run (or reattach to one with `resume`): one feature, end to end, with limits. It becomes this session's active run: every job you dispatch from now on joins it automatically (pass run_id only to target a different run). Admission enforces the run's limits -- jobs, api spend in dollars, wall-clock hours -- warning at the configured share and refusing at the cap. A vendor usage-limit error pauses that agent for the rest of the run. Limits come from the operator's army run_limits; you may lower them for this run, never raise them. Returns the run id and a log path: keep the run log (plan, decisions, progress) there so a fresh session can resume if yours hits its own usage limit.", {
+server.tool("run_start", "Start a /feature run (or reattach to one with `resume`): one feature, end to end, with limits. It becomes this session's active run: every job you dispatch from now on joins it automatically (pass run_id only to target a different run). Admission enforces the run's limits -- jobs, api spend in dollars, and hours with at least one job running (time between jobs, such as a wait at a human gate, doesn't count) -- warning at the configured share and refusing at the cap. A vendor usage-limit error pauses that agent for the rest of the run. Limits come from the operator's army run_limits; you may lower them for this run, never raise them. Returns the run id and a log path: keep the run log (plan, decisions, progress) there so a fresh session can resume if yours hits its own usage limit.", {
   name: z.string().min(1).max(120).optional().describe("A short name for the feature (required unless resuming)."),
   resume: z.string().regex(/^run-[a-z0-9-]{1,80}$/).optional().describe("Reattach this session to an existing, still-running run (e.g. after the previous session hit its own limit) instead of starting a new one."),
   max_jobs: z.number().int().positive().optional(), max_api_usd: z.number().positive().optional(), max_hours: z.number().positive().optional(),
@@ -544,7 +545,7 @@ server.tool("run_start", "Start a /feature run (or reattach to one with `resume`
       if (run.repo !== projectDir) return toolText(`run "${run.id}" belongs to ${run.repo}, not this repository`, true);
       if (run.status !== "running") return toolText(`run "${run.id}" is ${run.status}; start a new run instead`, true);
       activeRunId = run.id;
-      return toolText(JSON.stringify({ runId: run.id, resumed: true, limits: run.limits, logPath: run.logPath, ...runTotals(run) }, null, 2));
+      return toolText(JSON.stringify({ runId: run.id, resumed: true, limits: run.limits, logPath: run.logPath, ...runTotals(run, { inFlight: liveLeases(leasesRoot, { runId: run.id }).map((l) => l.startedAt) }) }, null, 2));
     }
     if (!name) return toolText("run_start needs a name (or resume: <run-id>)", true);
     const configured = currentArmy().army.runLimits;
@@ -562,10 +563,11 @@ server.tool("run_status", "A /feature run's limits, what it has used (jobs, api 
 }, async ({ run_id }) => {
   try {
     const run = loadRun(runsRoot, run_id);
-    const totals = runTotals(run);
+    const leases = liveLeases(leasesRoot, { runId: run.id });
+    const totals = runTotals(run, { inFlight: leases.map((l) => l.startedAt) });
     // In-flight jobs, from the machine-wide leases: finished jobs are all
     // `jobs` shows, so a run with work in progress used to report 0.
-    const running = liveLeases(leasesRoot, { runId: run.id }).map((l) => {
+    const running = leases.map((l) => {
       const status = readJson(path.join(jobsRoot, l.jobId, "status.json")) ?? {};
       return { jobId: l.jobId, agent: l.agent, model: l.model, role: l.role, phase: status.phase ?? null, startedAt: l.startedAt,
         lastTool: status.lastTool ?? null, filesChangedLive: status.filesChangedLive ?? null, heartbeatAt: status.heartbeatAt ?? null };
@@ -966,6 +968,12 @@ if (isMain) {
   // running again (a crash, a Podman machine restart) rather than waiting
   // for the next job to trigger the per-job sweep in executeJob.
   sweepStaleSandboxContainers().catch(() => {});
+  // Running jobs end with this process; say why on each (lib/server-stop.mjs).
+  const { recordServerStop, SERVER_STOP_REASONS } = await import("../lib/server-stop.mjs");
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+    process.once(signal, () => { recordServerStop(jobsRoot, SERVER_STOP_REASONS[signal]); process.exit(128 + os.constants.signals[signal]); });
+  }
+  process.stdin.once("end", () => recordServerStop(jobsRoot, SERVER_STOP_REASONS.stdin));
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

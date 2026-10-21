@@ -38,14 +38,21 @@ test("modelsToCheck: role and default models on api and subscription agents; nev
   assert.deepEqual(modelsToCheck({ agents, roles, providerOf: (a) => a.provider }), ["meta/muse-spark-1.3", "openai/gpt-6-astra", "openai/gpt-6.1-sol"]);
 });
 
-function fakeUpgrade(t, { channel = "latest", broken = [], failedBefore = [] } = {}) {
+function fakeUpgrade(t, { channel = "latest", broken = [], failedBefore = [], flakyOnce = [], failUpgrade = false } = {}) {
   const repairs = [], probes = [], printed = [];
   let installed = PINNED_OPENCLAW_VERSION;
   const run = (command, args) => command === "npm" ? { ok: true, stdout: NEWER } : args[0] === "--version" ? { ok: true, stdout: `OpenClaw ${installed} (abc)` } : { ok: false, stdout: "", stderr: "" };
-  const repair = async (opts) => { repairs.push({ target: opts.target, exact: opts.exact ?? false, yes: opts.yes }); installed = opts.target; return { ok: true, changed: [`to ${opts.target}`], checks: [] }; };
+  const repair = async (opts) => {
+    repairs.push({ target: opts.target, exact: opts.exact ?? false, yes: opts.yes });
+    // failUpgrade: OpenClaw itself is replaced, then a plugin install fails.
+    if (failUpgrade && opts.target === NEWER) { installed = opts.target; return { ok: false, changed: [`to ${opts.target}`], failed: "plugin", checks: [] }; }
+    installed = opts.target; return { ok: true, changed: [`to ${opts.target}`], checks: [] };
+  };
+  const flaky = new Set(flakyOnce);
   const probe = async ({ provider, model }) => {
     const id = `${provider}/${model}`; probes.push([installed, id]);
-    const bad = installed === NEWER ? broken.includes(id) : failedBefore.includes(id);
+    const once = installed === NEWER && flaky.delete(id);
+    const bad = once || (installed === NEWER ? broken.includes(id) : failedBefore.includes(id));
     return { ok: !bad, refused: bad, reason: bad ? "model_not_found" : null };
   };
   const skipFile = path.join(tmp(t), "skipped.json");
@@ -81,4 +88,25 @@ test("upgradeOpenclaw: a model that already failed before isn't the upgrade's fa
   await tested.go();
   assert.deepEqual(tested.probes, []);
   assert.deepEqual(tested.repairs, [{ target: PINNED_OPENCLAW_VERSION, exact: false, yes: true }]);
+});
+
+test("upgradeOpenclaw latest: a model that fails once after the upgrade and answers on its own retry doesn't roll back", async (t) => {
+  // Seen live: five sandboxes started at once and one hit crun's "mount devpts".
+  const f = fakeUpgrade(t, { flakyOnce: ["openai/gpt-6.1-sol"] });
+  const result = await f.go();
+  assert.equal(result.ok, true);
+  assert.equal(result.rolledBack, undefined);
+  assert.deepEqual(f.probes.filter(([v, id]) => v === NEWER && id === "openai/gpt-6.1-sol").length, 2);
+  assert.deepEqual(f.repairs, [{ target: NEWER, exact: false, yes: true }]);
+  assert.deepEqual(skippedReleases(f.skipFile), []);
+});
+
+test("upgradeOpenclaw latest: an upgrade that fails part-way puts back the exact earlier release, without skipping the new one", async (t) => {
+  const f = fakeUpgrade(t, { failUpgrade: true });
+  const result = await f.go();
+  assert.equal(result.ok, false);
+  assert.equal(result.rolledBack, true);
+  assert.deepEqual(f.repairs, [{ target: NEWER, exact: false, yes: true }, { target: PINNED_OPENCLAW_VERSION, exact: true, yes: true }]);
+  assert.deepEqual(skippedReleases(f.skipFile), []);
+  assert.ok(f.printed.some((line) => line.includes(`Back on OpenClaw ${PINNED_OPENCLAW_VERSION}`)));
 });

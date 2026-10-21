@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
-import { createRun, describeLoweredLimits, detectUsageLimit, finishRun, loadRun, recordRunJob, resolveRunLimits, runAdmissionProblems, runTotals, DEFAULT_RUN_LIMITS } from "../lib/runs.mjs";
+import { activeHours, createRun, describeLoweredLimits, detectUsageLimit, finishRun, loadRun, recordRunJob, resolveRunLimits, runAdmissionProblems, runTotals, DEFAULT_RUN_LIMITS } from "../lib/runs.mjs";
 import { armySchema, loadArmy } from "../lib/army.mjs";
 
 const dirs = [];
@@ -57,7 +57,9 @@ test("runAdmissionProblems: refuses at the job, spend and time caps, and once th
   const dir = tmp();
   const { id } = createRun(dir, { name: "f", repo: "/r", limits: LIMITS, now: Date.parse("2026-09-24T00:00:00Z") });
   assert.deepEqual(runAdmissionProblems(loadRun(dir, id), { now: Date.parse("2026-09-24T01:00:00Z") }), []);
-  assert.match(runAdmissionProblems(loadRun(dir, id), { now: Date.parse("2026-09-24T07:00:00Z") })[0], /run \d+(\.\d+)? of its 6 hours/);
+  // Hours count only while a job runs: an idle run is never out of time.
+  assert.deepEqual(runAdmissionProblems(loadRun(dir, id), { now: Date.parse("2026-09-24T07:00:00Z") }), []);
+  assert.match(runAdmissionProblems(loadRun(dir, id), { now: Date.parse("2026-09-24T07:00:00Z"), inFlight: ["2026-09-24T00:00:00Z"] })[0], /had jobs running for 7 of its 6 hours/);
   for (const j of ["a", "b", "c", "d"]) recordRunJob(dir, id, { jobId: j, agent: "local", kind: "local" });
   assert.match(runAdmissionProblems(loadRun(dir, id), { now: Date.parse("2026-09-24T01:00:00Z") })[0], /used all 4 of its jobs/);
   const other = createRun(dir, { name: "g", repo: "/r", limits: LIMITS });
@@ -107,7 +109,7 @@ test("army run_limits: validated, and personal -- refused in a committed .nomarm
 test("runTotals: past a limit is the loudest warning, not silence -- the real run at 8.46 of 4 hours", () => {
   const dir = tmp();
   const { id } = createRun(dir, { name: "f", repo: "/r", limits: LIMITS, now: Date.parse("2026-09-24T04:26:14Z") });
-  const totals = runTotals(loadRun(dir, id), { now: Date.parse("2026-09-24T12:53:50Z") });
+  const totals = runTotals(loadRun(dir, id), { now: Date.parse("2026-09-24T12:53:50Z"), inFlight: ["2026-09-24T04:26:14Z"] });
   assert.ok(totals.warnings.some((w) => /OVER its hours limit \(8.46 of 6\); no more jobs are admitted/.test(w)), totals.warnings.join("; "));
 });
 
@@ -117,4 +119,20 @@ test("describeLoweredLimits: says why a request was capped, and where to raise t
   assert.equal(notes.length, 1, "lowering hours to 4 is honored and needs no note");
   assert.match(notes[0], /api spend \(\$\) capped at 10, not 15: that's the ceiling from the default \(no run_limits configured\)\. Raise it with army\.run_limits\.max_api_usd/);
   assert.match(describeLoweredLimits({ max_api_usd: 12 }, { max_api_usd: 15 }, resolveRunLimits({ max_api_usd: 12 }, { max_api_usd: 15 }))[0], /from your configured run_limits/);
+});
+
+test("activeHours: a wait at a human gate doesn't count, and overlapping jobs count once", () => {
+  const dir = tmp();
+  const { id } = createRun(dir, { name: "f", repo: "/r", limits: LIMITS, now: Date.parse("2026-09-24T00:00:00Z") });
+  const run = loadRun(dir, id);
+  // BASE-53: paused at a gate for hours between two short phases.
+  run.jobs.push(
+    { jobId: "a", startedAt: "2026-09-24T00:00:00Z", recordedAt: "2026-09-24T01:00:00Z" },
+    { jobId: "b", startedAt: "2026-09-24T00:30:00Z", recordedAt: "2026-09-24T01:30:00Z" },
+    { jobId: "c", startedAt: "2026-09-24T09:00:00Z", recordedAt: "2026-09-24T09:30:00Z" },
+    { jobId: "old", recordedAt: "2026-09-24T05:00:00Z" },
+  );
+  assert.equal(activeHours(run, { now: Date.parse("2026-09-24T12:00:00Z") }), 2);
+  assert.equal(activeHours(run, { now: Date.parse("2026-09-24T12:00:00Z"), inFlight: ["2026-09-24T11:00:00Z"] }), 3);
+  assert.deepEqual(runAdmissionProblems({ ...run, limits: { ...LIMITS, max_jobs: 40 } }, { now: Date.parse("2026-09-24T12:00:00Z") }), []);
 });
