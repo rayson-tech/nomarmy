@@ -51,7 +51,7 @@ What the General uses. Every job takes the same shape: a `task`, optional `accep
 | Tool | What it does |
 |---|---|
 | `local_worker` | Runs one job and waits for it. |
-| `local_worker_start` / `local_worker_status` | Starts a job in the background / waits for its result. The start response includes `nomarmy jobs --wait <jobId>` for background monitoring. `report: true` returns just the report (a scout's cited findings), the outcome, issues and commit; `full: true` the whole record. Timeouts default to 10 minutes, 20 for a review scout (`reviews` set, or a review-phase role). |
+| `local_worker_start` / `local_worker_status` | Starts a job in the background / waits for its result. The start response includes `nomarmy jobs --wait <jobId>` for background monitoring. `report: true` returns just the report (a scout's cited findings), the outcome, issues and commit; `full: true` the whole record. Timeouts default to 10 minutes, 20 for a review scout (`reviews` set, or a review-phase role). When a report says done/pass but verification failed, the result carries `reportMismatch` and the verification's `failingTests` (names only; empty when the run failed without naming a test). A job another open session is running shows `running` with `runningIn`; an `orphaned` one says how its session's server stopped. |
 | `local_workers` | Runs a batch of independent jobs in parallel. `auto_union: true` merges them into one integration branch for review. |
 | `repo_evidence` | Deterministic answers (definitions, references, outlines, grep, files) with `[path:line]` on every hit, no model. |
 | `army` | The General's charter and agent, then this repo's roles and who runs each. |

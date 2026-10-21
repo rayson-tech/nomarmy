@@ -2051,7 +2051,7 @@ function syncOpenclaw() {
   if (json && !flag("yes")) return;
   const stateRoot = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
   const running = liveLeases(path.join(stateRoot, "leases")).length;
-  const later = "Run `nomarmy doctor --fix` to upgrade OpenClaw to the tested release.";
+  const later = "Run `nomarmy doctor --fix` to try again.";
   if (running) {
     console.error(c.yellow(`\n${running} nomArmy job(s) running, so OpenClaw was left as is. ${later}`));
     return;
@@ -2060,7 +2060,7 @@ function syncOpenclaw() {
     { stdio: json ? ["ignore", 2, 2] : "inherit" });
   if (r.status === 0) return;
   if (r.status === 2) { console.error(c.yellow(later)); return; }
-  console.error(c.red(`✗ OpenClaw wasn't upgraded. ${later}`));
+  console.error(c.red(`✗ The OpenClaw update didn't finish (see above). ${later}`));
   process.exitCode = 1;
 }
 

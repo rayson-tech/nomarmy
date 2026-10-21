@@ -256,7 +256,9 @@ test('security: credentialed output and artifacts stay in disposable worktree', 
     flow.registerVerificationRunner(createVerificationRunner({ image: 'sandbox:1', loadConfig: () => ({ found: true, config }),
       loadVerificationNetwork: () => ({ ...policy, keep_output }), hostEnv: { NOMARMY_TEST_OKTA_SECRET: value }, executor }));
     const result = await flow.runIndependentVerification({ cwd, jobId: String(keep_output), profile: 'quick' });
-    assert.deepEqual(Object.keys(result).sort(), ['artifacts', 'artifactsCapped', 'artifactsNote', 'basis', 'detail', 'issues', 'log', 'network', 'profile', 'reason', 'status']);
+    assert.deepEqual(Object.keys(result).sort(), ['artifacts', 'artifactsCapped', 'artifactsNote', 'basis', 'detail', 'failingTests', 'issues', 'log', 'network', 'profile', 'reason', 'status']);
+    // Failing test names come from the redacted (or withheld) output, never the raw one.
+    for (const form of forms) assert.equal(JSON.stringify(result.failingTests).includes(form), false);
     assert.equal(result.status, 'fail');
     assert.deepEqual(result.network, { allowlist: policy.allow, reached: ['api.stripe.com:80'], credentials: ['OKTA_CLIENT_SECRET'] });
     // No evidence is kept under credentials: a scan can't catch every encoding.

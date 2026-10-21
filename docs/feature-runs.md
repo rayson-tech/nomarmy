@@ -18,11 +18,11 @@ army:
   run_limits:
     max_jobs: 40        # the defaults
     max_api_usd: 10     # api agents only; a subscription isn't billed per call
-    max_hours: 6
+    max_hours: 6        # hours with at least one job running
     warn_at: 0.8
 ```
 
-The General can lower these for one run, never raise them. When a vendor answers with a usage-limit error, that agent is paused for the rest of the run and the General stops and tells you; it never moves the role to another vendor to get around it. The one limit no tool can see is your coordinator's own seat. If that runs out mid-feature, the run log (kept current after every phase) lets `/feature resume <run-id>` in a fresh session carry on.
+`max_hours` counts only time when the run has a job running: time between jobs, such as planning, review or a wait at a human gate, doesn't count. The General can lower these for one run, never raise them; to allow more, raise `run_limits` here. When a vendor answers with a usage-limit error, that agent is paused for the rest of the run and the General stops and tells you; it never moves the role to another vendor to get around it. The one limit no tool can see is your coordinator's own seat. If that runs out mid-feature, the run log (kept current after every phase) lets `/feature resume <run-id>` in a fresh session carry on.
 
 **Finishing a job that came back unfinished.** A build job that ends partial, blocked or failing verification keeps its worktree, uncommitted. The General finishes it with a new job carrying `continue_from: <that job id>` and a brief of just the correction (say, the one wrong expected value in its test). The new worktree starts from the old job's base with its changes in place, and the finished whole is verified and committed together, so the foundation doesn't land outside nomArmy's checks. The commit carries a `nomArmy-Continues:` trailer naming the earlier job.
 

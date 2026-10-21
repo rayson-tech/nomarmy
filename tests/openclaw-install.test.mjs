@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { PINNED_OPENCLAW_VERSION, runOpenclawCommand, openclawInstallPlan, pluginUpdatePlan, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors, codexBinaryCheck } from "../lib/openclaw-install.mjs";
+import { PINNED_OPENCLAW_VERSION, runOpenclawCommand, openclawInstallPlan, pluginUpdatePlan, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors, codexBinaryCheck, failureTail } from "../lib/openclaw-install.mjs";
 import os from "node:os";
 import path from "node:path";
 
@@ -157,8 +157,9 @@ test("terminal yes applies only listed actions and reports them", async () => {
 test("a failed state migration after an upgrade stops before postflight, with Doctor's command as the fix", async () => {
   const f = fixture({ doctorOk: false });
   const result = await repairOpenclaw({ ...f, yes: true });
-  assert.deepEqual(result, { ok: false, actions: [action, migrate], changed: [action.description], checks: [] });
+  assert.deepEqual(result, { ok: false, actions: [action, migrate], changed: [action.description], failed: migrate.description, checks: [] });
   assert.equal(f.output.at(-2), "Failed: Migrate OpenClaw's state to the new release. Fix: openclaw doctor --fix --non-interactive");
+  assert.equal(f.output.at(-1), "Already changed: Upgrade OpenClaw to 2026.10.3. OpenClaw is part-way through this change.");
 });
 
 test("doctor --fix runs only after an upgrade: never on a fresh install, at the pin, or on a rollback", async () => {
@@ -207,9 +208,29 @@ test("a meta plugin older than OpenClaw is ready at or past the pin, and needs a
 test("a failed npm install is reported without a successful change or postflight", async () => {
   const f = fixture({ installOk: false });
   const result = await repairOpenclaw({ ...f, yes: true });
-  assert.deepEqual(result, { ok: false, actions: [action, migrate], changed: [], checks: [] });
-  assert.deepEqual(f.calls, [["openclaw", ["--version"]], ["npm", action.args]]);
-  assert.equal(f.output.at(-1), "Completed changes: none. The failed install may have partially modified OpenClaw.");
+  assert.deepEqual(result, { ok: false, actions: [action, migrate], changed: [], failed: action.description, checks: [] });
+  // Tried twice: a step that fails once right after OpenClaw changed can pass on a second try.
+  assert.deepEqual(f.calls, [["openclaw", ["--version"]], ["npm", action.args], ["npm", action.args]]);
+  assert.equal(f.output.at(-1), "Nothing was changed before it failed.");
+});
+
+test("a failed step prints the last lines its command wrote, not just the command", async () => {
+  const output = [];
+  const run = (command, args) => command === "npm" ? { ok: false, stdout: "resolving...", stderr: "npm error code ETARGET\nnpm error notarget No matching version" }
+    : { ok: true, stdout: "OpenClaw 2026.9.4" };
+  await repairOpenclaw({ run, print: (line) => output.push(line), yes: true });
+  assert.ok(output.some((line) => line.split("\n").includes("  | npm error notarget No matching version")), output.join("\n"));
+  assert.equal(failureTail({ stdout: "", stderr: "" }), "");
+});
+
+test("a step that fails once and passes on the retry counts as done", async () => {
+  const f = fixture();
+  let npmCalls = 0;
+  const run = (command, args) => command === "npm" && ++npmCalls === 1 ? { ok: false, stdout: "", stderr: "transient" } : f.run(command, args);
+  const result = await repairOpenclaw({ ...f, run, yes: true });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.changed, [action.description, migrate.description]);
+  assert.ok(f.output.includes(`${action.description} failed; trying once more.`));
 });
 
 test("missing OpenClaw and a user prefix still use the exact shared pin", () => {

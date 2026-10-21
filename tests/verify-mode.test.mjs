@@ -46,7 +46,7 @@ test("verify is model-free from expansion through admission, execution and repor
   const recorded = loadRun(path.join(root, "runs"), run.id).jobs[0];
   const { recordedAt, ...fields } = recorded;
   assert.equal(typeof recordedAt, "string");
-  assert.deepEqual(fields, { jobId: "verified", agent: null, kind: "verify", model: null, role: "po", mode: "verify",
+  assert.deepEqual(fields, { jobId: "verified", startedAt: null, agent: null, kind: "verify", model: null, role: "po", mode: "verify",
     outcome: "VERIFIED", costUsd: 0, tokens: 0, usageLimit: null });
   assert.deepEqual((await runtime.admit([runJob])).problems, [`run "${run.id}" has used all 1 of its jobs`]);
 
