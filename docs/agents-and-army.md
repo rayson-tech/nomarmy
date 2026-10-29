@@ -87,6 +87,16 @@ The default roster follows a normal delivery cycle. The **Sr Dev** does the firs
 
 A job dispatches with `army_role: "security-analyst"`: nomArmy runs it on that role's agent and opens the brief with the role's description. The General reads the whole roster through the read-only `army` MCP tool.
 
+**Role guides.** A role's description is one line about which hat the worker wears; a guide is how this repository expects it worn. Point a role at a committed Markdown file and nomArmy attaches it to every brief for that role:
+
+```yaml
+army:
+  roles:
+    ui-ux: { guide: .nomarmy/roles/ui-ux.md }
+```
+
+Write the standing rules there: where the CSS tokens and rules live, which components exist and that a new one needs a reason, naming, accessibility, how tests and screenshots are named. The guide is read from the commit the job starts from (its `base_ref`, or `HEAD`), never from the job's own worktree, so a worker can't loosen its rules mid-job. A review scout (`reviews: <job id>`) also gets the reviewed job's role guide, read at that job's base, so its findings can cite the rules the builder was given. Guides are capped at 12,000 characters (a longer one is truncated with a note), a missing file is noted in the brief rather than failing the job, and `army` shows each role's guide path.
+
 **Config layers**, merged like Claude Code's settings (later wins, field by field):
 
 | Layer | File | Committed | Holds |

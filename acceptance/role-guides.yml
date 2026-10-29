@@ -1,0 +1,36 @@
+# Acceptance contract: role guides, a repository's standing rules per army
+# role, attached to every brief for that role and to reviews of its work.
+feature: Role guides attached to every brief for a role and to reviews of that role's work
+criteria:
+  - id: GUIDE-1
+    text: A role may name a guide, a repository-relative .md path; absolute paths, .. and other extensions are refused by the army schema
+    proven_by:
+      - file: tests/role-guide.test.mjs
+        test: armySchema accepts a repository-relative .md guide and refuses anything else
+    status: met
+  - id: GUIDE-2
+    text: The guide is read from the commit the job starts from, never the worktree, capped at 12,000 characters, and a missing guide is noted rather than failing the job
+    proven_by:
+      - file: tests/role-guide.test.mjs
+        test: readRoleGuide reads the file at the given commit, not the working tree
+      - file: tests/role-guide.test.mjs
+        test: readRoleGuide reports a missing or unsafe path and caps a long guide
+      - file: tests/role-guide.test.mjs
+        test: guideSection names the file and commit, and says so when the guide is missing or truncated
+    status: met
+  - id: GUIDE-3
+    text: A job dispatched by army_role gets its role's guide after the task, read at its base_ref
+    proven_by:
+      - file: tests/role-guide.test.mjs
+        test: expandArmyRole carries the role's guide path; expandJobs appends it at base_ref and never forwards the field
+    status: met
+  - id: GUIDE-4
+    text: A review scout gets the reviewed job's role guide, read at that job's base commit
+    proven_by:
+      - file: tests/role-guide.test.mjs
+        test: a review scout gets the reviewed job's role guide, read at that job's base commit
+      - file: tests/role-guide.test.mjs
+        test: reviewedJobRole reads the role label and base commit from the job record
+      - file: tests/role-guide.test.mjs
+        test: a job without a guide is untouched, and a review of an unknown job or with no army adds nothing
+    status: met
