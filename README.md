@@ -104,7 +104,7 @@ A nom gets a writable git worktree inside a Podman sandbox and nothing else: no 
 | `mode: verify`, secret scanning (secretlint, hard block), test-workaround and unwired-code checks | Unit and live tested; the heuristics are review flags |
 | Scout and decompose modes, `auto_union` | Unit and live tested |
 | Agents: API keys | Live-verified with xAI; other providers built to OpenClaw's documented interface |
-| Agents: subscriptions | ChatGPT (Codex) and Muse Code sandboxed and live-verified; Claude live-verified, but its tools run on the host (scout and review by default) |
+| Agents: subscriptions | ChatGPT (Codex) sandboxed and live-verified; Claude and Muse Code live-verified, but their tools run on the host (scout and review by default) |
 | Local (llama.cpp) and Bedrock profiles | Working |
 | The army and `/feature` | Used daily on nomArmy itself and our own products: 783 jobs from September 18 to October 10, 2026 ([measured results](https://github.com/rayson-tech/nomarmy/blob/main/docs/findings.md)) |
 | Harnesses: Go, Rust, Python, Node and mixed repos; Playwright; fake services | Live-verified offline |

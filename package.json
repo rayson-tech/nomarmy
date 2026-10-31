@@ -52,6 +52,7 @@
     "policies",
     "docker",
     "harnesses",
+    "openclaw-plugin",
     "install.sh",
     "e2e.sh",
     "LICENSE",

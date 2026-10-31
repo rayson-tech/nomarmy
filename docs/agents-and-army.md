@@ -8,7 +8,7 @@
 |---|---|---|
 | `local` | Your local llama-server model. `local` is built in; define another with `slot: gpt` for a second loaded model (see `config/agents.yml.example`) | nothing |
 | `api` | A metered API key: `xai`, `openai`, `anthropic`, `deepinfra`, `bedrock`, `azure-openai`, `openai-compatible` (with `base_url`), or `openclaw` for any other OpenClaw provider by id | `nomarmy agents add api` |
-| `subscription` | **One person's own** Claude, ChatGPT, Muse Code or Grok plan, or any other provider OpenClaw signs in to. Never pooled; every job on it names its owner. A Claude subscription's tools run on your machine, so it's for scouts and reviews unless you allow more (see [Security posture](security.md#security-posture)) | `nomarmy agents add subscription claude\|codex\|meta\|grok\|openclaw` |
+| `subscription` | **One person's own** Claude, ChatGPT, Muse Code or Grok plan, or any other provider OpenClaw signs in to. Never pooled; every job on it names its owner. A Claude or Muse Code subscription's tools run on your machine, so it's for scouts and reviews unless you allow more (see [Security posture](security.md#security-posture)) | `nomarmy agents add subscription claude\|codex\|meta\|grok\|openclaw` |
 
 ```bash
 nomarmy agents add                  # asks which kind, then walks through it
@@ -19,7 +19,7 @@ nomarmy agents update codex --max-concurrent 3
 `agents add` does the whole setup and asks only when something needs you:
 
 - **An api agent**: it registers the key with OpenClaw over stdin, typed once or read from an environment variable you name, and makes a test call. `agents.yml` only ever holds the variable's *name*.
-- **A subscription**: it installs the vendor's CLI if it's missing, runs that CLI's login, installs the OpenClaw plugin the vendor needs, lists the models your plan can use, defaults the owner to the account you logged in as, and makes a real test call before saving. For Meta it also copies the key Muse Code's login stored in your macOS keychain into OpenClaw (only that auto-connected key is flat-rate, per Meta's docs), and adds Meta's provider entry to OpenClaw's config.
+- **A subscription**: it installs the vendor's CLI if it's missing, runs that CLI's login, installs the OpenClaw plugin the vendor needs, lists the models your plan can use, defaults the owner to the account you logged in as, and makes a real test call before saving. For Muse Code it installs nomArmy's own `muse-cli` plugin, which runs `muse exec`: Meta accepts a Muse Code plan only from Muse Code's own client.
 
 nomArmy starts each login; the vendor's CLI and OpenClaw do the authenticating.
 
@@ -54,7 +54,7 @@ Changes apply to the next job with no restart. The exception is a **new** api ag
 
 **Vendor terms and platform risk.** Every model call goes through [OpenClaw](https://github.com/openclaw/openclaw), and subscriptions are reached through each vendor's own CLI or login. We've read the terms that apply (see above), but using a personal subscription through a harness is exactly the kind of use vendors tighten, and a change in a vendor's terms or in OpenClaw can stop a subscription agent from working. Local models and API keys don't carry that risk. Plan on subscriptions as a convenience, not the only way your roles can run.
 
-**Picking an agent.** Build work goes to a sandboxed agent: `local`, an api key, Codex or Muse. `local` for a bounded change against a written spec with a test; your code never leaves your machine. An api or subscription agent when the work needs more than the local model, knowing it sends code to that vendor. That's a decision about where your source travels, separate from the trust boundary, which is the same for every agent. The General itself when the answer isn't known yet.
+**Picking an agent.** Build work goes to a sandboxed agent: `local`, an api key or Codex. `local` for a bounded change against a written spec with a test; your code never leaves your machine. An api or subscription agent when the work needs more than the local model, knowing it sends code to that vendor. That's a decision about where your source travels, separate from the trust boundary, which is the same for every agent. The General itself when the answer isn't known yet.
 
 **High-stakes work.** How much a mistake would cost is separate from how hard the work is: a one-line change to an auth check is simple and high-stakes. Mark such a job `stakes: high` (security or access control, personal or tenant data, data loss, money, anything irreversible). nomArmy then requires a verification profile, keeps the revert check on, and flags the job for review until an independent review has looked at it: a scout on a different vendor than its worker, sent with `reviews: <job id>`, or a judge on another vendor. `nomarmy stats` counts high-stakes jobs with and without one. On Senti, most of the defects that passed every check were this kind: cross-tenant access, a false security label, deploy-only paths.
 

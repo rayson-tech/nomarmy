@@ -274,7 +274,7 @@ test("subscriptionKeyIssues flags an OpenClaw sign-in subscription whose provide
   assert.equal(OPENCLAW_SIGN_IN_PRESETS.grok.provider, "xai");
   const agents = {
     grok: { kind: "subscription", provider: "xai", owner: "me@example.com" },
-    muse: { kind: "subscription", provider: "meta", owner: "me@example.com" },
+    muse: { kind: "subscription", provider: "muse-cli", owner: "me@example.com" },
     qwen: { kind: "subscription", provider: "qwen", owner: "me@example.com" },
     key: { kind: "api", provider: "xai", auth_env: "K" },
   };

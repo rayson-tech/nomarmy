@@ -14,7 +14,6 @@ import {
   probeSucceeded,
   openclawSignInFailure,
   parseMuseAuthDescriptor,
-  extractMintedKey,
 } from "../lib/subscription-setup.mjs";
 
 const REAL_CATALOG = [
@@ -39,9 +38,11 @@ test("SUBSCRIPTION_VENDORS: real, live-verified provider ids and how each creden
   assert.equal(SUBSCRIPTION_VENDORS.codex.credential.loginProvider, "codex");
   assert.equal(SUBSCRIPTION_VENDORS.codex.plugin.minOpenclaw, "2026.9.5");
   assert.equal(SUBSCRIPTION_VENDORS.codex.credential.kind, "openclaw-login");
-  assert.equal(SUBSCRIPTION_VENDORS.meta.provider, "meta");
-  assert.equal(SUBSCRIPTION_VENDORS.meta.credential.kind, "minted-key");
-  assert.deepEqual({ ...SUBSCRIPTION_VENDORS.meta.credential.keychain }, { service: "ai.meta.dev.credentials", account: "meta", field: "api_key" });
+  // Meta refuses the minted key from anything but Muse Code's client, so
+  // Muse runs through its CLI, by nomArmy's own plugin.
+  assert.equal(SUBSCRIPTION_VENDORS.meta.provider, "muse-cli");
+  assert.equal(SUBSCRIPTION_VENDORS.meta.credential.kind, "cli-session");
+  assert.deepEqual({ ...SUBSCRIPTION_VENDORS.meta.plugin }, { id: "muse-cli", bundled: "openclaw-plugin/muse-cli" });
 });
 
 // The real descriptor shape, with the personal fields replaced.
@@ -54,14 +55,6 @@ test("parseMuseAuthDescriptor: logged in, with the account email, from the real 
   assert.deepEqual(parseMuseAuthDescriptor(REAL_SHAPE_MUSE_DESCRIPTOR), { loggedIn: true, email: "user@example.com", subscriptionType: "muse-code" });
   assert.equal(parseMuseAuthDescriptor(JSON.stringify({ schema_version: 2, providers: {} })).loggedIn, false);
   assert.equal(parseMuseAuthDescriptor("").loggedIn, false);
-});
-
-test("extractMintedKey: returns only the three-part minted api_key, never the OAuth access_token", () => {
-  const blob = JSON.stringify({ secret_schema_version: 1, api_key: "LLM|fakeid|fakesecret", access_token: "dca:fake-oauth-token" });
-  assert.equal(extractMintedKey(blob, "api_key"), "LLM|fakeid|fakesecret");
-  assert.equal(extractMintedKey(blob, "access_token"), null, "an OAuth token is refused even if asked for by name -- it 401s against api.meta.ai");
-  assert.equal(extractMintedKey(JSON.stringify({ api_key: "LLM|only-two" }), "api_key"), null);
-  assert.equal(extractMintedKey("not json", "api_key"), null);
 });
 
 test("parseOpenclawVersion: parses the real `openclaw --version` line", () => {
