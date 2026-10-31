@@ -33,6 +33,7 @@ import { COORDINATOR_INSTRUCTIONS } from "../lib/coordinator-instructions.mjs";
 import { runQuery, formatCitations, OPS as EVIDENCE_OPS } from "../lib/repo-query.mjs";
 import { loadConfig, ConfigError } from "../lib/config.mjs";
 import { expandArmyRole, describeArmy, globalConfigDir } from "../lib/army.mjs";
+import { guideSection, readRoleGuide } from "../lib/role-guide.mjs";
 import { notify } from "../lib/notify.mjs";
 import { checkAndRecordHealth } from "../lib/health.mjs";
 import { liveLeases, writeLease, pidAlive } from "../lib/slots.mjs";
@@ -261,7 +262,39 @@ export function defaultTimeoutSeconds(job, getArmyFn) {
   catch { return DEFAULT_TIMEOUT_SECONDS; }
 }
 
-export function expandJobs(jobs, { getArmy = currentArmy, getAgents = () => agentsConfig().agents, getActiveRun = () => activeRunId, env = process.env } = {}) {
+/** The reviewed job's role and base commit, from its record; null when unknown. */
+export function reviewedJobRole(jobId, root = jobsRoot) {
+  try {
+    const record = JSON.parse(fs.readFileSync(path.join(root, jobId, "metadata.json"), "utf8"));
+    const role = record?.labels?.role, baseSha = record?.git?.baseSha;
+    return typeof role === "string" && typeof baseSha === "string" ? { role, baseSha } : null;
+  } catch { return null; }
+}
+
+/**
+ * Role guides (lib/role-guide.mjs) go after the task: the job's own role's
+ * guide read at its base_ref, and for a review scout the reviewed job's
+ * role guide read at that job's base, so the review checks the same rules.
+ */
+export function attachRoleGuides(job, getArmyRoles, { readGuide = (ref, guidePath) => readRoleGuide({ projectDir, ref, guidePath }), reviewedJob = reviewedJobRole } = {}) {
+  const sections = [];
+  if (job.roleGuide) {
+    const ref = job.base_ref ?? "HEAD";
+    sections.push(guideSection({ heading: "Role guide", guidePath: job.roleGuide, ref, guide: readGuide(ref, job.roleGuide) }));
+  }
+  if (job.mode === "scout" && job.reviews) {
+    const reviewed = reviewedJob(job.reviews);
+    let roles = null;
+    try { roles = reviewed ? getArmyRoles() : null; } catch { /* no army configured: no guide to add */ }
+    const guidePath = roles?.[reviewed.role]?.guide;
+    if (guidePath && guidePath !== job.roleGuide) {
+      sections.push(guideSection({ heading: `Standards the reviewed work had to follow (${reviewed.role} guide)`, guidePath, ref: reviewed.baseSha, guide: readGuide(reviewed.baseSha, guidePath) }));
+    }
+  }
+  return sections.length ? { ...job, task: `${job.task}\n\n${sections.join("\n\n")}` } : job;
+}
+
+export function expandJobs(jobs, { getArmy = currentArmy, getAgents = () => agentsConfig().agents, getActiveRun = () => activeRunId, env = process.env, guides = {} } = {}) {
   const problems = [];
   let army = null, agents = null;
   const runId = getActiveRun();
@@ -274,7 +307,8 @@ export function expandJobs(jobs, { getArmy = currentArmy, getAgents = () => agen
         return { ...rest, ...(army_role ? { armyRole: army_role } : {}) };
       }
       if (j.army_role) { army ??= getArmy().army; j = expandArmyRole(j, army); }
-      const { agent, roleModel = null, ...rest } = j;
+      j = attachRoleGuides(j, () => (army ??= getArmy().army).roles, guides);
+      const { agent, roleModel = null, roleGuide, ...rest } = j;
       if (!agent) {
         if (executionMode(env).mode === "hosted") throw new Error("this install has no local model (NOMARMY_EXECUTION=hosted): give the job an army_role or an agent (the army tool lists them)");
         if (rest.model) throw new Error(`model "${rest.model}" needs an agent to run on: add agent (or army_role), or drop model to use the local model`);

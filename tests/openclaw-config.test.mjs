@@ -9,7 +9,6 @@ import { after, test } from "node:test";
 
 import { ensureProviderConfig, providerConfigured } from "../lib/openclaw-config.mjs";
 import { providerConfigIssues, providerModelIssues } from "../lib/health.mjs";
-import { SUBSCRIPTION_VENDORS } from "../lib/subscription-setup.mjs";
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -20,7 +19,12 @@ function fakeHome({ config, plugin }) {
   if (plugin) { fs.mkdirSync(path.join(home, "extensions", "meta", "dist"), { recursive: true }); fs.writeFileSync(path.join(home, "extensions", "meta", "dist", "onboard.js"), plugin); }
   return home;
 }
-const META = { provider: "meta", pluginId: "meta", ...SUBSCRIPTION_VENDORS.meta.plugin.providerConfig };
+// A vendor whose OpenClaw plugin writes its own provider entry: Meta's API
+// route had one, before Meta refused Muse Code's key outside its own client
+// (Muse now runs through muse-cli). The mechanism is generic, so it is
+// tested on that real shape.
+const VENDORS = { meta: { provider: "meta", plugin: { id: "meta", providerConfig: { module: "dist/onboard.js", exportName: "applyMetaConfig" } } } };
+const META = { provider: "meta", pluginId: "meta", ...VENDORS.meta.plugin.providerConfig };
 const REAL_SHAPE = `export function applyMetaConfig(c) { return { ...c, models: { ...c.models, providers: { ...(c.models?.providers ?? {}), meta: { baseUrl: "https://api.meta.ai/v1", api: "openai-responses", models: [{ id: "muse-spark-1.3" }] } } } }; }`;
 
 test("ensureProviderConfig: adds the missing Meta entry with the plugin's own step, keeps everything else, backs up first", async () => {
@@ -72,12 +76,12 @@ test("ensureProviderConfig: refuses, and writes nothing, when the step would dro
 
 test("providerConfigIssues: a Meta subscription agent with no provider entry is flagged; configured or unused is not", () => {
   const agents = { meta: { kind: "subscription", provider: "meta" }, codex: { kind: "subscription", provider: "openai" } };
-  const issues = providerConfigIssues({ agents, openclawConfig: { models: { providers: {} } }, vendors: SUBSCRIPTION_VENDORS });
+  const issues = providerConfigIssues({ agents, openclawConfig: { models: { providers: {} } }, vendors: VENDORS });
   assert.equal(issues.length, 1);
   assert.equal(issues[0].id, "provider-config:meta");
   assert.match(issues[0].fix, /nomarmy agents add subscription meta/);
-  assert.equal(providerConfigIssues({ agents, openclawConfig: { models: { providers: { meta: {} } } }, vendors: SUBSCRIPTION_VENDORS }).length, 0);
-  assert.equal(providerConfigIssues({ agents: { codex: agents.codex }, openclawConfig: {}, vendors: SUBSCRIPTION_VENDORS }).length, 0);
+  assert.equal(providerConfigIssues({ agents, openclawConfig: { models: { providers: { meta: {} } } }, vendors: VENDORS }).length, 0);
+  assert.equal(providerConfigIssues({ agents: { codex: agents.codex }, openclawConfig: {}, vendors: VENDORS }).length, 0);
   assert.equal(providerConfigured({ models: { providers: { meta: {} } } }, "meta"), true);
 });
 
@@ -86,11 +90,11 @@ test("providerModelIssues: flags models a plugin lists that the configured entry
   const configured = { models: { providers: { meta: { models: [] } } } };
   const asked = [];
   const check = async (spec) => { asked.push(spec.provider); return { changed: false, wouldChange: true, added: ["muse-wonder-1.0"] }; };
-  const issues = await providerModelIssues({ agents, openclawConfig: configured, vendors: SUBSCRIPTION_VENDORS, check });
+  const issues = await providerModelIssues({ agents, openclawConfig: configured, vendors: VENDORS, check });
   assert.deepEqual(issues.map((i) => [i.id, i.severity]), [["provider-models:meta:muse-wonder-1.0", "info"]]);
   assert.match(issues[0].fix, /^nomarmy doctor --fix/);
   assert.deepEqual(asked, ["meta"]);
-  assert.deepEqual(await providerModelIssues({ agents: {}, openclawConfig: configured, vendors: SUBSCRIPTION_VENDORS, check }), []);
-  assert.deepEqual(await providerModelIssues({ agents, openclawConfig: { models: { providers: {} } }, vendors: SUBSCRIPTION_VENDORS, check }), [], "a missing entry is providerConfigIssues' job");
-  assert.deepEqual(await providerModelIssues({ agents, openclawConfig: configured, vendors: SUBSCRIPTION_VENDORS, check: async () => ({ changed: false }) }), []);
+  assert.deepEqual(await providerModelIssues({ agents: {}, openclawConfig: configured, vendors: VENDORS, check }), []);
+  assert.deepEqual(await providerModelIssues({ agents, openclawConfig: { models: { providers: {} } }, vendors: VENDORS, check }), [], "a missing entry is providerConfigIssues' job");
+  assert.deepEqual(await providerModelIssues({ agents, openclawConfig: configured, vendors: VENDORS, check: async () => ({ changed: false }) }), []);
 });

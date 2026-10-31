@@ -47,7 +47,7 @@ import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
 import { linkCodex } from "../lib/codex-link.mjs";
 import { recordProbeSuccess, parseOpenclawAuthProfiles, codexImportRecovery, apiKeyProvider } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
-import { SUBSCRIPTION_VENDORS, OPENCLAW_SIGN_IN_PRESETS, competingProviderProfiles, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, openclawSignInFailure, parseMuseAuthDescriptor, extractMintedKey } from "../lib/subscription-setup.mjs";
+import { SUBSCRIPTION_VENDORS, OPENCLAW_SIGN_IN_PRESETS, competingProviderProfiles, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, openclawSignInFailure, parseMuseAuthDescriptor } from "../lib/subscription-setup.mjs";
 import { PINNED_OPENCLAW_VERSION, pluginInstallArgs, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors } from "../lib/openclaw-install.mjs";
 import { ensureOpenClawOnPath, ensureVendorClisOnPath } from "../lib/openclaw-path.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
@@ -1181,37 +1181,6 @@ function readLoginStatus(vendorKey) {
 }
 
 /**
- * credential.kind "minted-key": copies the key the vendor CLI's own login
- * minted into the OS keychain over to OpenClaw, keychain -> this process ->
- * `paste-api-key` stdin. Never printed, never on argv, never written to a
- * file nomArmy owns; child stdio is discarded so no error path can echo it.
- * Run on every setup, not just the first: the vendor may rotate the key,
- * and a stale copy in OpenClaw fails exactly like a missing one.
- */
-function syncMintedKey(vendor) {
-  const { keychain, profileId } = vendor.credential;
-  if (process.platform !== "darwin") {
-    console.log(c.red(`✗ Reading ${vendor.cli.bin}'s stored key is only wired up for the macOS keychain so far. On this OS, link it yourself: \`openclaw models auth paste-api-key --provider ${vendor.provider} --profile-id ${profileId}\` and paste the key it minted.`));
-    return false;
-  }
-  // macOS may show its own keychain prompt here, asking whether to let
-  // `security` read this item -- that's the OS asking the operator, as it should.
-  const read = spawnSync("security", ["find-generic-password", "-s", keychain.service, "-a", keychain.account, "-w"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-  const key = read.status === 0 ? extractMintedKey(read.stdout.trim(), keychain.field) : null;
-  if (!key) {
-    console.log(c.red(`✗ Couldn't find a usable ${vendor.cli.bin} key in the keychain (or access was declined). Run \`${vendor.cli.bin} ${vendor.cli.loginArgs.join(" ")}\` again, then re-run this.`));
-    return false;
-  }
-  const pasted = spawnSync(openclawCmd(), ["models", "auth", "paste-api-key", "--provider", vendor.provider, "--profile-id", profileId], { input: `${key}\n`, stdio: ["pipe", "ignore", "ignore"] });
-  if (pasted.status !== 0) {
-    console.log(c.red(`✗ OpenClaw didn't accept the key (exit ${pasted.status ?? "?"}). Run \`openclaw models auth paste-api-key --provider ${vendor.provider} --profile-id ${profileId}\` by hand to see why.`));
-    return false;
-  }
-  runQuiet(openclawCmd(), ["plugins", "registry", "--refresh"]);
-  return true;
-}
-
-/**
  * Makes one vendor's credential usable by OpenClaw, installing/updating/
  * logging in only what's actually missing. Returns { ok, email } -- email is
  * the vendor CLI's own logged-in account when it reports one, used to
@@ -1257,9 +1226,11 @@ async function ensureVendorAuth(rl, vendorKey) {
       });
       if (!repaired.ok) return { ok: false };
     }
-    if (!runQuiet(openclawCmd(), ["plugins", "inspect", vendor.plugin.id]).ok) {
+    // nomArmy's own plugin is (re)installed every time, so it always matches
+    // this nomArmy; a vendor's is installed only when it's missing.
+    if (vendor.plugin.bundled || !runQuiet(openclawCmd(), ["plugins", "inspect", vendor.plugin.id]).ok) {
       const installArgs = pluginInstallArgs(vendor.plugin);
-      console.log(c.dim(`Installing ${installArgs[2]}...`));
+      console.log(c.dim(`Installing ${vendor.plugin.bundled ? `nomArmy's ${vendor.plugin.id} plugin` : installArgs[2]}...`));
       if (!runInteractive(openclawCmd(), installArgs)) {
         console.log(c.red(`✗ Plugin install failed. Run \`openclaw ${installArgs.join(" ")}\` yourself to see why.`));
         return { ok: false };
@@ -1273,12 +1244,6 @@ async function ensureVendorAuth(rl, vendorKey) {
       return { ok: false };
     }
     console.log(c.green(`✓ OpenClaw's ${vendor.plugin.id} plugin is ready.`));
-  }
-  if (vendor.credential.kind === "minted-key") {
-    step(`Linking your ${vendor.cli.bin} login to OpenClaw`);
-    console.log(c.dim(`Copies the key ${vendor.cli.bin}'s own login stored in your keychain into OpenClaw (over stdin, never shown). macOS may ask you to allow it.`));
-    if (!syncMintedKey(vendor)) return { ok: false };
-    console.log(c.green(`✓ OpenClaw is using your ${vendor.cli.bin} subscription key (profile ${vendor.credential.profileId}).`));
   }
   if (vendor.plugin?.providerConfig) {
     // paste-api-key saves the key but not the provider's config entry; the
@@ -1761,7 +1726,7 @@ async function addOpenclawSignInAgent(rl, agents, presetKey) {
       pattern: OPENCLAW_PROVIDER_ID_RE, invalidMessage: "must be an OpenClaw provider id (lowercase letters, digits, dot, underscore, hyphen).",
     });
   }
-  const known = Object.entries(SUBSCRIPTION_VENDORS).find(([, v]) => v.provider === provider);
+  const known = Object.entries(SUBSCRIPTION_VENDORS).find(([, v]) => v.provider === provider || v.formerProviders?.includes(provider));
   if (known) { console.log(c.red(`\n✗ ${known[1].label} has its own setup: \`nomarmy agents add subscription ${known[0]}\`.`)); process.exitCode = 1; return; }
   const clash = apiAgentOnProvider(agents, provider);
   if (clash) {
@@ -1911,6 +1876,7 @@ function probeConfiguredAgent(name, agent) {
 function signInFix(provider) {
   if (provider === "claude-cli") return "claude auth logout && claude auth login  (Claude Code's saved login can be refused while `claude auth status` still says logged in)";
   if (provider === "openai") return codexImportRecovery();
+  if (provider === "muse-cli") return "muse logout && muse login";
   return null;
 }
 
