@@ -1726,7 +1726,7 @@ async function addOpenclawSignInAgent(rl, agents, presetKey) {
       pattern: OPENCLAW_PROVIDER_ID_RE, invalidMessage: "must be an OpenClaw provider id (lowercase letters, digits, dot, underscore, hyphen).",
     });
   }
-  const known = Object.entries(SUBSCRIPTION_VENDORS).find(([, v]) => v.provider === provider);
+  const known = Object.entries(SUBSCRIPTION_VENDORS).find(([, v]) => v.provider === provider || v.formerProviders?.includes(provider));
   if (known) { console.log(c.red(`\n✗ ${known[1].label} has its own setup: \`nomarmy agents add subscription ${known[0]}\`.`)); process.exitCode = 1; return; }
   const clash = apiAgentOnProvider(agents, provider);
   if (clash) {
