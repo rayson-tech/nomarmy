@@ -10,7 +10,10 @@ const playbook = fs.readFileSync(path.join(root, "playbooks", "feature.md"), "ut
 
 test("coordinator instructions name scoped job watches", () => {
   for (const text of [COORDINATOR_INSTRUCTIONS, playbook]) {
-    assert.match(text, /nomarmy jobs --wait <id> <id> \.\.\./);
+    // One background wait per job: a multi-id wait exits only when the last
+    // job does, which hid finished jobs from a coordinator.
+    assert.match(text, /one background .nomarmy jobs --wait <id>. per job/);
+    assert.match(text, /nomarmy jobs --wait <id> <id> \.\.\.. exits only when the last one has/);
     assert.match(text, /nomarmy jobs --events --until-done --run <run-id>/);
     assert.match(text, /Never use unscoped .*--until-done.* when other sessions may have jobs/);
   }

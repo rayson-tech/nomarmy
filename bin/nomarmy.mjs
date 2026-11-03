@@ -287,14 +287,16 @@ Usage: nomarmy <command> [options]
                   with a monitor that wakes on each line. A background
                   command is only reported when it exits, so there use
                   --events --until-done --run <run-id> for a whole run,
-                  or --wait <id> <id> ... for specific jobs. Unscoped
+                  or --wait <id> per job (one --wait for several jobs
+                  exits only when the last one finishes). Unscoped
                   --until-done watches every job on this machine. The plain
                   stream ends on its own after 30 minutes with nothing
                   running (--idle-minutes N); --prune removes the bulky runtime data
                   from finished jobs older than DAYS (default 2), keeping
                   their records, reports and any retained worktree;
                   --wait <jobId> [<jobId> ...] [--timeout <seconds>]
-                  blocks until all finish; comma-separated ids also work
+                  blocks until all finish, printing each as it does;
+                  comma-separated ids also work
                   (default timeout 1800; --json is supported);
                   --events --repo <path> limits events to one repository;
                   --stop <jobId> stops a running job's worker (no report

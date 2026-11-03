@@ -1598,12 +1598,34 @@ test("makeIdleDiffTick: an active worker isn't idle; a quiet one is; a busy one 
     // New transcript events keep it going past the plain idle limit.
     events = 5; assert.equal((await tick(900)).stop, false);
     events = 9; assert.equal((await tick(1500)).stop, false, "still working, just not editing");
-    // A long test run: one tool call in flight, no new events.
-    toolInFlight = true;
-    assert.equal((await tick(2400)).stop, false, "waiting on a running command is working");
+    // A worker busy without progress: new events every tick, nothing changed.
+    events = 12; assert.equal((await tick(2400)).stop, false);
+    events = 15;
     const capped = await tick(3100);
     assert.equal(capped.stop, true, "nothing changed for 3x the limit, however busy");
     assert.match(capped.detail, /while the worker kept working \(3x the idle limit\)/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// A third of one Senti run's implement jobs were stopped at 15 minutes (3x a
+// 300s limit) while their test suite was still running.
+test("makeIdleDiffTick: waiting on one long command doesn't count toward the 3x cap; a busy loop after it does", async () => {
+  const dir = await initTempGitRepo();
+  try {
+    let events = 1, toolInFlight = false;
+    const tick = makeIdleDiffTick(dir, { idleMs: 1000, minElapsedMs: 0, activity: async () => ({ events, toolInFlight }) });
+    fs.writeFileSync(path.join(dir, "a.txt"), "changed");
+    assert.equal((await tick(0)).stop, false);
+    // The suite starts: one tool call, then no new events for a long time.
+    events = 2; toolInFlight = true;
+    assert.equal((await tick(500)).stop, false);
+    for (let t = 1000; t <= 10000; t += 500) assert.equal((await tick(t)).stop, false, `still waiting on the suite at ${t}`);
+    // The suite ends and the worker loops without changing anything: about
+    // 3x the limit of busy time after the wait, it stops.
+    toolInFlight = false;
+    let stopped = null;
+    for (let t = 10500; t <= 14000 && !stopped; t += 500) { events++; const r = await tick(t); if (r.stop) stopped = t; }
+    assert.ok(stopped && stopped >= 12500, `stopped at ${stopped}`);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
