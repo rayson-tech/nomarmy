@@ -1,6 +1,6 @@
 {
   "name": "@nomarmy/openclaw-muse-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Runs Meta's Muse Code CLI (muse exec) as an OpenClaw CLI backend, so a Muse Code subscription is used through Meta's own client.",
   "type": "module",

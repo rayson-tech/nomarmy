@@ -82,6 +82,11 @@ export function buildMuseCliBackend() {
     id: MUSE_CLI_BACKEND_ID,
     modelProvider: "meta",
     nativeToolMode: "always-on",
+    // Muse manages its own context, and every run is a fresh session. Without
+    // this, OpenClaw tried to compact the transcript itself through an
+    // embedded model call to "muse-cli/<model>", which isn't an API model, and
+    // the job failed with "Unknown model: muse-cli/muse-spark-1.3".
+    ownsNativeCompaction: true,
     resolveExecutionArgs: resolveMuseExecutionArgs,
     parseJsonlEvent: parseMuseJsonlEvent,
     config: {
@@ -106,6 +111,11 @@ export function buildMuseCliBackend() {
       // headless resume, so every run is a fresh session.
       sessionMode: "none",
       serialize: true,
+      // muse writes nothing while a long command or a long think runs, and
+      // OpenClaw's default no-output watchdog ends a fresh CLI run after 10
+      // minutes of that, which cut long reviews off. nomArmy's own work
+      // timeout and idle breaker bound the run instead.
+      reliability: { watchdog: { fresh: { noOutputTimeoutRatio: 0.95, maxMs: 3_600_000 } } },
     },
   };
 }

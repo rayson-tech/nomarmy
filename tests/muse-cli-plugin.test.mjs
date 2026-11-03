@@ -60,6 +60,10 @@ test("the muse-cli backend: headless, muse's own sandbox kept, no web or operato
   assert.equal(args[args.indexOf("--sandbox-network") + 1], "restricted");
   for (const off of ["--yolo", "--disable-sandbox", "--trust-workspace"]) assert.equal(args.includes(off), false, off);
   assert.deepEqual([sessionMode, output], ["none", "jsonl"]);
+  // OpenClaw can't compact a muse transcript itself (it has no API model to
+  // do it with), and a long command must not trip its 10-minute watchdog.
+  assert.equal(backend.ownsNativeCompaction, true);
+  assert.ok(backend.config.reliability.watchdog.fresh.maxMs >= 3_600_000);
   // The manifest declares the same backend id and models under it.
   const manifest = JSON.parse(fs.readFileSync(new URL("../openclaw-plugin/muse-cli/openclaw.plugin.json", import.meta.url), "utf8"));
   assert.deepEqual(manifest.cliBackends, ["muse-cli"]);
