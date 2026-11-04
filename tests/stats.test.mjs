@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { loadJobRecords, computeStats, formatStats, parseSince, jobRole, jobModel, resolveRepo } from "../lib/stats.mjs";
+import { loadJobRecords, computeStats, formatStats, formatStatsSummary, parseSince, jobRole, jobModel, resolveRepo } from "../lib/stats.mjs";
 
 const REPO = "/repos/app";
 const at = (day) => `2026-09-${String(day).padStart(2, "0")}T12:00:00.000Z`;
@@ -44,7 +44,7 @@ test("computeStats: this repo, this period, every section from the records", () 
   assert.equal(s.workerMinutes.median, 5);
   assert.equal(s.jobMinutes.p90, 950000 / 60000);
   assert.equal(s.spendUsd.total, 1.75);
-  assert.deepEqual(s.claimVsEvidence, { claimedDone: 4, verificationFailed: 1, failedOnlyOnBase: 0, revertStillPassed: 1, passedBoth: 2, changedNothing: 0, flaggedAfterPassing: 1, provenTestFiles: s.claimVsEvidence.provenTestFiles });
+  assert.deepEqual(s.claimVsEvidence, { claimedDone: 4, judged: 4, failedOnBaseToo: 0, verificationFailed: 1, failedOnlyOnBase: 0, revertStillPassed: 1, passedBoth: 2, changedNothing: 0, flaggedAfterPassing: 1, provenTestFiles: s.claimVsEvidence.provenTestFiles });
   assert.deepEqual(s.notCompleted, { NEEDS_REVIEW: 2, WORKER_TIMEOUT: 1, SCOUT_UNSUPPORTED: 1 });
   assert.deepEqual(s.reviewers["security-analyst"], { runs: 1, outcomes: { SCOUT_DONE: 1 }, findings: 2 });
   assert.equal(s.signals["scoped test selection risk"], 1);
@@ -112,7 +112,7 @@ test("resolveRepo takes a path or a folder name, preferring an exact or trailing
 test("preexisting claims with failed regression checks count only as caught claims", () => {
   const job = regressionCheck => impl({ independentVerification: { status: "pass",
     baseComparison: { classification: "preexisting" } }, regressionCheck });
-  const expected = { claimedDone: 1, verificationFailed: 0, failedOnlyOnBase: 0,
+  const expected = { claimedDone: 1, judged: 1, verificationFailed: 0, failedOnBaseToo: 0, failedOnlyOnBase: 0,
     revertStillPassed: 1, passedBoth: 0, changedNothing: 0, flaggedAfterPassing: 0, provenTestFiles: 0 };
   assert.deepEqual(computeStats([job({ status: "fail" })]).claimVsEvidence, expected);
   for (const regressionCheck of [undefined, { status: "pass" }, { status: "not_run" }]) {
@@ -120,5 +120,24 @@ test("preexisting claims with failed regression checks count only as caught clai
       { ...expected, failedOnlyOnBase: 1, revertStillPassed: 0 });
   }
   assert.deepEqual(computeStats([job({ status: "fail" }), job({ status: "pass" })]).claimVsEvidence,
-    { ...expected, claimedDone: 2, failedOnlyOnBase: 1 });
+    { ...expected, claimedDone: 2, judged: 2, failedOnlyOnBase: 1 });
+});
+
+// An audit of 156 "caught" claims in one month: 39 failed only on two tests
+// already broken at base, which the stats counted against the worker.
+test("a failure where the base failed too isn't counted either way; one with a new failure, a passing base or no comparison is", () => {
+  const failed = (baseComparison) => impl({ independentVerification: { status: "fail", ...(baseComparison ? { baseComparison } : {}) } });
+  const jobs = [
+    failed({ baseStatus: "fail", classification: "failure", reason: "missing or unparseable passed count (job: unknown, base: unknown)", newFailures: [] }),
+    failed({ baseStatus: "fail", classification: "failure", reason: null, newFailures: ["tests/a.py::test_new"] }),
+    failed({ baseStatus: "pass", classification: "failure", newFailures: [] }),
+    failed({ baseStatus: "not_run", classification: "failure", newFailures: [] }),
+    failed(null),
+  ];
+  const cv = computeStats(jobs).claimVsEvidence;
+  assert.deepEqual([cv.claimedDone, cv.judged, cv.verificationFailed, cv.failedOnBaseToo], [5, 4, 4, 1]);
+  const summary = formatStatsSummary(computeStats(jobs));
+  assert.match(summary, /0 of 4 "done, tests pass" claims held up · 4 didn't/);
+  assert.match(summary, /1 not counted: the base failed too/);
+  assert.match(formatStats(computeStats(jobs)), /Failed, but the base failed too\s+1/);
 });

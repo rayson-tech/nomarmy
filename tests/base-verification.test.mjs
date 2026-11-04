@@ -245,7 +245,7 @@ test("implement jobs commit pre-existing-only failures, retain the revert gate a
   assert.equal(bad.manifest.commit.created, false, bad.report); assert.equal(bad.manifest.regressionCheck.status, "fail");
   assert.equal(reruns, 2);
   const stats = computeStats([m]);
-  assert.deepEqual(stats.claimVsEvidence, { claimedDone: 1, verificationFailed: 0, failedOnlyOnBase: 1, revertStillPassed: 0, passedBoth: 0, changedNothing: 0, flaggedAfterPassing: 0, provenTestFiles: 0 });
+  assert.deepEqual(stats.claimVsEvidence, { claimedDone: 1, judged: 1, verificationFailed: 0, failedOnBaseToo: 0, failedOnlyOnBase: 1, revertStillPassed: 0, passedBoth: 0, changedNothing: 0, flaggedAfterPassing: 0, provenTestFiles: 0 });
   assert.match(formatStats(stats), /Failed only on tests failing at base\s+1 \(100%\)/);
   assert.match(formatStats(stats), /all 1 "done, tests pass" claims held up/);
   assert.equal(JSON.parse(JSON.stringify(stats)).claimVsEvidence.failedOnlyOnBase, 1);
