@@ -32,7 +32,7 @@ import { describeBudgets, FRONTIER } from "../lib/budget.mjs";
 import { COORDINATOR_INSTRUCTIONS } from "../lib/coordinator-instructions.mjs";
 import { runQuery, formatCitations, OPS as EVIDENCE_OPS } from "../lib/repo-query.mjs";
 import { loadConfig, ConfigError } from "../lib/config.mjs";
-import { expandArmyRole, describeArmy, globalConfigDir } from "../lib/army.mjs";
+import { loadArmy, generalIdentity, expandArmyRole, describeArmy, globalConfigDir } from "../lib/army.mjs";
 import { guideSection, readRoleGuide } from "../lib/role-guide.mjs";
 import { notify } from "../lib/notify.mjs";
 import { checkAndRecordHealth } from "../lib/health.mjs";
@@ -222,6 +222,7 @@ export function resolveReasoningApplied({ result, profile, reasoning, workerMode
 
 const agentConfig = createAgentConfig({ projectDir });
 const { agentsConfig, dispatchConfig, subscriptionConfig, currentArmy, ensureCatalogRefresh, modelCatalog, modelCatalogReady } = agentConfig;
+const currentArmyForRecord = (record) => loadArmy({ projectDir: record?.projectDir ?? projectDir }).army;
 const { budgetsForPool, budgetsForJob, recordedBudgets, budgetsForSubscriptionWorker, catalogKeysForJob } = createJobBudgets({ budgetState, dispatchConfig, subscriptionConfig, modelCatalog });
 const { resolvePoolSelection, resolveSubscriptionSelection, withPoolEntrySlot, assertNoProviderConflict } = createSelection({ dispatchConfig, subscriptionConfig, profileConfig });
 export { resolvePoolSelection, resolveSubscriptionSelection };
@@ -340,6 +341,7 @@ export { registerVerificationRunner, normalizeVerification, runRegressionCheck, 
 // Podman checks, wired at startup below (a test importing this module gets none).
 let podmanChecks = null;
 const { executeJob, executeImplement, executeScout, executeDecompose } = createExecutor({
+  generalIdentity: () => generalIdentity(currentArmy().army, agentsConfig().agents),
   podmanVmStartedAt: () => podmanChecks?.vmStartedAt() ?? null,
   jevSettings: () => jevSettings(),
   judgeSettings: () => judgeSettings({ agents: agentsConfig().agents, providerOf: agentProviderId, runsOnHost: agentRunsToolsOnHost }),
@@ -546,7 +548,7 @@ server.tool("stats", "What nomArmy's own job records show for this repository (o
     const records = loadJobRecords(jobsRoot);
     let agentFor = () => null;
     try { agentFor = agentLookup(agentsConfig().agents, agentProviderId); } catch { /* commands name <agent> */ }
-    const stats = computeStats(records, { repo: repo ? resolveRepo(records, repo) : all_repos ? null : projectDir, sinceMs: parseSince(since), untilMs: parseSince(until), role: role ?? null, model: model ?? null, agentFor });
+    const stats = computeStats(records, { generalVendor: (r) => generalIdentity(currentArmyForRecord(r), agentsConfig().agents)?.vendor ?? null, repo: repo ? resolveRepo(records, repo) : all_repos ? null : projectDir, sinceMs: parseSince(since), untilMs: parseSince(until), role: role ?? null, model: model ?? null, agentFor });
     return toolText(format === "json" ? JSON.stringify(stats, null, 2) : details ? formatStats(stats) : formatStatsSummary(stats));
   } catch (error) { return toolText(error.message, true); }
 });
@@ -643,7 +645,7 @@ server.tool("run_finish", "Close a /feature run as complete or stopped, with a o
       const records = loadJobRecords(jobsRoot);
       gated = gatedJobs(records, run_id);
       const acceptance = await acceptanceSummary(projectDir);
-      prBlock = shareMarkdown(computeStats(records, { runId: run_id }), { scope: "this feature run", acceptance });
+      prBlock = shareMarkdown(computeStats(records, { runId: run_id, generalVendor: (r) => generalIdentity(currentArmyForRecord(r), agentsConfig().agents)?.vendor ?? null }), { scope: "this feature run", acceptance });
     } catch { /* the totals stand without it */ }
     return toolText(JSON.stringify({ id: run.id, status: run.status, ...runTotals(run), ...(gated.length ? { gated } : {}), ...(prBlock ? { prBlock, prBlockNote: "Put prBlock in the pull request's description as it is: every number is from nomArmy's verified records." } : {}) }, null, 2));
   } catch (error) { return toolText(error.message, true); }
@@ -687,7 +689,7 @@ server.tool("army", "Who you, the General, are and who you call for what in this
     // Routing suggestions from this repo's recent jobs (lib/suggestions.mjs):
     // tell the operator about them; never apply one without their say-so.
     try {
-      const list = recentSuggestions(loadJobRecords(jobsRoot), { projectDir, agentFor: agentLookup(agents, agentProviderId) });
+      const list = recentSuggestions(loadJobRecords(jobsRoot), { projectDir, agentFor: agentLookup(agents, agentProviderId), generalVendor: generalIdentity(currentArmy().army, agents)?.vendor ?? null });
       if (list.length) summary.suggestions = { note: "From this repo's last 14 days of jobs. Tell the operator; change routing only with their say-so (nomarmy army assign).", items: list.map(({ level, title, evidence, command }) => ({ level, title, evidence, command })) };
     } catch { /* suggestions are a bonus; the army summary stands without them */ }
     return toolText(JSON.stringify(withRestartNotice(summary), null, 2));

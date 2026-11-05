@@ -218,6 +218,7 @@ test("implement executor persists criterion IDs and proposals from its full-cont
   const testChanges = { production_files_changed: ["lib/code.mjs"], new_tests_added: [], existing_tests_modified: ["tests/example.test.mjs"], existing_tests_deleted: [], reviewRequired: false };
   const record = { repoStatusFiles: ["lib/code.mjs", "tests/example.test.mjs"], changedFiles: ["lib/code.mjs", "tests/example.test.mjs"], nameStatus: [{ status: "M", path: "lib/code.mjs" }, { status: "M", path: "tests/example.test.mjs" }], testChanges, ignoredRuntimeJunk: [], issues: [], additions: 2, deletions: 1 };
   const executor = createExecutor({ VERSION: "test", projectDir: f.repoDir, jobsRoot,
+    generalIdentity: () => ({ agent: "claude", vendor: "anthropic" }),
     assertRepo: async () => {}, ensureJobsRoot: () => fs.mkdirSync(jobsRoot, { recursive: true }), resolveBase: async () => ({ ref: "base", sha: "base" }),
     sweepStaleSandboxContainers: async () => {},
     run: async (cmd, args) => {
@@ -239,13 +240,14 @@ test("implement executor persists criterion IDs and proposals from its full-cont
   assert.equal(result.ok, true, JSON.stringify(result.manifest));
   const manifest = JSON.parse(fs.readFileSync(path.join(result.jobDir, "metadata.json"), "utf8"));
   assert.deepEqual(Object.keys(manifest).sort(), [
-    "version", "jobId", "workerId", "mode", "projectDir", "worktree", "branch", "startedAt", "finishedAt",
+    "general", "version", "jobId", "workerId", "mode", "projectDir", "worktree", "branch", "startedAt", "finishedAt",
     "objective", "acceptance", "criteria", "contract", "trust", "acceptanceProposals", "verificationProfile", "outcome", "recovered", "recoveryAttempted",
     "reportRecoveryAttempted", "reportRecovered", "reviewRequired", "coordinatorStatus", "issues", "runnerNotes", "reportValidation",
     "independentVerification", "regressionCheck", "testSelectionRisk", "unwiredDefinitions", "testChanges", "metrics",
     "worktreePointerBefore", "worktreePointerAfterWorker", "worktreeRetained", "commit", "gitBeforeCoordinatorCommit", "git", "worker",
     "workerError", "workerStopReason", "budgets", "timeBudget", "timing", "requestedProfile", "requestedReasoning", "reasoningApplied",
   ].sort());
+  assert.deepEqual(manifest.general, { agent: "claude", vendor: "anthropic" });
   assert.deepEqual(manifest.criteria, ["ACC-1", "ACC-2"]);
   assert.deepEqual(manifest.acceptanceProposals, expectedProposals);
   assert.deepEqual(calls.filter(args => args.includes("--unified=1000000")), [["diff", "--unified=1000000", "base", "--"]]);

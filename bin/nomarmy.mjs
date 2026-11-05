@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { vendorOf } from "../lib/vendor.mjs";
 import { processErrorSummary } from "../lib/process-error.mjs";
 import { acknowledgeTrust, collectReviewEvidence, trustSuggestions, reviewTrustLearning, trustAcknowledgment } from "../lib/trust-learning.mjs";
 import { writeTrustScoutBrief, writeTrustProposal, loadTrustProposal, trustProposalOrigins } from "../lib/trust-map.mjs";
@@ -34,7 +35,7 @@ import { loadValidators, saveJev, jevEndpoint, JEV_ENDPOINT, removeJev, jevSetti
 import { probeModel } from "../lib/model-probe.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
 import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, agentProviderId, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
-import { loadArmy, mergeArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
+import { generalIdentity, loadArmy, mergeArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
 import { parseLlamaUrl } from "../lib/execution.mjs";
 import { setupSteps, formatSetupSteps, runSetupPlaybook } from "../lib/setup-steps.mjs";
 import { readUsageSnapshots, refreshStaleOverLimitReadings } from "../lib/usage-limits.mjs";
@@ -3232,7 +3233,7 @@ function cmdStats() {
   }
   let agentFor = () => null;
   try { agentFor = agentLookup(loadAgents(globalConfigDir()).agents, agentProviderId); } catch { /* no agents.yml: commands name <agent> */ }
-  const stats = computeStats(records, { repo, sinceMs: parseSince(value("since")), untilMs: parseSince(value("until")), role: value("role"), model: value("model"), runId: value("run"), agentFor, allSuggestions: flag("all-suggestions") });
+  const stats = computeStats(records, { generalVendor: (r) => generalIdentity(loadArmy({ projectDir: r?.projectDir ?? repoDir }).army, loadAgents(globalConfigDir()).agents)?.vendor ?? null, repo, sinceMs: parseSince(value("since")), untilMs: parseSince(value("until")), role: value("role"), model: value("model"), runId: value("run"), agentFor, allSuggestions: flag("all-suggestions") });
   if (json) return out(stats);
   if (flag("share") || flag("badge")) return shareStats(stats);
   console.log(flag("details") ? formatStats(stats) : formatStatsSummary(stats, { c }));
@@ -3361,8 +3362,9 @@ async function cmdValidatorsJudge(sub) {
     };
     if (!agent) {
       if (!process.stdin.isTTY || json) throw new Error("Usage: nomarmy validators add judge --agent <name> --model <model> [--host-tools]");
-      const roles = loadArmy({ projectDir: repoDir }).army.roles;
-      const guided = judgeAgentChoices({ agents, roles, providerOf: agentProviderId, runsOnHost: agentRunsToolsOnHost });
+      const army = loadArmy({ projectDir: repoDir }).army;
+      const roles = army.roles;
+      const guided = judgeAgentChoices({ agents, roles, generalVendor: generalIdentity(loadArmy({ projectDir: repoDir }).army, agents)?.vendor ?? null, providerOf: agentProviderId, runsOnHost: agentRunsToolsOnHost });
       dominantBuilderVendor = guided.dominantBuilderVendor;
       if (!guided.choices.length) throw new Error("No api or subscription agents are configured in agents.yml.");
       agent = (await chooseJudgeAgent({ choices: guided.choices, ask: question, write: (line) => console.log(line) })).name;
@@ -3403,10 +3405,10 @@ async function cmdValidatorsJudge(sub) {
     if (dominantBuilderVendor === null) {
       try {
         const roles = loadArmy({ projectDir: repoDir }).army.roles;
-        dominantBuilderVendor = judgeAgentChoices({ agents, roles, providerOf: agentProviderId, runsOnHost: agentRunsToolsOnHost }).dominantBuilderVendor;
+        dominantBuilderVendor = judgeAgentChoices({ agents, roles, generalVendor: generalIdentity(loadArmy({ projectDir: repoDir }).army, agents)?.vendor ?? null, providerOf: agentProviderId, runsOnHost: agentRunsToolsOnHost }).dominantBuilderVendor;
       } catch { /* no readable army means there is no builder comparison */ }
     }
-    if (dominantBuilderVendor && agentProviderId(agents[agent]) === dominantBuilderVendor) console.log(c.yellow("Note: this judge uses the same vendor as most build roles, so its verdicts are not independent of those builders."));
+    if (dominantBuilderVendor && vendorOf(agentProviderId(agents[agent]), model) === dominantBuilderVendor) console.log(c.yellow("Note: this judge uses the same vendor as most build roles, so its verdicts are not independent of those builders."));
     console.log(test.ok ? c.green("✓ Test call answered. New implement jobs use it; restart open coordinator sessions to pick it up.") : c.red(`✗ Test call ${test.refused ? "refused" : "didn't answer"}: ${test.reason ?? "no answer"}`));
     if (!test.ok) process.exitCode = 1;
     return;
