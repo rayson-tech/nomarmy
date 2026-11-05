@@ -396,3 +396,93 @@ test("review regression: apostrophes in JSX copy never pair into a string that h
   // Still masked: a JS string continued with an escaped newline.
   assert.deepEqual(detectRemovedChecks([{ file: "a.js", before: "const s = 'line one \\\nrequireAuth, still a string';", after: "" }]), []);
 });
+
+// Audit regressions: each case reproduced against the detector before its fix.
+const kinds = (before, after, file) => detectRemovedChecks([{ file, before, after }]).map((f) => [f.kind, f.line]);
+const G = "  if (!user.isAdmin) throw new Forbidden();\n";
+test("audit: added statements that weaken row-level security are flagged; strengthening ones are not", () => {
+  const base = "CREATE POLICY p ON d USING (tenant_id = t());\n";
+  for (const added of ["DROP POLICY p ON d;", "ALTER POLICY p ON d USING (true);", "ALTER TABLE d DISABLE ROW LEVEL SECURITY;", "ALTER TABLE d NO FORCE ROW LEVEL SECURITY;"]) {
+    assert.deepEqual(kinds(base, `${base}${added}\n`, "m.sql"), [["bypass", 2]], added);
+  }
+  assert.deepEqual(kinds("x = 1\n", "x = 1\nop.execute(\"DROP POLICY p ON d\")\n", "migrations/v2.py"), [["bypass", 2]]);
+  for (const added of ["CREATE POLICY q ON e USING (tenant_id = t());", "ALTER TABLE e ENABLE ROW LEVEL SECURITY;", "ALTER TABLE e FORCE ROW LEVEL SECURITY;"]) {
+    assert.deepEqual(kinds(base, `${base}${added}\n`, "m.sql"), [], added);
+  }
+  // An existing DROP POLICY left alone, or removed, is not a new weakening.
+  assert.deepEqual(kinds(`${base}DROP POLICY old ON d;\n`, `${base}DROP POLICY old ON d;\n-- note\n`, "m.sql"), []);
+  assert.deepEqual(kinds(`${base}DROP POLICY old ON d;\n`, base, "m.sql"), []);
+});
+
+test("audit: a guard moved into another function, or code moved ahead of it, is flagged; reordering whole functions is not", () => {
+  const a = `function a(user) {\n${G}  return 1;\n}\n`, b = "function b(user) {\n  return 2;\n}\n";
+  assert.deepEqual(kinds(`${a}${b}`, `function a(user) {\n  return 1;\n}\nfunction b(user) {\n${G}  return 2;\n}\n`, "a.ts"), [["bypass", 5]]);
+  assert.deepEqual(kinds(`function f(user) {\n${G}  deleteAll();\n  return 1;\n}\n`, `function f(user) {\n  deleteAll();\n${G}  return 1;\n}\n`, "a.ts"), [["bypass", 2]]);
+  assert.deepEqual(kinds("def f(user):\n    if not user.is_admin:\n        raise PermissionError()\n    delete_all()\n", "def f(user):\n    delete_all()\n    if not user.is_admin:\n        raise PermissionError()\n", "a.py").map(([k]) => k), ["bypass"]);
+  // Near misses: swapping two functions, adding a new line ahead of the guard, moving code from before to after it.
+  assert.deepEqual(kinds(`${a}${b}`, `${b}${a}`, "a.ts"), []);
+  assert.deepEqual(kinds(`function f(user) {\n${G}  deleteAll();\n}\n`, `function f(user) {\n  log("start");\n${G}  deleteAll();\n}\n`, "a.ts"), []);
+  assert.deepEqual(kinds(`function f(user) {\n  prepare();\n${G}  deleteAll();\n}\n`, `function f(user) {\n${G}  prepare();\n  deleteAll();\n}\n`, "a.ts"), []);
+});
+
+test("audit: bypasses are found in generic and object-typed TypeScript functions, not in generic callbacks", () => {
+  for (const head of ["function f<T>(user: T) {", "function f(user): { ok: boolean } {", "function f(user): Promise<{ ok: boolean }> {", "const f = <T,>(user: T): { ok: boolean } => {"]) {
+    assert.deepEqual(kinds(`${head}\n  doA();\n${G}  return 1;\n}\n`, `${head}\n  doA();\n  if (debug) return 0;\n${G}  return 1;\n}\n`, "a.ts"), [["bypass", 3]], head);
+  }
+  assert.deepEqual(kinds(`function f(user) {\n  const xs = [];\n${G}  return xs;\n}\n`, `function f(user) {\n  const xs = list.map(function <T>(x: T) { return x; });\n${G}  return xs;\n}\n`, "a.ts"), []);
+});
+
+test("audit: continue and break only bypass a guard inside their own loop", () => {
+  assert.deepEqual(kinds("def f(user, xs):\n    for x in xs:\n        use(x)\n    if not user.is_admin:\n        raise PermissionError()\n", "def f(user, xs):\n    for x in xs:\n        if x is None:\n            continue\n        use(x)\n    if not user.is_admin:\n        raise PermissionError()\n", "a.py"), []);
+  assert.deepEqual(kinds(`function f(user, xs) {\n  for (const x of xs) {\n    use(x);\n  }\n${G}}\n`, `function f(user, xs) {\n  for (const x of xs) {\n    if (!x) continue;\n    use(x);\n  }\n${G}}\n`, "a.ts"), []);
+  assert.deepEqual(kinds(`function f(user, xs) {\n  switch (k) {\n    case 1: use(1);\n  }\n${G}}\n`, `function f(user, xs) {\n  switch (k) {\n    case 1: use(1); break;\n  }\n${G}}\n`, "a.ts"), []);
+  // Inside the loop, ahead of the guard, it still bypasses it; so does a labeled continue.
+  assert.deepEqual(kinds("def f(xs):\n    for x in xs:\n        if not x.is_admin:\n            raise PermissionError()\n        use(x)\n", "def f(xs):\n    for x in xs:\n        if x.skip:\n            continue\n        if not x.is_admin:\n            raise PermissionError()\n        use(x)\n", "a.py"), [["bypass", 4]]);
+  assert.deepEqual(kinds(`function f(user, xs) {\n  for (const x of xs) {\n    use(x);\n${G}  }\n}\n`, `function f(user, xs) {\n  for (const x of xs) {\n    if (!x) continue;\n    use(x);\n${G}  }\n}\n`, "a.ts"), [["bypass", 3]]);
+  assert.deepEqual(kinds(`function f(user, xs) {\n  outer: for (const x of xs) {\n    for (const y of x) {\n      use(y);\n    }\n${G}  }\n}\n`, `function f(user, xs) {\n  outer: for (const x of xs) {\n    for (const y of x) {\n      if (!y) continue outer;\n      use(y);\n    }\n${G}  }\n}\n`, "a.ts"), [["bypass", 4]]);
+});
+
+test("audit: common auth middleware names are recognized; author is not auth", () => {
+  for (const [file, before, after] of [
+    ["api.py", "@app.get('/items')\ndef items(user: User = Depends(get_current_user)):\n    return db.items()\n", "@app.get('/items')\ndef items():\n    return db.items()\n"],
+    ["a.py", "@jwt_required()\ndef f():\n    return 1\n", "def f():\n    return 1\n"],
+    ["a.js", "router.get('/x', verifyToken, handler);\n", "router.get('/x', handler);\n"],
+    ["a.js", "router.get('/x', ensureLoggedIn(), handler);\n", "router.get('/x', handler);\n"],
+    ["a.js", "router.get('/x', authorize, handler);\n", "router.get('/x', handler);\n"],
+    ["c.rb", "class C < ApplicationController\n  before_action :authenticate_user!\nend\n", "class C < ApplicationController\nend\n"],
+  ]) assert.deepEqual(kinds(before, after, file).map(([k]) => k), ["middleware"], before);
+  assert.deepEqual(kinds("export function byline(post) {\n  return format(post.author);\n}\n", "export function byline(post) {\n  return format(post.title);\n}\n", "post.ts"), []);
+  assert.deepEqual(kinds("const items = list.map(i => i.authorName);\n", "const items = list.map(i => i.name);\n", "a.ts"), []);
+  assert.deepEqual(kinds("class C\n  before_action :load_post\nend\n", "class C\nend\n", "c.rb"), []);
+});
+
+test("audit: session, redirect and status-401 guards are recognized; property checks are not guards", () => {
+  for (const [file, before, after] of [
+    ["a.ts", "function f(req, res) {\n  if (!req.isAuthenticated()) return res.redirect('/login');\n  go();\n}\n", "function f(req, res) {\n  go();\n}\n"],
+    ["page.tsx", "export default async function Page() {\n  const session = await getSession();\n  if (!session) redirect('/login');\n  return null;\n}\n", "export default async function Page() {\n  const session = await getSession();\n  return null;\n}\n"],
+    ["route.ts", "export async function loader({ request }) {\n  const user = await getUser(request);\n  if (!user) throw redirect('/login');\n  return json(user);\n}\n", "export async function loader({ request }) {\n  const user = await getUser(request);\n  return json(user);\n}\n"],
+    ["route.ts", "export async function GET() {\n  const session = await auth();\n  if (!session?.user) return new Response('no', { status: 401 });\n  return Response.json(x);\n}\n", "export async function GET() {\n  const session = await auth();\n  return Response.json(x);\n}\n"],
+    ["a.py", "def f(current_user):\n    if current_user is None:\n        raise HTTPException(status_code=401)\n    return 1\n", "def f(current_user):\n    return 1\n"],
+  ]) assert.deepEqual(kinds(before, after, file).map(([k]) => k), ["guard"], before);
+  for (const before of ["if (user.name === x) return;\n", "if (!users.length) return [];\n", "if (!user.nickname) return fallback;\n"]) {
+    assert.deepEqual(kinds(before, "", "a.ts"), [], before);
+  }
+});
+
+test("audit: camelCase tenant columns, and SQL WHERE in Python strings ends with its string", () => {
+  assert.deepEqual(kinds("db.select().from(t).where(eq(t.tenantId, tenant));\n", "db.select().from(t);\n", "a.ts"), [["tenant-filter", 1]]);
+  assert.deepEqual(kinds("db.select().from(t).where(eq(t.tenantIdentifier, x));\n", "db.select().from(t);\n", "a.ts"), []);
+  const pySql = `def get_docs(uid):\n    cur.execute("SELECT * FROM docs WHERE user_id = %s", (uid,))\n    return cur.fetchall()\n\n\ndef unrelated():\n    return 1\n`;
+  assert.deepEqual(kinds(pySql, pySql.replace("return 1", "return 2"), "repo.py"), []);
+  assert.deepEqual(kinds(pySql, pySql.replace("WHERE user_id = %s", "WHERE 1 = 1"), "repo.py"), [["tenant-filter", 2]]);
+  const triple = `def q():\n    return """\n        SELECT * FROM docs\n        WHERE active\n          AND org_id = %s\n    """\n`;
+  assert.deepEqual(kinds(triple, triple.replace("          AND org_id = %s\n", ""), "repo.py"), [["tenant-filter", 4]]);
+});
+
+test("audit: an added try that swallows an existing check is flagged; one that re-raises or guards new code is not", () => {
+  assert.deepEqual(kinds("def f(user):\n    validate_input(user)\n    return 1\n", "def f(user):\n    try:\n        validate_input(user)\n    except Exception:\n        pass\n    return 1\n", "a.py"), [["bypass", 2]]);
+  assert.deepEqual(kinds("def f(user):\n    validate_input(user)\n    return 1\n", "def f(user):\n    try:\n        validate_input(user)\n    except ValueError as e:\n        logger.warning(\"bad input %s\", e)\n    return 1\n", "a.py"), [["bypass", 2]]);
+  assert.deepEqual(kinds(`function f(user) {\n${G}  go();\n}\n`, `function f(user) {\n  try {\n  ${G}  } catch (e) {}\n  go();\n}\n`, "a.ts"), [["bypass", 2]]);
+  assert.deepEqual(kinds("def f(user):\n    validate_input(user)\n    return 1\n", "def f(user):\n    try:\n        validate_input(user)\n    except ValueError as e:\n        raise BadRequest(str(e))\n    return 1\n", "a.py"), []);
+  assert.deepEqual(kinds("def f(user):\n    validate_input(user)\n    return 1\n", "def f(user):\n    validate_input(user)\n    try:\n        send(user)\n    except Exception:\n        pass\n    return 1\n", "a.py"), []);
+});
