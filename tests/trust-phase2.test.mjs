@@ -486,3 +486,35 @@ test("audit: an added try that swallows an existing check is flagged; one that r
   assert.deepEqual(kinds("def f(user):\n    validate_input(user)\n    return 1\n", "def f(user):\n    try:\n        validate_input(user)\n    except ValueError as e:\n        raise BadRequest(str(e))\n    return 1\n", "a.py"), []);
   assert.deepEqual(kinds("def f(user):\n    validate_input(user)\n    return 1\n", "def f(user):\n    validate_input(user)\n    try:\n        send(user)\n    except Exception:\n        pass\n    return 1\n", "a.py"), []);
 });
+
+// Independent review (Codex) regressions: B1-B4 were flagged before this
+// branch's quieter rules, B5-B7 were missed before it too.
+test("review: a comparison is not a JSX tag, and author-named middleware is still auth", () => {
+  assert.deepEqual(kinds("registerRoute('/x', score >\nminimum ? requireAuth : noop,\n<Page/>);", "registerRoute('/x', score >\nminimum ? noop : noop,\n<Page/>);", "a.tsx").map(([k]) => k), ["middleware"]);
+  assert.deepEqual(kinds("router.get('/x', authorOnly, handler);", "router.get('/x', handler);", "a.js").map(([k]) => k), ["middleware"]);
+  assert.deepEqual(kinds("export const A = () => (\n  <Section\n    title=\"x\"\n  >\n    Roles and scopes\n  </Section>\n);", "export const A = () => (\n  <Section\n    title=\"x\"\n  >\n    Who can edit\n  </Section>\n);", "a.tsx"), []);
+});
+
+test("review: a WHERE string continues with its statement; break skips a loop's else", () => {
+  assert.deepEqual(kinds("q=('SELECT * FROM t WHERE '\n 'tenant_id=:id')\nrows=db.execute(q,{'id':uid})", "q=('SELECT * FROM t WHERE '\n '1=1')\nrows=db.execute(q,{'id':uid})", "a.py").map(([k]) => k), ["tenant-filter"]);
+  assert.deepEqual(kinds("def f(uid):\n    cur.execute(\n        \"SELECT * FROM t WHERE \"\n        \"org_id = %s\",\n        (uid,))\n", "def f(uid):\n    cur.execute(\n        \"SELECT * FROM t WHERE \"\n        \"1 = 1\",\n        (uid,))\n", "a.py").map(([k]) => k), ["tenant-filter"]);
+  assert.deepEqual(kinds("def f(xs,x):\n    for y in xs:\n        use(y)\n    else:\n        validate_input(x)\n    save(x)\n", "def f(xs,x):\n    for y in xs:\n        break\n        use(y)\n    else:\n        validate_input(x)\n    save(x)\n", "a.py"), [["bypass", 3]]);
+  assert.deepEqual(kinds("def f(xs,x):\n    for y in xs:\n        use(y)\n    else:\n        validate_input(x)\n", "def f(xs,x):\n    for y in xs:\n        continue\n        use(y)\n    else:\n        validate_input(x)\n", "a.py"), []);
+});
+
+test("review: function-typed return annotations, reordered RLS, and same-named methods in other classes", () => {
+  assert.deepEqual(kinds("function f(x):()=>{ok:boolean}{\nvalidateInput(x);\nreturn make;\n}", "function f(x):()=>{ok:boolean}{\nreturn make;\nvalidateInput(x);\nreturn make;\n}", "a.ts").map(([k]) => k), ["bypass"]);
+  assert.deepEqual(kinds("ALTER TABLE d DISABLE ROW LEVEL SECURITY;\nALTER TABLE d ENABLE ROW LEVEL SECURITY;", "ALTER TABLE d ENABLE ROW LEVEL SECURITY;\nALTER TABLE d DISABLE ROW LEVEL SECURITY;", "a.sql").map(([k]) => k), ["bypass"]);
+  assert.deepEqual(kinds("class A{\nrun(x){\nvalidateInput(x);\nsave(x);\n}\n}\nclass B{\nrun(x){\n}\n}", "class A{\nrun(x){\nsave(x);\n}\n}\nclass B{\nrun(x){\nvalidateInput(x);\n}\n}", "a.js").map(([k]) => k), ["bypass"]);
+  assert.deepEqual(kinds("class A:\n    def run(self, x):\n        validate_input(x)\n        save(x)\nclass B:\n    def run(self, x):\n        pass\n", "class A:\n    def run(self, x):\n        save(x)\nclass B:\n    def run(self, x):\n        validate_input(x)\n", "a.py").map(([k]) => k), ["bypass"]);
+});
+
+test("review: work an adversarial diff can demand is bounded, and an oversized source file is flagged, not passed", () => {
+  const big = "function f(x){\n" + "validateInput(x);\n".repeat(50000) + "}";
+  const started = Date.now();
+  assert.deepEqual(kinds(big, big + "\n//x", "a.js"), []);
+  assert.ok(Date.now() - started < 5000, "bounded time");
+  const huge = "x;\n".repeat(400000);
+  assert.deepEqual(kinds(huge, huge + "y;\n", "a.js"), [["unscanned", 1]]);
+  assert.deepEqual(kinds(huge, huge + "y;\n", "notes.txt"), []);
+});

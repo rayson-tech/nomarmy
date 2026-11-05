@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
-import { addedLinesOf, detectTestSabotage, HUNK_BREAK, loadDependencyNames } from "../lib/sabotage.mjs";
+import { addedLinesOf, detectTestSabotage, HUNK_BREAK, loadDependencyNames, withUnscanned, isBackupSegment } from "../lib/sabotage.mjs";
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -206,4 +206,38 @@ test("detectTestSabotage: backup copies are flagged, feature names that mention 
   assert.deepEqual(flagsOf(["src/services/backup-scheduler.ts", "src/cors.origins.ts", "src/backups.py", "src/BackupService.ts", "src/backup/restore.py", "src/clipboard-copy.ts", "src/deep_copy.py", "src/threshold.py"].flatMap((p) => one(p, ["x"], "A"))), []);
   // Only new files: an existing backup-looking file that was edited is not new.
   assert.deepEqual(flagsOf(one("src/foo.py.bak", ["x"], "M")), []);
+});
+
+// Independent review (Codex) regressions.
+test("review: hunks a couple of unchanged lines apart stay joined, so a changed import and its changed except still read as a stub", () => {
+  const diff = ["--- a/p.py", "+++ b/p.py", "@@ -2 +2 @@", "-    import p", "+    import p as q", "@@ -4,2 +4,2 @@", "-except RuntimeError:", "-    raise", "+except Exception:", "+    pass"].join("\n");
+  assert.deepEqual(addedLinesOf(diff), ["    import p as q", "except Exception:", "    pass"]);
+  assert.match(detectTestSabotage({ isTestPathFn: isTest, changes: [{ status: "M", path: "p.py", addedLines: addedLinesOf(diff) }] }).flags[0], /^stubbed import/);
+});
+
+test("review: a node:test skip option on its own line under the test call is a skip marker; pagination is not", () => {
+  const flagged = (addedLines) => detectTestSabotage({ isTestPathFn: isTest, changes: [{ status: "M", path: "tests/a.test.js", addedLines }] });
+  assert.match(flagged(["test('x', {", "  skip: true", "}, fn)"]).flags[0], /^skip marker/);
+  assert.match(flagged(["it('y', {", "  todo: 'later',", "}, fn)"]).flags[0], /^skip marker/);
+  assert.equal(flagged(["const page = {", "  skip: 10,", "};"]), null);
+  assert.equal(flagged(["const rows = query({", "  skip: true,", "});"]), null);
+});
+
+test("review: hidden or bare backup directories and numbered backup words are backups", () => {
+  for (const seg of [".backup", ".bak", "bak", "orig", "foo_backup2.py", "foo-bak3.py"]) assert.equal(isBackupSegment(seg), true, seg);
+  for (const seg of ["backups", "backup-scheduler.ts", "BackupService.ts", "cors.origins.ts", "original.py"]) assert.equal(isBackupSegment(seg), false, seg);
+});
+
+test("review: an over-long line is flagged as not scanned instead of run through the line patterns", () => {
+  const out = detectTestSabotage({ isTestPathFn: isTest, changes: [{ status: "M", path: "tests/a.test.js", addedLines: ["//" + "test(".repeat(10000)] }] });
+  assert.match(out.flags[0], /^not scanned: tests\/a\.test\.js has a line over/);
+});
+
+test("review: what the scan could not read becomes a review flag, never a silent pass", () => {
+  assert.equal(withUnscanned(null, []), null);
+  const alone = withUnscanned(null, ["the scan itself failed (boom)"]);
+  assert.match(alone.reason, /^not scanned for test workarounds: the scan itself failed \(boom\)/);
+  const merged = withUnscanned({ flags: ["skip marker: x"], reason: "1 sign(s): skip marker: x" }, ["a.py (over 2,000,000 characters)"]);
+  assert.equal(merged.flags.length, 2);
+  assert.match(merged.reason, /skip marker: x; not scanned/);
 });
