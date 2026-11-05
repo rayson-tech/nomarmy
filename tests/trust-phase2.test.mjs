@@ -566,3 +566,16 @@ test("middleware (Grok review): a bare data word passed whole is middleware; an 
     ["const name = format(req.user.role.name);", "const name = format(req.user.role.name, x);"],
   ]) assert.deepEqual(kinds(before, after, "a.mjs"), [], before);
 });
+
+test("swallowed-check scan stays linear on a hostile catch body (CodeQL js/redos)", () => {
+  const body = "return " + "return ".repeat(30000) + "x";
+  const before = "function f(user) {\n  validateInput(user);\n}\n";
+  const after = `function f(user) {\n  try {\n    validateInput(user);\n  } catch (e) { ${body} }\n}\n`;
+  const started = Date.now();
+  assert.deepEqual(kinds(before, after, "a.js"), []);
+  assert.ok(Date.now() - started < 2000, "bounded time");
+  // The real forms still swallow.
+  for (const handler of ["", "return;", "return null;", "console.error(e);", "logger.warn('x', e); return false;"]) {
+    assert.deepEqual(kinds(before, `function f(user) {\n  try {\n    validateInput(user);\n  } catch (e) { ${handler} }\n}\n`, "a.js"), [["bypass", 2]], handler);
+  }
+});
