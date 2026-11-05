@@ -385,3 +385,14 @@ test("review regression: JSX copy is not middleware, a JSX auth wrapper and a mu
   assert.deepEqual(detectRemovedChecks([{ file: "a.js", before: "app.get('/x',\n  requireAuth,\n  handler\n);", after: "app.get('/x',\n  handler\n);" }]).map((f) => f.kind), ["middleware"]);
   assert.deepEqual(detectRemovedChecks([{ file: "a.js", before: "const f = () =>\n  requireAuth\n<x/>", after: "" }]).map((f) => f.kind), ["middleware"]);
 });
+
+test("review regression: apostrophes in JSX copy never pair into a string that hides a removed check", () => {
+  const page = (guarded) => `export const A = ({ user }) => (\n  <div>\n    <p>Don't share this link.</p>\n${guarded ? "    <RequireAuth user={user}>\n      <Board />\n    </RequireAuth>" : "    <Board />"}\n    <p>It's private.</p>\n  </div>\n);`;
+  for (const file of ["a.tsx", "a.jsx", "a.js"]) {
+    assert.deepEqual(detectRemovedChecks([{ file, before: page(true), after: page(false) }]).map((f) => f.kind), ["middleware", "middleware"], file);
+  }
+  // Python: an apostrophe in a comment or docstring-free line does not hide a guard.
+  assert.deepEqual(detectRemovedChecks([{ file: "a.py", before: "x = 1  # don't\nif not authorized:\n    raise PermissionError()\ny = 'it'", after: "x = 1  # don't\ny = 'it'" }]).map((f) => f.kind), ["guard"]);
+  // Still masked: a JS string continued with an escaped newline.
+  assert.deepEqual(detectRemovedChecks([{ file: "a.js", before: "const s = 'line one \\\nrequireAuth, still a string';", after: "" }]), []);
+});
