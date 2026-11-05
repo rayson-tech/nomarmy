@@ -27,7 +27,7 @@ const scout = (provider = "claude-cli", model = "claude-sonnet-5-5") => ({ jobId
 test("vendorOf maps fixed providers, hosted models and unknown fallback", () => {
   for (const [provider, expected] of [
     ["claude-cli", "anthropic"], ["anthropic", "anthropic"], ["openai", "openai"], ["azure-openai", "openai"],
-    ["xai", "xai"], ["muse-cli", "meta"], ["gemini-cli", "google"], ["google", "google"],
+    ["xai", "xai"], ["muse-cli", "meta"], ["gemini-cli", "google"],
     ["llama-cpp", "local"], [null, "local"], [undefined, "local"], ["", "local"],
   ]) assert.equal(vendorOf(provider, "qwen-3"), expected, String(provider));
   for (const provider of ["bedrock", "deepinfra", "openai-compatible", "custom-openclaw", "unknown"]) {
@@ -36,7 +36,7 @@ test("vendorOf maps fixed providers, hosted models and unknown fallback", () => 
       ["o3", "openai"], ["o4-mini", "openai"], ["vendor/o5", "openai"], ["openai/custom", "openai"],
       ["grok-4", "xai"], ["meta-llama/Llama-4", "meta"], ["muse-spark", "meta"], ["gemini-3", "google"],
       ["Qwen/Qwen3", "alibaba"], ["mistral-large", "mistral"], ["mixtral-8x7b", "mistral"], ["codestral", "mistral"],
-      ["DeepSeek-V3", "deepseek"], ["unrecognized", provider], [null, provider], ["foo2", provider],
+      ["DeepSeek-V3", "deepseek"], ["unrecognized", "unknown"], [null, "unknown"], ["foo2", "unknown"],
     ]) assert.equal(vendorOf(provider, model), expected, `${provider}/${model}`);
   }
 });
@@ -56,7 +56,8 @@ test("judge independence excludes both worker and recorded General vendor", () =
 
 test("judge independence uses current General only for legacy records", () => {
   assert.equal(independentlyReviewedByJudge(judge(), "openai", { generalVendor: "anthropic" }), false);
-  assert.equal(independentlyReviewedByJudge(judge(), "openai", { record: { general: null }, generalVendor: "anthropic" }), true);
+  // A record dispatched with no General configured falls back to today's, so that gap can't clear a same-vendor judge.
+  assert.equal(independentlyReviewedByJudge(judge(), "openai", { record: { general: null }, generalVendor: "anthropic" }), false);
   assert.equal(independentlyReviewedByJudge(judge(), "openai"), true);
 });
 
@@ -79,7 +80,7 @@ test("reviewOf rejects General-vendor judges and scouts using recorded or curren
     assert.equal(reviewOf(work, [scout(null)], "anthropic"), null);
   }
   assert.equal(reviewOf(job({ worker: { provider: "anthropic" } }), [scout()]), null);
-  assert.deepEqual(reviewOf(job({ general: null }), [], "anthropic"), { by: "judge", provider: "claude-cli" });
+  assert.equal(reviewOf(job({ general: null }), [], "anthropic"), null);
   assert.deepEqual(reviewOf(job({ general: { vendor: "xai" } }), [], "anthropic"), { by: "judge", provider: "claude-cli" });
 });
 
@@ -160,4 +161,40 @@ test("generalVendorResolver loads config once per project and treats unreadable 
   assert.equal(resolve({ projectDir: "/broken" }), null);
   assert.equal(armyLoads, 2);
   assert.equal(agentLoads, 1);
+});
+
+test("independent review review (Grok): hosts are judged by model, unknowns never count, and look-alike ids don't match", () => {
+  // Multi-vendor hosts take the model's maker; a first-party provider is authoritative.
+  for (const [provider, model, expected] of [
+    ["google", "claude-3-5-sonnet@20241022", "anthropic"], ["vertex", "gemini-3", "google"], ["google", "my-tuned-model", "google"],
+    ["bedrock", "us.anthropic.claude-sonnet-4-5", "anthropic"], ["openrouter", "anthropic/claude-3.5-sonnet", "anthropic"],
+    ["openai-compatible", "chatgpt-4o-latest", "openai"], ["openrouter", "openai/o3-mini", "openai"], ["deepinfra", "openai/gpt-oss-120b", "openai"],
+    ["deepinfra", "google/gemma-2-27b-it", "google"], ["OpenAI", null, "openai"], [" Anthropic ", null, "anthropic"],
+    ["claude-cli", "qwen-3", "anthropic"],
+  ]) assert.equal(vendorOf(provider, model), expected, `${provider}/${model}`);
+  // Look-alikes: not OpenAI, not Meta.
+  for (const [provider, model] of [["deepinfra", "EleutherAI/gpt-neo-2.7B"], ["deepinfra", "EleutherAI/gpt-j-6b"], ["openrouter", "openbmb/MiniCPM-o2.6"], ["deepinfra", "amused/amused-512"]]) {
+    assert.equal(vendorOf(provider, model), "unknown", `${provider}/${model}`);
+  }
+  // Unknown vendors: a model-less or opaque bedrock reviewer can't clear an Anthropic worker and General.
+  for (const model of [null, "arn:aws:bedrock:us-east-1:1:application-inference-profile/abc"]) {
+    assert.equal(vendorOf("bedrock", model), "unknown");
+    assert.equal(independentlyReviewedByJudge(judge("bedrock", model), "anthropic", { generalVendor: "anthropic" }), false);
+    assert.equal(reviewOf(job({ worker: { provider: "anthropic", model: "claude-opus-5" } }), [scout("bedrock", model)], "anthropic"), null);
+  }
+  // An unknown worker vendor can't be shown different from any reviewer, and the note says which side is unknown.
+  assert.equal(independentlyReviewedByJudge(judge("xai", "grok-4"), "bedrock", { workerModel: null, generalVendor: "anthropic" }), false);
+  assert.match(highStakesNote(judge("xai", "grok-4"), "bedrock", { generalVendor: "anthropic" }), /the worker's vendor can't be told/);
+  assert.match(highStakesNote(judge("bedrock", null), "openai", { generalVendor: "anthropic" }), /the judge's vendor can't be told/);
+});
+
+test("an api or subscription job without a model in its envelope isn't recorded as running the local default model", async () => {
+  const { createBuildMetrics } = await import("../lib/outcome.mjs");
+  const build = createBuildMetrics({ execution: { defaultWorkerModel: "qwen3-coder-next" }, contextLimit: 1000 });
+  const metrics = (result) => build({ result, record: {}, reportValidation: {}, outcome: {}, workerElapsedMs: 1, totalElapsedMs: 1, regressionCheckElapsedMs: 0 });
+  assert.equal(metrics({ provider: "bedrock" }).worker_model, null);
+  assert.equal(vendorOf("bedrock", metrics({ provider: "bedrock" }).worker_model), "unknown");
+  assert.equal(metrics({ provider: "llama-cpp" }).worker_model, "qwen3-coder-next");
+  assert.equal(metrics({}).worker_model, "qwen3-coder-next");
+  assert.equal(metrics({ provider: "openai", model: "gpt-6" }).worker_model, "gpt-6");
 });
