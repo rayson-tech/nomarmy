@@ -531,3 +531,22 @@ test("review round 2: comparisons, long concatenations, per-table RLS order, and
   const cls = "class A(\nobject):\n def f():\n  assert x\n  go()\nclass B(\nobject):\n def f():\n  pass\n";
   assert.deepEqual(kinds(cls, cls.replace("  assert x\n", "").replace("  pass", "  assert x"), "a.py").map(([k]) => k), ["bypass"]);
 });
+
+test("middleware: object-literal keys, shorthand, defaults and bare data words are data; compound names, values and decorators are middleware", () => {
+  // From a real job's diff, all flagged as "removes permission middleware" before.
+  for (const [before, after] of [
+    ["const guided = judgeAgentChoices({ agents, roles, providerOf: agentProviderId, runsOnHost });", "const guided = judgeAgentChoices({ agents, roles, generalVendor, providerOf: agentProviderId, runsOnHost });"],
+    ["export function judgeAgentChoices({ agents, roles = {}, providerOf, runsOnHost }) {", "export function judgeAgentChoices({ agents, roles = {}, providerOf, runsOnHost, generalVendor = null }) {"],
+    ["const stats = computeStats(records, { role: role ?? null, model });", "const stats = computeStats(records, { role: role ?? null, model, generalVendor });"],
+    ["    const vendor = providerOf(agents[role.agent]);", "    const vendor = vendorOf(providerOf(agents[role.agent]), model);"],
+  ]) assert.deepEqual(kinds(before, after, "a.mjs"), [], before);
+  for (const [file, before, after] of [
+    ["a.js", "router.get('/x', requireRole('admin'), handler);", "router.get('/x', handler);"],
+    ["a.js", "router.get('/x', auth.required, handler);", "router.get('/x', handler);"],
+    ["a.js", "app.get('/x', { preHandler: [app.authenticate] }, handler);", "app.get('/x', {}, handler);"],
+    ["a.js", "app.get('/x', { preHandler: requireAdmin }, handler);", "app.get('/x', {}, handler);"],
+    ["a.ts", "@Roles('admin')\nexport class C {}", "export class C {}"],
+    ["a.ts", "@UseGuards(RolesGuard)\nexport class C {}", "export class C {}"],
+    ["a.js", "router.use(\n  checkScope,\n  handler\n);", "router.use(\n  handler\n);"],
+  ]) assert.deepEqual(kinds(before, after, file).map(([k]) => k).filter((k) => k === "middleware").length > 0, true, before);
+});
