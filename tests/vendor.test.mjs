@@ -146,3 +146,18 @@ test("dispatch records snapshot the configured General agent and vendor, or null
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, id, "metadata.json"))).general, general);
   }
 });
+
+test("generalVendorResolver loads config once per project and treats unreadable config as no General", async () => {
+  const { generalVendorResolver } = await import("../lib/army.mjs");
+  let armyLoads = 0, agentLoads = 0;
+  const resolve = generalVendorResolver({
+    loadArmyFor: (dir) => { armyLoads++; if (dir === "/broken") throw new Error("bad yaml"); return { general: "claude" }; },
+    loadAgents: () => { agentLoads++; return { claude: { kind: "subscription", provider: "claude-cli", owner: "me" } }; },
+    defaultProjectDir: "/repo",
+  });
+  for (let i = 0; i < 1000; i++) assert.equal(resolve({ projectDir: "/repo" }), "anthropic");
+  assert.equal(resolve({}), "anthropic");
+  assert.equal(resolve({ projectDir: "/broken" }), null);
+  assert.equal(armyLoads, 2);
+  assert.equal(agentLoads, 1);
+});

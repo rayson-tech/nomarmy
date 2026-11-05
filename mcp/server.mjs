@@ -32,7 +32,7 @@ import { describeBudgets, FRONTIER } from "../lib/budget.mjs";
 import { COORDINATOR_INSTRUCTIONS } from "../lib/coordinator-instructions.mjs";
 import { runQuery, formatCitations, OPS as EVIDENCE_OPS } from "../lib/repo-query.mjs";
 import { loadConfig, ConfigError } from "../lib/config.mjs";
-import { loadArmy, generalIdentity, expandArmyRole, describeArmy, globalConfigDir } from "../lib/army.mjs";
+import { loadArmy, generalIdentity, generalVendorResolver, expandArmyRole, describeArmy, globalConfigDir } from "../lib/army.mjs";
 import { guideSection, readRoleGuide } from "../lib/role-guide.mjs";
 import { notify } from "../lib/notify.mjs";
 import { checkAndRecordHealth } from "../lib/health.mjs";
@@ -222,7 +222,7 @@ export function resolveReasoningApplied({ result, profile, reasoning, workerMode
 
 const agentConfig = createAgentConfig({ projectDir });
 const { agentsConfig, dispatchConfig, subscriptionConfig, currentArmy, ensureCatalogRefresh, modelCatalog, modelCatalogReady } = agentConfig;
-const currentArmyForRecord = (record) => loadArmy({ projectDir: record?.projectDir ?? projectDir }).army;
+const recordGeneralVendorResolver = () => generalVendorResolver({ loadArmyFor: (dir) => loadArmy({ projectDir: dir }).army, loadAgents: () => agentsConfig().agents, defaultProjectDir: projectDir });
 const { budgetsForPool, budgetsForJob, recordedBudgets, budgetsForSubscriptionWorker, catalogKeysForJob } = createJobBudgets({ budgetState, dispatchConfig, subscriptionConfig, modelCatalog });
 const { resolvePoolSelection, resolveSubscriptionSelection, withPoolEntrySlot, assertNoProviderConflict } = createSelection({ dispatchConfig, subscriptionConfig, profileConfig });
 export { resolvePoolSelection, resolveSubscriptionSelection };
@@ -548,7 +548,7 @@ server.tool("stats", "What nomArmy's own job records show for this repository (o
     const records = loadJobRecords(jobsRoot);
     let agentFor = () => null;
     try { agentFor = agentLookup(agentsConfig().agents, agentProviderId); } catch { /* commands name <agent> */ }
-    const stats = computeStats(records, { generalVendor: (r) => generalIdentity(currentArmyForRecord(r), agentsConfig().agents)?.vendor ?? null, repo: repo ? resolveRepo(records, repo) : all_repos ? null : projectDir, sinceMs: parseSince(since), untilMs: parseSince(until), role: role ?? null, model: model ?? null, agentFor });
+    const stats = computeStats(records, { generalVendor: recordGeneralVendorResolver(), repo: repo ? resolveRepo(records, repo) : all_repos ? null : projectDir, sinceMs: parseSince(since), untilMs: parseSince(until), role: role ?? null, model: model ?? null, agentFor });
     return toolText(format === "json" ? JSON.stringify(stats, null, 2) : details ? formatStats(stats) : formatStatsSummary(stats));
   } catch (error) { return toolText(error.message, true); }
 });
@@ -645,7 +645,7 @@ server.tool("run_finish", "Close a /feature run as complete or stopped, with a o
       const records = loadJobRecords(jobsRoot);
       gated = gatedJobs(records, run_id);
       const acceptance = await acceptanceSummary(projectDir);
-      prBlock = shareMarkdown(computeStats(records, { runId: run_id, generalVendor: (r) => generalIdentity(currentArmyForRecord(r), agentsConfig().agents)?.vendor ?? null }), { scope: "this feature run", acceptance });
+      prBlock = shareMarkdown(computeStats(records, { runId: run_id, generalVendor: recordGeneralVendorResolver() }), { scope: "this feature run", acceptance });
     } catch { /* the totals stand without it */ }
     return toolText(JSON.stringify({ id: run.id, status: run.status, ...runTotals(run), ...(gated.length ? { gated } : {}), ...(prBlock ? { prBlock, prBlockNote: "Put prBlock in the pull request's description as it is: every number is from nomArmy's verified records." } : {}) }, null, 2));
   } catch (error) { return toolText(error.message, true); }

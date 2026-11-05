@@ -35,7 +35,7 @@ import { loadValidators, saveJev, jevEndpoint, JEV_ENDPOINT, removeJev, jevSetti
 import { probeModel } from "../lib/model-probe.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
 import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, agentProviderId, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
-import { generalIdentity, loadArmy, mergeArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
+import { generalIdentity, generalVendorResolver, loadArmy, mergeArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
 import { parseLlamaUrl } from "../lib/execution.mjs";
 import { setupSteps, formatSetupSteps, runSetupPlaybook } from "../lib/setup-steps.mjs";
 import { readUsageSnapshots, refreshStaleOverLimitReadings } from "../lib/usage-limits.mjs";
@@ -3233,7 +3233,7 @@ function cmdStats() {
   }
   let agentFor = () => null;
   try { agentFor = agentLookup(loadAgents(globalConfigDir()).agents, agentProviderId); } catch { /* no agents.yml: commands name <agent> */ }
-  const stats = computeStats(records, { generalVendor: (r) => generalIdentity(loadArmy({ projectDir: r?.projectDir ?? repoDir }).army, loadAgents(globalConfigDir()).agents)?.vendor ?? null, repo, sinceMs: parseSince(value("since")), untilMs: parseSince(value("until")), role: value("role"), model: value("model"), runId: value("run"), agentFor, allSuggestions: flag("all-suggestions") });
+  const stats = computeStats(records, { generalVendor: generalVendorResolver({ loadArmyFor: (dir) => loadArmy({ projectDir: dir }).army, loadAgents: () => loadAgents(globalConfigDir()).agents, defaultProjectDir: repoDir }), repo, sinceMs: parseSince(value("since")), untilMs: parseSince(value("until")), role: value("role"), model: value("model"), runId: value("run"), agentFor, allSuggestions: flag("all-suggestions") });
   if (json) return out(stats);
   if (flag("share") || flag("badge")) return shareStats(stats);
   console.log(flag("details") ? formatStats(stats) : formatStatsSummary(stats, { c }));
