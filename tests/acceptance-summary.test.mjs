@@ -96,7 +96,7 @@ test("PR acceptance without a sandbox reports unavailable and cleans up HEAD", a
   let runs = 0;
   assert.equal(await acceptanceSummary(repo, { run: fixtureWorktree(repo, calls), executor: {
     probe: async () => ({ available: false, reason: "no Podman" }), run: async () => { runs++; },
-  } }), "couldn't run: sandbox unavailable");
+  } }), "couldn't run: sandbox unavailable (no Podman; verification commands come from the repository and are never executed on the host)");
   assert.equal(runs, 0);
   assert.equal(host.mock.callCount(), 0);
   assert.equal(calls.length, 2);

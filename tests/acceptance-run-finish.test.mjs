@@ -48,7 +48,7 @@ test("run_finish reports sandbox unavailable without launching host acceptance t
   const data = JSON.parse(response.content[0].text);
   assert.deepEqual(Object.keys(data).sort(), ["byAgent", "id", "prBlock", "prBlockNote", "share", "status", "used", "warnings"]);
   assert.equal(data.status, "complete");
-  assert.deepEqual(data.prBlock.split("\n").filter(l => l.startsWith("| Acceptance |")), ["| Acceptance | couldn't run: sandbox unavailable |"]);
+  assert.deepEqual(data.prBlock.split("\n").filter(l => l.startsWith("| Acceptance |")), ["| Acceptance | couldn't run: sandbox unavailable (podman CLI is not available: no Podman; verification commands come from the repository and are never executed on the host) |"]);
   assert.deepEqual(hostCalls, [["podman", ["version", "--format", "{{.Server.Version}}"]]]);
   assert.equal(gitCalls.length, 2);
   assert.deepEqual(gitCalls[0], ["worktree", "add", "--detach", gitCalls[0][3], "HEAD"]);

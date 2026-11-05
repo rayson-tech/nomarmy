@@ -26,11 +26,11 @@ test("guided judge agents put independent choices first and re-ask empty and inv
   const result = judgeAgentChoices({ agents, roles, providerOf, runsOnHost });
   assert.deepEqual(Object.keys(result).sort(), ["choices", "dominantBuilderVendor"]);
   assert.deepEqual(result.choices.map((choice) => choice.name), ["codex", "grok", "claude"]);
-  assert.equal(result.dominantBuilderVendor, "claude-cli");
+  assert.equal(result.dominantBuilderVendor, "anthropic");
   const answers = ["", "9", "2"];
   const lines = [];
   const picked = await chooseJudgeAgent({ choices: result.choices, ask: async () => answers.shift(), write: (line) => lines.push(line) });
-  assert.deepEqual(Object.keys(picked).sort(), ["agent", "hostTools", "name", "sharesBuilderVendor", "vendor"]);
+  assert.deepEqual(Object.keys(picked).sort(), ["agent", "hostTools", "name", "sharesBuilderVendor", "sharesGeneralVendor", "vendor"]);
   assert.equal(picked.name, "grok");
   assert.deepEqual(lines, [
     "Configured judge agents:",
