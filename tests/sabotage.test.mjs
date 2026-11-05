@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
-import { addedLinesOf, detectTestSabotage, HUNK_BREAK, loadDependencyNames, withUnscanned, isBackupSegment } from "../lib/sabotage.mjs";
+import { addedLinesOf, detectTestSabotage, HUNK_BREAK, HUNK_JOIN, loadDependencyNames, withUnscanned, isBackupSegment } from "../lib/sabotage.mjs";
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -211,7 +211,7 @@ test("detectTestSabotage: backup copies are flagged, feature names that mention 
 // Independent review (Codex) regressions.
 test("review: hunks a couple of unchanged lines apart stay joined, so a changed import and its changed except still read as a stub", () => {
   const diff = ["--- a/p.py", "+++ b/p.py", "@@ -2 +2 @@", "-    import p", "+    import p as q", "@@ -4,2 +4,2 @@", "-except RuntimeError:", "-    raise", "+except Exception:", "+    pass"].join("\n");
-  assert.deepEqual(addedLinesOf(diff), ["    import p as q", "except Exception:", "    pass"]);
+  assert.deepEqual(addedLinesOf(diff), ["    import p as q", HUNK_JOIN, "except Exception:", "    pass"]);
   assert.match(detectTestSabotage({ isTestPathFn: isTest, changes: [{ status: "M", path: "p.py", addedLines: addedLinesOf(diff) }] }).flags[0], /^stubbed import/);
 });
 
@@ -220,7 +220,9 @@ test("review: a node:test skip option on its own line under the test call is a s
   assert.match(flagged(["test('x', {", "  skip: true", "}, fn)"]).flags[0], /^skip marker/);
   assert.match(flagged(["it('y', {", "  todo: 'later',", "}, fn)"]).flags[0], /^skip marker/);
   assert.equal(flagged(["const page = {", "  skip: 10,", "};"]), null);
-  assert.equal(flagged(["const rows = query({", "  skip: true,", "});"]), null);
+  // Alone on its line (a -U0 diff drops the unchanged test call above it), skip: true still counts.
+  assert.match(flagged(["  skip: true"]).flags[0], /^skip marker/);
+  assert.equal(flagged(["const fixture = {", "  todo: 'buy milk',", "};"]), null);
 });
 
 test("review: hidden or bare backup directories and numbered backup words are backups", () => {
@@ -240,4 +242,16 @@ test("review: what the scan could not read becomes a review flag, never a silent
   const merged = withUnscanned({ flags: ["skip marker: x"], reason: "1 sign(s): skip marker: x" }, ["a.py (over 2,000,000 characters)"]);
   assert.equal(merged.flags.length, 2);
   assert.match(merged.reason, /skip marker: x; not scanned/);
+});
+
+test("review round 2: a joined hunk never borrows an unrelated try; an import above an unchanged try is not a stub", () => {
+  const stub = addedLinesOf("--- a/p.py\n+++ b/p.py\n@@ -1 +1,2 @@\n-try:f()\n+try:\n+ f()\n@@ -4,3 +5,3 @@\n- import p\n-except OSError:\n- raise\n+ import q\n+except Exception:\n+ pass");
+  assert.match(detectTestSabotage({ isTestPathFn: isTest, changes: [{ status: "M", path: "p.py", addedLines: stub }] }).flags[0], /^stubbed import/);
+  const above = addedLinesOf("--- a/p.py\n+++ b/p.py\n@@ -1,0 +2 @@\n+import b\n@@ -4,2 +5,2 @@\n-except ValueError:\n-    raise\n+except Exception:\n+    pass");
+  assert.equal(detectTestSabotage({ isTestPathFn: isTest, changes: [{ status: "M", path: "p.py", addedLines: above }] }), null);
+});
+
+test("review round 2: an over-long line in any test language is flagged as not scanned", () => {
+  const out = detectTestSabotage({ isTestPathFn: (p) => /_test\.go$/.test(p), changes: [{ status: "A", path: "pkg/x_test.go", addedLines: ["package p", "func TestX(t *testing.T){t.Skip(\"" + "x".repeat(20001) + "\")}"] }] });
+  assert.match(out.flags[0], /^not scanned: pkg\/x_test\.go/);
 });

@@ -518,3 +518,16 @@ test("review: work an adversarial diff can demand is bounded, and an oversized s
   assert.deepEqual(kinds(huge, huge + "y;\n", "a.js"), [["unscanned", 1]]);
   assert.deepEqual(kinds(huge, huge + "y;\n", "notes.txt"), []);
 });
+
+test("review round 2: comparisons, long concatenations, per-table RLS order, and bracketed Python class headers", () => {
+  const cmp = "r(low<score >\nminimum ? requireAuth : noop,\n<Page/>);";
+  assert.deepEqual(kinds(cmp, cmp.replace("requireAuth", "noop"), "a.tsx").map(([k]) => k), ["middleware"]);
+  const concat = "q=('SELECT * FROM t WHERE '\n" + "\n".repeat(40) + "'tenant_id=:id')";
+  assert.deepEqual(kinds(concat, concat.replace("tenant_id=:id", "1=1"), "a.py").map(([k]) => k), ["tenant-filter"]);
+  const E = "ALTER TABLE t ENABLE ROW LEVEL SECURITY;\n", D = E.replace("ENABLE", "DISABLE");
+  assert.deepEqual(kinds(D + E, E + D + E.replace(" t ", " u "), "a.sql").map(([k]) => k), ["bypass"]);
+  const a = E.replace(" t ", " a "), b = E.replace(" t ", " b ");
+  assert.deepEqual(kinds(a + b, b + a, "a.sql"), []);
+  const cls = "class A(\nobject):\n def f():\n  assert x\n  go()\nclass B(\nobject):\n def f():\n  pass\n";
+  assert.deepEqual(kinds(cls, cls.replace("  assert x\n", "").replace("  pass", "  assert x"), "a.py").map(([k]) => k), ["bypass"]);
+});
