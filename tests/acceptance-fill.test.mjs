@@ -159,6 +159,8 @@ test("fill rejects unknown and ambiguous IDs before writing", async t => {
   assert.equal(fs.readFileSync(f.file, "utf8"), f.source);
 });
 
+// The reason the sandbox is missing varies by platform; the message keeps it in parentheses.
+const VERIFY_UNAVAILABLE_RE = /^couldn't verify: sandbox unavailable \(.+\)$/;
 test("acceptance fill CLI gathers a job or run, supports dry-run and JSON, and refuses another repo", t => {
   const f = fixture(t);
   const state = path.join(f.repoDir, "state"), jobsRoot = path.join(state, "jobs"), runsRoot = path.join(state, "runs");
@@ -174,14 +176,20 @@ test("acceptance fill CLI gathers a job or run, supports dry-run and JSON, and r
   const invoke = (...args) => spawnSync(process.execPath, [path.join(root, "bin/nomarmy.mjs"), "acceptance", "fill", ...args], { cwd: f.repoDir, env, encoding: "utf8" });
   const dry = invoke("run-example", "--dry-run", "--json");
   assert.equal(dry.status, 0, dry.stdout + dry.stderr);
-  assert.deepEqual(JSON.parse(dry.stdout), { dryRun: true, criteria: [result("ACC-1", ["new"], "unproven")], verificationError: "couldn't verify: sandbox unavailable" });
+  const dryResult = JSON.parse(dry.stdout);
+  assert.match(dryResult.verificationError, VERIFY_UNAVAILABLE_RE);
+  assert.deepEqual({ ...dryResult, verificationError: null }, { dryRun: true, criteria: [result("ACC-1", ["new"], "unproven")], verificationError: null });
   assert.equal(fs.readFileSync(f.file, "utf8"), f.source);
   const filled = invoke("job-one");
   assert.equal(filled.status, 0, filled.stdout + filled.stderr);
-  assert.equal(filled.stdout, 'ACC-1: added 1 proof(s) in acceptance/example.yml; status unproven\n  tests/example.test.mjs: new\ncouldn\'t verify: sandbox unavailable\n');
+  const [addedLine, proofLine, errorLine, rest] = filled.stdout.split("\n");
+  assert.deepEqual([addedLine, proofLine, rest], ["ACC-1: added 1 proof(s) in acceptance/example.yml; status unproven", "  tests/example.test.mjs: new", ""]);
+  assert.match(errorLine, VERIFY_UNAVAILABLE_RE);
   const duplicate = invoke("run-example", "--json");
   assert.equal(duplicate.status, 0);
-  assert.deepEqual(JSON.parse(duplicate.stdout), { dryRun: false, criteria: [], verificationError: "couldn't verify: sandbox unavailable" });
+  const duplicateResult = JSON.parse(duplicate.stdout);
+  assert.match(duplicateResult.verificationError, VERIFY_UNAVAILABLE_RE);
+  assert.deepEqual(duplicateResult.criteria, []);
   fs.writeFileSync(path.join(jobsRoot, "job-one/metadata.json"), JSON.stringify({ ...metadata, projectDir: path.join(f.repoDir, "other") }));
   assert.throws(() => gatherAcceptanceProposals({ ...input, id: "job-one" }), { message: "Job job-one belongs to another repository" });
 });
@@ -280,7 +288,7 @@ test("fill unavailable sandbox appends proposals without executing host tests or
   } });
   assert.deepEqual(await runFill({ ...f, verify, proposals: [proof("ACC-1")] }), {
     dryRun: false, criteria: [result("ACC-1", ["new"], "unproven")],
-    verificationError: "couldn't verify: sandbox unavailable",
+    verificationError: "couldn't verify: sandbox unavailable (the Podman sandbox is unavailable; verification commands come from the repository and are never executed on the host)",
   });
   assert.deepEqual(calls, ["probe"]);
   assert.equal(fs.existsSync(marker), false);

@@ -151,9 +151,9 @@ test("contract checks stay asynchronous and time out hung proofs into review iss
   clearTimeout(timer);
   assert.equal(ticked, true);
   assert.deepEqual(checked, {
-    record: { affected: ["EX-1"], broken: [{ id: "EX-1", file: "acceptance/example.yml", failures: [{ detail: "couldn't run: timed out after 400ms" }] }] },
+    record: { affected: ["EX-1"], broken: [], unchecked: [{ file: "acceptance/example.yml", ids: ["EX-1"], reason: "timed out after 400ms" }] },
     criteria: [{ id: "EX-1", text: "The answer is 42", file: "acceptance/example.yml" }],
-    issues: ["CONTRACT BROKEN: EX-1 (acceptance/example.yml): couldn't run: timed out after 400ms"],
+    issues: ["CONTRACT NOT CHECKED: EX-1 (acceptance/example.yml): couldn't run: timed out after 400ms. Nothing is known about these promises; check them by hand or rerun."],
   });
 });
 
@@ -278,12 +278,17 @@ for (const available of [true, false]) {
     const flow = createVerificationFlow({});
     flow.registerVerificationRunner(verify);
     const result = await checkJobContracts({ ...f, verify: flow.runIndependentVerification, jobDir: f.dir, changedFiles: ["lib/answer.mjs"] });
-    const failures = [{ detail: "couldn't run: sandbox unavailable" }];
-    assert.deepEqual(result, {
-      record: { affected: ["EX-1"], broken: available ? [] : [{ id: "EX-1", file: "acceptance/example.yml", failures }] },
-      criteria: [{ id: "EX-1", text: "The answer is 42", file: "acceptance/example.yml" }],
-      issues: available ? [] : ["CONTRACT BROKEN: EX-1 (acceptance/example.yml): couldn't run: sandbox unavailable"],
-    });
+    assert.deepEqual(result.record.affected, ["EX-1"]);
+    assert.deepEqual(result.record.broken, []);
+    assert.deepEqual(result.criteria, [{ id: "EX-1", text: "The answer is 42", file: "acceptance/example.yml" }]);
+    if (available) assert.deepEqual(result.issues, []);
+    else {
+      // The sandbox's own reason is kept, and an unrun check is not a broken promise.
+      assert.equal(result.record.unchecked.length, 1);
+      assert.match(result.record.unchecked[0].reason, /^sandbox unavailable \(.+\)$/);
+      assert.equal(result.issues.length, 1);
+      assert.match(result.issues[0], /^CONTRACT NOT CHECKED: EX-1 \(acceptance\/example\.yml\): couldn't run: sandbox unavailable \(.+\)\. Nothing is known/);
+    }
     assert.equal(calls.length, available ? 1 : 0);
     assert.equal(host.mock.callCount(), 0);
     if (snapshot) assert.equal(fs.existsSync(snapshot), false);
