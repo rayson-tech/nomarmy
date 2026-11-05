@@ -374,3 +374,14 @@ test("test-only validations and guards are informational while production findin
     assert.deepEqual(detectRemovedChecks([{ file, before: "validateInput(value)", after: "" }]), [removedFinding("validation", file)]);
   }
 });
+
+test("review regression: JSX copy is not middleware, a JSX auth wrapper and a multiline middleware list still are", () => {
+  const board = (copy) => `export function Board() {\n  return (\n    <p>\n      ${copy}\n    </p>\n  );\n}`;
+  for (const file of ["Board.tsx", "Board.jsx", "Board.js"]) {
+    assert.deepEqual(detectRemovedChecks([{ file, before: board("Permissions control who can see this board."), after: board("Only members can see this board.") }]), [], file);
+    assert.deepEqual(detectRemovedChecks([{ file, before: "export const A = () => (\n  <Section>\n    Roles and scopes, explained\n  </Section>\n);", after: "export const A = () => (\n  <Section>\n    Who can edit\n  </Section>\n);" }]), [], file);
+  }
+  assert.deepEqual(detectRemovedChecks([{ file: "a.tsx", before: "export const A = ({ user }) => (\n  <RequireAuth user={user}>\n    <Board />\n  </RequireAuth>\n);", after: "export const A = () => (\n  <Board />\n);" }]).map((f) => f.kind), ["middleware", "middleware"]);
+  assert.deepEqual(detectRemovedChecks([{ file: "a.js", before: "app.get('/x',\n  requireAuth,\n  handler\n);", after: "app.get('/x',\n  handler\n);" }]).map((f) => f.kind), ["middleware"]);
+  assert.deepEqual(detectRemovedChecks([{ file: "a.js", before: "const f = () =>\n  requireAuth\n<x/>", after: "" }]).map((f) => f.kind), ["middleware"]);
+});

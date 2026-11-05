@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
-import { addedLinesOf, detectTestSabotage, loadDependencyNames } from "../lib/sabotage.mjs";
+import { addedLinesOf, detectTestSabotage, HUNK_BREAK, loadDependencyNames } from "../lib/sabotage.mjs";
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -84,4 +84,22 @@ test("detectTestSabotage: a lazy import inside a try that also does the work is 
       "        print(f\"[complete] clear missing marks failed (non-fatal): {e}\")",
     ] },
   ] }), null);
+});
+
+test("addedLinesOf: a break between hunks, never before the first or after the last", () => {
+  assert.deepEqual(addedLinesOf("--- a/x\n+++ b/x\n@@ -1 +1 @@\n+a\n@@ -9 +9 @@\n-old\n@@ -20 +20 @@\n+b"), ["a", HUNK_BREAK, "b"]);
+});
+
+test("detectTestSabotage: an import added in one hunk and an except changed in another is not a stub (the pin_library false positive)", () => {
+  const diff = [
+    "--- a/lambda/board_pins.py", "+++ b/lambda/board_pins.py",
+    "@@ -3,0 +4 @@", "+from pin_library import load_pins",
+    "@@ -40 +41 @@", "-    except Exception:", "+    except Exception as e:",
+    "@@ -41 +42 @@", "-        return []", "+        log.warning(\"pins unavailable: %s\", e)",
+  ].join("\n");
+  assert.equal(detectTestSabotage({ isTestPathFn: isTest, changes: [{ status: "M", path: "lambda/board_pins.py", addedLines: addedLinesOf(diff) }] }), null);
+  // The same except directly under an added import in one hunk is still a stub.
+  const stub = ["--- a/x.py", "+++ b/x.py", "@@ -3,0 +4,3 @@", "+    import sqlglot", "+except Exception:", "+    sqlglot = None"].join("\n");
+  const out = detectTestSabotage({ isTestPathFn: isTest, changes: [{ status: "M", path: "lambda/x.py", addedLines: addedLinesOf(stub) }] });
+  assert.match(out.flags[0], /^stubbed import: production code in lambda\/x\.py/);
 });
