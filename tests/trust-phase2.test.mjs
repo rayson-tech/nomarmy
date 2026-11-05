@@ -550,3 +550,19 @@ test("middleware: object-literal keys, shorthand, defaults and bare data words a
     ["a.js", "router.use(\n  checkScope,\n  handler\n);", "router.use(\n  handler\n);"],
   ]) assert.deepEqual(kinds(before, after, file).map(([k]) => k).filter((k) => k === "middleware").length > 0, true, before);
 });
+
+test("middleware (Grok review): a bare data word passed whole is middleware; an index or a value read is not", () => {
+  for (const [file, before, after] of [
+    ["a.js", "app.use(admin);\n", ""], ["a.js", "router.use(guard);", ""], ["a.js", "app.use(guards.admin);", ""],
+    ["a.js", "app.get('/x', { preHandler: permissions }, h);", "app.get('/x', {}, h);"],
+    ["a.js", "app.get('/x', { preHandler: ok ? requireAuth : deny }, h);", "app.get('/x', {}, h);"],
+    ["a.js", "app.get('/x', [admin, h]);", "app.get('/x', [h]);"],
+    ["c.rb", "class C\n  before_action :login\nend\n", "class C\nend\n"],
+    ["a.ts", "@UseGuards(admin)\nexport class C {}", "export class C {}"],
+  ]) assert.deepEqual(kinds(before, after, file).some(([k]) => k === "middleware"), true, before);
+  for (const [before, after] of [
+    ["const vendor = providerOf(agents[role.agent]);", "const vendor = vendorOf(providerOf(agents[role.agent]), model);"],
+    ["const stats = computeStats(records, { role: role ?? null });", "const stats = computeStats(records, { role: role ?? null, x });"],
+    ["const name = format(req.user.role.name);", "const name = format(req.user.role.name, x);"],
+  ]) assert.deepEqual(kinds(before, after, "a.mjs"), [], before);
+});
