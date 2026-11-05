@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
-import { addedLinesOf, detectTestSabotage, loadDependencyNames } from "../lib/sabotage.mjs";
+import { addedLinesOf, detectTestSabotage, HUNK_BREAK, HUNK_JOIN, loadDependencyNames, withUnscanned, isBackupSegment } from "../lib/sabotage.mjs";
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -84,4 +84,174 @@ test("detectTestSabotage: a lazy import inside a try that also does the work is 
       "        print(f\"[complete] clear missing marks failed (non-fatal): {e}\")",
     ] },
   ] }), null);
+});
+
+test("addedLinesOf: a break between hunks, never before the first or after the last", () => {
+  assert.deepEqual(addedLinesOf("--- a/x\n+++ b/x\n@@ -1 +1 @@\n+a\n@@ -9 +9 @@\n-old\n@@ -20 +20 @@\n+b"), ["a", HUNK_BREAK, "b"]);
+});
+
+test("detectTestSabotage: an import added in one hunk and an except changed in another is not a stub (the pin_library false positive)", () => {
+  const diff = [
+    "--- a/lambda/board_pins.py", "+++ b/lambda/board_pins.py",
+    "@@ -3,0 +4 @@", "+from pin_library import load_pins",
+    "@@ -40 +41 @@", "-    except Exception:", "+    except Exception as e:",
+    "@@ -41 +42 @@", "-        return []", "+        log.warning(\"pins unavailable: %s\", e)",
+  ].join("\n");
+  assert.equal(detectTestSabotage({ isTestPathFn: isTest, changes: [{ status: "M", path: "lambda/board_pins.py", addedLines: addedLinesOf(diff) }] }), null);
+  // The same except directly under an added import in one hunk is still a stub.
+  const stub = ["--- a/x.py", "+++ b/x.py", "@@ -3,0 +4,3 @@", "+    import sqlglot", "+except Exception:", "+    sqlglot = None"].join("\n");
+  const out = detectTestSabotage({ isTestPathFn: isTest, changes: [{ status: "M", path: "lambda/x.py", addedLines: addedLinesOf(stub) }] });
+  assert.match(out.flags[0], /^stubbed import: production code in lambda\/x\.py/);
+});
+
+// Regressions from the detector audit: each case the detector missed, or
+// flagged wrongly, next to a near miss that must stay quiet.
+const flagsOf = (changes, dependencyNames = []) => detectTestSabotage({ isTestPathFn: isTest, dependencyNames, changes })?.flags ?? [];
+const one = (p, addedLines, status = "M") => [{ status, path: p, addedLines }];
+
+test("detectTestSabotage: a module-level pytestmark skip is a skip marker", () => {
+  assert.match(flagsOf(one("tests/test_x.py", ["pytestmark = pytest.mark.skip(reason='flaky')"]))[0], /^skip marker: tests\/test_x\.py/);
+  assert.match(flagsOf(one("tests/test_x.py", ["pytestmark = [pytest.mark.skipif(sys.platform == 'win32', reason='x')]"]))[0], /^skip marker/);
+  assert.deepEqual(flagsOf(one("tests/test_x.py", ["pytestmark = pytest.mark.django_db", "def test_only_admins(): assert only_admins()"])), []);
+});
+
+test("detectTestSabotage: .only, fit and fdescribe are focus markers in JS tests", () => {
+  for (const l of ["describe.only('suite', () => {", "it.only('x', () => {})", "test.only('x', () => {})", "test.only.each([1])('x', () => {})", "fit('x', () => {})", "fdescribe(\"suite\", () => {"]) {
+    const flags = flagsOf(one("tests/a.test.ts", [l]));
+    assert.equal(flags.length, 1, l);
+    assert.match(flags[0], /^focus marker: tests\/a\.test\.ts runs only these tests/, l);
+  }
+  assert.deepEqual(flagsOf(one("tests/a.test.ts", [
+    "it(\"only shows admins\", () => {", "describe(\"skip logic\", () => {", "const r = fitModel(data);", "model.fit('x');", "expect(only).toBe(true);",
+  ])), []);
+  // Python has no focus markers: a test named for "only" is just a name.
+  assert.deepEqual(flagsOf(one("tests/test_x.py", ["def test_only_admins():", "    fit('x')"])), []);
+});
+
+test("detectTestSabotage: Go t.Skipf and t.SkipNow are skip markers", () => {
+  assert.match(flagsOf(one("tests/a_test.go", ["\tt.Skipf(\"no db: %v\", err)"]))[0], /^skip marker/);
+  assert.match(flagsOf(one("tests/a_test.go", ["\tt.SkipNow()"]))[0], /^skip marker/);
+  assert.deepEqual(flagsOf(one("tests/a_test.go", ["\tif t.Skipped() { return }", "\tt.Logf(\"skip %d\", n)"])), []);
+});
+
+test("detectTestSabotage: vitest/jest skipIf, skip.each and todo are skip markers", () => {
+  for (const l of ["test.skipIf(process.env.CI)('x', () => {})", "it.skipIf(!db)('x', () => {})", "describe.skip.each([1])('x', () => {})", "test.todo('later')"]) {
+    assert.match(flagsOf(one("tests/a.test.ts", [l]))[0] ?? "", /^skip marker/, l);
+  }
+  assert.deepEqual(flagsOf(one("tests/a.test.ts", ["test('skips empty rows', () => {", "const todo = test.todoList;", "describe('todo list', () => {"])), []);
+});
+
+test("detectTestSabotage: node:test skip/todo options and t.skip()/t.todo() are skip markers", () => {
+  for (const l of ["test('x', { skip: true }, () => {})", "test('x', { skip: 'no db' }, () => {})", "it('x', { todo: true }, () => {})", "  t.skip('later');", "  t.todo();"]) {
+    assert.match(flagsOf(one("tests/a.test.mjs", [l]))[0] ?? "", /^skip marker/, l);
+  }
+  assert.deepEqual(flagsOf(one("tests/a.test.mjs", [
+    "test('x', { skip: false }, () => {})", "const page = await list({ skip: 10, take: 5 });", "const items = [{ todo: 'buy milk' }];",
+  ])), []);
+  // Skip markers are only checked in test files: production code may skip.
+  assert.deepEqual(flagsOf(one("src/pager.js", ["const skip = true;", "rows.skip(10);", "test('x', { skip: true })"])), []);
+  assert.deepEqual(flagsOf(one("src/pager.py", ["skip = True", "pytestmark = pytest.mark.skip"])), []);
+});
+
+test("detectTestSabotage: raise SkipTest is a skip marker", () => {
+  assert.match(flagsOf(one("tests/test_x.py", ["    raise unittest.SkipTest('no db')"]))[0], /^skip marker/);
+  assert.match(flagsOf(one("tests/test_x.py", ["    raise SkipTest('no db')"]))[0], /^skip marker/);
+  assert.deepEqual(flagsOf(one("tests/test_x.py", ["    raise SkipTestError('x')", "    # SkipTest was removed"])), []);
+});
+
+test("detectTestSabotage: a deleted test file is flagged", () => {
+  assert.deepEqual(flagsOf([{ status: "D", path: "tests/test_auth.py", addedLines: [] }]), ["deleted test: tests/test_auth.py removed"]);
+  // A deleted production file, or a deleted test fixture that is not code, is not.
+  assert.deepEqual(flagsOf([{ status: "D", path: "src/auth.py", addedLines: [] }, { status: "D", path: "tests/fixtures/rows.json", addedLines: [] }]), []);
+});
+
+test("detectTestSabotage: a parenthesized multi-line import inside try is a stub", () => {
+  const flags = flagsOf(one("app/x.py", ["try:", "    from sqlglot import (", "        parse,", "        exp,", "    )", "except Exception:", "    parse = None"]));
+  assert.match(flags[0], /^stubbed import: production code in app\/x\.py/);
+  // The same import followed by real work is a lazy import, not a stub.
+  assert.deepEqual(flagsOf(one("app/x.py", ["try:", "    from sqlglot import (", "        parse,", "    )", "    parse(q)", "except Exception:", "    log()"])), []);
+});
+
+test("detectTestSabotage: a one-line try: import is a stub", () => {
+  assert.match(flagsOf(one("app/x.py", ["try: import sqlglot", "except Exception:", "    pass"]))[0], /^stubbed import/);
+  assert.deepEqual(flagsOf(one("app/x.py", ["try: run(job)", "except Exception:", "    log()"])), []);
+});
+
+test("detectTestSabotage: a new package named like a dependency shadows it", () => {
+  for (const p of ["sqlglot/__init__.py", "src/sqlglot/__init__.pyi", "lib/sqlglot/index.js", "sqlglot/index.ts"]) {
+    assert.match(flagsOf(one(p, ["x = 1"], "A"), ["sqlglot"])[0] ?? "", /^shadow module: new file .* "sqlglot"/, p);
+  }
+  assert.deepEqual(flagsOf([...one("app/__init__.py", ["x = 1"], "A"), ...one("src/index.ts", ["x"], "A"), ...one("sqlglot_helpers/__init__.py", ["x"], "A")], ["sqlglot"]), []);
+});
+
+test("detectTestSabotage: a JS try around only require() or import() is a stub", () => {
+  const cases = [
+    ["try { require('sqlglot') } catch {}"],
+    ["let sqlglot;", "try {", "  sqlglot = require('sqlglot');", "} catch (e) {", "  sqlglot = null;", "}"],
+    ["try {", "  const { parse } = await import(\"sqlglot\");", "} catch (e) {"],
+  ];
+  for (const lines of cases) assert.match(flagsOf(one("src/x.js", lines))[0] ?? "", /^stubbed import: production code in src\/x\.js/, lines.join(" / "));
+  assert.match(flagsOf(one("src/x.ts", cases[1]))[0] ?? "", /^stubbed import/);
+  // A try that also does the work, or one that never loads a module, is not a stub.
+  assert.deepEqual(flagsOf(one("src/x.js", ["try {", "  const m = require('sqlglot');", "  m.parse(q);", "} catch (e) {", "  log(e);", "}"])), []);
+  assert.deepEqual(flagsOf(one("src/x.js", ["try { JSON.parse(s) } catch { return null }"])), []);
+  // JS-only: the same text in a Python or text file is not checked as JS.
+  assert.deepEqual(flagsOf(one("docs/notes.md", cases[1])), []);
+});
+
+test("detectTestSabotage: backup copies are flagged, feature names that mention backup are not", () => {
+  for (const p of ["src/foo.py.bak", "src/foo.bak", "src/foo.orig", "src/foo.py~", "src/foo.old", "src/foo.backup", "src/foo_backup.py", "src/fooBackup.ts", "src/foo-backup-2.py", "src/foo copy.py", "src/foo copy 2.py", "src/foo - Copy.py", ".sampling-gate-backup/athena_adapter.py"]) {
+    assert.match(flagsOf(one(p, [], "A"))[0] ?? "", /^stray backup/, p);
+  }
+  assert.deepEqual(flagsOf(["src/services/backup-scheduler.ts", "src/cors.origins.ts", "src/backups.py", "src/BackupService.ts", "src/backup/restore.py", "src/clipboard-copy.ts", "src/deep_copy.py", "src/threshold.py"].flatMap((p) => one(p, ["x"], "A"))), []);
+  // Only new files: an existing backup-looking file that was edited is not new.
+  assert.deepEqual(flagsOf(one("src/foo.py.bak", ["x"], "M")), []);
+});
+
+// Independent review (Codex) regressions.
+test("review: hunks a couple of unchanged lines apart stay joined, so a changed import and its changed except still read as a stub", () => {
+  const diff = ["--- a/p.py", "+++ b/p.py", "@@ -2 +2 @@", "-    import p", "+    import p as q", "@@ -4,2 +4,2 @@", "-except RuntimeError:", "-    raise", "+except Exception:", "+    pass"].join("\n");
+  assert.deepEqual(addedLinesOf(diff), ["    import p as q", HUNK_JOIN, "except Exception:", "    pass"]);
+  assert.match(detectTestSabotage({ isTestPathFn: isTest, changes: [{ status: "M", path: "p.py", addedLines: addedLinesOf(diff) }] }).flags[0], /^stubbed import/);
+});
+
+test("review: a node:test skip option on its own line under the test call is a skip marker; pagination is not", () => {
+  const flagged = (addedLines) => detectTestSabotage({ isTestPathFn: isTest, changes: [{ status: "M", path: "tests/a.test.js", addedLines }] });
+  assert.match(flagged(["test('x', {", "  skip: true", "}, fn)"]).flags[0], /^skip marker/);
+  assert.match(flagged(["it('y', {", "  todo: 'later',", "}, fn)"]).flags[0], /^skip marker/);
+  assert.equal(flagged(["const page = {", "  skip: 10,", "};"]), null);
+  // Alone on its line (a -U0 diff drops the unchanged test call above it), skip: true still counts.
+  assert.match(flagged(["  skip: true"]).flags[0], /^skip marker/);
+  assert.equal(flagged(["const fixture = {", "  todo: 'buy milk',", "};"]), null);
+});
+
+test("review: hidden or bare backup directories and numbered backup words are backups", () => {
+  for (const seg of [".backup", ".bak", "bak", "orig", "foo_backup2.py", "foo-bak3.py"]) assert.equal(isBackupSegment(seg), true, seg);
+  for (const seg of ["backups", "backup-scheduler.ts", "BackupService.ts", "cors.origins.ts", "original.py"]) assert.equal(isBackupSegment(seg), false, seg);
+});
+
+test("review: an over-long line is flagged as not scanned instead of run through the line patterns", () => {
+  const out = detectTestSabotage({ isTestPathFn: isTest, changes: [{ status: "M", path: "tests/a.test.js", addedLines: ["//" + "test(".repeat(10000)] }] });
+  assert.match(out.flags[0], /^not scanned: tests\/a\.test\.js has a line over/);
+});
+
+test("review: what the scan could not read becomes a review flag, never a silent pass", () => {
+  assert.equal(withUnscanned(null, []), null);
+  const alone = withUnscanned(null, ["the scan itself failed (boom)"]);
+  assert.match(alone.reason, /^not scanned for test workarounds: the scan itself failed \(boom\)/);
+  const merged = withUnscanned({ flags: ["skip marker: x"], reason: "1 sign(s): skip marker: x" }, ["a.py (over 2,000,000 characters)"]);
+  assert.equal(merged.flags.length, 2);
+  assert.match(merged.reason, /skip marker: x; not scanned/);
+});
+
+test("review round 2: a joined hunk never borrows an unrelated try; an import above an unchanged try is not a stub", () => {
+  const stub = addedLinesOf("--- a/p.py\n+++ b/p.py\n@@ -1 +1,2 @@\n-try:f()\n+try:\n+ f()\n@@ -4,3 +5,3 @@\n- import p\n-except OSError:\n- raise\n+ import q\n+except Exception:\n+ pass");
+  assert.match(detectTestSabotage({ isTestPathFn: isTest, changes: [{ status: "M", path: "p.py", addedLines: stub }] }).flags[0], /^stubbed import/);
+  const above = addedLinesOf("--- a/p.py\n+++ b/p.py\n@@ -1,0 +2 @@\n+import b\n@@ -4,2 +5,2 @@\n-except ValueError:\n-    raise\n+except Exception:\n+    pass");
+  assert.equal(detectTestSabotage({ isTestPathFn: isTest, changes: [{ status: "M", path: "p.py", addedLines: above }] }), null);
+});
+
+test("review round 2: an over-long line in any test language is flagged as not scanned", () => {
+  const out = detectTestSabotage({ isTestPathFn: (p) => /_test\.go$/.test(p), changes: [{ status: "A", path: "pkg/x_test.go", addedLines: ["package p", "func TestX(t *testing.T){t.Skip(\"" + "x".repeat(20001) + "\")}"] }] });
+  assert.match(out.flags[0], /^not scanned: pkg\/x_test\.go/);
 });

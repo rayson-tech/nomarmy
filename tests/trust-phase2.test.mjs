@@ -374,3 +374,208 @@ test("test-only validations and guards are informational while production findin
     assert.deepEqual(detectRemovedChecks([{ file, before: "validateInput(value)", after: "" }]), [removedFinding("validation", file)]);
   }
 });
+
+test("review regression: JSX copy is not middleware, a JSX auth wrapper and a multiline middleware list still are", () => {
+  const board = (copy) => `export function Board() {\n  return (\n    <p>\n      ${copy}\n    </p>\n  );\n}`;
+  for (const file of ["Board.tsx", "Board.jsx", "Board.js"]) {
+    assert.deepEqual(detectRemovedChecks([{ file, before: board("Permissions control who can see this board."), after: board("Only members can see this board.") }]), [], file);
+    assert.deepEqual(detectRemovedChecks([{ file, before: "export const A = () => (\n  <Section>\n    Roles and scopes, explained\n  </Section>\n);", after: "export const A = () => (\n  <Section>\n    Who can edit\n  </Section>\n);" }]), [], file);
+  }
+  assert.deepEqual(detectRemovedChecks([{ file: "a.tsx", before: "export const A = ({ user }) => (\n  <RequireAuth user={user}>\n    <Board />\n  </RequireAuth>\n);", after: "export const A = () => (\n  <Board />\n);" }]).map((f) => f.kind), ["middleware", "middleware"]);
+  assert.deepEqual(detectRemovedChecks([{ file: "a.js", before: "app.get('/x',\n  requireAuth,\n  handler\n);", after: "app.get('/x',\n  handler\n);" }]).map((f) => f.kind), ["middleware"]);
+  assert.deepEqual(detectRemovedChecks([{ file: "a.js", before: "const f = () =>\n  requireAuth\n<x/>", after: "" }]).map((f) => f.kind), ["middleware"]);
+});
+
+test("review regression: apostrophes in JSX copy never pair into a string that hides a removed check", () => {
+  const page = (guarded) => `export const A = ({ user }) => (\n  <div>\n    <p>Don't share this link.</p>\n${guarded ? "    <RequireAuth user={user}>\n      <Board />\n    </RequireAuth>" : "    <Board />"}\n    <p>It's private.</p>\n  </div>\n);`;
+  for (const file of ["a.tsx", "a.jsx", "a.js"]) {
+    assert.deepEqual(detectRemovedChecks([{ file, before: page(true), after: page(false) }]).map((f) => f.kind), ["middleware", "middleware"], file);
+  }
+  // Python: an apostrophe in a comment or docstring-free line does not hide a guard.
+  assert.deepEqual(detectRemovedChecks([{ file: "a.py", before: "x = 1  # don't\nif not authorized:\n    raise PermissionError()\ny = 'it'", after: "x = 1  # don't\ny = 'it'" }]).map((f) => f.kind), ["guard"]);
+  // Still masked: a JS string continued with an escaped newline.
+  assert.deepEqual(detectRemovedChecks([{ file: "a.js", before: "const s = 'line one \\\nrequireAuth, still a string';", after: "" }]), []);
+});
+
+// Audit regressions: each case reproduced against the detector before its fix.
+const kinds = (before, after, file) => detectRemovedChecks([{ file, before, after }]).map((f) => [f.kind, f.line]);
+const G = "  if (!user.isAdmin) throw new Forbidden();\n";
+test("audit: added statements that weaken row-level security are flagged; strengthening ones are not", () => {
+  const base = "CREATE POLICY p ON d USING (tenant_id = t());\n";
+  for (const added of ["DROP POLICY p ON d;", "ALTER POLICY p ON d USING (true);", "ALTER TABLE d DISABLE ROW LEVEL SECURITY;", "ALTER TABLE d NO FORCE ROW LEVEL SECURITY;"]) {
+    assert.deepEqual(kinds(base, `${base}${added}\n`, "m.sql"), [["bypass", 2]], added);
+  }
+  assert.deepEqual(kinds("x = 1\n", "x = 1\nop.execute(\"DROP POLICY p ON d\")\n", "migrations/v2.py"), [["bypass", 2]]);
+  for (const added of ["CREATE POLICY q ON e USING (tenant_id = t());", "ALTER TABLE e ENABLE ROW LEVEL SECURITY;", "ALTER TABLE e FORCE ROW LEVEL SECURITY;"]) {
+    assert.deepEqual(kinds(base, `${base}${added}\n`, "m.sql"), [], added);
+  }
+  // An existing DROP POLICY left alone, or removed, is not a new weakening.
+  assert.deepEqual(kinds(`${base}DROP POLICY old ON d;\n`, `${base}DROP POLICY old ON d;\n-- note\n`, "m.sql"), []);
+  assert.deepEqual(kinds(`${base}DROP POLICY old ON d;\n`, base, "m.sql"), []);
+});
+
+test("audit: a guard moved into another function, or code moved ahead of it, is flagged; reordering whole functions is not", () => {
+  const a = `function a(user) {\n${G}  return 1;\n}\n`, b = "function b(user) {\n  return 2;\n}\n";
+  assert.deepEqual(kinds(`${a}${b}`, `function a(user) {\n  return 1;\n}\nfunction b(user) {\n${G}  return 2;\n}\n`, "a.ts"), [["bypass", 5]]);
+  assert.deepEqual(kinds(`function f(user) {\n${G}  deleteAll();\n  return 1;\n}\n`, `function f(user) {\n  deleteAll();\n${G}  return 1;\n}\n`, "a.ts"), [["bypass", 2]]);
+  assert.deepEqual(kinds("def f(user):\n    if not user.is_admin:\n        raise PermissionError()\n    delete_all()\n", "def f(user):\n    delete_all()\n    if not user.is_admin:\n        raise PermissionError()\n", "a.py").map(([k]) => k), ["bypass"]);
+  // Near misses: swapping two functions, adding a new line ahead of the guard, moving code from before to after it.
+  assert.deepEqual(kinds(`${a}${b}`, `${b}${a}`, "a.ts"), []);
+  assert.deepEqual(kinds(`function f(user) {\n${G}  deleteAll();\n}\n`, `function f(user) {\n  log("start");\n${G}  deleteAll();\n}\n`, "a.ts"), []);
+  assert.deepEqual(kinds(`function f(user) {\n  prepare();\n${G}  deleteAll();\n}\n`, `function f(user) {\n${G}  prepare();\n  deleteAll();\n}\n`, "a.ts"), []);
+});
+
+test("audit: bypasses are found in generic and object-typed TypeScript functions, not in generic callbacks", () => {
+  for (const head of ["function f<T>(user: T) {", "function f(user): { ok: boolean } {", "function f(user): Promise<{ ok: boolean }> {", "const f = <T,>(user: T): { ok: boolean } => {"]) {
+    assert.deepEqual(kinds(`${head}\n  doA();\n${G}  return 1;\n}\n`, `${head}\n  doA();\n  if (debug) return 0;\n${G}  return 1;\n}\n`, "a.ts"), [["bypass", 3]], head);
+  }
+  assert.deepEqual(kinds(`function f(user) {\n  const xs = [];\n${G}  return xs;\n}\n`, `function f(user) {\n  const xs = list.map(function <T>(x: T) { return x; });\n${G}  return xs;\n}\n`, "a.ts"), []);
+});
+
+test("audit: continue and break only bypass a guard inside their own loop", () => {
+  assert.deepEqual(kinds("def f(user, xs):\n    for x in xs:\n        use(x)\n    if not user.is_admin:\n        raise PermissionError()\n", "def f(user, xs):\n    for x in xs:\n        if x is None:\n            continue\n        use(x)\n    if not user.is_admin:\n        raise PermissionError()\n", "a.py"), []);
+  assert.deepEqual(kinds(`function f(user, xs) {\n  for (const x of xs) {\n    use(x);\n  }\n${G}}\n`, `function f(user, xs) {\n  for (const x of xs) {\n    if (!x) continue;\n    use(x);\n  }\n${G}}\n`, "a.ts"), []);
+  assert.deepEqual(kinds(`function f(user, xs) {\n  switch (k) {\n    case 1: use(1);\n  }\n${G}}\n`, `function f(user, xs) {\n  switch (k) {\n    case 1: use(1); break;\n  }\n${G}}\n`, "a.ts"), []);
+  // Inside the loop, ahead of the guard, it still bypasses it; so does a labeled continue.
+  assert.deepEqual(kinds("def f(xs):\n    for x in xs:\n        if not x.is_admin:\n            raise PermissionError()\n        use(x)\n", "def f(xs):\n    for x in xs:\n        if x.skip:\n            continue\n        if not x.is_admin:\n            raise PermissionError()\n        use(x)\n", "a.py"), [["bypass", 4]]);
+  assert.deepEqual(kinds(`function f(user, xs) {\n  for (const x of xs) {\n    use(x);\n${G}  }\n}\n`, `function f(user, xs) {\n  for (const x of xs) {\n    if (!x) continue;\n    use(x);\n${G}  }\n}\n`, "a.ts"), [["bypass", 3]]);
+  assert.deepEqual(kinds(`function f(user, xs) {\n  outer: for (const x of xs) {\n    for (const y of x) {\n      use(y);\n    }\n${G}  }\n}\n`, `function f(user, xs) {\n  outer: for (const x of xs) {\n    for (const y of x) {\n      if (!y) continue outer;\n      use(y);\n    }\n${G}  }\n}\n`, "a.ts"), [["bypass", 4]]);
+});
+
+test("audit: common auth middleware names are recognized; author is not auth", () => {
+  for (const [file, before, after] of [
+    ["api.py", "@app.get('/items')\ndef items(user: User = Depends(get_current_user)):\n    return db.items()\n", "@app.get('/items')\ndef items():\n    return db.items()\n"],
+    ["a.py", "@jwt_required()\ndef f():\n    return 1\n", "def f():\n    return 1\n"],
+    ["a.js", "router.get('/x', verifyToken, handler);\n", "router.get('/x', handler);\n"],
+    ["a.js", "router.get('/x', ensureLoggedIn(), handler);\n", "router.get('/x', handler);\n"],
+    ["a.js", "router.get('/x', authorize, handler);\n", "router.get('/x', handler);\n"],
+    ["c.rb", "class C < ApplicationController\n  before_action :authenticate_user!\nend\n", "class C < ApplicationController\nend\n"],
+  ]) assert.deepEqual(kinds(before, after, file).map(([k]) => k), ["middleware"], before);
+  assert.deepEqual(kinds("export function byline(post) {\n  return format(post.author);\n}\n", "export function byline(post) {\n  return format(post.title);\n}\n", "post.ts"), []);
+  assert.deepEqual(kinds("const items = list.map(i => i.authorName);\n", "const items = list.map(i => i.name);\n", "a.ts"), []);
+  assert.deepEqual(kinds("class C\n  before_action :load_post\nend\n", "class C\nend\n", "c.rb"), []);
+});
+
+test("audit: session, redirect and status-401 guards are recognized; property checks are not guards", () => {
+  for (const [file, before, after] of [
+    ["a.ts", "function f(req, res) {\n  if (!req.isAuthenticated()) return res.redirect('/login');\n  go();\n}\n", "function f(req, res) {\n  go();\n}\n"],
+    ["page.tsx", "export default async function Page() {\n  const session = await getSession();\n  if (!session) redirect('/login');\n  return null;\n}\n", "export default async function Page() {\n  const session = await getSession();\n  return null;\n}\n"],
+    ["route.ts", "export async function loader({ request }) {\n  const user = await getUser(request);\n  if (!user) throw redirect('/login');\n  return json(user);\n}\n", "export async function loader({ request }) {\n  const user = await getUser(request);\n  return json(user);\n}\n"],
+    ["route.ts", "export async function GET() {\n  const session = await auth();\n  if (!session?.user) return new Response('no', { status: 401 });\n  return Response.json(x);\n}\n", "export async function GET() {\n  const session = await auth();\n  return Response.json(x);\n}\n"],
+    ["a.py", "def f(current_user):\n    if current_user is None:\n        raise HTTPException(status_code=401)\n    return 1\n", "def f(current_user):\n    return 1\n"],
+  ]) assert.deepEqual(kinds(before, after, file).map(([k]) => k), ["guard"], before);
+  for (const before of ["if (user.name === x) return;\n", "if (!users.length) return [];\n", "if (!user.nickname) return fallback;\n"]) {
+    assert.deepEqual(kinds(before, "", "a.ts"), [], before);
+  }
+});
+
+test("audit: camelCase tenant columns, and SQL WHERE in Python strings ends with its string", () => {
+  assert.deepEqual(kinds("db.select().from(t).where(eq(t.tenantId, tenant));\n", "db.select().from(t);\n", "a.ts"), [["tenant-filter", 1]]);
+  assert.deepEqual(kinds("db.select().from(t).where(eq(t.tenantIdentifier, x));\n", "db.select().from(t);\n", "a.ts"), []);
+  const pySql = `def get_docs(uid):\n    cur.execute("SELECT * FROM docs WHERE user_id = %s", (uid,))\n    return cur.fetchall()\n\n\ndef unrelated():\n    return 1\n`;
+  assert.deepEqual(kinds(pySql, pySql.replace("return 1", "return 2"), "repo.py"), []);
+  assert.deepEqual(kinds(pySql, pySql.replace("WHERE user_id = %s", "WHERE 1 = 1"), "repo.py"), [["tenant-filter", 2]]);
+  const triple = `def q():\n    return """\n        SELECT * FROM docs\n        WHERE active\n          AND org_id = %s\n    """\n`;
+  assert.deepEqual(kinds(triple, triple.replace("          AND org_id = %s\n", ""), "repo.py"), [["tenant-filter", 4]]);
+});
+
+test("audit: an added try that swallows an existing check is flagged; one that re-raises or guards new code is not", () => {
+  assert.deepEqual(kinds("def f(user):\n    validate_input(user)\n    return 1\n", "def f(user):\n    try:\n        validate_input(user)\n    except Exception:\n        pass\n    return 1\n", "a.py"), [["bypass", 2]]);
+  assert.deepEqual(kinds("def f(user):\n    validate_input(user)\n    return 1\n", "def f(user):\n    try:\n        validate_input(user)\n    except ValueError as e:\n        logger.warning(\"bad input %s\", e)\n    return 1\n", "a.py"), [["bypass", 2]]);
+  assert.deepEqual(kinds(`function f(user) {\n${G}  go();\n}\n`, `function f(user) {\n  try {\n  ${G}  } catch (e) {}\n  go();\n}\n`, "a.ts"), [["bypass", 2]]);
+  assert.deepEqual(kinds("def f(user):\n    validate_input(user)\n    return 1\n", "def f(user):\n    try:\n        validate_input(user)\n    except ValueError as e:\n        raise BadRequest(str(e))\n    return 1\n", "a.py"), []);
+  assert.deepEqual(kinds("def f(user):\n    validate_input(user)\n    return 1\n", "def f(user):\n    validate_input(user)\n    try:\n        send(user)\n    except Exception:\n        pass\n    return 1\n", "a.py"), []);
+});
+
+// Independent review (Codex) regressions: B1-B4 were flagged before this
+// branch's quieter rules, B5-B7 were missed before it too.
+test("review: a comparison is not a JSX tag, and author-named middleware is still auth", () => {
+  assert.deepEqual(kinds("registerRoute('/x', score >\nminimum ? requireAuth : noop,\n<Page/>);", "registerRoute('/x', score >\nminimum ? noop : noop,\n<Page/>);", "a.tsx").map(([k]) => k), ["middleware"]);
+  assert.deepEqual(kinds("router.get('/x', authorOnly, handler);", "router.get('/x', handler);", "a.js").map(([k]) => k), ["middleware"]);
+  assert.deepEqual(kinds("export const A = () => (\n  <Section\n    title=\"x\"\n  >\n    Roles and scopes\n  </Section>\n);", "export const A = () => (\n  <Section\n    title=\"x\"\n  >\n    Who can edit\n  </Section>\n);", "a.tsx"), []);
+});
+
+test("review: a WHERE string continues with its statement; break skips a loop's else", () => {
+  assert.deepEqual(kinds("q=('SELECT * FROM t WHERE '\n 'tenant_id=:id')\nrows=db.execute(q,{'id':uid})", "q=('SELECT * FROM t WHERE '\n '1=1')\nrows=db.execute(q,{'id':uid})", "a.py").map(([k]) => k), ["tenant-filter"]);
+  assert.deepEqual(kinds("def f(uid):\n    cur.execute(\n        \"SELECT * FROM t WHERE \"\n        \"org_id = %s\",\n        (uid,))\n", "def f(uid):\n    cur.execute(\n        \"SELECT * FROM t WHERE \"\n        \"1 = 1\",\n        (uid,))\n", "a.py").map(([k]) => k), ["tenant-filter"]);
+  assert.deepEqual(kinds("def f(xs,x):\n    for y in xs:\n        use(y)\n    else:\n        validate_input(x)\n    save(x)\n", "def f(xs,x):\n    for y in xs:\n        break\n        use(y)\n    else:\n        validate_input(x)\n    save(x)\n", "a.py"), [["bypass", 3]]);
+  assert.deepEqual(kinds("def f(xs,x):\n    for y in xs:\n        use(y)\n    else:\n        validate_input(x)\n", "def f(xs,x):\n    for y in xs:\n        continue\n        use(y)\n    else:\n        validate_input(x)\n", "a.py"), []);
+});
+
+test("review: function-typed return annotations, reordered RLS, and same-named methods in other classes", () => {
+  assert.deepEqual(kinds("function f(x):()=>{ok:boolean}{\nvalidateInput(x);\nreturn make;\n}", "function f(x):()=>{ok:boolean}{\nreturn make;\nvalidateInput(x);\nreturn make;\n}", "a.ts").map(([k]) => k), ["bypass"]);
+  assert.deepEqual(kinds("ALTER TABLE d DISABLE ROW LEVEL SECURITY;\nALTER TABLE d ENABLE ROW LEVEL SECURITY;", "ALTER TABLE d ENABLE ROW LEVEL SECURITY;\nALTER TABLE d DISABLE ROW LEVEL SECURITY;", "a.sql").map(([k]) => k), ["bypass"]);
+  assert.deepEqual(kinds("class A{\nrun(x){\nvalidateInput(x);\nsave(x);\n}\n}\nclass B{\nrun(x){\n}\n}", "class A{\nrun(x){\nsave(x);\n}\n}\nclass B{\nrun(x){\nvalidateInput(x);\n}\n}", "a.js").map(([k]) => k), ["bypass"]);
+  assert.deepEqual(kinds("class A:\n    def run(self, x):\n        validate_input(x)\n        save(x)\nclass B:\n    def run(self, x):\n        pass\n", "class A:\n    def run(self, x):\n        save(x)\nclass B:\n    def run(self, x):\n        validate_input(x)\n", "a.py").map(([k]) => k), ["bypass"]);
+});
+
+test("review: work an adversarial diff can demand is bounded, and an oversized source file is flagged, not passed", () => {
+  const big = "function f(x){\n" + "validateInput(x);\n".repeat(50000) + "}";
+  const started = Date.now();
+  assert.deepEqual(kinds(big, big + "\n//x", "a.js"), []);
+  assert.ok(Date.now() - started < 5000, "bounded time");
+  const huge = "x;\n".repeat(400000);
+  assert.deepEqual(kinds(huge, huge + "y;\n", "a.js"), [["unscanned", 1]]);
+  assert.deepEqual(kinds(huge, huge + "y;\n", "notes.txt"), []);
+});
+
+test("review round 2: comparisons, long concatenations, per-table RLS order, and bracketed Python class headers", () => {
+  const cmp = "r(low<score >\nminimum ? requireAuth : noop,\n<Page/>);";
+  assert.deepEqual(kinds(cmp, cmp.replace("requireAuth", "noop"), "a.tsx").map(([k]) => k), ["middleware"]);
+  const concat = "q=('SELECT * FROM t WHERE '\n" + "\n".repeat(40) + "'tenant_id=:id')";
+  assert.deepEqual(kinds(concat, concat.replace("tenant_id=:id", "1=1"), "a.py").map(([k]) => k), ["tenant-filter"]);
+  const E = "ALTER TABLE t ENABLE ROW LEVEL SECURITY;\n", D = E.replace("ENABLE", "DISABLE");
+  assert.deepEqual(kinds(D + E, E + D + E.replace(" t ", " u "), "a.sql").map(([k]) => k), ["bypass"]);
+  const a = E.replace(" t ", " a "), b = E.replace(" t ", " b ");
+  assert.deepEqual(kinds(a + b, b + a, "a.sql"), []);
+  const cls = "class A(\nobject):\n def f():\n  assert x\n  go()\nclass B(\nobject):\n def f():\n  pass\n";
+  assert.deepEqual(kinds(cls, cls.replace("  assert x\n", "").replace("  pass", "  assert x"), "a.py").map(([k]) => k), ["bypass"]);
+});
+
+test("middleware: object-literal keys, shorthand, defaults and bare data words are data; compound names, values and decorators are middleware", () => {
+  // From a real job's diff, all flagged as "removes permission middleware" before.
+  for (const [before, after] of [
+    ["const guided = judgeAgentChoices({ agents, roles, providerOf: agentProviderId, runsOnHost });", "const guided = judgeAgentChoices({ agents, roles, generalVendor, providerOf: agentProviderId, runsOnHost });"],
+    ["export function judgeAgentChoices({ agents, roles = {}, providerOf, runsOnHost }) {", "export function judgeAgentChoices({ agents, roles = {}, providerOf, runsOnHost, generalVendor = null }) {"],
+    ["const stats = computeStats(records, { role: role ?? null, model });", "const stats = computeStats(records, { role: role ?? null, model, generalVendor });"],
+    ["    const vendor = providerOf(agents[role.agent]);", "    const vendor = vendorOf(providerOf(agents[role.agent]), model);"],
+  ]) assert.deepEqual(kinds(before, after, "a.mjs"), [], before);
+  for (const [file, before, after] of [
+    ["a.js", "router.get('/x', requireRole('admin'), handler);", "router.get('/x', handler);"],
+    ["a.js", "router.get('/x', auth.required, handler);", "router.get('/x', handler);"],
+    ["a.js", "app.get('/x', { preHandler: [app.authenticate] }, handler);", "app.get('/x', {}, handler);"],
+    ["a.js", "app.get('/x', { preHandler: requireAdmin }, handler);", "app.get('/x', {}, handler);"],
+    ["a.ts", "@Roles('admin')\nexport class C {}", "export class C {}"],
+    ["a.ts", "@UseGuards(RolesGuard)\nexport class C {}", "export class C {}"],
+    ["a.js", "router.use(\n  checkScope,\n  handler\n);", "router.use(\n  handler\n);"],
+  ]) assert.deepEqual(kinds(before, after, file).map(([k]) => k).filter((k) => k === "middleware").length > 0, true, before);
+});
+
+test("middleware (Grok review): a bare data word passed whole is middleware; an index or a value read is not", () => {
+  for (const [file, before, after] of [
+    ["a.js", "app.use(admin);\n", ""], ["a.js", "router.use(guard);", ""], ["a.js", "app.use(guards.admin);", ""],
+    ["a.js", "app.get('/x', { preHandler: permissions }, h);", "app.get('/x', {}, h);"],
+    ["a.js", "app.get('/x', { preHandler: ok ? requireAuth : deny }, h);", "app.get('/x', {}, h);"],
+    ["a.js", "app.get('/x', [admin, h]);", "app.get('/x', [h]);"],
+    ["c.rb", "class C\n  before_action :login\nend\n", "class C\nend\n"],
+    ["a.ts", "@UseGuards(admin)\nexport class C {}", "export class C {}"],
+  ]) assert.deepEqual(kinds(before, after, file).some(([k]) => k === "middleware"), true, before);
+  for (const [before, after] of [
+    ["const vendor = providerOf(agents[role.agent]);", "const vendor = vendorOf(providerOf(agents[role.agent]), model);"],
+    ["const stats = computeStats(records, { role: role ?? null });", "const stats = computeStats(records, { role: role ?? null, x });"],
+    ["const name = format(req.user.role.name);", "const name = format(req.user.role.name, x);"],
+  ]) assert.deepEqual(kinds(before, after, "a.mjs"), [], before);
+});
+
+test("swallowed-check scan stays linear on a hostile catch body (CodeQL js/redos)", () => {
+  const body = "return " + "return ".repeat(30000) + "x";
+  const before = "function f(user) {\n  validateInput(user);\n}\n";
+  const after = `function f(user) {\n  try {\n    validateInput(user);\n  } catch (e) { ${body} }\n}\n`;
+  const started = Date.now();
+  assert.deepEqual(kinds(before, after, "a.js"), []);
+  assert.ok(Date.now() - started < 2000, "bounded time");
+  // The real forms still swallow.
+  for (const handler of ["", "return;", "return null;", "console.error(e);", "logger.warn('x', e); return false;"]) {
+    assert.deepEqual(kinds(before, `function f(user) {\n  try {\n    validateInput(user);\n  } catch (e) { ${handler} }\n}\n`, "a.js"), [["bypass", 2]], handler);
+  }
+});
