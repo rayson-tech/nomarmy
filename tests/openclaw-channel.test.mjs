@@ -38,13 +38,21 @@ test("modelsToCheck: role and default models on api and subscription agents; nev
   assert.deepEqual(modelsToCheck({ agents, roles, providerOf: (a) => a.provider }), ["meta/muse-spark-1.3", "openai/gpt-6-astra", "openai/gpt-6.1-sol"]);
 });
 
-function fakeUpgrade(t, { channel = "latest", broken = [], failedBefore = [], flakyOnce = [], failUpgrade = false } = {}) {
+function fakeUpgrade(t, { channel = "latest", broken = [], failedBefore = [], flakyOnce = [], failUpgrade = false, migrates = false } = {}) {
   const repairs = [], probes = [], printed = [];
   let installed = PINNED_OPENCLAW_VERSION;
-  const run = (command, args) => command === "npm" ? { ok: true, stdout: NEWER } : args[0] === "--version" ? { ok: true, stdout: `OpenClaw ${installed} (abc)` } : { ok: false, stdout: "", stderr: "" };
+  // migrates: the newer release moves the state to a schema the older can't read.
+  let migrated = false;
+  const run = (command, args) => {
+    if (command === "npm") return { ok: true, stdout: NEWER };
+    if (args[0] === "--version") return { ok: true, stdout: `OpenClaw ${installed} (abc)` };
+    if (args[0] === "plugins" && args[1] === "list" && migrated && installed !== NEWER) return { ok: false, stdout: "", stderr: `OpenClaw state schema 22 is newer than OpenClaw ${installed}. Use a build that supports schema 22 or newer with this state directory.` };
+    return { ok: false, stdout: "", stderr: "" };
+  };
   const repair = async (opts) => {
     repairs.push({ target: opts.target, exact: opts.exact ?? false, yes: opts.yes });
     // failUpgrade: OpenClaw itself is replaced, then a plugin install fails.
+    if (migrates && opts.target === NEWER) migrated = true;
     if (failUpgrade && opts.target === NEWER) { installed = opts.target; return { ok: false, changed: [`to ${opts.target}`], failed: "plugin", checks: [] }; }
     installed = opts.target; return { ok: true, changed: [`to ${opts.target}`], checks: [] };
   };
@@ -109,4 +117,23 @@ test("upgradeOpenclaw latest: an upgrade that fails part-way puts back the exact
   assert.deepEqual(f.repairs, [{ target: NEWER, exact: false, yes: true }, { target: PINNED_OPENCLAW_VERSION, exact: true, yes: true }]);
   assert.deepEqual(skippedReleases(f.skipFile), []);
   assert.ok(f.printed.some((line) => line.includes(`Back on OpenClaw ${PINNED_OPENCLAW_VERSION}`)));
+});
+
+test("upgradeOpenclaw latest: when the new release migrated the state, a rollback goes forward again instead of leaving OpenClaw unable to start", async (t) => {
+  // From a real update: 2026.11.1 broke muse-cli, the rollback to 2026.10.5
+  // couldn't read the migrated state, and OpenClaw stopped for every session.
+  const f = fakeUpgrade(t, { broken: ["meta/muse-spark-1.3"], migrates: true });
+  const result = await f.go();
+  assert.equal(result.ok, false);
+  assert.equal(result.rolledBack, false);
+  assert.equal(result.keptNewer, true);
+  assert.deepEqual(result.broke, [{ model: "meta/muse-spark-1.3", reason: "model_not_found" }]);
+  assert.deepEqual(f.repairs.map((r) => r.target), [NEWER, PINNED_OPENCLAW_VERSION, NEWER]);
+  assert.ok(f.printed.some((line) => line.includes(`can't read it. Reinstalling ${NEWER}`)));
+  assert.ok(f.printed.some((line) => line.includes("move the roles on meta/muse-spark-1.3")));
+  // Part-way failure, same state problem: forward again too.
+  const partway = fakeUpgrade(t, { failUpgrade: true, migrates: true });
+  const r2 = await partway.go();
+  assert.equal(r2.keptNewer, true);
+  assert.deepEqual(partway.repairs.map((r) => r.target), [NEWER, PINNED_OPENCLAW_VERSION, NEWER]);
 });
