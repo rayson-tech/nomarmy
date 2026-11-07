@@ -2242,6 +2242,15 @@ function makeRuntimeDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-sbx-override-"));
 }
 
+test("resolveWorkerSandboxOverride: a muse-cli job runs with OpenClaw's workspace-only restriction off; others keep the ambient setting", () => {
+  const opts = (modelRef) => ({ loadConfigFn: () => ({ found: false }), resolveSandboxImageFn: () => DEFAULT_AGENT_IMAGE,
+    ambientConfigPathFn: () => "/fake/openclaw.json", readAmbientConfig: () => ({ tools: { fs: { workspaceOnly: true } } }), modelRef });
+  const read = (modelRef) => JSON.parse(fs.readFileSync(resolveWorkerSandboxOverride("/repo", makeRuntimeDir(), opts(modelRef)), "utf8"));
+  assert.equal(read("muse-cli/muse-spark-1.3").tools.fs.workspaceOnly, false);
+  assert.equal(read("openai/gpt-6-astra").tools.fs.workspaceOnly, true);
+  assert.equal(read(null).tools.fs.workspaceOnly, true);
+});
+
 test("resolveWorkerSandboxOverride: every job's config turns OpenClaw's memory search and session-memory hook off, even on the default image", () => {
   const runtimeDir = makeRuntimeDir();
   // The ambient config as a real install has it: the session-memory hook on,

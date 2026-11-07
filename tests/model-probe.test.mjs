@@ -112,3 +112,28 @@ test("probeModel: an answer stays ok when its scratch dir can't be removed", { s
   const r = await probeModel({ provider: "openai", model: "gpt-6.1-sol", stateRoot: root, openclawCmd: "openclaw", exec });
   assert.deepEqual(r, { ok: true, refused: false, reason: null });
 });
+
+test("probeModel: muse-cli is tested the way its jobs run, with OpenClaw's workspace-only restriction off; other providers on the ambient config", async (t) => {
+  const root = stateRoot(t);
+  const ambientPath = path.join(root, "ambient.json");
+  fs.writeFileSync(ambientPath, JSON.stringify({ tools: { fs: { other: 1 } }, auth: { kept: true } }));
+  let written = null;
+  const calls = [];
+  const exec = async (file, args) => {
+    calls.push([file, ...args]);
+    if (file === "openclaw" && args[0] === "config") return { error: null, stdout: `${ambientPath}\n`, stderr: "" };
+    if (file === "openclaw") {
+      const at = args.indexOf("--config");
+      if (at !== -1) written = JSON.parse(fs.readFileSync(args[at + 1], "utf8"));
+      return { error: null, stdout: JSON.stringify({ ok: true, status: "ok", final: "ok" }), stderr: "" };
+    }
+    return { error: null, stdout: "", stderr: "" };
+  };
+  assert.equal((await probeModel({ provider: "muse-cli", model: "muse-spark-1.3", stateRoot: root, openclawCmd: "openclaw", exec })).ok, true);
+  assert.deepEqual(written.tools.fs, { other: 1, workspaceOnly: false });
+  assert.deepEqual(written.auth, { kept: true });
+  written = null;
+  await probeModel({ provider: "openai", model: "gpt-6-astra", stateRoot: root, openclawCmd: "openclaw", exec });
+  assert.equal(written, null, "no config override for a sandboxed provider");
+  assert.equal(calls.filter((c) => c[1] === "config").length, 1);
+});

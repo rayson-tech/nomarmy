@@ -135,3 +135,20 @@ test("the General's stats tool defaults to the one-screen summary", async () => 
   const src = (await import("node:fs")).readFileSync(new URL("../mcp/server.mjs", import.meta.url), "utf8");
   assert.match(src, /details \? formatStats\(stats\) : formatStatsSummary\(stats\)/);
 });
+
+test("partials that passed independent verification are reported apart, not as a weak model", () => {
+  const job = (i, outcome, verified) => impl({ jobId: `p${i}`, labels: { role: "sr-dev" }, outcome, ...(verified === undefined ? {} : { independentVerification: { status: verified } }) });
+  // From Senti: 2 done, 3 partial with the change verified, 1 partial that failed verification.
+  const mostlyVerified = [job(0, "WORKER_DONE"), job(1, "WORKER_DONE"), job(2, "WORKER_PARTIAL", "pass"), job(3, "WORKER_PARTIAL", "pass"), job(4, "WORKER_PARTIAL", "pass"), job(5, "WORKER_PARTIAL", "fail")];
+  const list = computeSuggestions(mostlyVerified, { agentFor: () => "codex" });
+  assert.equal(list.find((s) => s.key.startsWith("low-success")), undefined, "no reassign advice when the work mostly verified");
+  const s = list.find((x) => x.key.startsWith("partial-verified:sr-dev"));
+  assert.equal(s.level, "info");
+  assert.match(s.title, /sr-dev on gpt-6-astra finished 2 of 6 implement jobs \(33%\); another 3 \(50%\) stopped partial but passed independent verification/);
+  assert.match(s.evidence, /focused tests and the revert check/);
+  assert.equal(s.command, null);
+  // Still a low rate with them counted: the warning stays, and says how many verified.
+  const weak = [job(0, "WORKER_DONE"), job(1, "WORKER_PARTIAL", "pass"), job(2, "WORKER_PARTIAL", "fail"), job(3, "WORKER_PARTIAL", "fail"), job(4, "WORKER_PARTIAL")];
+  const low = computeSuggestions(weak).find((x) => x.key.startsWith("low-success"));
+  assert.match(low.title, /finished 1 of 5 implement jobs \(20%\); another 1 stopped partial but passed independent verification/);
+});
