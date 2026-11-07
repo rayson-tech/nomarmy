@@ -49,7 +49,7 @@ import { linkCodex } from "../lib/codex-link.mjs";
 import { recordProbeSuccess, parseOpenclawAuthProfiles, codexImportRecovery, apiKeyProvider } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
 import { SUBSCRIPTION_VENDORS, OPENCLAW_SIGN_IN_PRESETS, competingProviderProfiles, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, openclawSignInFailure, parseMuseAuthDescriptor } from "../lib/subscription-setup.mjs";
-import { PINNED_OPENCLAW_VERSION, pluginInstallArgs, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors } from "../lib/openclaw-install.mjs";
+import { PINNED_OPENCLAW_VERSION, pluginInstallArgs, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors, bundledCatalogModels } from "../lib/openclaw-install.mjs";
 import { ensureOpenClawOnPath, ensureVendorClisOnPath } from "../lib/openclaw-path.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
 import { fileURLToPath } from "node:url";
@@ -1275,7 +1275,8 @@ function hasUsableOpenclawAuthProfile(provider) {
 }
 
 function catalogModelsFor(provider) {
-  return parseCatalogModels(runQuiet(openclawCmd(), ["models", "list", "--refresh"]).out, provider);
+  const listed = parseCatalogModels(runQuiet(openclawCmd(), ["models", "list", "--refresh"]).out, provider);
+  return listed.length ? listed : bundledCatalogModels(provider);
 }
 
 /** One real, one-token completion through OpenClaw to test a model. */

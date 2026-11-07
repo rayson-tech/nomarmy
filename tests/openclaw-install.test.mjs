@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { PINNED_OPENCLAW_VERSION, runOpenclawCommand, openclawInstallPlan, pluginUpdatePlan, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors, codexBinaryCheck, failureTail, bundledPlugin, pluginInstallArgs } from "../lib/openclaw-install.mjs";
+import { PINNED_OPENCLAW_VERSION, runOpenclawCommand, openclawInstallPlan, pluginUpdatePlan, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors, codexBinaryCheck, failureTail, bundledPlugin, bundledCatalogModels, pluginInstallArgs } from "../lib/openclaw-install.mjs";
 import { SUBSCRIPTION_VENDORS } from "../lib/subscription-setup.mjs";
 import os from "node:os";
 import path from "node:path";
@@ -462,4 +462,13 @@ test("codexBinaryCheck: flags the Codex plugin missing its platform binary, with
   fs.mkdirSync(path.join(modules, "codex-darwin-arm64"));
   assert.equal(codexBinaryCheck({ home, platform: "darwin", arch: "arm64" }).ok, true);
   assert.equal(codexBinaryCheck({ home, platform: "linux", arch: "x64" }).ok, false);
+});
+
+test("bundledCatalogModels: setup offers the muse-cli plugin's own models, which `openclaw models list` hides until configured", () => {
+  const models = bundledCatalogModels("muse-cli");
+  assert.ok(models.includes(SUBSCRIPTION_VENDORS.meta.defaultModel), "the default model is one the plugin declares");
+  assert.ok(models.includes("muse-wonder-1.0"));
+  assert.equal(new Set(models).size, models.length);
+  assert.deepEqual(bundledCatalogModels("openai"), [], "a vendor plugin nomArmy doesn't ship has no bundled list");
+  assert.deepEqual(bundledCatalogModels("claude-cli"), []);
 });
