@@ -33,6 +33,7 @@ import { loadJobRecords, computeStats, formatStats, formatStatsSummary, parseSin
 import { requestJobStop } from "../lib/openclaw-run.mjs";
 import { loadValidators, saveJev, jevEndpoint, JEV_ENDPOINT, removeJev, jevSettings, askJev, validatorsPath, JEV_CHECKS, saveJudge, removeJudge, judgeSettings, judgeAgentChoices, chooseJudgeAgent, confirmJudgeHostTools, validatorTrustDisclosure } from "../lib/validators.mjs";
 import { probeModel } from "../lib/model-probe.mjs";
+import { OWN_SANDBOX_CLI_BACKENDS, cliBackendConfigArgs } from "../lib/cli-backend-policy.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
 import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, agentProviderId, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
 import { generalIdentity, generalVendorResolver, loadArmy, mergeArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
@@ -1294,8 +1295,13 @@ function probeWorker(provider, model) {
   const stateDir = path.join(dir, "state"), cwd = path.join(dir, "ws");
   fs.mkdirSync(stateDir); fs.mkdirSync(cwd);
   try {
+    // Tested the way jobs run it: a backend with its own sandbox runs with
+    // OpenClaw's workspace-only restriction off (lib/cli-backend-policy.mjs).
+    const configArgs = OWN_SANDBOX_CLI_BACKENDS.has(provider)
+      ? cliBackendConfigArgs({ provider, model, dir, ambientPath: spawnSync(openclawCmd(), ["config", "file"], { encoding: "utf8", cwd, timeout: 20000 }).stdout })
+      : [];
     const result = spawnSync(openclawCmd(), ["agent", "exec", "Reply with exactly: ok", "--model", `${provider}/${model}`, "--no-auth-env-only",
-      "--json", "--cwd", cwd, "--state-dir", stateDir, "--timeout", "90"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], cwd });
+      "--json", "--cwd", cwd, "--state-dir", stateDir, ...configArgs, "--timeout", "90"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], cwd });
     // Streams kept apart: OpenClaw logs a "run ... ended" line to stderr
     // AFTER the JSON envelope, and the merged text doesn't parse.
     const stdout = result.stdout ?? "";
