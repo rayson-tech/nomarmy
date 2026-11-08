@@ -24,7 +24,7 @@ Every command proposes before it writes: a `[y/N]` prompt, or an explicit flag u
 | `nomarmy health` | Runs the health checks now. |
 | `nomarmy statusline` | nomArmy's part of Claude Code's status line. |
 | `nomarmy config paths` | Where each config file lives. |
-| `nomarmy config openclaw [tested\|latest]` | Which OpenClaw release `nomarmy update` and `nomarmy doctor --fix` keep: `tested` (default) or `latest`, npm's latest with matching vendor plugins, never below tested. On `latest`, your roles' models are test-called before and after; if one that answered stops, OpenClaw and its plugins roll back to the exact earlier release, which is then skipped. |
+| `nomarmy config openclaw [tested\|latest]` | Which OpenClaw release `nomarmy update` and `nomarmy doctor --fix` keep: `tested` (default) or `latest`, npm's latest with matching vendor plugins, never below tested. On `latest`, your roles' models are test-called before and after; if one that answered stops, OpenClaw and its plugins roll back to the exact earlier release, which is then skipped. If the newer release migrated OpenClaw's state so the earlier one can't read it, it stays on the newer release and names the roles to move. |
 | `nomarmy config max-jobs [n]` | How many api and subscription jobs run at once, across every session (default 4); with `n`, sets it. Warns when the Podman VM is too small. |
 | `nomarmy model` | Changes the local model. |
 | `nomarmy sizing` | Recommends context, slots and workers. `--check` evaluates the loaded profile; `--noms N` sizes for a count. |
