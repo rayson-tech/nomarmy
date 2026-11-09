@@ -32,7 +32,7 @@ import { compareVersions, readPackageVersion, readInstallVersions, copyIsStale }
 import { loadJobRecords, computeStats, formatStats, formatStatsSummary, parseSince, resolveRepo, agentLookup } from "../lib/stats.mjs";
 import { requestJobStop } from "../lib/openclaw-run.mjs";
 import { loadValidators, saveJev, jevEndpoint, JEV_ENDPOINT, removeJev, jevSettings, askJev, validatorsPath, JEV_CHECKS, saveJudge, removeJudge, judgeSettings, judgeAgentChoices, chooseJudgeAgent, confirmJudgeHostTools, validatorTrustDisclosure } from "../lib/validators.mjs";
-import { probeModel } from "../lib/model-probe.mjs";
+import { probeModel, routeForProvider } from "../lib/model-probe.mjs";
 import { OWN_SANDBOX_CLI_BACKENDS, cliBackendConfigArgs } from "../lib/cli-backend-policy.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
 import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, agentProviderId, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
@@ -45,6 +45,7 @@ import { listProcesses, staleSessions, formatStaleSessions } from "../lib/stale-
 import { readSetting, writeSetting, writeEnvLine, userCommonPath, userProfilePath, profilePathFor, tildePath } from "../lib/user-config.mjs";
 import { MIN_PODMAN_VM_MB } from "../lib/doctor.mjs";
 import { liveLeases } from "../lib/slots.mjs";
+import { gatewayOwnsState, profilesFromModelsStatus } from "../lib/openclaw-busy.mjs";
 import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
 import { linkCodex } from "../lib/codex-link.mjs";
 import { recordProbeSuccess, parseOpenclawAuthProfiles, codexImportRecovery, apiKeyProvider } from "../lib/health.mjs";
@@ -53,7 +54,7 @@ import { SUBSCRIPTION_VENDORS, OPENCLAW_SIGN_IN_PRESETS, competingProviderProfil
 import { PINNED_OPENCLAW_VERSION, pluginInstallArgs, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors, bundledCatalogModels } from "../lib/openclaw-install.mjs";
 import { ensureOpenClawOnPath, ensureVendorClisOnPath } from "../lib/openclaw-path.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 // Inside WSL, only the distro's own tools (see lib/wsl.mjs).
 dropWindowsPath();
 // The Windows front end: whatever it forwards knows the coordinators are on Windows.
@@ -1169,8 +1170,74 @@ function runInteractive(cmd, args) {
   catch { return false; }
 }
 
+/** OpenClaw's saved auth profiles; through `models status` when the Gateway holds the state (lib/openclaw-busy.mjs). Null = unreadable. */
+function readAuthProfilesSync() {
+  const listed = runQuiet(openclawCmd(), ["models", "auth", "list", "--json"]);
+  const profiles = listed.ok ? parseOpenclawAuthProfiles(listed.stdout) : null;
+  if (profiles || !gatewayOwnsState(listed.out)) return profiles;
+  const status = runQuiet(openclawCmd(), ["models", "status", "--json"]);
+  return status.ok ? profilesFromModelsStatus(status.stdout) : null;
+}
+
+// OpenClaw 2026.11 saves keys and sign-ins only with its Gateway stopped.
+// Setup stops it once, with the operator's yes, and starts it again on exit.
+let gatewayStoppedForSetup = false;
+// What OpenClaw says when `agent exec` can't use a sign-in it holds itself.
+const GATEWAY_ONLY_SIGN_IN = /Explicit auth order for \S+ has no usable profiles/i;
+const GATEWAY_MANUAL_STEPS = "openclaw gateway stop --force, run this again, then openclaw gateway start";
+
+/** True when OpenClaw can save keys and sign-ins now, stopping the Gateway (asked first) if it holds the state. */
+async function freeOpenclawStateForWrites(rl) {
+  if (gatewayStoppedForSetup) return true;
+  const probe = runQuiet(openclawCmd(), ["models", "auth", "list", "--json"]);
+  if (probe.ok || !gatewayOwnsState(probe.out)) return true;
+  // With no prompt (--json) this goes to stderr, keeping stdout JSON.
+  const say = rl ? console.log : console.error;
+  say(c.yellow("OpenClaw saves keys and sign-ins only while its Gateway is stopped, and the Gateway is running."));
+  const running = liveLeases(path.join(agentStateRoot(), "leases")).length;
+  if (running) {
+    say(c.red(`✗ ${running} nomArmy job(s) are running. Run this again when they're done (\`nomarmy jobs\`).`));
+    return false;
+  }
+  if (!rl || !input.isTTY) {
+    say(c.red(`✗ Stop it first: ${GATEWAY_MANUAL_STEPS}.`));
+    return false;
+  }
+  if (!(await confirm(rl, "Stop the Gateway now, and start it again when this finishes?"))) {
+    say(c.dim(`Stopped; nothing was saved to OpenClaw. To do it by hand: ${GATEWAY_MANUAL_STEPS}.`));
+    return false;
+  }
+  if (!runQuiet(openclawCmd(), ["gateway", "stop", "--force"]).ok) {
+    say(c.red("✗ `openclaw gateway stop --force` failed. Stop the Gateway yourself and run this again."));
+    return false;
+  }
+  gatewayStoppedForSetup = true;
+  say(c.dim("Gateway stopped; it starts again when this finishes."));
+  return true;
+}
+
+/** Starts the Gateway again if setup stopped it. */
+function restartGatewayIfStopped() {
+  if (!gatewayStoppedForSetup) return;
+  gatewayStoppedForSetup = false;
+  if (runQuiet(openclawCmd(), ["gateway", "start"]).ok) {
+    // A Gateway takes a few seconds to take turns after it starts, and a
+    // Gateway-route test call may come right after this.
+    for (let i = 0; i < 15 && !/running/i.test(runQuiet(openclawCmd(), ["gateway", "status"]).out); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000);
+    console.log(c.dim("Gateway started again."));
+  }
+  else console.log(c.red("✗ Starting the Gateway again failed. Run: openclaw gateway start"));
+}
+
 async function confirm(rl, question, { defaultYes = true } = {}) {
-  const answer = (await rl.question(c.bold(`${question} ${defaultYes ? "[Y/n]" : "[y/N]"} `))).trim().toLowerCase();
+  // With no terminal (a `!` command in Claude Code, a pipe), stdin ends and
+  // the question never resolves: node exits with "unsettled top-level
+  // await" and the command silently did nothing. Say so instead.
+  const ended = new Promise((resolve) => rl.once("close", () => resolve(null)));
+  const raw = await Promise.race([rl.question(c.bold(`${question} ${defaultYes ? "[Y/n]" : "[y/N]"} `)), ended]);
+  if (raw === null) throw new Error(`No answer to "${question}": this needs an interactive terminal${json ? "" : ", or --json where the command takes it"}. Nothing was changed.`);
+  const answer = raw.trim().toLowerCase();
   if (!answer) return defaultYes;
   return answer === "y" || answer === "yes";
 }
@@ -1264,9 +1331,7 @@ async function ensureVendorAuth(rl, vendorKey) {
 
 function hasUsableOpenclawAuthProfile(provider) {
   // Same OpenClaw command and JSON shape used by health's login-expiry check.
-  const result = runQuiet(openclawCmd(), ["models", "auth", "list", "--json"]);
-  if (!result.ok) return false;
-  const profiles = parseOpenclawAuthProfiles(result.stdout);
+  const profiles = readAuthProfilesSync();
   return profiles?.some((profile) => {
     if (profile.provider !== provider) return false;
     if (profile.expiresAt == null) return true;
@@ -1285,6 +1350,12 @@ function catalogModelsFor(provider) {
 let lastProbeFailure = null;
 let lastProbeText = "";
 function probeWorker(provider, model) {
+  // An agent on route: gateway is tested through the Gateway, as its jobs
+  // run (lib/openclaw-gateway-route.mjs); that test is async, so it runs in
+  // a child process to keep this one's callers as they are.
+  let route = null;
+  try { route = routeForProvider(loadAgents(globalConfigDir()).agents, provider); } catch { /* exec route */ }
+  if (route === "gateway") return probeWorkerOnGateway(provider, model);
   // The route a job takes: the ambient OpenClaw config and a state dir of
   // its own, never --isolated. --isolated skips that config, and with it the
   // Codex runtime ChatGPT-plan jobs run through: gpt-6-sol answered "ok"
@@ -1320,6 +1391,19 @@ function probeWorker(provider, model) {
     try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* leftover dir; see above */ }
   }
 }
+function probeWorkerOnGateway(provider, model) {
+  const moduleUrl = pathToFileURL(path.join(nomarmyRoot, "lib", "model-probe.mjs")).href;
+  const script = `import { probeModel } from ${JSON.stringify(moduleUrl)}; const r = await probeModel(JSON.parse(process.argv[1])); process.stdout.write(JSON.stringify(r));`;
+  const child = spawnSync(process.execPath, ["--input-type=module", "-e", script, JSON.stringify({ provider, model, stateRoot: agentStateRoot(), route: "gateway", openclawCmd: openclawCmd() })],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 300000 });
+  let result = null;
+  try { result = JSON.parse(child.stdout); } catch { /* the child failed */ }
+  lastProbeText = `${child.stderr ?? ""}\n${child.stdout ?? ""}`;
+  lastProbeFailure = result?.ok ? null : result?.reason ?? "the Gateway test call didn't finish";
+  if (result?.ok) recordProbeSuccess(agentStateRoot(), `${provider}/${model}`);
+  return Boolean(result?.ok);
+}
+
 function agentStateRoot() {
   const root = process.env.NOMARMY_AGENT_STATE || path.join(os.homedir(), ".local", "share", "nomarmy-local-agents");
   fs.mkdirSync(root, { recursive: true });
@@ -1347,6 +1431,7 @@ function reapProbeSandbox(stateDir) {
  * login is confirmed; other providers link when catalog or auth checks fail.
  */
 async function openclawProviderLogin(vendor, rl) {
+  if (!(await freeOpenclawStateForWrites(rl))) return false;
   if (vendor === SUBSCRIPTION_VENDORS.codex) return linkCodex({
     run: runQuiet, command: openclawCmd(), isTTY: Boolean(input.isTTY),
     importLogin: flag("link-openclaw"), removeEmailProfiles: flag("remove-email-profiles"),
@@ -1453,14 +1538,21 @@ async function cmdAgentsRegister() {
   const agents = fileAgentsOrExit();
   const api = Object.entries(agents).filter(([n, a]) => a.kind === "api" && (!name || n === name));
   if (name && !api.length) throw new Error(Object.prototype.hasOwnProperty.call(agents, name) ? `"${name}" isn't an api agent; only api agents have a key to register.` : `Unknown agent "${name}". Your agents: ${Object.keys(agents).join(", ")}`);
-  const listed = runQuiet(openclawCmd(), ["models", "auth", "list", "--json"]);
-  const saved = new Set((listed.ok ? parseOpenclawAuthProfiles(listed.stdout) ?? [] : []).map((p) => p.provider));
+  const saved = new Set((readAuthProfilesSync() ?? []).map((p) => p.provider));
   const results = [];
-  for (const [n, agent] of api) {
-    const provider = apiKeyProvider(n, agent);
-    if (!name && saved.has(provider)) { results.push({ name: n, status: "already" }); continue; }
-    if (!process.env[agent.auth_env]) { results.push({ name: n, status: "missing", env: agent.auth_env }); continue; }
-    results.push({ name: n, status: registerProviderWithOpenClaw(apiAgentAsPoolEntry(n, agent)) ? "registered" : "failed" });
+  const rl = input.isTTY && !json ? createInterface({ input, output }) : null;
+  let writable = null;
+  try {
+    for (const [n, agent] of api) {
+      const provider = apiKeyProvider(n, agent);
+      if (!name && saved.has(provider)) { results.push({ name: n, status: "already" }); continue; }
+      if (!process.env[agent.auth_env]) { results.push({ name: n, status: "missing", env: agent.auth_env }); continue; }
+      writable ??= await freeOpenclawStateForWrites(rl);
+      results.push({ name: n, status: writable && registerProviderWithOpenClaw(apiAgentAsPoolEntry(n, agent)) ? "registered" : "failed" });
+    }
+  } finally {
+    rl?.close();
+    restartGatewayIfStopped();
   }
   // Text only: registration itself prints as it goes.
   if (!api.length) console.log(c.dim("No api agents in agents.yml."));
@@ -1514,6 +1606,7 @@ async function cmdAgentsAdd() {
     return await addSubscriptionAgent(rl, agents);
   } finally {
     rl.close();
+    restartGatewayIfStopped();
   }
 }
 
@@ -1590,7 +1683,7 @@ async function addApiAgent(rl, agents) {
   console.log(c.green(`\n✓ Saved agent "${name}": ${describeAgentLabel(saved)}.`));
 
   console.log(`\n${c.bold("→")} Registering the key with OpenClaw`);
-  const registered = registerProviderWithOpenClaw({ ...apiAgentAsPoolEntry(name, saved), apiKeyOverride: apiKey });
+  const registered = (await freeOpenclawStateForWrites(rl)) && registerProviderWithOpenClaw({ ...apiAgentAsPoolEntry(name, saved), apiKeyOverride: apiKey });
   if (registered && saved.model) {
     console.log(`\n${c.bold("→")} Test call`);
     const provId = saved.provider === "openclaw" ? saved.openclaw_provider : ["bedrock", "azure-openai", "openai-compatible"].includes(saved.provider) ? name : saved.provider;
@@ -1751,7 +1844,8 @@ async function addOpenclawSignInAgent(rl, agents, presetKey) {
   if (plugin && !runInteractive(openclawCmd(), ["plugins", "install", plugin])) {
     console.log(c.red(`✗ Installing ${plugin} failed. Run \`openclaw plugins install ${plugin}\` yourself to see why.`)); process.exitCode = 1; return;
   }
-  const profiles = () => parseOpenclawAuthProfiles(runQuiet(openclawCmd(), ["models", "auth", "list", "--json"]).stdout) ?? [];
+  if (!(await freeOpenclawStateForWrites(rl))) { process.exitCode = 1; return; }
+  const profiles = () => readAuthProfilesSync() ?? [];
   const signedIn = () => profiles().some((profile) => profile.provider === provider && profile.type !== "api_key"
     && (profile.expiresAt == null || Date.parse(profile.expiresAt) > Date.now()));
   if (!signedIn() || await confirm(rl, `OpenClaw already has a ${provider} sign-in. Sign in again (a different account, or to refresh it)?`, { defaultYes: false })) {
@@ -1778,6 +1872,9 @@ async function addOpenclawSignInAgent(rl, agents, presetKey) {
     }
   }
 
+  // Signed in: the Gateway (if setup stopped it) comes back before the
+  // model list and test call, which can go through it.
+  restartGatewayIfStopped();
   console.log(`\n${c.bold("→")} Models`);
   const models = catalogModelsFor(provider);
   if (models.length) models.forEach((m, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${m}`));
@@ -1796,7 +1893,21 @@ async function addOpenclawSignInAgent(rl, agents, presetKey) {
   console.log(`\n${c.bold("→")} Test call`);
   const probeModel = model ?? models[0];
   if (probeModel && probeWorker(provider, probeModel)) console.log(c.green(`✓ ${provider}/${probeModel} answered a real test prompt.`));
-  else {
+  else if (probeModel && GATEWAY_ONLY_SIGN_IN.test(`${lastProbeFailure ?? ""}\n${lastProbeText}`)) {
+    // OpenClaw's isolated runs can't use a sign-in OpenClaw holds itself
+    // (openclaw/openclaw#124768); its Gateway can (lib/openclaw-gateway-route.mjs).
+    console.log(c.yellow(`⚠ OpenClaw's isolated runs, which jobs use, can't use this sign-in (openclaw/openclaw#124768), but the OpenClaw Gateway can.`));
+    if (!(await confirm(rl, "Run this agent's jobs through the Gateway instead?", { defaultYes: false })) || !(await prepareGatewayRoute(name, rl))) {
+      console.log(c.dim("Stopped; nothing was written.")); process.exitCode = 1; return;
+    }
+    const written = saveAgents({ ...agents, [name]: { kind: "subscription", provider, owner, ...(model ? { model } : {}), route: "gateway" } });
+    console.log(`\n${c.bold("→")} Test call through the Gateway`);
+    if (probeWorker(provider, probeModel)) console.log(c.green(`✓ ${provider}/${probeModel} answered a real test prompt through the Gateway.`));
+    else console.log(c.yellow(`⚠ It didn't answer through the Gateway either${lastProbeFailure ? `: ${lastProbeFailure}` : ""}. Is the Gateway running (openclaw gateway status)? Retry with \`nomarmy agents update ${name} --probe\`.`));
+    savedAgentMessage(name, written);
+    console.log(c.dim(`Jobs on it need on_behalf_of: "${owner}".`));
+    return;
+  } else {
     console.log(c.yellow(probeModel ? `⚠ ${provider}/${probeModel} didn't answer a real test prompt${lastProbeFailure ? `: ${lastProbeFailure}` : ""}.` : "⚠ No model is available for a test call."));
     console.log(c.dim(`You can retry later with \`nomarmy agents update ${name} --probe\`.`));
     if (!(await confirm(rl, "Save the agent anyway?", { defaultYes: false }))) { console.log(c.dim("Stopped; nothing was written.")); process.exitCode = 1; return; }
@@ -1829,6 +1940,7 @@ async function cmdAgentsAddJson() {
   }
   if (kind === "subscription" && agent.provider === "openai" && (flag("link-openclaw") || flag("remove-email-profiles"))) {
     if (!readLoginStatus("codex").loggedIn) throw new Error("Confirm Codex CLI login first: codex login");
+    if (!(await freeOpenclawStateForWrites(null))) throw new Error(`OpenClaw's Gateway holds its state, so the Codex login can't be imported; nothing was written. ${GATEWAY_MANUAL_STEPS}.`);
     const linked = await linkCodex({ run: runQuiet, command: openclawCmd(),
       importLogin: flag("link-openclaw"), removeEmailProfiles: flag("remove-email-profiles"), print: (message) => console.error(message) });
     if (!linked) throw new Error(flag("link-openclaw")
@@ -1841,7 +1953,7 @@ async function cmdAgentsAddJson() {
   const written = saveAgents({ ...agents, [name]: agent });
   const saved = written[name];
   let registered = null, mcpUpdated = false;
-  if (kind === "api" && flag("register")) registered = registerProviderWithOpenClaw(apiAgentAsPoolEntry(name, saved));
+  if (kind === "api" && flag("register")) registered = (await freeOpenclawStateForWrites(null)) && registerProviderWithOpenClaw(apiAgentAsPoolEntry(name, saved));
   if (kind === "api" && flag("update-mcp")) {
     connectClaude({ nomarmyRoot, run: (cmd, args2, opts = {}) => execFileSync(cmd, args2, { stdio: "ignore", ...opts }), extraEnv: { [saved.auth_env]: "registered" } });
     mcpUpdated = true;
@@ -1850,6 +1962,39 @@ async function cmdAgentsAddJson() {
 }
 
 // A probe-only update checks credentials without changing agents.yml.
+/**
+ * Turning on route: gateway: says what it changes, and makes sure OpenClaw
+ * won't seed starter files into job worktrees (agents.defaults.skipBootstrap),
+ * setting it only with the operator's yes (--yes with --json).
+ */
+async function prepareGatewayRoute(name, sharedRl = null) {
+  const say = json ? console.error : console.log;
+  say(c.yellow([
+    `Route "${name}" through the OpenClaw Gateway. For a sign-in OpenClaw's isolated runs can't use (openclaw/openclaw#124768), each job instead:`,
+    "  - adds a temporary agent to OpenClaw's config, on the job's worktree, and removes it after (nomarmy health reports any left behind);",
+    "  - runs in OpenClaw's sandbox with the job's image, PATH and privacy settings, so the Gateway must be running;",
+    "  - gets no transcript of its own for report recovery, and its cost is recorded as subscription use.",
+  ].join("\n")));
+  const current = runQuiet(openclawCmd(), ["config", "get", "agents.defaults.skipBootstrap", "--json"]);
+  if (current.ok && current.stdout.trim() === "true") return true;
+  say("OpenClaw writes starter files (AGENTS.md, SOUL.md, BOOTSTRAP.md, ...) into a new agent's workspace, which here is the job's worktree. Setting agents.defaults.skipBootstrap stops that for new agents; existing ones keep theirs.");
+  let yes = flag("yes");
+  if (!yes && !json && input.isTTY) {
+    const rl = sharedRl ?? createInterface({ input, output });
+    try { yes = await confirm(rl, "Set agents.defaults.skipBootstrap: true in OpenClaw's config?"); } finally { if (!sharedRl) rl.close(); }
+  }
+  if (!yes) {
+    say(c.red(`✗ Not changed. Set it yourself (openclaw config set agents.defaults.skipBootstrap true --strict-json) and run this again${json ? ", or pass --yes" : ""}.`));
+    return false;
+  }
+  if (!runQuiet(openclawCmd(), ["config", "set", "agents.defaults.skipBootstrap", "true", "--strict-json"]).ok) {
+    say(c.red("✗ Setting agents.defaults.skipBootstrap failed. Run: openclaw config set agents.defaults.skipBootstrap true --strict-json"));
+    return false;
+  }
+  say(c.dim("Set agents.defaults.skipBootstrap: true."));
+  return true;
+}
+
 function probeConfiguredAgent(name, agent) {
   const provider = agentProviderId(agent);
   let model = agent.model;
@@ -1914,7 +2059,7 @@ async function cmdAgentsUpdate() {
   const changes = {};
   let probe = false;
   // Flags alone are enough; without any, it asks field by field.
-  const flagged = ["model", "no-model", "slot", "auth-env", "base-url", "max-concurrent", "context-window", "thinking", "no-thinking", "probe"].some((f) => flag(f));
+  const flagged = ["model", "no-model", "slot", "auth-env", "base-url", "max-concurrent", "context-window", "thinking", "no-thinking", "probe", "route"].some((f) => flag(f));
   if (json || flagged) {
     const num = (flagName) => (value(flagName) !== null ? Number(value(flagName)) : undefined);
     if (value("model") !== null) changes.model = value("model");
@@ -1929,6 +2074,12 @@ async function cmdAgentsUpdate() {
     if (thinking !== undefined) changes.thinking = thinking;
     if (flag("owner") || value("owner") !== null || value("provider") !== null || value("kind") !== null) {
       throw new Error("Kind, provider and owner can't be changed -- that's a different agent. Use `nomarmy agents add`.");
+    }
+    if (value("route") !== null) {
+      const route = value("route");
+      if (!["gateway", "exec"].includes(route)) throw new Error("--route is gateway or exec.");
+      if (current.kind !== "subscription") throw new Error("--route applies to subscription agents.");
+      if ((current.route ?? "exec") !== route) changes.route = route === "gateway" ? "gateway" : undefined;
     }
     probe = flag("probe");
     if (!Object.keys(changes).length && !probe) throw new Error("Nothing to update -- pass at least one field flag (see `nomarmy agents update` usage).");
@@ -1983,9 +2134,16 @@ async function cmdAgentsUpdate() {
     out({ error: `a real test prompt to ${current.provider}/${changes.model} didn't come back -- nothing was written` });
     process.exit(1);
   }
+  if (changes.route === "gateway" && !(await prepareGatewayRoute(name))) { process.exitCode = 1; return; }
   const next = { ...current, ...changes };
   for (const [k, v] of Object.entries(next)) if (v === undefined) delete next[k];
   const written = saveAgents({ ...agents, [name]: next });
+  if (changes.route === "gateway") {
+    if (!json) console.log(c.green(`\n✓ "${name}" now runs its jobs through the OpenClaw Gateway.`));
+    if (!json) probeConfiguredAgent(name, written[name]);
+    if (json) return out({ updated: true, name, agent: written[name], changed: Object.keys(changes) });
+    return;
+  }
   if (json) return out({ updated: true, name, agent: written[name], changed: Object.keys(changes) });
   console.log(c.green(`\n✓ Updated "${name}": ${describeAgentLabel(written[name])}.`));
   if (changes.auth_env) console.log(c.yellow(`The key's variable changed to ${changes.auth_env}: run \`nomarmy connect claude\` so the MCP server sees it.`));
@@ -2973,7 +3131,8 @@ function collectJobs({ recent = 8, runId = null, projectDir = null } = {}) {
   const root = jobsRootDir();
   let names = [];
   try { names = fs.readdirSync(root); } catch { return { running: [], recent: [] }; }
-  const jobs = names.map((name) => {
+  // Dot folders are nomArmy's own caches (.base-verification), not jobs.
+  const jobs = names.filter((name) => !name.startsWith(".")).map((name) => {
     const dir = path.join(root, name);
     const status = readJsonSafe(path.join(dir, "status.json")) ?? {};
     const meta = readJsonSafe(path.join(dir, "metadata.json")) ?? readJsonSafe(path.join(dir, "failure.json"));

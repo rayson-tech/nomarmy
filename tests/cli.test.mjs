@@ -418,8 +418,9 @@ test("agents add --json --register (native api provider, e.g. xai) pipes the REA
       "--model", "grok-4.7", "--auth-env", "NOMARMY_TEST_KEY_XAI",
     ], { ...fake.env, NOMARMY_TEST_KEY_XAI: "sk-test-real-secret-value" });
     assert.equal(exitCode, 0, stdout);
-    const calls = fake.calls();
-    assert.equal(calls.length, 1, "a native provider needs exactly one openclaw call (paste-api-key)");
+    // The first call checks OpenClaw can take writes now (its Gateway can hold the state).
+    const calls = fake.calls().filter((call) => call.argv.slice(0, 3).join(" ") !== "models auth list");
+    assert.equal(calls.length, 1, "a native provider needs exactly one openclaw write (paste-api-key)");
     assert.deepEqual(calls[0].argv.slice(0, 5), ["models", "auth", "paste-api-key", "--provider", "xai"]);
     assert.equal(calls[0].stdin.trim(), "sk-test-real-secret-value", "the REAL key must be on stdin, not \"null\" or \"undefined\"");
     assert.ok(!calls[0].argv.join(" ").includes("sk-test-real-secret-value"), "the key must never appear in argv");
@@ -438,7 +439,7 @@ test("agents add --json --register (custom endpoint) onboards with the REAL mode
       "--model", "gpt-4o-mini", "--auth-env", "NOMARMY_TEST_KEY_AZURE", "--base-url", "https://my-resource.openai.azure.com",
     ], { NOMARMY_TEST_KEY_AZURE: "sk-test-azure-secret", ...fake.env });
     assert.equal(exitCode, 0, stdout);
-    const [onboardCall, pasteCall] = fake.calls();
+    const [onboardCall, pasteCall] = fake.calls().filter((call) => call.argv.slice(0, 3).join(" ") !== "models auth list");
     assert.ok(onboardCall.argv.some((a) => a === "https://my-resource.openai.azure.com") && onboardCall.argv.some((a) => a === "gpt-4o-mini"));
     assert.deepEqual(pasteCall.argv.slice(0, 3), ["models", "auth", "paste-api-key"]);
     assert.equal(pasteCall.stdin.trim(), "sk-test-azure-secret");
@@ -1427,7 +1428,8 @@ if(a[0]==="agent") console.log(JSON.stringify({ok:true,final:"ok"}));`);
     assert.equal(denied.exitCode, 1);
     assert.equal(JSON.parse(denied.stdout).error, "Codex import failed; nothing was written.");
     assert.equal(fs.existsSync(path.join(root, "config", "agents.yml")), false);
-    assert.deepEqual(fs.readFileSync(marker, "utf8").trim().split("\n").map(JSON.parse), [["models", "auth", "list", "--json"]]);
+    // The write check (can OpenClaw take writes with its Gateway up?), then linkCodex's own read.
+    assert.deepEqual(fs.readFileSync(marker, "utf8").trim().split("\n").map(JSON.parse), [["models", "auth", "list", "--json"], ["models", "auth", "list", "--json"]]);
     // Removing the email profiles is not consent to the import itself.
     const unconsented = runAgentsCLI(root, [...args.filter((a) => a !== "--link-openclaw"), "--remove-email-profiles"], testEnv);
     assert.equal(unconsented.exitCode, 1);
@@ -1439,10 +1441,10 @@ if(a[0]==="agent") console.log(JSON.stringify({ok:true,final:"ok"}));`);
     assert.doesNotMatch(passed.stdout + passed.stderr, /SECRET_SENTINEL/);
     assert.deepEqual(JSON.parse(passed.stdout).agent, {kind:"subscription",provider:"openai",owner:"person@example.com",max_concurrent:1,thinking:true});
     const calls = fs.readFileSync(marker, "utf8").trim().split("\n").map(JSON.parse);
-    assert.deepEqual(calls.slice(1, 4), [["models", "auth", "list", "--json"], ["models", "auth", "logout", "openai:person@example.com"], ["models", "auth", "list", "--json"]]);
-    assert.deepEqual(calls[4].slice(0, 4), ["migrate", "apply", "codex", "--from"]);
-    assert.deepEqual(calls[5], ["models", "auth", "list", "--json"]);
-    assert.deepEqual(calls[6].slice(0, 6), ["agent", "exec", "Reply with exactly: ok", "--model", "openai/gpt-6-astra", "--no-auth-env-only"]);
+    assert.deepEqual(calls.slice(1, 5), [["models", "auth", "list", "--json"], ["models", "auth", "list", "--json"], ["models", "auth", "logout", "openai:person@example.com"], ["models", "auth", "list", "--json"]]);
+    assert.deepEqual(calls[5].slice(0, 4), ["migrate", "apply", "codex", "--from"]);
+    assert.deepEqual(calls[6], ["models", "auth", "list", "--json"]);
+    assert.deepEqual(calls[7].slice(0, 6), ["agent", "exec", "Reply with exactly: ok", "--model", "openai/gpt-6-astra", "--no-auth-env-only"]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

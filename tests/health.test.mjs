@@ -40,6 +40,16 @@ test("loginExpiryIssues: quiet 9 days out, a warning inside 7, an error once exp
   assert.equal(expired.fix, CODEX_RECOVERY);
 });
 
+test("loginExpiryIssues: an OAuth sign-in OpenClaw refreshes itself (xai) isn't flagged for its hours-long access token", () => {
+  const now = Date.parse("2026-11-09T19:00:00Z");
+  const xai = { id: "xai:me@example.com", provider: "xai", type: "oauth", expiresAt: "2026-11-10T01:00:00.000Z" };
+  assert.deepEqual(loginExpiryIssues({ profiles: [xai] }, { now }), []);
+  assert.deepEqual(loginExpiryIssues({ profiles: [{ ...xai, expiresAt: "2026-11-09T18:00:00.000Z" }] }, { now }), []);
+  // A static token with an expiry is still tracked.
+  const token = { id: "x:token", provider: "x", type: "token", expiresAt: "2026-11-10T01:00:00.000Z" };
+  assert.deepEqual(loginExpiryIssues({ profiles: [token] }, { now }).map((i) => i.id), ["login-expiring:x:token"]);
+});
+
 function authRun(profiles) {
   return async (_cmd, args) => {
     if (args?.[0] === "models" && args[1] === "auth") return { ok: true, stdout: `note\n${JSON.stringify({ profiles })}` };
