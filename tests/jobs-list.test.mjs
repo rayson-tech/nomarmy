@@ -7,8 +7,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const cliFile = fileURLToPath(new URL("../bin/nomarmy.mjs", import.meta.url));
+// The CLI asks for WSL on native Windows, as tests/cli.test.mjs notes.
+const posixOnly = { skip: process.platform === "win32" ? "the nomarmy CLI runs under WSL on Windows" : false };
 
-test("nomarmy jobs: nomArmy's own cache folders (.base-verification) aren't listed as jobs", (t) => {
+test("nomarmy jobs: nomArmy's own cache folders (.base-verification) aren't listed as jobs", posixOnly, (t) => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "jobs-list-"));
   t.after(() => fs.rmSync(stateDir, { recursive: true, force: true }));
   const jobsRoot = path.join(stateDir, "jobs");

@@ -7,6 +7,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const cliFile = fileURLToPath(new URL("../bin/nomarmy.mjs", import.meta.url));
+// The CLI asks for WSL on native Windows, as tests/cli.test.mjs notes.
+const posixOnly = { skip: process.platform === "win32" ? "the nomarmy CLI runs under WSL on Windows" : false };
 
 // A fake openclaw that refuses `models auth` the way OpenClaw 2026.11 does
 // while its Gateway runs, answers `models status`, and logs every call.
@@ -42,7 +44,7 @@ function setup(t) {
   return { run, fake };
 }
 
-test("agents register: with the Gateway holding OpenClaw's state, saved keys are read from models status, and a new key isn't attempted without stopping it", (t) => {
+test("agents register: with the Gateway holding OpenClaw's state, saved keys are read from models status, and a new key isn't attempted without stopping it", posixOnly, (t) => {
   const { run, fake } = setup(t);
   const result = run("agents", "register");
   assert.equal(result.status, 1);
@@ -54,7 +56,7 @@ test("agents register: with the Gateway holding OpenClaw's state, saved keys are
   assert.ok(!calls.some((c) => c.startsWith("gateway")), "never stops the Gateway without asking");
 });
 
-test("agents add --json --register: with the Gateway holding OpenClaw's state, stdout stays JSON and stderr says how to proceed", (t) => {
+test("agents add --json --register: with the Gateway holding OpenClaw's state, stdout stays JSON and stderr says how to proceed", posixOnly, (t) => {
   const { run, fake } = setup(t);
   const result = run("agents", "add", "api", "--json", "--name", "oai2", "--provider", "openai", "--auth-env", "FAKE_DEEP_KEY", "--register");
   const out = JSON.parse(result.stdout);

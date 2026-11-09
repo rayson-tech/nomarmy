@@ -7,8 +7,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const cliFile = fileURLToPath(new URL("../bin/nomarmy.mjs", import.meta.url));
+// The CLI asks for WSL on native Windows, as tests/cli.test.mjs notes.
+const posixOnly = { skip: process.platform === "win32" ? "the nomarmy CLI runs under WSL on Windows" : false };
 
-test("a yes/no prompt with no terminal says so and changes nothing (it used to exit with an unsettled await)", (t) => {
+test("a yes/no prompt with no terminal says so and changes nothing (it used to exit with an unsettled await)", posixOnly, (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "no-tty-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const config = path.join(dir, "agents.yml");
