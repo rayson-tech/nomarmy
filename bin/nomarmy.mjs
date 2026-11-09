@@ -45,6 +45,7 @@ import { listProcesses, staleSessions, formatStaleSessions } from "../lib/stale-
 import { readSetting, writeSetting, writeEnvLine, userCommonPath, userProfilePath, profilePathFor, tildePath } from "../lib/user-config.mjs";
 import { MIN_PODMAN_VM_MB } from "../lib/doctor.mjs";
 import { liveLeases } from "../lib/slots.mjs";
+import { gatewayOwnsState, profilesFromModelsStatus } from "../lib/openclaw-busy.mjs";
 import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
 import { linkCodex } from "../lib/codex-link.mjs";
 import { recordProbeSuccess, parseOpenclawAuthProfiles, codexImportRecovery, apiKeyProvider } from "../lib/health.mjs";
@@ -1169,8 +1170,66 @@ function runInteractive(cmd, args) {
   catch { return false; }
 }
 
+/** OpenClaw's saved auth profiles; through `models status` when the Gateway holds the state (lib/openclaw-busy.mjs). Null = unreadable. */
+function readAuthProfilesSync() {
+  const listed = runQuiet(openclawCmd(), ["models", "auth", "list", "--json"]);
+  const profiles = listed.ok ? parseOpenclawAuthProfiles(listed.stdout) : null;
+  if (profiles || !gatewayOwnsState(listed.out)) return profiles;
+  const status = runQuiet(openclawCmd(), ["models", "status", "--json"]);
+  return status.ok ? profilesFromModelsStatus(status.stdout) : null;
+}
+
+// OpenClaw 2026.11 saves keys and sign-ins only with its Gateway stopped.
+// Setup stops it once, with the operator's yes, and starts it again on exit.
+let gatewayStoppedForSetup = false;
+const GATEWAY_MANUAL_STEPS = "openclaw gateway stop --force, run this again, then openclaw gateway start";
+
+/** True when OpenClaw can save keys and sign-ins now, stopping the Gateway (asked first) if it holds the state. */
+async function freeOpenclawStateForWrites(rl) {
+  if (gatewayStoppedForSetup) return true;
+  const probe = runQuiet(openclawCmd(), ["models", "auth", "list", "--json"]);
+  if (probe.ok || !gatewayOwnsState(probe.out)) return true;
+  // With no prompt (--json) this goes to stderr, keeping stdout JSON.
+  const say = rl ? console.log : console.error;
+  say(c.yellow("OpenClaw saves keys and sign-ins only while its Gateway is stopped, and the Gateway is running."));
+  const running = liveLeases(path.join(agentStateRoot(), "leases")).length;
+  if (running) {
+    say(c.red(`✗ ${running} nomArmy job(s) are running. Run this again when they're done (\`nomarmy jobs\`).`));
+    return false;
+  }
+  if (!rl || !input.isTTY) {
+    say(c.red(`✗ Stop it first: ${GATEWAY_MANUAL_STEPS}.`));
+    return false;
+  }
+  if (!(await confirm(rl, "Stop the Gateway now, and start it again when this finishes?"))) {
+    say(c.dim(`Stopped; nothing was saved to OpenClaw. To do it by hand: ${GATEWAY_MANUAL_STEPS}.`));
+    return false;
+  }
+  if (!runQuiet(openclawCmd(), ["gateway", "stop", "--force"]).ok) {
+    say(c.red("✗ `openclaw gateway stop --force` failed. Stop the Gateway yourself and run this again."));
+    return false;
+  }
+  gatewayStoppedForSetup = true;
+  say(c.dim("Gateway stopped; it starts again when this finishes."));
+  return true;
+}
+
+/** Starts the Gateway again if setup stopped it. */
+function restartGatewayIfStopped() {
+  if (!gatewayStoppedForSetup) return;
+  gatewayStoppedForSetup = false;
+  if (runQuiet(openclawCmd(), ["gateway", "start"]).ok) console.log(c.dim("Gateway started again."));
+  else console.log(c.red("✗ Starting the Gateway again failed. Run: openclaw gateway start"));
+}
+
 async function confirm(rl, question, { defaultYes = true } = {}) {
-  const answer = (await rl.question(c.bold(`${question} ${defaultYes ? "[Y/n]" : "[y/N]"} `))).trim().toLowerCase();
+  // With no terminal (a `!` command in Claude Code, a pipe), stdin ends and
+  // the question never resolves: node exits with "unsettled top-level
+  // await" and the command silently did nothing. Say so instead.
+  const ended = new Promise((resolve) => rl.once("close", () => resolve(null)));
+  const raw = await Promise.race([rl.question(c.bold(`${question} ${defaultYes ? "[Y/n]" : "[y/N]"} `)), ended]);
+  if (raw === null) throw new Error(`No answer to "${question}": this needs an interactive terminal${json ? "" : ", or --json where the command takes it"}. Nothing was changed.`);
+  const answer = raw.trim().toLowerCase();
   if (!answer) return defaultYes;
   return answer === "y" || answer === "yes";
 }
@@ -1264,9 +1323,7 @@ async function ensureVendorAuth(rl, vendorKey) {
 
 function hasUsableOpenclawAuthProfile(provider) {
   // Same OpenClaw command and JSON shape used by health's login-expiry check.
-  const result = runQuiet(openclawCmd(), ["models", "auth", "list", "--json"]);
-  if (!result.ok) return false;
-  const profiles = parseOpenclawAuthProfiles(result.stdout);
+  const profiles = readAuthProfilesSync();
   return profiles?.some((profile) => {
     if (profile.provider !== provider) return false;
     if (profile.expiresAt == null) return true;
@@ -1347,6 +1404,7 @@ function reapProbeSandbox(stateDir) {
  * login is confirmed; other providers link when catalog or auth checks fail.
  */
 async function openclawProviderLogin(vendor, rl) {
+  if (!(await freeOpenclawStateForWrites(rl))) return false;
   if (vendor === SUBSCRIPTION_VENDORS.codex) return linkCodex({
     run: runQuiet, command: openclawCmd(), isTTY: Boolean(input.isTTY),
     importLogin: flag("link-openclaw"), removeEmailProfiles: flag("remove-email-profiles"),
@@ -1453,14 +1511,21 @@ async function cmdAgentsRegister() {
   const agents = fileAgentsOrExit();
   const api = Object.entries(agents).filter(([n, a]) => a.kind === "api" && (!name || n === name));
   if (name && !api.length) throw new Error(Object.prototype.hasOwnProperty.call(agents, name) ? `"${name}" isn't an api agent; only api agents have a key to register.` : `Unknown agent "${name}". Your agents: ${Object.keys(agents).join(", ")}`);
-  const listed = runQuiet(openclawCmd(), ["models", "auth", "list", "--json"]);
-  const saved = new Set((listed.ok ? parseOpenclawAuthProfiles(listed.stdout) ?? [] : []).map((p) => p.provider));
+  const saved = new Set((readAuthProfilesSync() ?? []).map((p) => p.provider));
   const results = [];
-  for (const [n, agent] of api) {
-    const provider = apiKeyProvider(n, agent);
-    if (!name && saved.has(provider)) { results.push({ name: n, status: "already" }); continue; }
-    if (!process.env[agent.auth_env]) { results.push({ name: n, status: "missing", env: agent.auth_env }); continue; }
-    results.push({ name: n, status: registerProviderWithOpenClaw(apiAgentAsPoolEntry(n, agent)) ? "registered" : "failed" });
+  const rl = input.isTTY && !json ? createInterface({ input, output }) : null;
+  let writable = null;
+  try {
+    for (const [n, agent] of api) {
+      const provider = apiKeyProvider(n, agent);
+      if (!name && saved.has(provider)) { results.push({ name: n, status: "already" }); continue; }
+      if (!process.env[agent.auth_env]) { results.push({ name: n, status: "missing", env: agent.auth_env }); continue; }
+      writable ??= await freeOpenclawStateForWrites(rl);
+      results.push({ name: n, status: writable && registerProviderWithOpenClaw(apiAgentAsPoolEntry(n, agent)) ? "registered" : "failed" });
+    }
+  } finally {
+    rl?.close();
+    restartGatewayIfStopped();
   }
   // Text only: registration itself prints as it goes.
   if (!api.length) console.log(c.dim("No api agents in agents.yml."));
@@ -1514,6 +1579,7 @@ async function cmdAgentsAdd() {
     return await addSubscriptionAgent(rl, agents);
   } finally {
     rl.close();
+    restartGatewayIfStopped();
   }
 }
 
@@ -1590,7 +1656,7 @@ async function addApiAgent(rl, agents) {
   console.log(c.green(`\n✓ Saved agent "${name}": ${describeAgentLabel(saved)}.`));
 
   console.log(`\n${c.bold("→")} Registering the key with OpenClaw`);
-  const registered = registerProviderWithOpenClaw({ ...apiAgentAsPoolEntry(name, saved), apiKeyOverride: apiKey });
+  const registered = (await freeOpenclawStateForWrites(rl)) && registerProviderWithOpenClaw({ ...apiAgentAsPoolEntry(name, saved), apiKeyOverride: apiKey });
   if (registered && saved.model) {
     console.log(`\n${c.bold("→")} Test call`);
     const provId = saved.provider === "openclaw" ? saved.openclaw_provider : ["bedrock", "azure-openai", "openai-compatible"].includes(saved.provider) ? name : saved.provider;
@@ -1751,7 +1817,8 @@ async function addOpenclawSignInAgent(rl, agents, presetKey) {
   if (plugin && !runInteractive(openclawCmd(), ["plugins", "install", plugin])) {
     console.log(c.red(`✗ Installing ${plugin} failed. Run \`openclaw plugins install ${plugin}\` yourself to see why.`)); process.exitCode = 1; return;
   }
-  const profiles = () => parseOpenclawAuthProfiles(runQuiet(openclawCmd(), ["models", "auth", "list", "--json"]).stdout) ?? [];
+  if (!(await freeOpenclawStateForWrites(rl))) { process.exitCode = 1; return; }
+  const profiles = () => readAuthProfilesSync() ?? [];
   const signedIn = () => profiles().some((profile) => profile.provider === provider && profile.type !== "api_key"
     && (profile.expiresAt == null || Date.parse(profile.expiresAt) > Date.now()));
   if (!signedIn() || await confirm(rl, `OpenClaw already has a ${provider} sign-in. Sign in again (a different account, or to refresh it)?`, { defaultYes: false })) {
@@ -1829,6 +1896,7 @@ async function cmdAgentsAddJson() {
   }
   if (kind === "subscription" && agent.provider === "openai" && (flag("link-openclaw") || flag("remove-email-profiles"))) {
     if (!readLoginStatus("codex").loggedIn) throw new Error("Confirm Codex CLI login first: codex login");
+    if (!(await freeOpenclawStateForWrites(null))) throw new Error(`OpenClaw's Gateway holds its state, so the Codex login can't be imported; nothing was written. ${GATEWAY_MANUAL_STEPS}.`);
     const linked = await linkCodex({ run: runQuiet, command: openclawCmd(),
       importLogin: flag("link-openclaw"), removeEmailProfiles: flag("remove-email-profiles"), print: (message) => console.error(message) });
     if (!linked) throw new Error(flag("link-openclaw")
@@ -1841,7 +1909,7 @@ async function cmdAgentsAddJson() {
   const written = saveAgents({ ...agents, [name]: agent });
   const saved = written[name];
   let registered = null, mcpUpdated = false;
-  if (kind === "api" && flag("register")) registered = registerProviderWithOpenClaw(apiAgentAsPoolEntry(name, saved));
+  if (kind === "api" && flag("register")) registered = (await freeOpenclawStateForWrites(null)) && registerProviderWithOpenClaw(apiAgentAsPoolEntry(name, saved));
   if (kind === "api" && flag("update-mcp")) {
     connectClaude({ nomarmyRoot, run: (cmd, args2, opts = {}) => execFileSync(cmd, args2, { stdio: "ignore", ...opts }), extraEnv: { [saved.auth_env]: "registered" } });
     mcpUpdated = true;
@@ -2973,7 +3041,8 @@ function collectJobs({ recent = 8, runId = null, projectDir = null } = {}) {
   const root = jobsRootDir();
   let names = [];
   try { names = fs.readdirSync(root); } catch { return { running: [], recent: [] }; }
-  const jobs = names.map((name) => {
+  // Dot folders are nomArmy's own caches (.base-verification), not jobs.
+  const jobs = names.filter((name) => !name.startsWith(".")).map((name) => {
     const dir = path.join(root, name);
     const status = readJsonSafe(path.join(dir, "status.json")) ?? {};
     const meta = readJsonSafe(path.join(dir, "metadata.json")) ?? readJsonSafe(path.join(dir, "failure.json"));

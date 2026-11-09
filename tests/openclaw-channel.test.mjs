@@ -87,11 +87,21 @@ test("upgradeOpenclaw latest: a model that answered before and fails after rolls
   assert.ok(f.printed.some((line) => line.includes(`Rolled back to OpenClaw ${PINNED_OPENCLAW_VERSION}`)));
 });
 
+test("upgradeOpenclaw: a model that failed before and answers on the new release is reported as fixed", async (t) => {
+  const f = fakeUpgrade(t, { failedBefore: ["meta/muse-spark-1.3"] });
+  const result = await f.go();
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.fixed, ["meta/muse-spark-1.3"]);
+  assert.ok(f.printed.some((line) => line.includes(`Now answering on OpenClaw ${NEWER}`) && line.includes("meta/muse-spark-1.3")));
+});
+
 test("upgradeOpenclaw: a model that already failed before isn't the upgrade's fault, and tested never probes", async (t) => {
   const f = fakeUpgrade(t, { broken: ["meta/muse-spark-1.3"], failedBefore: ["meta/muse-spark-1.3"] });
   const result = await f.go();
   assert.equal(result.ok, true);
-  assert.deepEqual(f.probes.filter(([v]) => v === NEWER).map(([, id]) => id), ["openai/gpt-6.1-sol"]);
+  assert.deepEqual(f.probes.filter(([v]) => v === NEWER).map(([, id]) => id).sort(), ["meta/muse-spark-1.3", "openai/gpt-6.1-sol"], "the failed model is tested again, but its failure doesn't roll back");
+  assert.equal(result.fixed, undefined);
+  assert.equal(result.rolledBack, undefined);
   const tested = fakeUpgrade(t, { channel: "tested" });
   await tested.go();
   assert.deepEqual(tested.probes, []);

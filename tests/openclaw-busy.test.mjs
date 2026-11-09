@@ -1,8 +1,8 @@
 import "./helpers/isolate-global-config.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { openclawErrorLine, openclawStateBusy, serialOpenclawRun } from "../lib/openclaw-busy.mjs";
-import { runtimeIssues } from "../lib/health.mjs";
+import { gatewayOwnsState, openclawErrorLine, openclawStateBusy, profilesFromModelsStatus, serialOpenclawRun } from "../lib/openclaw-busy.mjs";
+import { readOpenclawAuthProfiles, runtimeIssues } from "../lib/health.mjs";
 import { withSandboxProvisioningRetry } from "../lib/openclaw-run.mjs";
 
 // The real message, from a user's trace of a health run with no Gateway.
@@ -98,4 +98,40 @@ test("a job start refused by OpenClaw's state lock is retried; one that ran firs
     await assert.rejects(withSandboxProvisioningRetry(async () => { calls++; clock += 120000; throw new Error(BUSY); }, { delayMs: 1 }), /offline maintenance/);
     assert.equal(calls, 1);
   } finally { Date.now = realNow; }
+});
+
+// OpenClaw 2026.11.1's real refusal with the Gateway running, and the shape of
+// `models status --json` (trimmed) that still reads the same profiles.
+const GATEWAY = JSON.stringify({ ok: false, error: { type: "cli_error", message: "Cannot admit models.auth for system/agent credentials in state root /home/u/.openclaw: This operation requires exclusive offline state ownership. No local mutation was attempted." } });
+const STATUS = JSON.stringify({ auth: { oauth: { profiles: [
+  { profileId: "openai:account-123", provider: "openai", type: "oauth", source: "store", label: "openai:account-123 (Codex import)", status: "ok", expiresAt: Date.parse("2099-01-01T00:00:00.000Z") },
+  { profileId: "llama-cpp:nomarmy-local", provider: "llama-cpp", type: "api_key", source: "store", label: "llama-cpp:nomarmy-local", status: "static" },
+] } } });
+
+test("profilesFromModelsStatus: models status rows in models auth list's shape", () => {
+  assert.equal(gatewayOwnsState(GATEWAY), true);
+  assert.equal(gatewayOwnsState(BUSY), false);
+  assert.deepEqual(profilesFromModelsStatus(`log line\n${STATUS}`), [
+    { id: "openai:account-123", provider: "openai", type: "oauth", label: "openai:account-123 (Codex import)", expiresAt: "2099-01-01T00:00:00.000Z" },
+    { id: "llama-cpp:nomarmy-local", provider: "llama-cpp", type: "api_key", label: "llama-cpp:nomarmy-local" },
+  ]);
+  assert.equal(profilesFromModelsStatus("not json"), null);
+  assert.equal(profilesFromModelsStatus(JSON.stringify({ auth: {} })), null);
+});
+
+test("health: with the Gateway holding OpenClaw's state, sign-ins are read from models status, not reported unreadable", async () => {
+  const calls = [];
+  const run = async (cmd, args) => {
+    calls.push(args.join(" "));
+    if (args[0] === "models" && args[1] === "auth") return { ok: false, stdout: GATEWAY, stderr: "" };
+    if (args[0] === "models" && args[1] === "status") return { ok: true, stdout: STATUS };
+    return { ok: false, stdout: "" };
+  };
+  const { profiles } = await readOpenclawAuthProfiles(run, "openclaw");
+  assert.deepEqual(profiles.map((p) => p.id), ["openai:account-123", "llama-cpp:nomarmy-local"]);
+  assert.deepEqual(await runtimeIssues({ run, openclawCmd: "openclaw", agents: codex }), []);
+  assert.ok(calls.includes("models status --json"));
+  // Any other failure isn't retried through models status.
+  const other = async (cmd, args) => args[1] === "auth" ? { ok: false, stdout: "", stderr: "boom" } : { ok: true, stdout: STATUS };
+  assert.equal((await readOpenclawAuthProfiles(other, "openclaw")).profiles, null);
 });
