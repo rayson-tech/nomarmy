@@ -5,7 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { gatewayAgentId, gatewayAgentSettings, gatewayResultAsExecResult, runOnGateway, GATEWAY_AGENT_PREFIX } from "../lib/openclaw-gateway-route.mjs";
+import { gatewayAgentId, gatewayAgentSettings, gatewayResultAsExecResult, runOnGateway, GATEWAY_AGENT_PREFIX,
+  gatewayAgentsCreateRaced, withGatewayRegistryLock, MAX_AGENT_CREATE_RETRIES } from "../lib/openclaw-gateway-route.mjs";
+import { gatewayStartRaceNote } from "../lib/openclaw-run.mjs";
 import { gatewayRouteIssues } from "../lib/health.mjs";
 import { agentsFileSchema } from "../lib/agents.mjs";
 import { routeForProvider } from "../lib/model-probe.mjs";
@@ -14,7 +16,7 @@ const tmp = (t) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), "gw-route-"
 
 // A fake OpenClaw for runOnGateway: an in-memory config and agent list, a
 // call log, and switches for the ways a step can fail.
-function fakeOpenclaw({ skipBootstrap = true, failSet = false, failWorkspaceSwap = false, turn = null } = {}) {
+function fakeOpenclaw({ skipBootstrap = true, failSet = false, failWorkspaceSwap = false, turn = null, addErrors = [] } = {}) {
   const calls = [], config = {}, agents = new Map(), trashed = [];
   if (skipBootstrap !== undefined) config["agents.defaults.skipBootstrap"] = skipBootstrap;
   const fail = (message) => Promise.reject(Object.assign(new Error(message), { stdout: "", stderr: message }));
@@ -22,6 +24,7 @@ function fakeOpenclaw({ skipBootstrap = true, failSet = false, failWorkspaceSwap
     calls.push(args.join(" "));
     const [a, b] = args;
     if (a === "config" && b === "get") return args[2] in config ? { stdout: JSON.stringify(config[args[2]]), stderr: "" } : fail("Config path is valid but unset");
+    if (a === "agents" && b === "add" && addErrors.length) return fail(addErrors.shift());
     if (a === "agents" && b === "add") { agents.set(args[2], { workspace: args[args.indexOf("--workspace") + 1] }); config[`agents.entries.${args[2]}.workspace`] = args[args.indexOf("--workspace") + 1]; return { stdout: "{}", stderr: "" }; }
     if (a === "config" && b === "set" && args[2] === "--batch-json") { if (failSet) return fail("invalid path"); for (const op of JSON.parse(args[3])) config[op.path] = op.value; return { stdout: "", stderr: "" }; }
     if (a === "config" && b === "set") {
@@ -142,4 +145,100 @@ test("health: a Gateway-route agent needs skipBootstrap, and leftover temporary 
   assert.match(issues[1].title, /aaaaaa/); assert.doesNotMatch(issues[1].title, /bbbbbb/);
   assert.match(issues[1].fix, /workspace .* && openclaw agents delete/);
   assert.deepEqual(await gatewayRouteIssues({ run: run(true), openclawCmd: "openclaw", agents: { grok: { ...agents.grok, route: undefined } } }), []);
+});
+
+// "agents.create ... owner changed": the Gateway refusing to add a job's
+// agent because its agent registry changed under it (another job's setup or
+// removal). It killed a continue_from follow-up before it started.
+const RACED = "GatewayRequestError: agents.create failed: agent registry owner changed (expected rev 41, found 42)";
+
+test("gatewayAgentsCreateRaced: only a refused agents.create with 'owner changed'", () => {
+  assert.equal(gatewayAgentsCreateRaced(RACED), true);
+  assert.equal(gatewayAgentsCreateRaced("[gateway] agents.create: Owner changed"), true);
+  assert.equal(gatewayAgentsCreateRaced("agents.delete failed: owner changed"), false);
+  assert.equal(gatewayAgentsCreateRaced("agents.create failed: agent already exists"), false);
+  assert.equal(gatewayAgentsCreateRaced("owner changed"), false);
+  assert.equal(gatewayAgentsCreateRaced(null), false);
+});
+
+test("runOnGateway: a raced agents.create is retried with backoff before the worker starts, and reported", async (t) => {
+  const oc = fakeOpenclaw({ addErrors: [RACED, RACED] });
+  const slept = [], retries = [], logged = [];
+  const j = job(t, oc, { sleep: async (ms) => { slept.push(ms); }, onStartRetry: (n, detail) => retries.push([n, detail]), log: (l) => logged.push(l) });
+  const result = await j.go();
+  assert.match(result.stdout, /STATUS: done/);
+  assert.equal(result.startRetries, 2);
+  assert.deepEqual(retries.map(([n]) => n), [1, 2]);
+  assert.match(retries[0][1], /owner changed/);
+  assert.deepEqual(slept, [1000, 2000]);
+  assert.equal(oc.calls.filter((c) => c.startsWith("agents add")).length, 3);
+  assert.equal(oc.calls.filter((c) => c.startsWith("agent --agent")).length, 1, "one turn");
+  assert.match(logged.join("\n"), /owner changed.*retry 1\/3/);
+  assert.equal(oc.trashed.length, 1);
+});
+
+test("runOnGateway: a race that doesn't clear fails before the worker starts, saying so", async (t) => {
+  const oc = fakeOpenclaw({ addErrors: Array(MAX_AGENT_CREATE_RETRIES + 1).fill(RACED) });
+  const j = job(t, oc, { sleep: async () => {} });
+  await assert.rejects(j.go(), (e) => /Adding the Gateway agent/.test(e.message) && /registry race, retried 3 time\(s\) before the worker started/.test(e.message) && e.gatewayStartRetries === 3);
+  assert.equal(oc.calls.filter((c) => c.startsWith("agents add")).length, MAX_AGENT_CREATE_RETRIES + 1);
+  assert.ok(!oc.calls.some((c) => c.startsWith("agent --agent")), "no turn, so no model spend");
+});
+
+test("runOnGateway: any other agents add failure is not retried", async (t) => {
+  const oc = fakeOpenclaw({ addErrors: ["agents.create failed: agent already exists"] });
+  const j = job(t, oc, { sleep: async () => assert.fail("no retry") });
+  await assert.rejects(j.go(), (e) => /already exists/.test(e.message) && !/race/.test(e.message));
+  assert.equal(oc.calls.filter((c) => c.startsWith("agents add")).length, 1);
+});
+
+test("runOnGateway: a turn that started is never retried, whatever it says", async (t) => {
+  const oc = fakeOpenclaw({ turn: () => Promise.reject(Object.assign(new Error("exit 1"), { stdout: "", stderr: RACED })) });
+  const j = job(t, oc, { sleep: async () => assert.fail("no retry") });
+  await assert.rejects(j.go(), (e) => e.stderr === RACED);
+  assert.equal(oc.calls.filter((c) => c.startsWith("agent --agent")).length, 1);
+  assert.equal(oc.calls.filter((c) => c.startsWith("agents add")).length, 1);
+});
+
+test("runOnGateway: jobs' registry writes are serialized on the lock, so none races another's", async (t) => {
+  // A Gateway that refuses agents.create while any other registry write is in flight.
+  const lockDir = tmp(t);
+  let inFlight = 0, races = 0;
+  const base = fakeOpenclaw();
+  const writes = (args) => (args[0] === "agents" && (args[1] === "add" || args[1] === "delete")) || (args[0] === "config" && args[1] === "set");
+  const run = async (cmd, args, opts) => {
+    if (!writes(args)) return base.run(cmd, args, opts);
+    if (args[1] === "add" && inFlight > 0) { races++; throw Object.assign(new Error(RACED), { stdout: "", stderr: RACED }); }
+    inFlight++;
+    try { await new Promise((r) => setTimeout(r, 15)); return await base.run(cmd, args, opts); } finally { inFlight--; }
+  };
+  const go = (name) => {
+    const dir = tmp(t), cwd = path.join(dir, "wt"), scratch = path.join(dir, "rt");
+    fs.mkdirSync(cwd); fs.mkdirSync(scratch);
+    const promptFile = path.join(dir, "brief.txt"); fs.writeFileSync(promptFile, "x\n");
+    const agentId = gatewayAgentId(name);
+    return runOnGateway({ run, agentId, cwd, model: "xai/grok-4.7", promptFile, thinking: "high", timeoutSeconds: 60,
+      settings: gatewayAgentSettings(agentId, null), scratchDir: scratch, lockDir, sleep: async () => {} });
+  };
+  const results = await Promise.all([go("worker-a"), go("worker-b"), go("worker-c")]);
+  assert.equal(races, 0, "no agents.create ran while another registry write was in flight");
+  assert.deepEqual(results.map((r) => r.startRetries), [0, 0, 0]);
+  assert.equal(base.trashed.length, 3);
+  assert.deepEqual(fs.readdirSync(lockDir), [], "the lock is released");
+});
+
+test("withGatewayRegistryLock: a lock held past the wait is logged and the job goes ahead", async (t) => {
+  const lockDir = tmp(t), logged = [];
+  let release;
+  const holder = withGatewayRegistryLock(lockDir, () => new Promise((r) => { release = r; }));
+  await new Promise((r) => setTimeout(r, 20));
+  const value = await withGatewayRegistryLock(lockDir, async () => 7, { waitMs: 50, log: (l) => logged.push(l) });
+  assert.equal(value, 7);
+  assert.match(logged.join("\n"), /lock still held/);
+  release(); await holder;
+  assert.equal(await withGatewayRegistryLock(null, async () => 8), 8);
+});
+
+test("gatewayStartRaceNote: the job record says the start was retried and cost nothing", () => {
+  assert.match(gatewayStartRaceNote(2), /agents\.create: owner changed\) retried 2 time\(s\) before the worker started/);
 });
