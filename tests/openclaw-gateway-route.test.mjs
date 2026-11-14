@@ -147,15 +147,18 @@ test("health: a Gateway-route agent needs skipBootstrap, and leftover temporary 
   assert.deepEqual(await gatewayRouteIssues({ run: run(true), openclawCmd: "openclaw", agents: { grok: { ...agents.grok, route: undefined } } }), []);
 });
 
-// "agents.create ... owner changed": the Gateway refusing to add a job's
-// agent because its agent registry changed under it (another job's setup or
-// removal). It killed a continue_from follow-up before it started.
-const RACED = "GatewayRequestError: agents.create failed: agent registry owner changed (expected rev 41, found 42)";
+// OpenClaw's own wording (src/cli/local-state-owner.ts): the Gateway refusing
+// agents.create because its owner or runtime config changed mid-call. It
+// killed a continue_from follow-up before it started.
+const RACED = "Gateway owning /home/u/.openclaw on local port 18789 could not complete agents.create for nomarmy-job-x: Gateway state owner or requester changed; rerun against the current owner.. No local mutation was attempted. Update the Gateway or fix authentication and retry.";
+const BEFORE_DISPATCH = "Cannot admit agents.create for nomarmy-job-x in state root /home/u/.openclaw: Gateway owner changed before dispatch. No local mutation was attempted. Inspect openclaw gateway status.";
+const PARTIAL = "Gateway owning /home/u/.openclaw on local port 18789 could not complete agents.create for nomarmy-job-x: socket hang up after Gateway owner changed. The outcome may be partial; inspect the operation's status and the target before retrying. No local fallback was attempted.";
 
-test("gatewayAgentsCreateRaced: only a refused agents.create with 'owner changed'", () => {
+test("gatewayAgentsCreateRaced: only a refused agents.create that OpenClaw says changed nothing", () => {
   assert.equal(gatewayAgentsCreateRaced(RACED), true);
-  assert.equal(gatewayAgentsCreateRaced("[gateway] agents.create: Owner changed"), true);
-  assert.equal(gatewayAgentsCreateRaced("agents.delete failed: owner changed"), false);
+  assert.equal(gatewayAgentsCreateRaced(BEFORE_DISPATCH), true);
+  assert.equal(gatewayAgentsCreateRaced(PARTIAL), false, "an outcome that may be partial is never retried");
+  assert.equal(gatewayAgentsCreateRaced(RACED.replace("agents.create", "agents.delete")), false);
   assert.equal(gatewayAgentsCreateRaced("agents.create failed: agent already exists"), false);
   assert.equal(gatewayAgentsCreateRaced("owner changed"), false);
   assert.equal(gatewayAgentsCreateRaced(null), false);
@@ -169,18 +172,18 @@ test("runOnGateway: a raced agents.create is retried with backoff before the wor
   assert.match(result.stdout, /STATUS: done/);
   assert.equal(result.startRetries, 2);
   assert.deepEqual(retries.map(([n]) => n), [1, 2]);
-  assert.match(retries[0][1], /owner changed/);
-  assert.deepEqual(slept, [1000, 2000]);
+  assert.match(retries[0][1], /owner or requester changed/);
+  assert.deepEqual(slept, [2000, 4000]);
   assert.equal(oc.calls.filter((c) => c.startsWith("agents add")).length, 3);
   assert.equal(oc.calls.filter((c) => c.startsWith("agent --agent")).length, 1, "one turn");
-  assert.match(logged.join("\n"), /owner changed.*retry 1\/3/);
+  assert.match(logged.join("\n"), /config changed mid-call; nothing was changed.*retry 1\/3/);
   assert.equal(oc.trashed.length, 1);
 });
 
 test("runOnGateway: a race that doesn't clear fails before the worker starts, saying so", async (t) => {
   const oc = fakeOpenclaw({ addErrors: Array(MAX_AGENT_CREATE_RETRIES + 1).fill(RACED) });
   const j = job(t, oc, { sleep: async () => {} });
-  await assert.rejects(j.go(), (e) => /Adding the Gateway agent/.test(e.message) && /registry race, retried 3 time\(s\) before the worker started/.test(e.message) && e.gatewayStartRetries === 3);
+  await assert.rejects(j.go(), (e) => /Adding the Gateway agent/.test(e.message) && /config changed mid-call, retried 3 time\(s\) before the worker started/.test(e.message) && e.gatewayStartRetries === 3);
   assert.equal(oc.calls.filter((c) => c.startsWith("agents add")).length, MAX_AGENT_CREATE_RETRIES + 1);
   assert.ok(!oc.calls.some((c) => c.startsWith("agent --agent")), "no turn, so no model spend");
 });
@@ -188,7 +191,7 @@ test("runOnGateway: a race that doesn't clear fails before the worker starts, sa
 test("runOnGateway: any other agents add failure is not retried", async (t) => {
   const oc = fakeOpenclaw({ addErrors: ["agents.create failed: agent already exists"] });
   const j = job(t, oc, { sleep: async () => assert.fail("no retry") });
-  await assert.rejects(j.go(), (e) => /already exists/.test(e.message) && !/race/.test(e.message));
+  await assert.rejects(j.go(), (e) => /already exists/.test(e.message) && !/mid-call/.test(e.message));
   assert.equal(oc.calls.filter((c) => c.startsWith("agents add")).length, 1);
 });
 
@@ -240,5 +243,5 @@ test("withGatewayRegistryLock: a lock held past the wait is logged and the job g
 });
 
 test("gatewayStartRaceNote: the job record says the start was retried and cost nothing", () => {
-  assert.match(gatewayStartRaceNote(2), /agents\.create: owner changed\) retried 2 time\(s\) before the worker started/);
+  assert.match(gatewayStartRaceNote(2), /agents\.create \(owner changed: .*\) and nomArmy retried 2 time\(s\) before the worker started/);
 });
