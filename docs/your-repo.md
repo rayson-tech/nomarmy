@@ -83,6 +83,14 @@ The sandbox has no network, so dependencies are installed when its image is buil
 
 The worker's own tool calls and nomArmy's verification use the same image. `NOMARMY_AGENT_IMAGE` overrides detection, and `environment.node.install: false` turns the Node install off.
 
+**Node version.** The base image has Node 26 (`node:26-bookworm-slim`, from `docker/Dockerfile`). A repo that pins another major gets its image built from `node:<major>-bookworm-slim` instead, since the sandbox can't download a Node at run time. nomArmy reads the pin from your checkout, never a job's worktree, in this order: `environment.node.version` in `.nomarmy.yml`; the root's `.nvmrc`, `.node-version`, `volta.node`, `engines.node` and `.tool-versions`; then, if the root pins nothing, the other packages' pins and CI's `actions/setup-node` `node-version`, which must all name the same major. Only exact versions and single-major ranges count (`22`, `v22.11.0`, `22.x`, `^22.11`, `>=22 <23`, `lts/jod`). An open range such as `>=18` keeps Node 26. A spec that names several majors (`^20 || ^22`), pins that disagree, or a major older than 18 also keeps Node 26, and the job records a note saying why. The worker's brief states which Node it has.
+
+```yaml
+environment:
+  node:
+    version: 22
+```
+
 ```yaml
 environment:
   python:
