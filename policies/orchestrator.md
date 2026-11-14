@@ -22,6 +22,7 @@ Trust boundary:
 - Worker report is a claim.
 - Coordinator Git record is authoritative.
 - Malformed/truncated report, partial/blocked status, failed verification, missing commit, or worktree integrity failure means incomplete work; retain the worktree.
+- Exception you may take after review: a partial/blocked job whose change passed independent verification can be committed with `local_worker_commit` and your reason. nomArmy checks the worktree is exactly what it verified.
 - Never accept worker assertions about tests or changes without reviewing evidence appropriate to materiality.
 
 Execution layer:

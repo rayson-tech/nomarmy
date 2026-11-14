@@ -62,6 +62,7 @@ What the General uses. Every job takes the same shape: a `task`, optional `accep
 | `stats` | What the job records show for this repo (or `all_repos`, or another `repo` by name), filtered by `since`, `until`, `role` and `model`; `format: json` for the raw numbers. |
 | `local_worker_jobs` | Recent job records; `full: true` for the complete manifest. |
 | `local_worker_config` | This repo's verification profiles. |
+| `local_worker_commit` | Commits a finished job held back only by the worker's own claim (STATUS partial or blocked, or an unrecoverable report) when independent verification passed, after the General's review. Refuses unless every other commit gate held and the worktree is byte-for-byte what was verified. Commits on the job's branch only. |
 | `local_worker_cleanup` | Removes one worktree and branch. Recognizes a cherry-picked branch as integrated by content. |
 | `local_worker_sweep` | Removes worktrees that are provably empty. `dry_run` previews. |
 

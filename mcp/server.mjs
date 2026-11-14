@@ -15,6 +15,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import fs from "node:fs";
 import { diffFor, patchText, registerJobRecordWorktree, COMMIT_SHOW_MAX_BYTES } from "../lib/commit-diff.mjs";
+import { commitVerifiedJob, GENERAL_COMMIT_REASON_MIN } from "../lib/general-commit.mjs";
 import { maxVerifications } from "../lib/limits.mjs";
 import { startDetachedJob, readDetachedJob } from "../lib/detached-job.mjs";
 import os from "node:os";
@@ -102,7 +103,7 @@ const server = new McpServer({ name: "nomarmy-local-worker", version: VERSION },
 const ctx = createServerContext();
 const { projectDir, stateRoot, jobsRoot, runsRoot, leasesRoot, slotsRoot } = ctx;
 const { run, git, gitRaw } = createProcess(ctx);
-const { collectGitRecord, createCoordinatorCommit, makeIdleDiffTick } = createGitRecord({ run, git, gitRaw });
+const { collectGitRecord, createCoordinatorCommit, makeIdleDiffTick, worktreeFingerprint } = createGitRecord({ run, git, gitRaw });
 export function currentMaxWorkers() { return budgetState.currentMaxWorkers(); }
 
 // Importing this module (the contract tests do) must not touch the filesystem
@@ -346,7 +347,7 @@ const { executeJob, executeImplement, executeScout, executeDecompose } = createE
   jevSettings: () => jevSettings(),
   judgeSettings: () => judgeSettings({ agents: agentsConfig().agents, providerOf: agentProviderId, runsOnHost: agentRunsToolsOnHost }),
   VERSION, projectDir, jobsRoot, run, git, gitRaw,
-  collectGitRecord, createCoordinatorCommit, ensureJobsRoot, slug, assertRepo,
+  collectGitRecord, createCoordinatorCommit, worktreeFingerprint, ensureJobsRoot, slug, assertRepo,
   resolveBase, workerModelThinkingSupported, budgetState, execution, buildMetrics,
   resolveReasoningApplied, recordedBudgets, runOpenClaw, sweepStaleSandboxContainers,
   verificationFlow, normalizeVerification, runIndependentVerification,
@@ -808,6 +809,16 @@ server.tool("commit_show", "Read-only: what a job or a commit changed. A job id 
       ...(shown.withheld.length ? { withheld: shown.withheld } : {}) };
     return toolText(`${JSON.stringify(summary, null, 2)}\n\n${patchText(shown)}`);
   } catch (error) { return toolText(`commit_show: ${error.message}`, true); }
+});
+server.tool("local_worker_commit", "Commit a finished implement job the coordinator held back only because of the worker's own claim -- it reported STATUS partial or blocked (for example it couldn't run a slow suite or fetch a toolchain offline), or its report was unrecoverable -- while nomArmy's independent verification of the change passed. The job's issues say when this applies. Review the change first (commit_show <job_id>); you own acceptance. Refuses unless the job's record shows every mechanical gate of a normal commit held (verification passed, revert check, no possible secret, no changed verification inputs, refactor contract), the worktree pointer is the one nomArmy sealed, and the worktree is byte-for-byte what was verified. Commits on the job's own branch only; nothing is merged. Use this instead of a follow-up job that changes nothing and reports done.", {
+  job_id: z.string().min(1).regex(JOB_ID_RE),
+  reason: z.string().min(GENERAL_COMMIT_REASON_MIN).max(1000).describe("What you reviewed and why the change is acceptable despite the worker's claim (e.g. \"NOT DONE was only the full UI suite, which verification ran and passed\"). Recorded on the job and in the commit message."),
+}, async ({ job_id, reason }) => {
+  try {
+    await assertRepo();
+    const result = await commitVerifiedJob({ jobsRoot: ensureJobsRoot(), projectDir, jobId: job_id, reason, git, createCoordinatorCommit, worktreeFingerprint });
+    return toolText(JSON.stringify(result, null, 2));
+  } catch (error) { return toolText(`local_worker_commit: ${error.message}`, true); }
 });
 server.tool("local_worker_jobs", "List recent job records for review/recovery, including jobs still running or orphaned by a server restart. Does not modify repositories. Returns a small PROJECTION per job by default (jobId, outcome, branch/commit, worktreeRetained, filesChanged, timing, issues) -- enough to decide what needs recovery or cleanup without pulling every job's full execution record (objective text, budgets, git records, ...) into context, which can exceed the tool result size past a handful of jobs. Pass full: true only for the specific job(s) you already know need deep inspection.", { limit: z.number().int().min(1).max(50).default(10), full: z.boolean().default(false).describe("Return each job's complete, uncompacted manifest instead of the small default projection. Requesting this across many jobs at once risks exceeding the tool result size cap -- prefer the default projection first, then a targeted look (e.g. local_worker_status) at just the job(s) that need it.") }, async ({ limit, full }) => {
   const dirs = fs.readdirSync(ensureJobsRoot(), { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name).sort().reverse().slice(0, limit);

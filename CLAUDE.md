@@ -27,6 +27,8 @@ A local implement job is not complete if any of these are true:
 - worktree `.git` pointer integrity fails
 - material verification is inadequate
 
+A partial/blocked job whose change passed independent verification can be committed by you with `local_worker_commit` after you review it; nomArmy refuses unless the worktree is exactly what it verified and every other commit gate held.
+
 Incomplete/failed worktrees are retained. Use `local_worker_jobs` to find them and `local_worker_cleanup` only after review/integration/discard decision.
 
 ## Integration
