@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 import * as images from "../lib/sandbox-images.mjs";
+import { changedFilesFor, runnerLanguagesOf } from "../lib/diff-checks.mjs";
 
 import {
   DEFAULT_AGENT_IMAGE,
@@ -445,7 +446,7 @@ test("a non-zero exit yields fail naming the command and exit code, and stops th
 
 test("runner exposes the diff's changed test/production files as real env vars to the sandbox", async () => {
   const executor = fakeExecutor({ fallback: { started: true, exitCode: 0, stdout: "ok", stderr: "" } });
-  const run = createVerificationRunner({ loadConfig: fixedConfig(STANDARD), executor });
+  const run = createVerificationRunner({ loadConfig: fixedConfig({ verification: { standard: { environment: "none", commands: ["make test"] } } }), executor });
   const record = {
     testChanges: {
       new_tests_added: ["tests/test_new.py"],
@@ -466,6 +467,57 @@ test("runner: with no record (or a record with no testChanges), both env vars ar
   await run({ ...CONTEXT }); // no `record` at all -- the shape every pre-existing caller/test already used
   assert.equal(executor.calls.run[0].env.NOMARMY_CHANGED_TEST_FILES, "");
   assert.equal(executor.calls.run[0].env.NOMARMY_CHANGED_PRODUCTION_FILES, "");
+});
+
+// A python profile in a mixed Python/TS repo was handed `.test.tsx` paths,
+// pytest failed to collect them, and a job whose tests passed read as failed.
+const MIXED = {
+  new_tests_added: ["tests/test_api.py", "web/App.test.tsx"],
+  existing_tests_modified: ["web/util.spec.ts"],
+  existing_tests_deleted: [],
+  production_files_changed: ["api/app.py", "web/App.tsx", "db/schema.sql"],
+};
+
+test("runnerLanguagesOf reads the runner from the command, and knows when it doesn't know", () => {
+  assert.deepEqual(runnerLanguagesOf('if [ -n "$NOMARMY_CHANGED_TEST_FILES" ]; then python3 -m pytest $NOMARMY_CHANGED_TEST_FILES -q; fi'), ["python"]);
+  assert.deepEqual(runnerLanguagesOf(".venv/bin/pytest -q"), ["python"]);
+  assert.deepEqual(runnerLanguagesOf("python -m unittest discover"), ["python"]);
+  assert.deepEqual(runnerLanguagesOf("npx vitest run"), ["js"]);
+  assert.deepEqual(runnerLanguagesOf("node --test tests/"), ["js"]);
+  assert.deepEqual(runnerLanguagesOf("go test ./..."), ["go"]);
+  assert.deepEqual(runnerLanguagesOf("./gradlew test"), ["jvm"]);
+  assert.deepEqual(runnerLanguagesOf("pytest tests/node -q"), ["python"], "a path segment is not a runner");
+  assert.deepEqual(runnerLanguagesOf("make test"), []);
+  assert.deepEqual(runnerLanguagesOf("./scripts/check.sh"), []);
+});
+
+test("changedFilesFor hands each runner only the test files it can take", () => {
+  const python = changedFilesFor(MIXED, "python3 -m pytest $NOMARMY_CHANGED_TEST_FILES -q");
+  assert.equal(python.env.NOMARMY_CHANGED_TEST_FILES, "tests/test_api.py");
+  assert.equal(python.env.NOMARMY_CHANGED_PRODUCTION_FILES, "api/app.py db/schema.sql", "another runner's code is dropped; data and SQL stay");
+  assert.deepEqual(python.skippedTests, ["web/App.test.tsx", "web/util.spec.ts"]);
+  const js = changedFilesFor(MIXED, "npx vitest run $NOMARMY_CHANGED_TEST_FILES");
+  assert.equal(js.env.NOMARMY_CHANGED_TEST_FILES, "web/App.test.tsx web/util.spec.ts");
+  assert.equal(js.env.NOMARMY_CHANGED_PRODUCTION_FILES, "web/App.tsx db/schema.sql");
+  const unknown = changedFilesFor(MIXED, "make test");
+  assert.equal(unknown.env.NOMARMY_CHANGED_TEST_FILES, "tests/test_api.py web/App.test.tsx web/util.spec.ts", "an unknown runner gets everything, as before");
+  assert.equal(unknown.env.NOMARMY_CHANGED_PRODUCTION_FILES, "api/app.py web/App.tsx db/schema.sql");
+  assert.deepEqual(unknown.skippedTests, []);
+  for (const scope of [python, js, unknown]) {
+    assert.equal(scope.env.NOMARMY_CHANGED_PYTHON_TEST_FILES, "tests/test_api.py", "per-language lists never depend on the command");
+    assert.equal(scope.env.NOMARMY_CHANGED_JS_TEST_FILES, "web/App.test.tsx web/util.spec.ts");
+    assert.equal(scope.env.NOMARMY_CHANGED_GO_TEST_FILES, "");
+  }
+});
+
+test("runner: each command in a mixed repo sees only the changed files its own runner takes", async () => {
+  const executor = fakeExecutor({ fallback: { started: true, exitCode: 0, stdout: "ok", stderr: "" } });
+  const config = { verification: { mixed: { environment: "none", commands: ["python3 -m pytest $NOMARMY_CHANGED_TEST_FILES -q", "npx vitest run $NOMARMY_CHANGED_TEST_FILES"] } } };
+  const run = createVerificationRunner({ loadConfig: fixedConfig(config), executor });
+  const verdict = await run({ ...CONTEXT, profile: "mixed", record: { testChanges: MIXED } });
+  assert.equal(verdict.status, "pass");
+  assert.equal(executor.calls.run[0].env.NOMARMY_CHANGED_TEST_FILES, "tests/test_api.py", "pytest is never handed a .tsx file");
+  assert.equal(executor.calls.run[1].env.NOMARMY_CHANGED_TEST_FILES, "web/App.test.tsx web/util.spec.ts");
 });
 
 // --------------------------------------------------------------------------
@@ -807,6 +859,29 @@ test("classifyResults: a silent command still ran when it names no changed-file 
   assert.equal(classifyResults([{ ...silentPass(GUARD_TESTS), stdout: "output withheld", silent: false }], { env: NOTHING_CHANGED }).status, "pass");
   // A failure is still a failure, whatever else skipped.
   assert.equal(classifyResults([silentPass(GUARD_TESTS), { ...silentPass(GUARD_SUITE), exitCode: 1 }], { env: NOTHING_CHANGED }).status, "fail");
+});
+
+test("classifyResults: a guarded command whose runner can't take the changed tests says they were not exercised", () => {
+  const scope = changedFilesFor({ new_tests_added: ["web/App.test.tsx"], production_files_changed: ["api/app.py"] }, GUARD_TESTS);
+  const suite = changedFilesFor({ new_tests_added: ["web/App.test.tsx"], production_files_changed: ["api/app.py"] }, GUARD_SUITE);
+  const verdict = classifyResults([silentPass(GUARD_TESTS), { ...silentPass(GUARD_SUITE), stdout: "12 passed" }], { scopes: [scope, suite] });
+  assert.equal(verdict.status, "pass", "the suite really ran on the changed production file");
+  assert.match(verdict.detail, /1 skipped: .*NOMARMY_CHANGED_TEST_FILES is empty \(its python runner can't take the changed test file web\/App\.test\.tsx, so it was not exercised\)/);
+});
+
+test("createVerificationRunner: a python profile on a job that changed only .tsx tests is not_run (not exercised), never a pass", async () => {
+  const host = tempRepo({});
+  const executor = fakeExecutor({ fallback: { started: true, exitCode: 0, stdout: "", stderr: "" } });
+  const config = { verification: { python: { environment: "none", commands: [GUARD_TESTS, GUARD_SUITE] } } };
+  const run = createVerificationRunner({ loadConfig: fixedConfig(config), executor, hostProjectDir: host });
+  const record = { testChanges: { new_tests_added: ["web/App.test.tsx"], existing_tests_modified: [], existing_tests_deleted: [], production_files_changed: ["web/App.tsx"] } };
+  const verdict = await run({ ...CONTEXT, profile: "python", cwd: tempRepo({}), record });
+  assert.equal(executor.calls.run[0].env.NOMARMY_CHANGED_TEST_FILES, "", "pytest is never handed web/App.test.tsx");
+  assert.equal(executor.calls.run[1].env.NOMARMY_CHANGED_PRODUCTION_FILES, "", "nor a .tsx production file to decide the suite should run");
+  assert.equal(verdict.status, "not_run");
+  assert.equal(verdict.basis, "not-exercised", "not 'nothing changed': something did, this profile just can't run it");
+  assert.match(verdict.reason, /not exercised by this profile/);
+  assert.match(verdict.reason, /web\/App\.test\.tsx/);
 });
 
 test("createVerificationRunner: guarded commands on an unchanged checkout report not_run", async () => {

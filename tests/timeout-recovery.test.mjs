@@ -61,6 +61,15 @@ test("scoped selection: no warning when a command runs the changed test files by
   assert.ok(detectScopedTestSelectionRisk({ commands: ["pytest ${NOMARMY_CHANGED_TEST_FILES} -k fast"], testChanges }), "the changed files, but filtered: still a risk");
 });
 
+test("scoped selection: a by-name pytest command doesn't cover a changed .tsx test it is never handed", () => {
+  const byName = 'if [ -n "$NOMARMY_CHANGED_TEST_FILES" ]; then python3 -m pytest $NOMARMY_CHANGED_TEST_FILES -q; fi';
+  const scopedJs = "npx vitest run --testNamePattern smoke";
+  const mixed = { new_tests_added: ["web/App.test.tsx", "tests/test_x.py"], existing_tests_modified: [] };
+  assert.ok(detectScopedTestSelectionRisk({ commands: [byName, scopedJs], testChanges: mixed }), "the .tsx test only reaches the filtered vitest run");
+  assert.equal(detectScopedTestSelectionRisk({ commands: [byName, scopedJs, "npx vitest run $NOMARMY_CHANGED_TEST_FILES"], testChanges: mixed }), null,
+    "every touched test is run by name by a command that takes it");
+});
+
 test("report view: the report and verdict, not the whole record", () => {
   const meta = { jobId: "w1", mode: "implement", outcome: "WORKER_DONE", coordinatorStatus: "complete", issues: ["TEST CHANGE REVIEW: x"], branch: "nomarmy/w1",
     reportValidation: { fields: { STATUS: "done", TESTS: "pass", NOT_DONE: "none", NOTE: "added it" }, gate: {} },
