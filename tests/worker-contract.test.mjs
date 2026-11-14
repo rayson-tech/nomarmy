@@ -3640,6 +3640,107 @@ test("refactor: a declared refactor skips the revert check but commits only with
   assert.equal(applyVerificationPolicy(done, "not_run", strict).outcome, "NEEDS_REVIEW");
 });
 
+// A module move drags its test along and re-points imports; the refactor
+// contract lets that through, and nothing else, against real git.
+async function refactorRepo(t, files) {
+  const { analyzeRefactorTestChanges } = await import("../lib/refactor-tests.mjs");
+  const { parseNameStatusZ } = await import("../lib/git-record.mjs");
+  const { mergeUntrackedIntoNameStatus, classifyTestChanges } = await import("../lib/diff-checks.mjs");
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-refactor-"));
+  t.after(() => fs.rmSync(repo, { recursive: true, force: true }));
+  const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8" });
+  const write = (file, text) => { fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true }); fs.writeFileSync(path.join(repo, file), text); };
+  git("init", "-q", "-b", "main");
+  for (const [file, text] of Object.entries(files)) write(file, text);
+  git("add", "-A");
+  git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base");
+  const baseSha = git("rev-parse", "HEAD").trim();
+  const analyze = async () => {
+    const gitRaw = async (args, cwd) => execFileSync("git", args, { cwd, encoding: "utf8" });
+    const untracked = git("ls-files", "--others", "--exclude-standard").split("\n").filter(Boolean);
+    const nameStatus = mergeUntrackedIntoNameStatus(parseNameStatusZ(await gitRaw(["diff", "--name-status", "-z", baseSha, "--"], repo)), untracked);
+    return { testChanges: classifyTestChanges(nameStatus), neutralTestChanges: await analyzeRefactorTestChanges({ cwd: repo, baseSha, nameStatus, gitRaw }) };
+  };
+  return { repo, git, write, analyze, rm: (file) => fs.rmSync(path.join(repo, file)) };
+}
+const BAR_TEST = `import { test, expect } from "vitest";\nimport { bar } from "../../src/foo/bar";\njest.mock("../../src/foo/dep");\n\ntest("bar doubles", () => {\n  expect(bar(2)).toBe(4);\n});\n`;
+const refactorDone = { outcome: "WORKER_DONE", commitAllowed: true, reviewRequired: false, reasons: [] };
+const contractFor = (changes) => applyRefactorContract(refactorDone, { refactor: true, verificationStatus: "pass", ...changes });
+
+test("refactor: a pure test rename commits, with a note naming it", async (t) => {
+  const r = await refactorRepo(t, { "src/foo/bar.ts": "export const bar = (x) => x * 2;\n", "tests/foo/bar.test.ts": BAR_TEST });
+  r.rm("tests/foo/bar.test.ts"); r.write("tests/baz/bar.test.ts", BAR_TEST);
+  const changes = await r.analyze();
+  assert.deepEqual(changes.neutralTestChanges.files, [{ path: "tests/baz/bar.test.ts", from: "tests/foo/bar.test.ts", kind: "rename" }]);
+  const out = contractFor(changes);
+  assert.equal(out.commitAllowed, true);
+  assert.equal(out.outcome, "WORKER_DONE");
+  assert.match(out.reasons.at(-1), /tests\/foo\/bar\.test\.ts -> tests\/baz\/bar\.test\.ts \(rename\)/);
+  // A staged `git mv` reads as an R entry and is handled the same way.
+  r.git("add", "-A");
+  assert.equal(contractFor(await r.analyze()).commitAllowed, true);
+});
+
+test("refactor: a test moved with its module and only its import paths re-pointed commits", async (t) => {
+  const r = await refactorRepo(t, { "src/foo/bar.ts": "export const bar = (x) => x * 2;\n", "tests/foo/bar.test.ts": BAR_TEST });
+  r.rm("tests/foo/bar.test.ts");
+  r.write("tests/baz/bar.test.ts", BAR_TEST.replace("../../src/foo/bar", "../../src/baz/bar").replace("../../src/foo/dep", "../../src/baz/dep"));
+  const out = contractFor(await r.analyze());
+  assert.equal(out.commitAllowed, true);
+  assert.match(out.reasons.at(-1), /\(move\)/);
+});
+
+test("refactor: an in-place edit that only changes import specifiers commits", async (t) => {
+  const r = await refactorRepo(t, { "tests/bar.test.ts": BAR_TEST, "tests/test_bar.py": "from pkg.old import bar\n\n@mock.patch(\"pkg.old.dep\")\ndef test_bar(dep):\n    assert bar(2) == 4\n" });
+  r.write("tests/bar.test.ts", BAR_TEST.replace("../../src/foo/bar", "../../src/baz/bar"));
+  r.write("tests/test_bar.py", "from pkg.new import bar\n\n@mock.patch(\"pkg.new.dep\")\ndef test_bar(dep):\n    assert bar(2) == 4\n");
+  const changes = await r.analyze();
+  assert.deepEqual(changes.neutralTestChanges.blocking, []);
+  const out = contractFor(changes);
+  assert.equal(out.commitAllowed, true);
+  assert.match(out.reasons.at(-1), /tests\/bar\.test\.ts \(imports\)/);
+  assert.match(applyRefactorContract(refactorDone, { refactor: true, verificationStatus: "fail", ...changes }).commitBlockedReason, /verification was fail/, "a neutral test change doesn't excuse failing verification");
+});
+
+test("refactor: an import edit alongside an assertion edit blocks", async (t) => {
+  const r = await refactorRepo(t, { "tests/bar.test.ts": BAR_TEST });
+  r.write("tests/bar.test.ts", BAR_TEST.replace("../../src/foo/bar", "../../src/baz/bar").replace("toBe(4)", "toBe(5)"));
+  const out = contractFor(await r.analyze());
+  assert.equal(out.commitAllowed, false);
+  assert.match(out.commitBlockedReason, /test files changed \(tests\/bar\.test\.ts\)/);
+  // A changed string that isn't a module specifier is an assertion, even if it looks like a path.
+  r.write("tests/bar.test.ts", BAR_TEST.replace('test("bar doubles"', 'test("bar/doubles"'));
+  assert.equal(contractFor(await r.analyze()).commitAllowed, false);
+});
+
+test("refactor: a deleted test blocks", async (t) => {
+  const r = await refactorRepo(t, { "tests/bar.test.ts": BAR_TEST, "tests/other.test.ts": "test('x', () => {});\n" });
+  r.rm("tests/bar.test.ts");
+  const changes = await r.analyze();
+  assert.deepEqual(changes.neutralTestChanges.blocking, [{ path: "tests/bar.test.ts", why: "test deleted" }]);
+  const out = contractFor(changes);
+  assert.equal(out.commitAllowed, false);
+  assert.match(out.commitBlockedReason, /test files changed \(tests\/bar\.test\.ts\)/);
+});
+
+test("refactor: a new test with novel content blocks, even when it stands in for a moved one", async (t) => {
+  const r = await refactorRepo(t, { "tests/foo/bar.test.ts": BAR_TEST });
+  r.write("tests/new.test.ts", "test('new behavior', () => { expect(1).toBe(1); });\n");
+  assert.equal(contractFor(await r.analyze()).commitAllowed, false);
+  r.rm("tests/foo/bar.test.ts");
+  r.write("tests/baz/bar.test.ts", BAR_TEST.replace("\n});\n", "\n  expect(bar(3)).toBe(6);\n});\n"));
+  const out = contractFor(await r.analyze());
+  assert.equal(out.commitAllowed, false, "a move that adds an assertion is not a move");
+  assert.match(out.commitBlockedReason, /tests\/baz\/bar\.test\.ts/);
+});
+
+test("refactor: without the neutrality analysis every test change still blocks", () => {
+  const out = applyRefactorContract(refactorDone, { refactor: true, verificationStatus: "pass",
+    testChanges: { new_tests_added: ["tests/b.test.mjs"], existing_tests_modified: [], existing_tests_deleted: ["tests/a.test.mjs"] } });
+  assert.equal(out.commitAllowed, false);
+  assert.match(out.commitBlockedReason, /test files changed \(tests\/b\.test\.mjs, tests\/a\.test\.mjs\)/);
+});
+
 test("isDocumentationPath: prose files skip the revert check; code, config and tests don't", async () => {
   const { isDocumentationPath } = await import("../lib/diff-checks.mjs");
   for (const doc of ["CONTRIBUTING.md", "docs/plans/split.md", "README.mdx", "guide.rst", "notes.txt", "LICENSE", "CHANGELOG.md", "site/page.markdown"]) assert.equal(isDocumentationPath(doc), true, doc);
