@@ -54,7 +54,7 @@ import { probeModel } from "../lib/model-probe.mjs";
 import { jevSettings, judgeSettings } from "../lib/validators.mjs";
 import { agentRunsToolsOnHost } from "../lib/dispatch-schema.mjs";
 import { createBuildMetrics, resolveOutcome, finalText, workerMetadata, usageMetrics, policyAdmissionProblems, applyRefactorContract, applyVerificationPolicy, resolveVerifyRegression } from "../lib/outcome.mjs";
-import { jobLabel, compactJobRecord, formatResult, reportView, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner } from "../lib/job-format.mjs";
+import { jobLabel, compactJobRecord, formatResult, reportView, boundStatusView, STATUS_VIEW_CHARS, formatUnion, testChangeBanner, regressionCheckBanner, decomposeOverlapBanner } from "../lib/job-format.mjs";
 import { ensureOpenClawOnPath, ensureVendorClisOnPath } from "../lib/openclaw-path.mjs";
 import { SUBSCRIPTION_VENDORS } from "../lib/subscription-setup.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
@@ -496,7 +496,7 @@ server.tool("local_worker_start", "Start one worker or scout in the background a
 // always crossed; 110s returns in-line with margin. Raise it only for a
 // client that neither backgrounds nor times out that early.
 export const MAX_STATUS_WAIT_SECONDS = Number.parseInt(process.env.NOMARMY_MAX_STATUS_WAIT_SECONDS ?? "", 10) || 110;
-server.tool("local_worker_status", `Status of one job, started by this session or any other (a detached job included): phase (starting, worktree, worker, verification, commit, record, finished), elapsed time against its timeout, and the result once finished. wait_seconds long-polls up to that long for completion (max ${MAX_STATUS_WAIT_SECONDS}, to stay inside MCP client request timeouts; poll again for longer jobs). report=true returns just the worker's report (a scout's findings with their verified citations), the outcome, issues, verification and commit. full=true returns the complete execution record.`, {
+server.tool("local_worker_status", `Status of one job, started by this session or any other (a detached job included): phase (starting, worktree, worker, verification, commit, record, finished), elapsed time against its timeout, and the result once finished. wait_seconds long-polls up to that long for completion (max ${MAX_STATUS_WAIT_SECONDS}, to stay inside MCP client request timeouts; poll again for longer jobs). report=true returns just the worker's report (a scout's findings with their verified citations), the outcome, issues, verification and commit. The default and report=true views are held to about ${STATUS_VIEW_CHARS} characters, long lists ending "...and N more". full=true returns the complete execution record.`, {
   job_id: z.string().min(1), wait_seconds: z.number().int().min(0).max(MAX_STATUS_WAIT_SECONDS).default(0), full: z.boolean().default(false),
   report: z.boolean().default(false).describe("Just the report and nomArmy's verdict on it, without the rest of the record. Prefer this to full."),
 }, async ({ job_id, wait_seconds, full, report }) => {
@@ -517,12 +517,13 @@ server.tool("local_worker_status", `Status of one job, started by this session o
     summarize(entry, files, jobDir),
     sleep(15000).then(() => summarize(entry, files, null)),
   ]);
-  if (summary.state === "running") return toolText(coordinatorJson({ ...summary, jobDir, hint: `poll again with wait_seconds up to ${MAX_STATUS_WAIT_SECONDS}; lastTool/filesChangedLive are best-effort and may be absent early in a run` }));
-  if (entry?.error) return toolText(coordinatorJson({ ...summary, jobDir }), true);
-  if (report && files.meta) return toolText(coordinatorJson(reportView(files.meta)), summary.coordinatorStatus !== "complete");
+  if (summary.state === "running") return toolText(coordinatorJson(boundStatusView({ ...summary, jobDir, hint: `poll again with wait_seconds up to ${MAX_STATUS_WAIT_SECONDS}; lastTool/filesChangedLive are best-effort and may be absent early in a run` })));
+  if (entry?.error) return toolText(coordinatorJson(boundStatusView({ ...summary, jobDir })), true);
+  // A scout's or decomposer's report is its deliverable, already held to its report budget.
+  if (report && files.meta) return toolText(coordinatorJson(["scout", "decompose"].includes(files.meta.mode) ? reportView(files.meta) : boundStatusView(reportView(files.meta))), summary.coordinatorStatus !== "complete");
   if (full && entry?.result) return toolText(coordinatorResult(entry.result), !entry.result.ok);
   if (full && files.meta) return toolText(coordinatorJson(files.meta), summary.coordinatorStatus !== "complete");
-  return toolText(coordinatorJson({ ...summary, jobDir, hint: entry?.result || files.meta ? "call again with report=true for the worker's report, or full=true for the complete record" : null }), summary.state === "orphaned" || summary.state === "failed");
+  return toolText(coordinatorJson(boundStatusView({ ...summary, jobDir, hint: entry?.result || files.meta ? "call again with report=true for the worker's report, or full=true for the complete record" : null })), summary.state === "orphaned" || summary.state === "failed");
 });
 // Set when this session's copy of nomArmy changed on disk after it started
 // (nomarmy connect or update ran): shown first in army and capacity, and
