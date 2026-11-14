@@ -56,6 +56,19 @@ agents:
     owner: "you@example.com"
     # max_concurrent: 1             # the default for a subscription
 
+  # Two accounts on one provider (two companies' plans): each agent names its
+  # own sign-in, from `openclaw models auth list`, and every job on it runs
+  # pinned to that account with no fallback to the other. `nomarmy agents add
+  # subscription codex|grok` sets this up when a second account is added;
+  # `nomarmy agents update <name> --auth-profile <id>` sets it by hand.
+  # codex-company-b:
+  #   kind: subscription
+  #   provider: openai
+  #   owner: "you@company-b.example"
+  #   auth_profile: openai:account-1234abcd   # a Codex import, keyed by account
+  # Claude and Muse Code run on their CLI's one signed-in session, so a second
+  # account on those needs a separate OS user.
+
 # One OpenClaw provider id holds one credential. OpenAI, Meta and xAI use the
 # same id for the subscription and the API key, so an api agent and a
 # subscription agent on the same provider are refused. Here, `grok` (xai)

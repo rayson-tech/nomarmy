@@ -35,7 +35,7 @@ import { loadValidators, saveJev, jevEndpoint, JEV_ENDPOINT, removeJev, jevSetti
 import { probeModel, routeForProvider } from "../lib/model-probe.mjs";
 import { OWN_SANDBOX_CLI_BACKENDS, cliBackendConfigArgs } from "../lib/cli-backend-policy.mjs";
 import { ID_RE, AUTH_ENV_NAME_RE, OPENCLAW_PROVIDER_ID_RE, openclawProviderId, isNativeProviderType } from "../lib/dispatch-schema.mjs";
-import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, agentProviderId, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT } from "../lib/agents.mjs";
+import { loadAgents, readAgentsFile, writeAgentsFile, agentsConfigPath, apiAgentAsPoolEntry, describeAgent as describeAgentLabel, agentRunsToolsOnHost, agentProviderId, AGENT_KINDS, API_PROVIDER_TYPES, RESERVED_AGENT_NAMES, BUILTIN_LOCAL_AGENT, AUTH_PROFILE_RE } from "../lib/agents.mjs";
 import { generalIdentity, generalVendorResolver, loadArmy, mergeArmy, describeArmy, readArmyFile, updateArmyInFile, assignRoleInFile, parseTargetSpec, armyLayerPath, globalConfigDir, DEFAULT_ARMY, ARMY_PHASES, LOCAL_CONFIG_FILENAME } from "../lib/army.mjs";
 import { parseLlamaUrl } from "../lib/execution.mjs";
 import { setupSteps, formatSetupSteps, runSetupPlaybook } from "../lib/setup-steps.mjs";
@@ -50,7 +50,7 @@ import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
 import { linkCodex } from "../lib/codex-link.mjs";
 import { recordProbeSuccess, parseOpenclawAuthProfiles, codexImportRecovery, apiKeyProvider } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
-import { SUBSCRIPTION_VENDORS, OPENCLAW_SIGN_IN_PRESETS, competingProviderProfiles, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, openclawSignInFailure, parseMuseAuthDescriptor } from "../lib/subscription-setup.mjs";
+import { SUBSCRIPTION_VENDORS, OPENCLAW_SIGN_IN_PRESETS, competingProviderProfiles, newAgentAuthProfile, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, openclawSignInFailure, parseMuseAuthDescriptor } from "../lib/subscription-setup.mjs";
 import { PINNED_OPENCLAW_VERSION, pluginInstallArgs, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors, bundledCatalogModels } from "../lib/openclaw-install.mjs";
 import { ensureOpenClawOnPath, ensureVendorClisOnPath } from "../lib/openclaw-path.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
@@ -1349,13 +1349,13 @@ function catalogModelsFor(provider) {
 // Why the last probeWorker() call failed, in the vendor's words when it said.
 let lastProbeFailure = null;
 let lastProbeText = "";
-function probeWorker(provider, model) {
+function probeWorker(provider, model, authProfile = null) {
   // An agent on route: gateway is tested through the Gateway, as its jobs
   // run (lib/openclaw-gateway-route.mjs); that test is async, so it runs in
   // a child process to keep this one's callers as they are.
   let route = null;
   try { route = routeForProvider(loadAgents(globalConfigDir()).agents, provider); } catch { /* exec route */ }
-  if (route === "gateway") return probeWorkerOnGateway(provider, model);
+  if (route === "gateway" || authProfile) return probeWorkerOnGateway(provider, model, authProfile, route);
   // The route a job takes: the ambient OpenClaw config and a state dir of
   // its own, never --isolated. --isolated skips that config, and with it the
   // Codex runtime ChatGPT-plan jobs run through: gpt-6-sol answered "ok"
@@ -1391,10 +1391,12 @@ function probeWorker(provider, model) {
     try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* leftover dir; see above */ }
   }
 }
-function probeWorkerOnGateway(provider, model) {
+// Also how an agent pinned to one sign-in is tested: lib/model-probe.mjs
+// writes the same pinned config a job on it gets.
+function probeWorkerOnGateway(provider, model, authProfile = null, route = "gateway") {
   const moduleUrl = pathToFileURL(path.join(nomarmyRoot, "lib", "model-probe.mjs")).href;
   const script = `import { probeModel } from ${JSON.stringify(moduleUrl)}; const r = await probeModel(JSON.parse(process.argv[1])); process.stdout.write(JSON.stringify(r));`;
-  const child = spawnSync(process.execPath, ["--input-type=module", "-e", script, JSON.stringify({ provider, model, stateRoot: agentStateRoot(), route: "gateway", openclawCmd: openclawCmd() })],
+  const child = spawnSync(process.execPath, ["--input-type=module", "-e", script, JSON.stringify({ provider, model, authProfile, stateRoot: agentStateRoot(), route: route ?? "exec", openclawCmd: openclawCmd() })],
     { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 300000 });
   let result = null;
   try { result = JSON.parse(child.stdout); } catch { /* the child failed */ }
@@ -1734,6 +1736,23 @@ async function addSubscriptionAgent(rl, agents) {
     return;
   }
 
+  const profilesBefore = (readAuthProfilesSync() ?? []).map((p) => p.id);
+  const sameCli = Object.entries(agents).find(([, a]) => a.kind === "subscription" && a.provider === vendor.provider);
+  // Another agent on this provider: a second model on the same account, or
+  // another account (two companies' plans)?
+  const secondAccount = Boolean(sameCli) && await confirm(rl, `Agent "${sameCli?.[0]}" already uses ${vendor.label}. Is this a different account from it?`, { defaultYes: false });
+  if (secondAccount && vendor.credential.kind === "cli-session") {
+    console.log(c.red(`\n✗ ${vendor.cli?.bin ?? vendor.provider} runs on the one account its CLI is signed in to on this machine, so a second account needs a separate OS user.`));
+    process.exitCode = 1; return;
+  }
+  // A second ChatGPT account (two companies' plans): OpenClaw keys a Codex
+  // import by account id, so it sits beside the first, but the import copies
+  // whichever account the Codex CLI is signed in to. Switch it first.
+  if (secondAccount && vendorKey === "codex") {
+    console.log(c.yellow(`\nAgent "${sameCli[0]}" already uses a ChatGPT plan. To add another account, the Codex CLI has to be signed in to that account for the import; the first account's sign-in in OpenClaw stays.`));
+    if (!(await confirm(rl, "Sign the Codex CLI out now and back in as the other account?", { defaultYes: true }))) { console.log(c.dim("Stopped; nothing was written.")); return; }
+    runInteractive(vendor.cli.bin, ["logout"]);
+  }
   const auth = await ensureVendorAuth(rl, vendorKey);
   if (!auth.ok) { console.log(c.dim("\nStopped; nothing was written.")); process.exitCode = 1; return; }
 
@@ -1785,10 +1804,13 @@ async function addSubscriptionAgent(rl, agents) {
 
   const name = await askAgentName(rl, agents, SUBSCRIPTION_AGENT_DEFAULT_NAMES[vendorKey] ?? vendorKey);
   if (!name) { console.log(c.dim("Stopped; nothing was written.")); return; }
+  const pinned = await pickAuthProfile(rl, agents, vendor.provider, profilesBefore, { secondAccount, sameAs: sameCli?.[1] });
+  if (!pinned) { console.log(c.dim("Stopped; nothing was written.")); process.exitCode = 1; return; }
+  agents = pinned.agents;
 
   console.log(`\n${c.bold("→")} Test call`);
   const probed = Boolean(probeModel);
-  const works = probed ? probeWorker(vendor.provider, probeModel) : false;
+  const works = probed ? probeWorker(vendor.provider, probeModel, pinned.authProfile) : false;
   if (works) console.log(c.green(`✓ ${vendor.provider}/${probeModel} answered a real test prompt.`));
   else if ((needsOpenclawLogin || vendorKey === "claude") && probed && openclawSignInFailure(`${lastProbeFailure ?? ""}\n${lastProbeText}`)) {
     const why = lastProbeFailure ? `: ${lastProbeFailure}` : "";
@@ -1806,9 +1828,48 @@ async function addSubscriptionAgent(rl, agents) {
       return;
     }
   }
-  const written = saveAgents({ ...agents, [name]: { kind: "subscription", provider: vendor.provider, owner, ...(model ? { model } : {}) } });
+  const written = saveAgents({ ...agents, [name]: { kind: "subscription", provider: vendor.provider, owner, ...(model ? { model } : {}), ...(pinned.authProfile ? { auth_profile: pinned.authProfile } : {}) } });
   savedAgentMessage(name, written);
   console.log(c.dim(`Jobs on it need on_behalf_of: "${owner}".`));
+}
+
+/**
+ * The sign-in a new subscription agent runs on when another agent already
+ * uses `provider` (lib/subscription-setup.mjs newAgentAuthProfile), asking
+ * when it can't tell. Also pins any existing agent on the provider that
+ * names none. Returns { authProfile, agents } (agents with those pins), or
+ * null after saying why it stopped.
+ */
+async function pickAuthProfile(rl, agents, provider, before, { secondAccount = true, sameAs = null } = {}) {
+  // Another model on an account an agent already uses: the same sign-in.
+  if (!secondAccount) return { authProfile: sameAs?.auth_profile ?? null, agents };
+  const answer = newAgentAuthProfile({ agents, provider, profiles: readAuthProfilesSync() ?? [], before });
+  if (!answer.needed) return { authProfile: null, agents };
+  if (answer.problem) { console.log(c.red(`✗ ${answer.problem}`)); return null; }
+  const choose = async (question, options) => {
+    options.forEach((id, i) => console.log(`  ${c.cyan(`${i + 1}.`)} ${id}`));
+    return options[await askChoice(rl, options.length)];
+  };
+  let updated = { ...agents };
+  const used = new Set(Object.values(agents).map((a) => a?.auth_profile).filter(Boolean));
+  for (const name of answer.unpinned) {
+    const left = answer.signIns.filter((id) => !used.has(id));
+    console.log(c.bold(`\nAgent "${name}" also uses ${provider}. Which sign-in is its account?`));
+    const id = await choose(name, left);
+    used.add(id);
+    updated = { ...updated, [name]: { ...updated[name], auth_profile: id } };
+  }
+  let authProfile = answer.profile && !used.has(answer.profile) ? answer.profile : null;
+  if (!authProfile) {
+    const left = answer.signIns.filter((id) => !used.has(id));
+    if (left.length === 1) authProfile = left[0];
+    else {
+      console.log(c.bold(`\nWhich sign-in is this new agent's account?`));
+      authProfile = await choose("new", left);
+    }
+  }
+  console.log(c.green(`✓ This agent runs only on ${authProfile}; jobs on it never fall back to another ${provider} account.`));
+  return { authProfile, agents: updated };
 }
 
 function apiAgentOnProvider(agents, provider) {
@@ -1848,10 +1909,26 @@ async function addOpenclawSignInAgent(rl, agents, presetKey) {
   const profiles = () => readAuthProfilesSync() ?? [];
   const signedIn = () => profiles().some((profile) => profile.provider === provider && profile.type !== "api_key"
     && (profile.expiresAt == null || Date.parse(profile.expiresAt) > Date.now()));
-  if (!signedIn() || await confirm(rl, `OpenClaw already has a ${provider} sign-in. Sign in again (a different account, or to refresh it)?`, { defaultYes: false })) {
+  // A second account on a provider another agent uses (two companies'
+  // plans): always a fresh sign-in, saved under its own name so it can't
+  // replace the other account's. The Gateway is stopped, so --profile-id works.
+  const profilesBefore = profiles().map((p) => p.id);
+  const sharing = Object.entries(agents).filter(([, a]) => a.kind === "subscription" && a.provider === provider);
+  let profileId = null;
+  const secondAccount = sharing.length > 0 && await confirm(rl, `Agent "${sharing[0][0]}" already uses ${provider}. Is this a different account from it?`, { defaultYes: false });
+  if (secondAccount) {
+    console.log(c.yellow(`Sign in to the OTHER account now; it's saved beside the first.`));
+    const label = await askUntilValid(rl, "A short name for this account's sign-in (e.g. company-b): ", {
+      pattern: /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, invalidMessage: "letters, digits, dot, underscore or hyphen.",
+    });
+    profileId = `${provider}:${label}`;
+    if (profilesBefore.includes(profileId)) { console.log(c.red(`✗ OpenClaw already has a sign-in named ${profileId}. Pick another name.`)); process.exitCode = 1; return; }
+  }
+  if (profileId || !signedIn() || await confirm(rl, `OpenClaw already has a ${provider} sign-in. Sign in again (a different account, or to refresh it)?`, { defaultYes: false })) {
     const method = value("method");
-    console.log(c.dim(`Opening OpenClaw's sign-in (\`openclaw models auth login --provider ${provider}${method ? ` --method ${method}` : ""}\`); follow its prompts:`));
-    const ok = runInteractive(openclawCmd(), ["models", "auth", "login", "--provider", provider, ...(method ? ["--method", method] : [])]);
+    const loginArgs = ["models", "auth", "login", "--provider", provider, ...(method ? ["--method", method] : []), ...(profileId ? ["--profile-id", profileId] : [])];
+    console.log(c.dim(`Opening OpenClaw's sign-in (\`openclaw ${loginArgs.join(" ")}\`); follow its prompts:`));
+    const ok = runInteractive(openclawCmd(), loginArgs);
     runQuiet(openclawCmd(), ["plugins", "registry", "--refresh"]);
     if (!ok || !signedIn()) {
       console.log(c.red(`✗ Sign-in failed or was canceled. Retry with \`nomarmy agents add subscription ${presetKey}\`.`)); process.exitCode = 1; return;
@@ -1889,10 +1966,14 @@ async function addOpenclawSignInAgent(rl, agents, presetKey) {
   });
   const name = await askAgentName(rl, agents, preset.defaultName ?? provider);
   if (!name) { console.log(c.dim("Stopped; nothing was written.")); return; }
+  const pinned = await pickAuthProfile(rl, agents, provider, profilesBefore, { secondAccount, sameAs: sharing[0]?.[1] });
+  if (!pinned) { console.log(c.dim("Stopped; nothing was written.")); process.exitCode = 1; return; }
+  agents = pinned.agents;
+  const pin = pinned.authProfile ? { auth_profile: pinned.authProfile } : {};
 
   console.log(`\n${c.bold("→")} Test call`);
   const probeModel = model ?? models[0];
-  if (probeModel && probeWorker(provider, probeModel)) console.log(c.green(`✓ ${provider}/${probeModel} answered a real test prompt.`));
+  if (probeModel && probeWorker(provider, probeModel, pinned.authProfile)) console.log(c.green(`✓ ${provider}/${probeModel} answered a real test prompt.`));
   else if (probeModel && GATEWAY_ONLY_SIGN_IN.test(`${lastProbeFailure ?? ""}\n${lastProbeText}`)) {
     // OpenClaw's isolated runs can't use a sign-in OpenClaw holds itself
     // (openclaw/openclaw#124768); its Gateway can (lib/openclaw-gateway-route.mjs).
@@ -1900,9 +1981,9 @@ async function addOpenclawSignInAgent(rl, agents, presetKey) {
     if (!(await confirm(rl, "Run this agent's jobs through the Gateway instead?", { defaultYes: false })) || !(await prepareGatewayRoute(name, rl))) {
       console.log(c.dim("Stopped; nothing was written.")); process.exitCode = 1; return;
     }
-    const written = saveAgents({ ...agents, [name]: { kind: "subscription", provider, owner, ...(model ? { model } : {}), route: "gateway" } });
+    const written = saveAgents({ ...agents, [name]: { kind: "subscription", provider, owner, ...(model ? { model } : {}), ...pin, route: "gateway" } });
     console.log(`\n${c.bold("→")} Test call through the Gateway`);
-    if (probeWorker(provider, probeModel)) console.log(c.green(`✓ ${provider}/${probeModel} answered a real test prompt through the Gateway.`));
+    if (probeWorker(provider, probeModel, pinned.authProfile)) console.log(c.green(`✓ ${provider}/${probeModel} answered a real test prompt through the Gateway.`));
     else console.log(c.yellow(`⚠ It didn't answer through the Gateway either${lastProbeFailure ? `: ${lastProbeFailure}` : ""}. Is the Gateway running (openclaw gateway status)? Retry with \`nomarmy agents update ${name} --probe\`.`));
     savedAgentMessage(name, written);
     console.log(c.dim(`Jobs on it need on_behalf_of: "${owner}".`));
@@ -1912,7 +1993,7 @@ async function addOpenclawSignInAgent(rl, agents, presetKey) {
     console.log(c.dim(`You can retry later with \`nomarmy agents update ${name} --probe\`.`));
     if (!(await confirm(rl, "Save the agent anyway?", { defaultYes: false }))) { console.log(c.dim("Stopped; nothing was written.")); process.exitCode = 1; return; }
   }
-  const written = saveAgents({ ...agents, [name]: { kind: "subscription", provider, owner, ...(model ? { model } : {}) } });
+  const written = saveAgents({ ...agents, [name]: { kind: "subscription", provider, owner, ...(model ? { model } : {}), ...pin } });
   savedAgentMessage(name, written);
   console.log(c.dim(`Jobs on it need on_behalf_of: "${owner}".`));
 }
@@ -2059,7 +2140,7 @@ async function cmdAgentsUpdate() {
   const changes = {};
   let probe = false;
   // Flags alone are enough; without any, it asks field by field.
-  const flagged = ["model", "no-model", "slot", "auth-env", "base-url", "max-concurrent", "context-window", "thinking", "no-thinking", "probe", "route"].some((f) => flag(f));
+  const flagged = ["model", "no-model", "slot", "auth-env", "base-url", "max-concurrent", "context-window", "thinking", "no-thinking", "probe", "route", "auth-profile"].some((f) => flag(f));
   if (json || flagged) {
     const num = (flagName) => (value(flagName) !== null ? Number(value(flagName)) : undefined);
     if (value("model") !== null) changes.model = value("model");
@@ -2080,6 +2161,16 @@ async function cmdAgentsUpdate() {
       if (!["gateway", "exec"].includes(route)) throw new Error("--route is gateway or exec.");
       if (current.kind !== "subscription") throw new Error("--route applies to subscription agents.");
       if ((current.route ?? "exec") !== route) changes.route = route === "gateway" ? "gateway" : undefined;
+    }
+    // Which of OpenClaw's sign-ins it runs on (`openclaw models auth list`);
+    // agents.yml refuses a second agent on a provider without one.
+    if (value("auth-profile") !== null) {
+      if (current.kind !== "subscription") throw new Error("--auth-profile applies to subscription agents.");
+      const id = value("auth-profile");
+      if (!AUTH_PROFILE_RE.test(id)) throw new Error(`--auth-profile must be a profile id from \`openclaw models auth list\` (for example ${current.provider}:you@example.com).`);
+      const known = readAuthProfilesSync();
+      if (known && !known.some((p) => p.id === id && p.provider === current.provider)) throw new Error(`OpenClaw has no ${current.provider} sign-in named ${id}; \`openclaw models auth list\` shows them.`);
+      changes.auth_profile = id;
     }
     probe = flag("probe");
     if (!Object.keys(changes).length && !probe) throw new Error("Nothing to update -- pass at least one field flag (see `nomarmy agents update` usage).");
@@ -2116,7 +2207,7 @@ async function cmdAgentsUpdate() {
         if (thinking !== current.thinking) changes.thinking = thinking;
         if (changes.model && current.kind === "subscription") {
           console.log(`\n${c.bold("→")} Test call`);
-          if (probeWorker(current.provider, changes.model)) console.log(c.green(`✓ ${current.provider}/${changes.model} answered a real test prompt.`));
+          if (probeWorker(current.provider, changes.model, current.auth_profile ?? null)) console.log(c.green(`✓ ${current.provider}/${changes.model} answered a real test prompt.`));
           else {
             console.log(c.red(`✗ A real test prompt to ${current.provider}/${changes.model} didn't come back.`));
             if (!(await confirm(rl, "Save the change anyway?", { defaultYes: false }))) { console.log(c.dim("Stopped; nothing was written.")); return; }
@@ -2130,7 +2221,7 @@ async function cmdAgentsUpdate() {
   }
 
   if (probe && !Object.keys(changes).length) { probeConfiguredAgent(name, current); return; }
-  if (probe && changes.model && !probeWorker(agentProviderId(current), changes.model)) {
+  if (probe && changes.model && !probeWorker(agentProviderId(current), changes.model, { ...current, ...changes }.auth_profile ?? null)) {
     out({ error: `a real test prompt to ${current.provider}/${changes.model} didn't come back -- nothing was written` });
     process.exit(1);
   }
