@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { resolveOutcome, generalCommitEligibility } from "../lib/outcome.mjs";
+import { resolveOutcome, generalCommitEligibility, applyRefactorContract } from "../lib/outcome.mjs";
 import { parseWorkerReport } from "../lib/report.mjs";
 import { OUTCOMES } from "../lib/outcomes.mjs";
 import { createGitRecord } from "../lib/git-record.mjs";
@@ -49,8 +49,11 @@ test("the General may commit a verified partial, and only when every other gate 
     assert.match(e.reason, why);
   }
   assert.equal(eligibility(partial, { regressionCheck: { status: "not_run", basis: "not-applicable" } }).eligible, true);
-  const refactorBlocked = { ...partial, reasons: [...partial.reasons, "refactor: test files changed (a.test.js); a refactor must pass the existing tests unchanged"] };
-  assert.match(eligibility(refactorBlocked).reason, /^refactor:/);
+  const refactorBlocked = applyRefactorContract(partial, { refactor: true, verificationStatus: "pass", testChanges: { existing_tests_modified: ["a.test.js"] } });
+  assert.match(eligibility(refactorBlocked).reason, /^refactor: test files changed/);
+  const refactorNote = applyRefactorContract(partial, { refactor: true, verificationStatus: "pass", testChanges: { existing_tests_modified: ["a.test.js"] },
+    neutralTestChanges: { files: [{ path: "a.test.js", kind: "imports" }], blocking: [] } });
+  assert.equal(eligibility(refactorNote).eligible, true, "a non-blocking refactor note doesn't block the General");
   const timedOut = resolveOutcome({ report: report("partial"), repositoryChanged: true, independentVerification: pass, workerTimedOut: true });
   assert.equal(eligibility(timedOut).eligible, false, "a timeout is not a claim block");
   const done = resolveOutcome({ report: report("done"), repositoryChanged: true, independentVerification: pass });
