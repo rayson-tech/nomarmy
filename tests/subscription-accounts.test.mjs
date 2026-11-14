@@ -42,9 +42,28 @@ test("several agents on ONE account stay fine: same owner, different default mod
   assert.equal(validateAgents({ agents: { opus: claude("claude-opus-5"), sonnet: claude("claude-sonnet-5") } }).ok, true);
 });
 
-test("a CLI-session subscription can't be two people's accounts, and auth_profile ids stay command-line safe", () => {
-  const claude = (owner) => ({ kind: "subscription", provider: "claude-cli", owner });
-  assert.match(validateAgents({ agents: { a: claude("a@x"), b: claude("b@x") } }).errors.join("\n"), /CLI's one signed-in session/);
+test("two Claude seats: one on the CLI's own login, the other pinned to a setup-token; Muse Code stays one account", () => {
+  const claude = (owner, extra = {}) => ({ kind: "subscription", provider: "claude-cli", owner, ...extra });
+  assert.equal(validateAgents({ agents: { a: claude("lee@a.example"), b: claude("lee@b.example", { auth_profile: "anthropic:setup-token-2" }) } }).ok, true,
+    "Claude never picks a sign-in itself, so the unpinned agent is the CLI's own login");
+  assert.match(validateAgents({ agents: { a: claude("lee@a.example"), b: claude("lee@b.example") } }).errors.join("\n"), /claude CLI's own login, one account, but name different owners/);
+  const muse = (owner) => ({ kind: "subscription", provider: "muse-cli", owner });
+  assert.match(validateAgents({ agents: { a: muse("a@x"), b: muse("b@x") } }).errors.join("\n"), /CLI's one signed-in session/);
+});
+
+test("setup: a second Claude seat's token is found under anthropic, and the first agent can stay on the CLI login", () => {
+  const profiles = [
+    { id: "anthropic:setup-token", provider: "anthropic", type: "token" },
+    { id: "anthropic:api", provider: "anthropic", type: "api_key" },
+  ];
+  const first = { kind: "subscription", provider: "claude-cli", owner: "lee@a.example" };
+  const answer = newAgentAuthProfile({ agents: { claude: first }, provider: "claude-cli", profiles, before: [] });
+  assert.equal(answer.profile, "anthropic:setup-token");
+  assert.deepEqual(answer.unpinned, [], "the unpinned Claude agent keeps the CLI's own login");
+  assert.ok(!answer.signIns.includes("anthropic:api"), "a metered key is never a subscription's sign-in");
+});
+
+test("auth_profile ids stay command-line safe", () => {
   assert.equal(validateAgents({ agents: { c: { ...codexA, auth_profile: "openai:x; rm -rf /" } } }).ok, false);
   assert.equal(validateAgents({ agents: { c: { ...codexA, auth_profile: "no-provider-prefix" } } }).ok, false);
   assert.equal(validateAgents({ agents: { c: { ...codexA, auth_profile: "xai:company-b" } } }).ok, true);

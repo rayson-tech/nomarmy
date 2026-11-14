@@ -66,8 +66,10 @@ agents:
   #   provider: openai
   #   owner: "you@company-b.example"
   #   auth_profile: openai:account-1234abcd   # a Codex import, keyed by account
-  # Claude and Muse Code run on their CLI's one signed-in session, so a second
-  # account on those needs a separate OS user.
+  # Claude: the CLI's own login is one account; a second seat runs pinned to a
+  # `claude setup-token` token saved in OpenClaw (auth_profile:
+  # anthropic:setup-token-2, say). Muse Code runs on its CLI's one keychain
+  # login, so a second account there needs a separate OS user.
 
 # One OpenClaw provider id holds one credential. OpenAI, Meta and xAI use the
 # same id for the subscription and the API key, so an api agent and a

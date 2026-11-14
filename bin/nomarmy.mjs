@@ -50,7 +50,7 @@ import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
 import { linkCodex } from "../lib/codex-link.mjs";
 import { recordProbeSuccess, parseOpenclawAuthProfiles, codexImportRecovery, apiKeyProvider } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
-import { SUBSCRIPTION_VENDORS, OPENCLAW_SIGN_IN_PRESETS, competingProviderProfiles, newAgentAuthProfile, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, openclawSignInFailure, parseMuseAuthDescriptor } from "../lib/subscription-setup.mjs";
+import { SUBSCRIPTION_VENDORS, OPENCLAW_SIGN_IN_PRESETS, competingProviderProfiles, newAgentAuthProfile, profileProviderFor, PINNABLE_PROFILE_PROVIDER, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, openclawSignInFailure, parseMuseAuthDescriptor } from "../lib/subscription-setup.mjs";
 import { PINNED_OPENCLAW_VERSION, pluginInstallArgs, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors, bundledCatalogModels } from "../lib/openclaw-install.mjs";
 import { ensureOpenClawOnPath, ensureVendorClisOnPath } from "../lib/openclaw-path.mjs";
 import { THINKING_LEVELS } from "../lib/thinking.mjs";
@@ -1741,9 +1741,23 @@ async function addSubscriptionAgent(rl, agents) {
   // Another agent on this provider: a second model on the same account, or
   // another account (two companies' plans)?
   const secondAccount = Boolean(sameCli) && await confirm(rl, `Agent "${sameCli?.[0]}" already uses ${vendor.label}. Is this a different account from it?`, { defaultYes: false });
-  if (secondAccount && vendor.credential.kind === "cli-session") {
-    console.log(c.red(`\n✗ ${vendor.cli?.bin ?? vendor.provider} runs on the one account its CLI is signed in to on this machine, so a second account needs a separate OS user.`));
+  if (secondAccount && vendor.credential.kind === "cli-session" && !PINNABLE_PROFILE_PROVIDER[vendor.provider]) {
+    console.log(c.red(`\n✗ ${vendor.cli?.bin ?? vendor.provider} runs on the one account its CLI is signed in to on this machine, and nomArmy can't hand it another, so a second account needs a separate OS user.`));
     process.exitCode = 1; return;
+  }
+  // A second Claude seat: OpenClaw hands a pinned anthropic token to the
+  // claude CLI for that agent's runs, while the CLI's own login stays the
+  // first account's. `claude setup-token` makes the token (a browser sign-in:
+  // sign in as the OTHER account), and OpenClaw saves it beside any others.
+  if (secondAccount && PINNABLE_PROFILE_PROVIDER[vendor.provider]) {
+    if (!(await freeOpenclawStateForWrites(rl))) { process.exitCode = 1; return; }
+    console.log(c.yellow(`\nThe claude CLI stays signed in to "${sameCli[0]}"'s account. For the other account, \`claude setup-token\` makes a long-lived subscription token: sign in to the OTHER account in the browser it opens, then paste the token into OpenClaw's prompt.`));
+    if (!(await confirm(rl, "Run claude setup-token now?", { defaultYes: true }))) { console.log(c.dim("Stopped; nothing was written.")); return; }
+    if (!runInteractive(vendor.cli.bin, ["setup-token"])) { console.log(c.red("✗ claude setup-token failed or was canceled.")); process.exitCode = 1; return; }
+    const profileProvider = profileProviderFor(vendor.provider);
+    if (!runInteractive(openclawCmd(), ["models", "auth", "login", "--provider", profileProvider, "--method", "setup-token"])) {
+      console.log(c.red(`✗ OpenClaw didn't save the token. Retry with \`openclaw models auth login --provider ${profileProvider} --method setup-token\`, then \`nomarmy agents update <name> --auth-profile <id>\`.`)); process.exitCode = 1; return;
+    }
   }
   // A second ChatGPT account (two companies' plans): OpenClaw keys a Codex
   // import by account id, so it sits beside the first, but the import copies
@@ -1753,7 +1767,7 @@ async function addSubscriptionAgent(rl, agents) {
     if (!(await confirm(rl, "Sign the Codex CLI out now and back in as the other account?", { defaultYes: true }))) { console.log(c.dim("Stopped; nothing was written.")); return; }
     runInteractive(vendor.cli.bin, ["logout"]);
   }
-  const auth = await ensureVendorAuth(rl, vendorKey);
+  const auth = secondAccount && PINNABLE_PROFILE_PROVIDER[vendor.provider] ? { ok: true, email: null } : await ensureVendorAuth(rl, vendorKey);
   if (!auth.ok) { console.log(c.dim("\nStopped; nothing was written.")); process.exitCode = 1; return; }
 
   console.log(`\n${c.bold("→")} Models`);
@@ -2169,7 +2183,11 @@ async function cmdAgentsUpdate() {
       const id = value("auth-profile");
       if (!AUTH_PROFILE_RE.test(id)) throw new Error(`--auth-profile must be a profile id from \`openclaw models auth list\` (for example ${current.provider}:you@example.com).`);
       const known = readAuthProfilesSync();
-      if (known && !known.some((p) => p.id === id && p.provider === current.provider)) throw new Error(`OpenClaw has no ${current.provider} sign-in named ${id}; \`openclaw models auth list\` shows them.`);
+      const profileProvider = profileProviderFor(current.provider);
+      const match = known?.find((p) => p.id === id && p.provider === profileProvider);
+      if (known && !match) throw new Error(`OpenClaw has no ${profileProvider} sign-in named ${id}; \`openclaw models auth list\` shows them.`);
+      // A subscription agent never runs on a metered key.
+      if (match?.type === "api_key") throw new Error(`${id} is an API key, billed by the token; a subscription agent runs on a sign-in or a subscription token.`);
       changes.auth_profile = id;
     }
     probe = flag("probe");
