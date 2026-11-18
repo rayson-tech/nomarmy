@@ -1016,7 +1016,7 @@ else if(a[0]==="agent") console.log(JSON.stringify({ok:true,final:"ok"}));`);
       ["Whose subscription is this", "me@example.com"], ["Agent name", ""],
     ], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
     assert.equal(result.exitCode, 0, result.stdout);
-    assert.equal(fs.readFileSync(`${state}-login`, "utf8"), "models auth login --provider xai");
+    assert.equal(fs.readFileSync(`${state}-login`, "utf8"), "models auth login --provider xai --method oauth --agent main");
     assert.equal(fs.readFileSync(`${state}-logout`, "utf8"), "models auth logout xai:nomarmy --yes");
     assert.match(result.stdout, /xai\/grok-4\.7 answered a real test prompt/);
     const agent = JSON.parse(runAgentsCLI(root, ["list", "--json"]).stdout).agents.grok;
@@ -1198,7 +1198,7 @@ test("agents add subscription codex stops as a sign-in failure when a valid prof
     assert.equal(result.exitCode, 1, result.stdout);
     assert.equal(result.sent, 3, result.stdout);
     assert.match(result.stdout, /Sign-in failed: 401 Unauthorized/);
-    assert.match(result.stdout, /fix: openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --backup-output ~\/\.openclaw-backups --overwrite --yes[\r\n]/);
+    assert.match(result.stdout, /fix: mkdir -p -m 700 ~\/\.openclaw-codex-backups && openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --backup-output ~\/\.openclaw-codex-backups --overwrite --yes[\r\n]/);
     assert.doesNotMatch(result.stdout, /openclaw configure|migrate plan/);
     assert.doesNotMatch(result.stdout, /Save the agent anyway|login works|nomarmy agents add/);
     assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
@@ -1215,7 +1215,7 @@ test("agents add subscription codex treats missing bearer, no usable profiles, a
       assert.equal(result.exitCode, 1, `${message}\n${result.stdout}`);
       assert.equal(result.sent, 3, result.stdout);
       assert.match(result.stdout, new RegExp(`Sign-in failed: ${message.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-      assert.match(result.stdout, /openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --backup-output ~\/\.openclaw-backups --overwrite --yes/);
+      assert.match(result.stdout, /mkdir -p -m 700 ~\/\.openclaw-codex-backups && openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --backup-output ~\/\.openclaw-codex-backups --overwrite --yes/);
       assert.doesNotMatch(result.stdout, /openclaw configure|migrate plan/);
       assert.doesNotMatch(result.stdout, /Save the agent anyway|login works|nomarmy agents add/);
       assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
@@ -1463,8 +1463,8 @@ test("health and doctor CLI fail on Codex and model-policy runtime blockers", po
       const selected = issues.filter((i) => i.id.startsWith("codex-import:") || i.id.startsWith("model-policy:"));
       assert.deepEqual(selected.map((i) => i.id), ["codex-import:missing", "codex-import:shadowed", "model-policy:agents.entries.main.modelPolicy.allow"]);
       assert.deepEqual(selected.map((i) => i.fix), [
-        "openclaw models auth logout openai:person@example.com && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-backups --overwrite --yes",
-        "openclaw models auth logout openai:person@example.com && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-backups --overwrite --yes",
+        "openclaw models auth logout openai:person@example.com && mkdir -p -m 700 ~/.openclaw-codex-backups && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-codex-backups --overwrite --yes",
+        "openclaw models auth logout openai:person@example.com && mkdir -p -m 700 ~/.openclaw-codex-backups && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-codex-backups --overwrite --yes",
         "openclaw config unset agents.entries.main.modelPolicy (or add the missing models to agents.entries.main.modelPolicy.allow)",
       ]);
     }

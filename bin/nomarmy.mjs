@@ -50,6 +50,7 @@ import { ensureProviderConfig } from "../lib/openclaw-config.mjs";
 import { linkCodex } from "../lib/codex-link.mjs";
 import { recordProbeSuccess, parseOpenclawAuthProfiles, codexImportRecovery, apiKeyProvider } from "../lib/health.mjs";
 import { pruneJobRuntime } from "../lib/prune.mjs";
+import { gatewaySignInMethod, parseGatewayStatus } from "../lib/openclaw-gateway-route.mjs";
 import { SUBSCRIPTION_VENDORS, OPENCLAW_SIGN_IN_PRESETS, competingProviderProfiles, parseOpenclawVersion, versionAtLeast, parseCatalogModels, parseCliLoginStatus, probeOutcome, openclawSignInFailure, parseMuseAuthDescriptor } from "../lib/subscription-setup.mjs";
 import { PINNED_OPENCLAW_VERSION, pluginInstallArgs, repairOpenclaw, verifyOpenclaw, configuredSubscriptionVendors, bundledCatalogModels } from "../lib/openclaw-install.mjs";
 import { ensureOpenClawOnPath, ensureVendorClisOnPath } from "../lib/openclaw-path.mjs";
@@ -373,6 +374,7 @@ Usage: nomarmy <command> [options]
                               of the plain (non --json) report
   doctor          Check this host is ready to run nomArmy, with a fix for
                   anything missing.
+  --version       The installed nomArmy version (also -v, version).
   help
 
 Options:
@@ -1186,14 +1188,26 @@ let gatewayStoppedForSetup = false;
 const GATEWAY_ONLY_SIGN_IN = /Explicit auth order for \S+ has no usable profiles/i;
 const GATEWAY_MANUAL_STEPS = "openclaw gateway stop --force, run this again, then openclaw gateway start";
 
-/** True when OpenClaw can save keys and sign-ins now, stopping the Gateway (asked first) if it holds the state. */
-async function freeOpenclawStateForWrites(rl) {
+/** The Gateway's state now (lib/openclaw-gateway-route.mjs), or null when OpenClaw can't say. */
+function gatewayStatusNow() {
+  const status = runQuiet(openclawCmd(), ["gateway", "status", "--json", "--no-probe"]);
+  return status.ok ? parseGatewayStatus(status.stdout) : null;
+}
+
+/**
+ * True when OpenClaw can save keys and sign-ins now, stopping the Gateway
+ * (asked first) if it holds the state. `why` replaces the opening line when
+ * the caller already knows the Gateway is in the way.
+ */
+async function freeOpenclawStateForWrites(rl, { why = null } = {}) {
   if (gatewayStoppedForSetup) return true;
-  const probe = runQuiet(openclawCmd(), ["models", "auth", "list", "--json"]);
-  if (probe.ok || !gatewayOwnsState(probe.out)) return true;
+  if (!why) {
+    const probe = runQuiet(openclawCmd(), ["models", "auth", "list", "--json"]);
+    if (probe.ok || !gatewayOwnsState(probe.out)) return true;
+  }
   // With no prompt (--json) this goes to stderr, keeping stdout JSON.
   const say = rl ? console.log : console.error;
-  say(c.yellow("OpenClaw saves keys and sign-ins only while its Gateway is stopped, and the Gateway is running."));
+  say(c.yellow(why ?? "OpenClaw saves keys and sign-ins only while its Gateway is stopped, and the Gateway is running."));
   const running = liveLeases(path.join(agentStateRoot(), "leases")).length;
   if (running) {
     say(c.red(`✗ ${running} nomArmy job(s) are running. Run this again when they're done (\`nomarmy jobs\`).`));
@@ -1207,8 +1221,17 @@ async function freeOpenclawStateForWrites(rl) {
     say(c.dim(`Stopped; nothing was saved to OpenClaw. To do it by hand: ${GATEWAY_MANUAL_STEPS}.`));
     return false;
   }
-  if (!runQuiet(openclawCmd(), ["gateway", "stop", "--force"]).ok) {
-    say(c.red("✗ `openclaw gateway stop --force` failed. Stop the Gateway yourself and run this again."));
+  // On macOS, launchd's KeepAlive starts a plain-stopped Gateway right back
+  // up; --disable holds it down until `openclaw gateway start`.
+  const stopArgs = ["gateway", "stop", "--force", ...(process.platform === "darwin" ? ["--disable"] : [])];
+  const stopped = runQuiet(openclawCmd(), stopArgs);
+  // OpenClaw refuses when it can't see who started this terminal (an editor's
+  // terminal, tmux): "Process ancestry could not be fully inspected".
+  const stillRunning = () => { const now = gatewayStatusNow(); return now ? now.running : !stopped.ok; };
+  if (!stopped.ok || stillRunning()) {
+    const reason = String(stopped.out ?? "").split("\n").map((l) => l.trim()).find((l) => /fail|error|refus|could not/i.test(l));
+    say(c.red(`✗ The Gateway didn't stop${reason ? `: ${reason}` : ""}.`));
+    say(`  Stop it from a plain terminal window (not inside an editor or tmux): openclaw ${stopArgs.join(" ")}${process.platform === "darwin" ? ", or: launchctl bootout gui/$(id -u)/ai.openclaw.gateway" : ""}. Then run this again; afterward, openclaw gateway start.`);
     return false;
   }
   gatewayStoppedForSetup = true;
@@ -1844,17 +1867,33 @@ async function addOpenclawSignInAgent(rl, agents, presetKey) {
   if (plugin && !runInteractive(openclawCmd(), ["plugins", "install", plugin])) {
     console.log(c.red(`✗ Installing ${plugin} failed. Run \`openclaw plugins install ${plugin}\` yourself to see why.`)); process.exitCode = 1; return;
   }
-  if (!(await freeOpenclawStateForWrites(rl))) { process.exitCode = 1; return; }
   const profiles = () => readAuthProfilesSync() ?? [];
-  const signedIn = () => profiles().some((profile) => profile.provider === provider && profile.type !== "api_key"
-    && (profile.expiresAt == null || Date.parse(profile.expiresAt) > Date.now()));
+  // A refreshed sign-in OpenClaw holds itself has no expiry worth reading;
+  // a failed refresh shows as status "expired" (lib/health.mjs).
+  const signedIn = () => profiles().some((profile) => profile.provider === provider && profile.type !== "api_key" && profile.status !== "expired"
+    && (profile.expiresAt == null || Date.parse(profile.expiresAt) > Date.now() || (profile.type === "oauth" && profile.status)));
   if (!signedIn() || await confirm(rl, `OpenClaw already has a ${provider} sign-in. Sign in again (a different account, or to refresh it)?`, { defaultYes: false })) {
-    const method = value("method");
-    console.log(c.dim(`Opening OpenClaw's sign-in (\`openclaw models auth login --provider ${provider}${method ? ` --method ${method}` : ""}\`); follow its prompts:`));
-    const ok = runInteractive(openclawCmd(), ["models", "auth", "login", "--provider", provider, ...(method ? ["--method", method] : [])]);
+    // Signs in through a running Gateway where the method allows (xAI's
+    // "oauth"), so the Gateway keeps running; --agent main, since OpenClaw
+    // refuses a sign-in that names no agent when it has more than one.
+    const method = gatewaySignInMethod(provider, value("method"));
+    const loginArgs = ["models", "auth", "login", "--provider", provider, ...(method ? ["--method", method] : []), "--agent", "main"];
+    const signIn = () => {
+      console.log(c.dim(`Opening OpenClaw's sign-in (\`openclaw ${loginArgs.join(" ")}\`); follow its prompts:`));
+      return runInteractive(openclawCmd(), loginArgs);
+    };
+    let ok = signIn();
+    if (!ok && !gatewayStoppedForSetup && gatewayStatusNow()?.running) {
+      // OpenClaw does only some sign-ins through a running Gateway ("No
+      // Gateway-compatible login matches this provider and method").
+      if (await freeOpenclawStateForWrites(rl, { why: "That sign-in may need OpenClaw's Gateway stopped: OpenClaw does only some sign-ins through a running Gateway." })) ok = signIn();
+    }
     runQuiet(openclawCmd(), ["plugins", "registry", "--refresh"]);
-    if (!ok || !signedIn()) {
-      console.log(c.red(`✗ Sign-in failed or was canceled. Retry with \`nomarmy agents add subscription ${presetKey}\`.`)); process.exitCode = 1; return;
+    if (!ok) {
+      console.log(c.red(`✗ OpenClaw's sign-in exited with an error or was canceled (its message is above). Retry with \`nomarmy agents add subscription ${presetKey}\`${provider === "xai" ? "" : ", or pick another sign-in method with --method <id>"}.`)); process.exitCode = 1; return;
+    }
+    if (!signedIn()) {
+      console.log(c.red(`✗ OpenClaw's sign-in finished, but OpenClaw has no usable ${provider} sign-in (check \`openclaw models status\`). Retry with \`nomarmy agents add subscription ${presetKey}\`.`)); process.exitCode = 1; return;
     }
   }
   console.log(c.green(`✓ OpenClaw is signed in to ${provider}.`));
@@ -1862,7 +1901,7 @@ async function addOpenclawSignInAgent(rl, agents, presetKey) {
   const keys = competingProviderProfiles(profiles(), provider);
   if (keys.length) {
     console.log(c.yellow(`OpenClaw also has an API key for ${provider} (${keys.map((p) => p.id).join(", ")}). Jobs could run on that key, billed by the token, instead of your plan.`));
-    if (await confirm(rl, "Remove the saved API key from OpenClaw? (The key itself isn't revoked.)")) {
+    if (await confirm(rl, "Remove the saved API key from OpenClaw? (The key itself isn't revoked.)") && await freeOpenclawStateForWrites(rl)) {
       for (const profile of keys) runQuiet(openclawCmd(), ["models", "auth", "logout", profile.id, "--yes"]);
       const left = competingProviderProfiles(profiles(), provider);
       if (left.length) { console.log(c.red(`✗ Couldn't remove ${left.map((p) => p.id).join(", ")}. Run \`openclaw models auth logout <id>\` yourself.`)); process.exitCode = 1; return; }
@@ -1961,6 +2000,33 @@ async function cmdAgentsAddJson() {
   return out({ written: agentsConfigPath(globalConfigDir()), name, agent: saved, ...(kind === "api" ? { registered, mcpUpdated } : {}) });
 }
 
+/**
+ * Gateway-route jobs need the Gateway running, and running as a service so
+ * it comes back at login and after updates. nomArmy installs OpenClaw but
+ * not that service. Offers `openclaw gateway install` or `start` (--yes with
+ * --json); never fails the caller, since the agent can be fixed later and
+ * `nomarmy health` reports a stopped Gateway.
+ */
+async function ensureGatewayService(sharedRl = null) {
+  if (gatewayStoppedForSetup) return;
+  const say = json ? console.error : console.log;
+  const gateway = gatewayStatusNow();
+  if (!gateway || gateway.running) return;
+  const fix = gateway.installed ? ["gateway", "start"] : ["gateway", "install"];
+  say(c.yellow(gateway.installed
+    ? "OpenClaw's Gateway is installed but stopped, and this agent's jobs run through it."
+    : "OpenClaw's Gateway isn't installed as a service, and this agent's jobs run through it. Installed, it starts at login and after updates."));
+  let yes = flag("yes");
+  if (!yes && !json && input.isTTY) {
+    const rl = sharedRl ?? createInterface({ input, output });
+    try { yes = await confirm(rl, `Run \`openclaw ${fix.join(" ")}\` now?`); } finally { if (!sharedRl) rl.close(); }
+  }
+  if (!yes) { say(c.dim(`Not changed. Before its first job: openclaw ${fix.join(" ")}`)); return; }
+  if (!runQuiet(openclawCmd(), fix).ok) { say(c.red(`✗ \`openclaw ${fix.join(" ")}\` failed. Run it yourself to see why.`)); return; }
+  for (let i = 0; i < 15 && !gatewayStatusNow()?.running; i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+  say(gatewayStatusNow()?.running ? c.green("✓ The Gateway is running.") : c.yellow(`⚠ The Gateway hasn't started yet; check \`openclaw gateway status\`.`));
+}
+
 // A probe-only update checks credentials without changing agents.yml.
 /**
  * Turning on route: gateway: says what it changes, and makes sure OpenClaw
@@ -1975,6 +2041,7 @@ async function prepareGatewayRoute(name, sharedRl = null) {
     "  - runs in OpenClaw's sandbox with the job's image, PATH and privacy settings, so the Gateway must be running;",
     "  - gets no transcript of its own for report recovery, and its cost is recorded as subscription use.",
   ].join("\n")));
+  await ensureGatewayService(sharedRl);
   const current = runQuiet(openclawCmd(), ["config", "get", "agents.defaults.skipBootstrap", "--json"]);
   if (current.ok && current.stdout.trim() === "true") return true;
   say("OpenClaw writes starter files (AGENTS.md, SOUL.md, BOOTSTRAP.md, ...) into a new agent's workspace, which here is the job's worktree. Setting agents.defaults.skipBootstrap stops that for new agents; existing ones keep theirs.");
@@ -3754,6 +3821,13 @@ async function cmdDoctor() {
     runtime: { agents, armySummary, openclawCmd: openclawCmd() } });
 }
 commands.doctor = cmdDoctor;
+// Before the Windows forward: the installed version is this copy's, and
+// reading it needs nothing from WSL.
+if (["--version", "-v", "version"].includes(command)) {
+  const { version } = JSON.parse(fs.readFileSync(path.join(nomarmyRoot, "package.json"), "utf8"));
+  console.log(json ? JSON.stringify({ version }) : version);
+  process.exit(0);
+}
 if (windowsFrontEnd() && windowsPlan(argv) === "FORWARD") {
   process.exit(windowsForward(argv));
 }
