@@ -7,6 +7,7 @@ Every command proposes before it writes: a `[y/N]` prompt, or an explicit flag u
 | Command | What it does |
 |---|---|
 | `nomarmy doctor` | Checks this machine is ready, with a fix for anything missing. Start here. |
+| `nomarmy --version` | The installed nomArmy version (also `-v`, `version`; `--json` for `{"version": ...}`). |
 | `nomarmy setup` | The setup playbook: a checklist of where models run, install, agents, roles, this repo and a check, running the next step when you say yes. `--status` prints it only; `--choose`, `--hosted` and `--llama-url` set where models run. |
 | `nomarmy sandbox` | The Podman VM every sandbox shares (macOS; on Windows Podman runs inside WSL, sized by `.wslconfig`): memory, disk and images. `--memory <GiB>` resizes it (refused while jobs run, below 4 GiB, or above three quarters of the machine); `--prune` removes images no container uses; `--repair` restores rootless Podman's subordinate ID ranges if they're missing (refused while jobs run). |
 | `nomarmy install` | Runs the bundled `install.sh` for the profile setup chose (`--profile` to override, `--no-claude` to skip the Claude Code registration). `--server`: the hosted profile with no editor connections, for a headless machine. |

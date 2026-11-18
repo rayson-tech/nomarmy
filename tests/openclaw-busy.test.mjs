@@ -112,8 +112,8 @@ test("profilesFromModelsStatus: models status rows in models auth list's shape",
   assert.equal(gatewayOwnsState(GATEWAY), true);
   assert.equal(gatewayOwnsState(BUSY), false);
   assert.deepEqual(profilesFromModelsStatus(`log line\n${STATUS}`), [
-    { id: "openai:account-123", provider: "openai", type: "oauth", label: "openai:account-123 (Codex import)", expiresAt: "2099-01-01T00:00:00.000Z" },
-    { id: "llama-cpp:nomarmy-local", provider: "llama-cpp", type: "api_key", label: "llama-cpp:nomarmy-local" },
+    { id: "openai:account-123", provider: "openai", type: "oauth", label: "openai:account-123 (Codex import)", expiresAt: "2099-01-01T00:00:00.000Z", status: "ok" },
+    { id: "llama-cpp:nomarmy-local", provider: "llama-cpp", type: "api_key", label: "llama-cpp:nomarmy-local", status: "static" },
   ]);
   assert.equal(profilesFromModelsStatus("not json"), null);
   assert.equal(profilesFromModelsStatus(JSON.stringify({ auth: {} })), null);
