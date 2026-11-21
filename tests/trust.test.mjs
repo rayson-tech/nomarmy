@@ -882,7 +882,9 @@ test("high-stakes issue and stats agree on independent judge evidence", async (t
       },
     });
     assert.equal(calls, 1);
-    assert.deepEqual(manifest.issues, [entry.reviewed ? reviewed : HIGH_STAKES_NOTE, "existing issue",
+    // A judge on the worker's own vendor now says so, naming the fix.
+    const overlap = entry.provider === "openai" ? ["JUDGE NOT INDEPENDENT: claude/sonnet shares the worker's vendor (openai). Add a judge on another vendor under judge.alternates in validators.yml, and nomArmy picks it for jobs like this one."] : [];
+    assert.deepEqual(manifest.issues, [entry.reviewed ? reviewed : HIGH_STAKES_NOTE, ...overlap, "existing issue",
       ...(entry.error ? ["Judge didn't answer (judge failed); this job's result doesn't depend on it"] : [])]);
     assert.equal(manifest.reviewRequired, true);
     assert.equal(commitOutcome.reviewRequired, true);

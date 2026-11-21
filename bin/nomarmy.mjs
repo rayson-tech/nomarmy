@@ -3330,15 +3330,30 @@ async function waitForJobCli() {
     }
   }
   const deadline = Date.now() + timeoutSeconds * 1000;
-  const results = await Promise.all(jobIds.map(async (jobId) => {
-    const jobDir = path.join(jobsRootDir(), jobId);
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; } };
+  const results = await Promise.all(jobIds.map(async (requestedId) => {
+    let jobId = requestedId;
+    let jobDir = path.join(jobsRootDir(), jobId);
     for (;;) {
       const status = readJsonSafe(path.join(jobDir, "status.json")) ?? {};
       const meta = readJsonSafe(path.join(jobDir, "metadata.json")) ?? {};
+      // An automatic correction round (lib/auto-correct.mjs): wait for it,
+      // and report its result, while the server that runs it is alive.
+      const correction = meta.autoCorrection;
+      if (correction?.jobId && ["running", "finished"].includes(correction.state) && fs.existsSync(path.join(jobsRootDir(), correction.jobId))) {
+        if (!json) console.log(c.dim(`${jobId}: verification failed after a done/pass report; following its auto-correction ${correction.jobId}`));
+        jobId = correction.jobId; jobDir = path.join(jobsRootDir(), jobId);
+        continue;
+      }
+      if (correction?.state === "pending" && status.serverPid && alive(status.serverPid) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        continue;
+      }
       if (status.state === "finished" || meta.outcome) {
         const issues = Array.isArray(meta.issues) ? meta.issues : Array.isArray(status.issues) ? status.issues : [];
         const result = {
           jobId,
+          ...(jobId !== requestedId ? { autoCorrectionOf: requestedId } : {}),
           outcome: meta.outcome ?? status.outcome ?? null,
           coordinatorStatus: meta.coordinatorStatus ?? status.coordinatorStatus ?? null,
           branch: meta.branch ?? status.branch ?? null,
