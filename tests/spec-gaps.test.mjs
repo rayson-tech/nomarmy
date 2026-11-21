@@ -290,7 +290,7 @@ test("visual setup uses the repository's playwright config, or needs a server an
 
 test("the visual issue lists screenshots, missing ones and the reference", () => {
   const shots = screenshotsFrom({ artifacts: ["artifacts/test-results/nomarmy-visual/votes--light--desktop.png", "artifacts/test-results/other.txt"] }, "/jobs/j/visual");
-  assert.deepEqual(shots, ["/jobs/j/visual/artifacts/test-results/nomarmy-visual/votes--light--desktop.png"]);
+  assert.deepEqual(shots, [path.join("/jobs/j/visual", "artifacts/test-results/nomarmy-visual/votes--light--desktop.png")]);
   const issue = visualIssue({ shots, expected: expectedShots(["/votes"]), reference: "design/votes.png", status: "pass" });
   assert.match(issue, /^VISUAL REVIEW: 1 screenshot\(s\).*3 didn't render.*approved design \(design\/votes\.png\)/);
   assert.match(visualIssue({ shots: [], expected: [], status: "not_run", reason: "no playwright.config" }), /^VISUAL CHECK DIDN'T RUN: no playwright\.config/);
