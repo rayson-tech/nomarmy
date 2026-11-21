@@ -66,4 +66,20 @@ What the General uses. Every job takes the same shape: a `task`, optional `accep
 | `local_worker_cleanup` | Removes one worktree and branch. Recognizes a cherry-picked branch as integrated by content. |
 | `local_worker_sweep` | Removes worktrees that are provably empty. `dry_run` previews. |
 
-A job's `mode` is `implement` (edits, then nomArmy verifies and commits), `scout` (read-only research, every claim cited as `[path:start-end]` and checked against the base commit) or `decompose` (read-only, proposes independent subtasks for the General to dispatch).
+A job's `mode` is `implement` (edits, then nomArmy verifies and commits), `tests-first` (writes failing tests from the acceptance criteria and nothing else; see below), `scout` (read-only research, every claim cited as `[path:start-end]` and checked against the base commit) or `decompose` (read-only, proposes independent subtasks for the General to dispatch).
+
+### Catching work that passes its own tests but misses the spec
+
+Every implement job gets these checks after the worker finishes. They read the Git record and the worktree; none runs the worker's code.
+
+| Check | What it does | Effect |
+|---|---|---|
+| Removed or loosened assertions | Compares assertions line by line across changed, deleted and new test files. A moved assertion is fine. One removed with no replacement, or replaced by one that checks less (`toBe(42)` to `toBeDefined()`), is listed side by side with its replacement. | Refuses the commit, unless the job sets `allow_test_removal: true`. |
+| Frozen tests | `frozen_tests: [paths]` (a trailing `/` freezes a directory) or `frozen_tests_from: <tests-first job id>`. The files must exist at the base, and the job needs a `verification` profile that runs them. | Editing, renaming or deleting one refuses the commit, and so does verification not passing. |
+| Tests-first jobs | `mode: tests-first` writes failing tests only. It commits when no production file changed and its new tests fail under `verification`. Its build job, with `frozen_tests_from`, starts from that commit with those tests frozen, and says so when both ran on one vendor. | Its own outcome rules. |
+| Surface map | When a diff changes an exported function, class, component, type or server-sent event, nomArmy finds every other file that uses it (the same whole-word search as `repo_evidence`). The worker accounts for each in `.openclaw/accounting.md` (`<path>: changed` or `<path>: not affected because ...`) or its NOTE. | `SURFACE NOT ACCOUNTED FOR` review flag. |
+| Scope guard | CSS classes or rules removed, defaults changed, and `aria-*`, `role` or `data-testid` hooks removed, when the brief doesn't name them. | `UNREQUESTED CHANGES` review flag, separate from the diff. |
+| Reload prompt | A UI change that touches saved data or a server-sent event needs a test that rebuilds the view from saved data, or `RELOAD: no test because ...` in the accounting file. | `RELOAD NOT COVERED` review flag. |
+| Visual verification | `visual: { routes, reference?, server?, base_url? }` screenshots each route in the sandbox's headless Chromium (the repository's own `@playwright/test`, offline), in light and dark, desktop and phone. The repository's `playwright.config` `webServer` serves the app, or `server` at `base_url`. A route that answers with an HTTP error fails the run. A review scout with `reviews: <job id>` gets the screenshots and a local reference image, and is told to list every visible difference. | `VISUAL REVIEW` review flag with the screenshot paths. |
+| Independent judge | The judge in `validators.yml` can list `alternates: [{ agent, model }]`. Each job is judged by the first one on neither the worker's nor the General's vendor. | `JUDGE NOT INDEPENDENT` warning when none qualifies. |
+| Correction round | A job whose worker reported done/pass but whose verification failed gets one automatic `continue_from` job on the same agent, with the failing output as its brief. `nomarmy jobs --wait` and `local_worker_status` follow it. It's admitted like any job, so it counts toward a run's limits. `auto_correct: false` turns it off. | The caller gets the correction's result. |
