@@ -12,7 +12,7 @@ const now = Date.parse("2026-10-01T12:00:00Z");
 const imported = { id: "openai:account-123", provider: "openai", type: "oauth", label: "(Codex import)", expiresAt: "2099-01-01T00:00:00.000Z" };
 const email = { id: "openai:person@example.com", provider: "openai", type: "oauth", expiresAt: "2099-01-01T00:00:00.000Z" };
 const migrate = "mkdir -p -m 700 ~/.openclaw-codex-backups && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-codex-backups --overwrite --yes";
-const fix = `openclaw models auth logout ${email.id} && ${migrate}`;
+const fix = "nomarmy login codex --remove-email-profiles";
 const list = ["models", "auth", "list", "--json"];
 const backupDir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-test-openclaw-")), "backups");
 const migration = ["migrate", "apply", "codex", "--from", "/sandbox/codex", "--agent", "main", "--include-secrets", "--item", "auth:openai", "--backup-output", backupDir, "--overwrite", "--yes"];
@@ -102,11 +102,11 @@ async function checks(kind, profiles, allows = [null, null], armySummary = null)
 for (const kind of ["health", "doctor"]) {
   test(`${kind} flags absent, expired and shadowed Codex imports with ordered exact recovery`, async () => {
     for (const [profiles, ids, recovery] of [
-      [[], ["codex-import:missing"], migrate],
+      [[], ["codex-import:missing"], "nomarmy login codex"],
       [[email], ["codex-import:missing", "codex-import:shadowed"], fix],
       [[imported, email], ["codex-import:shadowed"], fix],
       [[{ ...imported, expiresAt: "1970-01-01T00:00:00.000Z" }, email], ["login-expired:openai:account-123", "codex-import:missing", "codex-import:shadowed"], fix],
-      [[imported], [], migrate],
+      [[imported], [], "nomarmy login codex"],
     ]) {
       const issues = await checks(kind, profiles);
       assert.deepEqual(issues.map((i) => i.id), ids);
@@ -135,4 +135,34 @@ test("the Codex import's backup goes inside OpenClaw's state, never the current 
   const args = r.calls.find((call) => call[0] === "migrate");
   assert.equal(args[args.indexOf("--backup-output") + 1], backupDir);
   assert.equal(fs.statSync(backupDir).mode & 0o777, process.platform === "win32" ? fs.statSync(backupDir).mode & 0o777 : 0o700);
+});
+
+test("Codex link removes expired imports once the new one is confirmed, and an unusable status counts as expired", async () => {
+  const stale = { id: "openai:account-old", provider: "openai", type: "oauth", label: "(Codex import)", status: "expired" };
+  const r = linkRunner([stale], [stale, imported]); const printed = [];
+  assert.equal(await linkCodex({ ...options, run: r.run, removeStale: true, print: (s) => printed.push(s) }), true);
+  assert.deepEqual(r.calls.slice(-1), [["models", "auth", "logout", stale.id, "--yes"]]);
+  assert.equal(printed.at(-1), `Removed the expired Codex login ${stale.id}.`);
+  // Without removeStale (setup's path) nothing else is logged out.
+  const kept = linkRunner([stale], [stale, imported]);
+  assert.equal(await linkCodex({ ...options, run: kept.run }), true);
+  assert.equal(kept.calls.some((c) => c[2] === "logout"), false);
+  // An "expired" import with no expiry isn't the usable one.
+  assert.equal(await linkCodex({ ...options, run: linkRunner([], [stale]).run }), false);
+});
+
+test("Codex link retries a logout without --yes on an OpenClaw that doesn't know it", async () => {
+  const stale = { id: "openai:account-old", provider: "openai", type: "oauth", label: "(Codex import)", expiresAt: "2000-01-01T00:00:00.000Z" };
+  let profiles = [stale];
+  const calls = [];
+  const run = async (cmd, args) => {
+    calls.push(args.join(" "));
+    if (args.join(" ") === list.join(" ")) return { ok: true, stdout: JSON.stringify({ profiles }) };
+    if (args[0] === "migrate") { profiles = [stale, imported]; return { ok: true }; }
+    if (args.at(-1) === "--yes" && args[2] === "logout") return { ok: false, out: "error: unknown option '--yes'" };
+    if (args[2] === "logout") { profiles = [imported]; return { ok: true }; }
+    return { ok: true };
+  };
+  assert.equal(await linkCodex({ ...options, run, removeStale: true }), true);
+  assert.deepEqual(calls.filter((c) => c.includes("logout")), [`models auth logout ${stale.id} --yes`, `models auth logout ${stale.id}`]);
 });

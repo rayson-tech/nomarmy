@@ -23,6 +23,7 @@ Every command proposes before it writes: a `[y/N]` prompt, or an explicit flag u
 | `nomarmy army show\|init\|assign\|general` | The General and the roster. See [The army](agents-and-army.md#the-army-who-does-what). |
 | `nomarmy jobs [--watch\|--events\|--prune\|--wait <jobId>]` | What's running across every session, and what just finished. `--wait <jobId> [--timeout <seconds>]` waits for one cross-session job (default 1800 seconds; add `--json` for structured output). |
 | `nomarmy health` | Runs the health checks now. |
+| `nomarmy login codex [--skip-codex-login] [--yes] [--remove-email-profiles] [--no-test]` | Renews the Codex login jobs use: runs `codex login`, stops OpenClaw's Gateway (asks first; `--yes` doesn't, for use without a terminal), copies the login into OpenClaw, starts the Gateway again, removes expired Codex logins and makes a test call. Refused while jobs run. |
 | `nomarmy statusline` | nomArmy's part of Claude Code's status line. |
 | `nomarmy config paths` | Where each config file lives. |
 | `nomarmy config openclaw [tested\|latest]` | Which OpenClaw release `nomarmy update` and `nomarmy doctor --fix` keep: `tested` (default) or `latest`, npm's latest with matching vendor plugins, never below tested. On `latest`, your roles' models are test-called before and after; if one that answered stops, OpenClaw and its plugins roll back to the exact earlier release, which is then skipped. If the newer release migrated OpenClaw's state so the earlier one can't read it, it stays on the newer release and names the roles to move. |
