@@ -1198,7 +1198,7 @@ test("agents add subscription codex stops as a sign-in failure when a valid prof
     assert.equal(result.exitCode, 1, result.stdout);
     assert.equal(result.sent, 3, result.stdout);
     assert.match(result.stdout, /Sign-in failed: 401 Unauthorized/);
-    assert.match(result.stdout, /fix: mkdir -p -m 700 ~\/\.openclaw-codex-backups && openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --backup-output ~\/\.openclaw-codex-backups --overwrite --yes[\r\n]/);
+    assert.match(result.stdout, /fix: nomarmy login codex[\r\n]/);
     assert.doesNotMatch(result.stdout, /openclaw configure|migrate plan/);
     assert.doesNotMatch(result.stdout, /Save the agent anyway|login works|nomarmy agents add/);
     assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
@@ -1215,7 +1215,7 @@ test("agents add subscription codex treats missing bearer, no usable profiles, a
       assert.equal(result.exitCode, 1, `${message}\n${result.stdout}`);
       assert.equal(result.sent, 3, result.stdout);
       assert.match(result.stdout, new RegExp(`Sign-in failed: ${message.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-      assert.match(result.stdout, /mkdir -p -m 700 ~\/\.openclaw-codex-backups && openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --backup-output ~\/\.openclaw-codex-backups --overwrite --yes/);
+      assert.match(result.stdout, /nomarmy login codex/);
       assert.doesNotMatch(result.stdout, /openclaw configure|migrate plan/);
       assert.doesNotMatch(result.stdout, /Save the agent anyway|login works|nomarmy agents add/);
       assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
