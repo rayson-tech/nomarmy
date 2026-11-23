@@ -311,6 +311,11 @@ Usage: nomarmy <command> [options]
                   that can't be dispatched, an unloadable agents.yml,
                   piled-up job storage. The MCP server also runs this
                   every 6 hours and notifies once per new warning
+  login codex [--skip-codex-login] [--yes] [--remove-email-profiles] [--no-test]
+                  renew the Codex login jobs use: runs codex login, stops
+                  OpenClaw's Gateway (asks first; --yes doesn't), copies the
+                  login into OpenClaw, starts the Gateway again, removes
+                  expired Codex logins and makes a test call
   statusline      the one-line summary Claude Code's status line shows
                   (installed by \`nomarmy connect claude\` when no status
                   line is set); reads the session JSON on stdin
@@ -1199,7 +1204,7 @@ function gatewayStatusNow() {
  * (asked first) if it holds the state. `why` replaces the opening line when
  * the caller already knows the Gateway is in the way.
  */
-async function freeOpenclawStateForWrites(rl, { why = null } = {}) {
+async function freeOpenclawStateForWrites(rl, { why = null, yes = false, retry = null } = {}) {
   if (gatewayStoppedForSetup) return true;
   if (!why) {
     const probe = runQuiet(openclawCmd(), ["models", "auth", "list", "--json"]);
@@ -1213,11 +1218,11 @@ async function freeOpenclawStateForWrites(rl, { why = null } = {}) {
     say(c.red(`✗ ${running} nomArmy job(s) are running. Run this again when they're done (\`nomarmy jobs\`).`));
     return false;
   }
-  if (!rl || !input.isTTY) {
-    say(c.red(`✗ Stop it first: ${GATEWAY_MANUAL_STEPS}.`));
+  if (!yes && (!rl || !input.isTTY)) {
+    say(c.red(`✗ ${retry ? `Run ${retry} to let nomArmy stop it and start it again, or stop it yourself` : "Stop it first"}: ${GATEWAY_MANUAL_STEPS}.`));
     return false;
   }
-  if (!(await confirm(rl, "Stop the Gateway now, and start it again when this finishes?"))) {
+  if (!yes && !(await confirm(rl, "Stop the Gateway now, and start it again when this finishes?"))) {
     say(c.dim(`Stopped; nothing was saved to OpenClaw. To do it by hand: ${GATEWAY_MANUAL_STEPS}.`));
     return false;
   }
@@ -1465,6 +1470,50 @@ async function openclawProviderLogin(vendor, rl) {
   const ok = runInteractive(openclawCmd(), ["models", "auth", "login", "--provider", provider]);
   runQuiet(openclawCmd(), ["plugins", "registry", "--refresh"]);
   return ok;
+}
+
+// --- `nomarmy login codex`: renew the Codex login jobs use ------------------
+// Jobs use OpenClaw's copy of the Codex login, not Codex's own, so a fresh
+// `codex login` alone changes nothing; the import that copies it needs the
+// Gateway stopped. This does every step: sign in, stop the Gateway (asked
+// first, or --yes), import, start it again, remove expired imports, test.
+async function cmdLogin() {
+  const usageText = "Usage: nomarmy login codex [--skip-codex-login] [--yes] [--remove-email-profiles] [--no-test]";
+  if (argv[1] !== "codex") throw new Error(usageText);
+  const running = liveLeases(path.join(agentStateRoot(), "leases")).length;
+  if (running) throw new Error(`${running} nomArmy job(s) are running; run this again when they're done (\`nomarmy jobs\`). Nothing was changed.`);
+  const vendor = SUBSCRIPTION_VENDORS.codex;
+  if (!runQuiet(vendor.cli.bin, ["--version"]).ok) throw new Error(`The Codex CLI isn't installed: ${vendor.cli.installHint}`);
+  if (!flag("skip-codex-login")) {
+    console.log(`${c.bold("→")} codex login ${c.dim("(follow its sign-in)")}`);
+    if (!runInteractive(vendor.cli.bin, vendor.cli.loginArgs)) throw new Error("codex login didn't finish; nothing was imported.");
+  }
+  if (!readLoginStatus("codex").loggedIn) throw new Error("Codex isn't signed in. Run codex login, then nomarmy login codex --skip-codex-login.");
+  console.log(`${c.bold("→")} Copying the Codex login into OpenClaw ${c.dim("(jobs use OpenClaw's copy)")}`);
+  const rl = input.isTTY ? createInterface({ input, output }) : null;
+  let linked = false;
+  try {
+    if (!(await freeOpenclawStateForWrites(rl, { yes: flag("yes"), retry: "nomarmy login codex --skip-codex-login --yes" }))) { process.exitCode = 1; return; }
+    linked = await linkCodex({ run: runQuiet, command: openclawCmd(), isTTY: Boolean(rl), importLogin: true,
+      removeEmailProfiles: flag("remove-email-profiles"), removeStale: true,
+      confirm: (prompt, opts) => confirm(rl, prompt, opts), print: (message) => console.log(c.dim(message)) });
+  } finally {
+    restartGatewayIfStopped();
+    rl?.close();
+  }
+  if (!linked) throw new Error("The Codex login wasn't imported; see above. Your Codex sign-in itself is unchanged.");
+  const imported = (readAuthProfilesSync() ?? []).filter((p) => p.provider === "openai" && Number.isFinite(Date.parse(p.expiresAt ?? "")) && p.status !== "expired");
+  const latest = Math.max(...imported.map((p) => Date.parse(p.expiresAt)));
+  if (Number.isFinite(latest)) console.log(c.green(`✓ OpenClaw has the Codex login; it's good for ${Math.max(0, Math.floor((latest - Date.now()) / 86400000))} days.`));
+  if (flag("no-test")) return;
+  const agent = Object.values(loadAgents(globalConfigDir()).agents ?? {}).find((a) => a?.kind === "subscription" && a.provider === vendor.provider);
+  const model = agent?.model && agent.model !== "auto" ? agent.model : vendor.defaultModel;
+  console.log(`${c.bold("→")} Test call to ${vendor.provider}/${model}`);
+  if (probeWorker(vendor.provider, model)) console.log(c.green("✓ Codex jobs can run."));
+  else {
+    console.log(c.red(`✗ The test call failed${lastProbeFailure ? `: ${lastProbeFailure}` : ""}.`));
+    process.exitCode = 1;
+  }
 }
 
 // --- `nomarmy agents`: every model a job can run on -------------------------
@@ -3791,7 +3840,7 @@ async function cmdTrust() {
   else console.log(`${result.status}: ${result.map ?? result.proposal} (${result.entries.length} entries)`);
 }
 
-const commands = { trust: cmdTrust, acceptance: cmdAcceptance, stats: cmdStats, validators: cmdValidators, mcp: cmdMcp, scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, install: cmdInstall, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, sandbox: cmdSandbox, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
+const commands = { trust: cmdTrust, acceptance: cmdAcceptance, stats: cmdStats, validators: cmdValidators, mcp: cmdMcp, scan: cmdScan, validate: cmdValidate, sizing: cmdSizing, init: cmdInit, setup: cmdSetup, install: cmdInstall, model: cmdModel, agents: cmdAgents, army: cmdArmy, jobs: cmdJobs, statusline: cmdStatusline, health: cmdHealth, config: cmdConfig, update: cmdUpdate, connect: cmdConnect, login: cmdLogin, sandbox: cmdSandbox, start: cmdStart, stop: cmdStop, uninstall: cmdUninstall, help: () => usage(0) };
 // doctor command
 async function cmdDoctor() {
   if (windowsFrontEnd()) {

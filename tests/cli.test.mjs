@@ -1198,7 +1198,7 @@ test("agents add subscription codex stops as a sign-in failure when a valid prof
     assert.equal(result.exitCode, 1, result.stdout);
     assert.equal(result.sent, 3, result.stdout);
     assert.match(result.stdout, /Sign-in failed: 401 Unauthorized/);
-    assert.match(result.stdout, /fix: mkdir -p -m 700 ~\/\.openclaw-codex-backups && openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --backup-output ~\/\.openclaw-codex-backups --overwrite --yes[\r\n]/);
+    assert.match(result.stdout, /fix: nomarmy login codex[\r\n]/);
     assert.doesNotMatch(result.stdout, /openclaw configure|migrate plan/);
     assert.doesNotMatch(result.stdout, /Save the agent anyway|login works|nomarmy agents add/);
     assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
@@ -1215,7 +1215,7 @@ test("agents add subscription codex treats missing bearer, no usable profiles, a
       assert.equal(result.exitCode, 1, `${message}\n${result.stdout}`);
       assert.equal(result.sent, 3, result.stdout);
       assert.match(result.stdout, new RegExp(`Sign-in failed: ${message.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-      assert.match(result.stdout, /mkdir -p -m 700 ~\/\.openclaw-codex-backups && openclaw migrate apply codex --from ~\/\.codex --agent main --include-secrets --item auth:openai --backup-output ~\/\.openclaw-codex-backups --overwrite --yes/);
+      assert.match(result.stdout, /nomarmy login codex/);
       assert.doesNotMatch(result.stdout, /openclaw configure|migrate plan/);
       assert.doesNotMatch(result.stdout, /Save the agent anyway|login works|nomarmy agents add/);
       assert.equal(fs.readFileSync(probeMarker, "utf8"), "called");
@@ -1463,10 +1463,86 @@ test("health and doctor CLI fail on Codex and model-policy runtime blockers", po
       const selected = issues.filter((i) => i.id.startsWith("codex-import:") || i.id.startsWith("model-policy:"));
       assert.deepEqual(selected.map((i) => i.id), ["codex-import:missing", "codex-import:shadowed", "model-policy:agents.entries.main.modelPolicy.allow"]);
       assert.deepEqual(selected.map((i) => i.fix), [
-        "openclaw models auth logout openai:person@example.com && mkdir -p -m 700 ~/.openclaw-codex-backups && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-codex-backups --overwrite --yes",
-        "openclaw models auth logout openai:person@example.com && mkdir -p -m 700 ~/.openclaw-codex-backups && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-codex-backups --overwrite --yes",
+        "nomarmy login codex --remove-email-profiles",
+        "nomarmy login codex --remove-email-profiles",
         "openclaw config unset agents.entries.main.modelPolicy (or add the missing models to agents.entries.main.modelPolicy.allow)",
       ]);
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// `nomarmy login codex`: a fake OpenClaw whose Gateway holds its state, as
+// OpenClaw 2026.11's does, so the import only works once it's stopped.
+function fakeGatewayOpenclaw(root) {
+  const log = path.join(root, "openclaw-calls"), state = path.join(root, "openclaw-state.json");
+  const stale = { profileId: "openai:account-old", provider: "openai", type: "oauth", label: "openai:account-old (Codex import)", status: "expired" };
+  fs.writeFileSync(state, JSON.stringify({ up: true, profiles: [stale] }));
+  const openclaw = fakeExecutable(root, "fake-openclaw", `import fs from "node:fs"; const a=process.argv.slice(2).join(" ");
+fs.appendFileSync(${JSON.stringify(log)}, a+"\\n");
+const S=${JSON.stringify(state)}; const s=JSON.parse(fs.readFileSync(S,"utf8")); const save=()=>fs.writeFileSync(S,JSON.stringify(s));
+const owned=()=>{ console.error("Cannot admit models.auth: This operation requires exclusive offline state ownership."); process.exit(1); };
+const asList=()=>s.profiles.map((p)=>({id:p.profileId,provider:p.provider,type:p.type,label:p.label,...(p.expiresAt?{expiresAt:new Date(p.expiresAt).toISOString()}:{}),...(p.status?{status:p.status}:{})}));
+if(a==="models auth list --json") { if(s.up) owned(); console.log(JSON.stringify({profiles:asList()})); }
+else if(a==="models status --json") console.log(JSON.stringify({auth:{oauth:{profiles:s.profiles}}}));
+else if(a.startsWith("gateway stop")) { s.up=false; save(); console.log("Stopped LaunchAgent"); }
+else if(a==="gateway start") { s.up=true; save(); }
+else if(a==="gateway status --json --no-probe") console.log(JSON.stringify({service:{loaded:true,runtime:{status:s.up?"running":"stopped"}}}));
+else if(a==="gateway status") console.log(s.up?"Runtime: running":"Runtime: stopped");
+else if(a.startsWith("migrate apply codex")) { if(s.up) owned(); s.profiles.push({profileId:"openai:account-new",provider:"openai",type:"oauth",label:"openai:account-new (Codex import)",status:"ok",expiresAt:Date.now()+10.5*86400000}); save(); console.log("SECRET_SENTINEL"); }
+else if(a.startsWith("models auth logout ")) { if(s.up) owned(); const id=a.split(" ")[3]; s.profiles=s.profiles.filter((p)=>p.profileId!==id); save(); }
+else if(a.startsWith("config file")) console.log("/nonexistent/openclaw.json");
+else if(a.startsWith("agent exec")) console.log(JSON.stringify({ok:true,final:"ok"}));`);
+  return { openclaw, log, state };
+}
+
+function runLoginCLI(root, args, env) {
+  try {
+    const stdout = execFileSync(process.execPath, [path.join(root, "bin", "nomarmy.mjs"), "login", ...args], {
+      cwd: root, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, PATH: `${path.join(root, "bin")}:${process.env.PATH}`, NOMARMY_CONFIG_DIR: path.join(root, "config"), ...env },
+    });
+    return { exitCode: 0, stdout, stderr: "" };
+  } catch (error) { return { exitCode: error.status ?? 1, stdout: error.stdout ?? "", stderr: error.stderr ?? "" }; }
+}
+
+test("login codex stops the Gateway, imports, removes the expired login, starts it again, then tests", posixStubOnly, () => {
+  const root = scratchNomarmyRoot();
+  try {
+    const codexLog = path.join(root, "codex-calls");
+    fakeExecutable(root, "codex", `import fs from "node:fs"; const a=process.argv.slice(2).join(" "); fs.appendFileSync(${JSON.stringify(codexLog)}, a+"\\n"); if(a==="login status") console.log("Logged in using ChatGPT");`);
+    const { openclaw, log, state } = fakeGatewayOpenclaw(root);
+    const result = runLoginCLI(root, ["codex", "--yes"], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+    assert.equal(result.exitCode, 0, result.stdout + result.stderr);
+    assert.match(fs.readFileSync(codexLog, "utf8"), /^login$/m);
+    const calls = fs.readFileSync(log, "utf8").trim().split("\n");
+    const at = (prefix) => calls.findIndex((c) => c.startsWith(prefix));
+    const order = ["gateway stop --force", "migrate apply codex", "models auth logout openai:account-old --yes", "gateway start", "agent exec"].map(at);
+    assert.ok(order.every((i, n) => i >= 0 && (n === 0 || i > order[n - 1])), calls.join("\n"));
+    assert.deepEqual(JSON.parse(fs.readFileSync(state, "utf8")).profiles.map((p) => p.profileId), ["openai:account-new"]);
+    assert.equal(JSON.parse(fs.readFileSync(state, "utf8")).up, true);
+    assert.match(result.stdout, /Removed the expired Codex login openai:account-old\./);
+    assert.match(result.stdout, /OpenClaw has the Codex login; it's good for 10 days\./);
+    assert.match(result.stdout, /Codex jobs can run\./);
+    assert.doesNotMatch(result.stdout + result.stderr, /SECRET_SENTINEL/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("login codex without a terminal or --yes leaves the Gateway running and says how to go on", posixStubOnly, () => {
+  const root = scratchNomarmyRoot();
+  try {
+    fakeExecutable(root, "codex", `const a=process.argv.slice(2).join(" "); if(a==="login status") console.log("Logged in using ChatGPT");`);
+    const { openclaw, log, state } = fakeGatewayOpenclaw(root);
+    const result = runLoginCLI(root, ["codex", "--skip-codex-login"], { NOMARMY_OPENCLAW_CMD: openclaw, NOMARMY_AGENT_STATE: path.join(root, "state") });
+    assert.equal(result.exitCode, 1, result.stdout);
+    assert.match(result.stdout + result.stderr, /Run nomarmy login codex --skip-codex-login --yes to let nomArmy stop it and start it again/);
+    const calls = fs.readFileSync(log, "utf8");
+    assert.doesNotMatch(calls, /gateway stop|migrate apply/);
+    assert.equal(JSON.parse(fs.readFileSync(state, "utf8")).up, true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("login takes only codex", () => {
+  const result = runCLI(["login", "claude"]);
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /Usage: nomarmy login codex/);
 });

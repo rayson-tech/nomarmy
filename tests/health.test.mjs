@@ -19,7 +19,7 @@ const AUTH = { profiles: [
   { id: "openai:account-1", provider: "openai", type: "oauth", expiresAt: "2026-10-03T21:10:37.000Z" },
 ] };
 
-const CODEX_RECOVERY = "mkdir -p -m 700 ~/.openclaw-codex-backups && openclaw migrate apply codex --from ~/.codex --agent main --include-secrets --item auth:openai --backup-output ~/.openclaw-codex-backups --overwrite --yes";
+const CODEX_RECOVERY = "nomarmy login codex";
 
 test("loginExpiryIssues: quiet 9 days out, a warning inside 7, an error once expired", () => {
   assert.deepEqual(loginExpiryIssues(AUTH, { now: Date.parse("2026-09-24T12:00:00Z") }), []);
@@ -299,4 +299,19 @@ test("auth profile JSON is found after a log line that contains a brace", () => 
   assert.deepEqual(parseOpenclawAuthProfiles(`[plugins] loaded {codex}\n${json}`), [{ id: "openai:account-1", provider: "openai" }]);
   assert.equal(parseOpenclawAuthProfiles("Gateway is not running."), null);
   assert.equal(parseOpenclawAuthProfiles('{"profiles":"none"}'), null);
+});
+
+test("an expired Codex import with no expiry left is reported, not read as usable", async () => {
+  const now = Date.parse("2026-11-23T12:00:00Z");
+  const stale = { id: "openai:account-old", provider: "openai", type: "oauth", label: "openai:account-old (Codex import)", status: "expired" };
+  const fresh = { id: "openai:account-new", provider: "openai", type: "oauth", label: "openai:account-new (Codex import)", status: "ok", expiresAt: "2026-12-03T12:00:00.000Z" };
+  // Alone, "Codex import missing" reports it (runtime-recovery tests); here, nothing claims it's fine.
+  assert.deepEqual(loginExpiryIssues({ profiles: [stale] }, { now }), []);
+  const beside = loginExpiryIssues({ profiles: [stale, fresh] }, { now });
+  assert.deepEqual(beside.map((i) => [i.id, i.severity, i.fix]), [["login-expired:openai:account-old", "warn", "nomarmy login codex"]]);
+  assert.match(beside[0].detail, /OpenClaw may still pick this one/);
+  const { usableCodexImport, staleCodexImports } = await import("../lib/openclaw-runtime-health.mjs");
+  assert.equal(usableCodexImport([stale], now), false);
+  assert.equal(usableCodexImport([stale, fresh], now), true);
+  assert.deepEqual(staleCodexImports([stale, fresh], now).map((p) => p.id), ["openai:account-old"]);
 });
