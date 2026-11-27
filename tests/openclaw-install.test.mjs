@@ -257,7 +257,9 @@ test("all installation entry points use the shared policy and doctor wires its c
   assert.doesNotMatch(shell, /npm\s+(?:install|update)\s+[^\n]*\bopenclaw(?:@|\s|$)/m);
   assert.equal(shell.includes("NOMARMY_OPENCLAW_VERSION"), false);
   assert.equal(cli.includes('["update", "-g", "openclaw"]'), false);
-  assert.equal(cli.includes('yes: flag("yes"), isTTY: Boolean(input.isTTY)'), true);
+  assert.equal(cli.includes('vendors, yes, isTTY: Boolean(input.isTTY)'), true);
+  assert.equal(cli.includes('repaired = await upgrade({ yes: flag("yes") })'), true);
+  assert.equal(cli.includes('upgrade: () => upgrade({ yes: true })'), true, "only the automatic update answers yes for you");
   assert.equal(cli.includes("additionalChecks: checks"), true);
 });
 
@@ -430,6 +432,29 @@ test("a rollback installs the exact earlier release of OpenClaw and its plugins;
   assert.deepEqual(pluginUpdatePlan({ run: inspect("2026.10.3"), vendors: ["codex"], target: "2099.1.1" }).map((a) => a.args.join(" ")),
     ["plugins install clawhub:@openclaw/codex@2099.1.1 --force"]);
   assert.deepEqual(pluginUpdatePlan({ run: inspect("2099.1.1"), vendors: ["codex"], target: "2026.10.3" }), []);
+});
+
+test("an upgrade migrates OpenClaw's state before touching plugins, then again after them", async () => {
+  // OpenClaw 2026.11.10 refused the codex plugin install until Doctor had
+  // converted a key it retired, and the upgrade had scheduled Doctor last.
+  let current = "2026.11.3", migrated = false;
+  const calls = [];
+  const run = (command, args) => {
+    calls.push(`${command} ${args.join(" ")}`);
+    if (command === "npm") { current = "2026.11.10"; return { ok: true, stdout: "" }; }
+    if (args[0] === "--version") return { ok: true, stdout: `OpenClaw ${current}` };
+    if (args[0] === "doctor" && args[1] === "--fix") { migrated = true; return { ok: true, stdout: "" }; }
+    if (args[0] === "plugins" && args[1] === "install") return migrated ? { ok: true, stdout: "" } : { ok: false, stderr: "OpenClaw config is invalid" };
+    if (args[0] === "plugins") return { ok: true, stdout: JSON.stringify({ plugin: { id: "codex", enabled: true, version: current, builtWithOpenClawVersion: current } }) };
+    if (args.join(" ") === "update status --json") return { ok: true, stdout: JSON.stringify({ migrationWarnings: [] }) };
+    return { ok: true, stdout: "" };
+  };
+  const result = await repairOpenclaw({ run, yes: true, vendors: ["codex"], target: "2026.11.10", print: () => {} });
+  assert.deepEqual(result.changed, ["Upgrade OpenClaw to 2026.11.10", "Migrate OpenClaw's state to the new release", "Update OpenClaw plugin codex 2026.11.3 to 2026.11.10", "Finish the plugin upgrades"]);
+  assert.deepEqual(calls.filter((c) => /^npm|doctor --fix|plugins install/.test(c)), [
+    "npm install -g openclaw@2026.11.10", "openclaw doctor --fix --non-interactive",
+    "openclaw plugins install clawhub:@openclaw/codex@2026.11.10 --force", "openclaw doctor --fix --non-interactive",
+  ]);
 });
 
 test("nomArmy's own muse-cli plugin: installed from this package and kept at its version, whatever OpenClaw's release", () => {

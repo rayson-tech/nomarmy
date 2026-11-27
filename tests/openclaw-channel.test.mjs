@@ -9,16 +9,17 @@ import { PINNED_OPENCLAW_VERSION } from "../lib/openclaw-pin.mjs";
 const tmp = (t) => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomarmy-channel-")); t.after(() => fs.rmSync(dir, { recursive: true, force: true })); return dir; };
 const NEWER = "2099.1.1";
 
-test("openclaw channel: defaults to tested, is set in limits.yml beside max_jobs, and refuses anything else", (t) => {
+test("openclaw channel: defaults to latest, is set in limits.yml beside max_jobs, and refuses anything else", (t) => {
   const filePath = path.join(tmp(t), "limits.yml");
-  assert.equal(openclawChannel({ filePath }), "tested");
-  fs.writeFileSync(filePath, "# keep me\nmax_jobs: 8\n");
-  assert.equal(setOpenclawChannel("latest", { filePath }), "latest");
   assert.equal(openclawChannel({ filePath }), "latest");
-  assert.equal(fs.readFileSync(filePath, "utf8"), "# keep me\nmax_jobs: 8\nopenclaw: latest\n");
+  fs.writeFileSync(filePath, "# keep me\nmax_jobs: 8\n");
+  assert.equal(openclawChannel({ filePath }), "latest");
+  assert.equal(setOpenclawChannel("tested", { filePath }), "tested");
+  assert.equal(openclawChannel({ filePath }), "tested");
+  assert.equal(fs.readFileSync(filePath, "utf8"), "# keep me\nmax_jobs: 8\nopenclaw: tested\n");
   assert.throws(() => setOpenclawChannel("nightly", { filePath }), /openclaw must be tested or latest/);
   fs.writeFileSync(filePath, "openclaw: nightly\n");
-  assert.equal(openclawChannel({ filePath }), "tested");
+  assert.equal(openclawChannel({ filePath }), "latest");
 });
 
 test("resolveOpenclawTarget: the pin for tested; npm's latest, never below the pin, and never a rolled-back release", () => {

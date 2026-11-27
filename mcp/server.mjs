@@ -36,6 +36,7 @@ import { loadArmy, generalIdentity, generalVendorResolver, expandArmyRole, descr
 import { guideSection, readRoleGuide } from "../lib/role-guide.mjs";
 import { notify } from "../lib/notify.mjs";
 import { checkAndRecordHealth } from "../lib/health.mjs";
+import { maybeStartAutoUpdate } from "../lib/openclaw-auto-update.mjs";
 import { liveLeases, writeLease, pidAlive } from "../lib/slots.mjs";
 import { createRun, loadRun, runTotals, finishRun, resolveRunLimits, describeLoweredLimits } from "../lib/runs.mjs";
 import { agentDispatchFields, resolveAgentModel, agentProviderId, describeAgent } from "../lib/agents.mjs";
@@ -1076,8 +1077,14 @@ if (isMain) {
   const runHealth = () => checkAndRecordHealth({ projectDir, stateRoot, configDir: globalConfigDir() })
     .then(({ toNotify }) => { for (const i of toNotify) notify(`nomArmy: ${i.title}`, `${i.detail} Fix: ${i.fix}`); })
     .catch(() => {});
-  setTimeout(runHealth, 60000).unref();
-  setInterval(runHealth, 6 * 3600000).unref();
+  // With them, about once a day, an automatic OpenClaw update when no job
+  // runs (lib/openclaw-auto-update.mjs); it runs detached, outliving this session.
+  const autoUpdate = () => {
+    try { maybeStartAutoUpdate({ stateRoot, leasesDir: leasesRoot, projectDir, nomarmyBin: path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "nomarmy.mjs") }); }
+    catch { /* best-effort; health reports a stale OpenClaw */ }
+  };
+  setTimeout(() => { runHealth(); autoUpdate(); }, 60000).unref();
+  setInterval(() => { runHealth(); autoUpdate(); }, 6 * 3600000).unref();
   // Catches accumulation from a session that ended without a job ever
   // running again (a crash, a Podman machine restart) rather than waiting
   // for the next job to trigger the per-job sweep in executeJob.
