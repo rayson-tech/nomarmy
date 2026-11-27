@@ -9,6 +9,8 @@ import { hostDepsRoot, hostDepsSupported, linkNodePackages, restoreSandboxLinks,
 const tmp = (t) => { const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "hostdeps-"))); t.after(() => fs.rmSync(d, { recursive: true, force: true })); return d; };
 const IMAGE = "openclaw-nomarmy-coder-deps-deadbeef:bookworm";
 const COPY = "openclaw-nomarmy-coder-deps-deadbeef-bookworm";
+// Host copies are Linux only, and Windows rewrites symlink targets (drive letter, backslashes).
+const posixLinks = { skip: process.platform === "win32" && "host copies are Linux only; Windows rewrites symlink targets" };
 const NOW = Date.parse("2026-11-27T12:00:00Z");
 // A fake podman; async like lib/process.mjs's run, resolving { stdout }.
 function podman({ failCp = false } = {}) {
@@ -79,7 +81,7 @@ test("sweepHostDeps removes copies unused for a week and leftover staging, never
   assert.deepEqual(sweepHostDeps(path.join(cache, "missing")), []);
 });
 
-test("workspace links point at the host copy, then back at /deps for verification", (t) => {
+test("workspace links point at the host copy, then back at /deps for verification", posixLinks, (t) => {
   const wt = tmp(t), deps = path.join(tmp(t), "deps");
   fs.writeFileSync(path.join(wt, "package.json"), JSON.stringify({ name: "r", workspaces: ["cli"] }));
   fs.writeFileSync(path.join(wt, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: {} }));
@@ -91,7 +93,7 @@ test("workspace links point at the host copy, then back at /deps for verificatio
   assert.equal(fs.readlinkSync(path.join(wt, "node_modules")), "/deps/node_modules");
 });
 
-test("restoreSandboxLinks leaves links it didn't make, and real directories, alone", (t) => {
+test("restoreSandboxLinks leaves links it didn't make, and real directories, alone", posixLinks, (t) => {
   const wt = tmp(t), deps = path.join(tmp(t), "deps");
   fs.writeFileSync(path.join(wt, "package.json"), JSON.stringify({ name: "r", workspaces: ["cli", "web"] }));
   fs.writeFileSync(path.join(wt, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: {} }));
