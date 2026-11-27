@@ -350,6 +350,7 @@ const { executeJob, executeImplement, executeScout, executeDecompose } = createE
   podmanVmStartedAt: () => podmanChecks?.vmStartedAt() ?? null,
   jevSettings: () => jevSettings(),
   judgeSettings: () => judgeSettings({ agents: agentsConfig().agents, providerOf: agentProviderId, runsOnHost: agentRunsToolsOnHost }),
+  agentRunsOnHost: (name) => { try { return agentRunsToolsOnHost(agentsConfig().agents?.[name]); } catch { return false; } },
   VERSION, projectDir, jobsRoot, run, git, gitRaw,
   collectGitRecord, createCoordinatorCommit, ensureJobsRoot, slug, assertRepo,
   resolveBase, workerModelThinkingSupported, budgetState, execution, buildMetrics,
