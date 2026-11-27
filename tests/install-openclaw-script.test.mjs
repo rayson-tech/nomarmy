@@ -104,11 +104,15 @@ test("--update --yes falls back to ~/.npm-global when npm's global prefix isn't 
 });
 
 test("--update below the pin on an old Node refuses without installing", { skip: (process.platform === "win32" || nodeOk) && "needs a Node older than OpenClaw supports" }, () => {
-  const f = fakes({ version: "2026.9.6" });
+  const f = fakes({ version: "2026.9.6", channel: "tested" });
   const r = f.run("--yes");
   assert.equal(r.status, 1);
   assert.match(r.stderr, /needs Node 24\.16\+ or 26\.1\+/);
   assert.deepEqual(f.npmCalls(), []);
+  // On latest (the default) it may look up npm's latest first, but still installs nothing.
+  const latest = fakes({ version: "2026.9.6", npmLatest: "2099.1.1" });
+  assert.equal(latest.run("--yes").status, 1);
+  assert.deepEqual(latest.npmCalls().filter((call) => call.startsWith("install")), []);
 });
 
 test("--update with OpenClaw at the pin but a configured vendor's plugin behind it updates that plugin", { skip: process.platform === "win32" && "fake commands are shell scripts" }, () => {
