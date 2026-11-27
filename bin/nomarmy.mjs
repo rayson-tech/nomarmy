@@ -276,12 +276,16 @@ Usage: nomarmy <command> [options]
                   once on this machine, across every session; unset by
                   default (only max-jobs applies). Jobs past it wait.
   config openclaw [tested|latest]
-                  which OpenClaw release updates keep: tested (the
-                  release nomArmy is tested with, the default) or latest
-                  (npm's latest and matching vendor plugins, so new models
-                  arrive without a nomArmy release; never below tested,
-                  your roles' models are test-called before and after,
-                  and a release that breaks one is rolled back and skipped)
+                  which OpenClaw release updates keep: latest (the
+                  default: npm's latest and matching vendor plugins, so new
+                  models arrive without a nomArmy release; never below
+                  tested, your roles' models are test-called before and
+                  after, and a release that breaks one is rolled back and
+                  skipped) or tested (the release nomArmy is tested with)
+  config openclaw-auto [on|off]
+                  on latest, update OpenClaw on its own about once a day
+                  when no jobs run (on by default), with the same test
+                  and rollback; new jobs wait while it runs
   jobs [--watch|--events [--until-done] [--run <run-id>] [--repo <path>]|--prune|--wait <jobId> [<jobId> ...]|--stop <jobId> [--reason <text>]] [--interval N] [--older-than DAYS]
                   what's running across every session (agent, model, phase,
                   last tool call, files changed, heartbeat) and what just
@@ -3179,6 +3183,24 @@ async function cmdConfigOpenclaw() {
   if (given !== undefined) console.log(c.dim("Run `nomarmy update` (or `nomarmy doctor --fix`) to apply it."));
 }
 
+// `nomarmy config openclaw-auto [on|off]`: whether OpenClaw updates on its own.
+async function cmdConfigOpenclawAuto() {
+  const { openclawAutoEnabled, setOpenclawAuto, readAutoUpdateState } = await import("../lib/openclaw-auto-update.mjs");
+  const { openclawChannel } = await import("../lib/openclaw-channel.mjs");
+  const given = argv[2];
+  if (given !== undefined && !["on", "off"].includes(given)) throw new Error(`openclaw-auto must be on or off, got "${given}"`);
+  const enabled = given === undefined ? openclawAutoEnabled() : setOpenclawAuto(given === "on");
+  const channel = openclawChannel();
+  const last = readAutoUpdateState(agentStateRoot());
+  if (json) return out({ openclawAuto: enabled, openclaw: channel, lastAttempt: last.lastAttempt ?? null, lastResult: last.result ?? null });
+  console.log(`${given !== undefined ? c.green("✓ ") : ""}openclaw-auto: ${enabled ? "on" : "off"}`);
+  if (enabled && channel !== "latest") console.log(c.yellow("⚠ openclaw is set to tested, so there's nothing to update automatically. `nomarmy config openclaw latest` turns it on."));
+  else console.log(c.dim(enabled
+    ? "About once a day, when no jobs are running, a nomArmy session updates OpenClaw and its plugins to npm's latest: it test-calls your roles' models before and after, and rolls back if one that worked stops. New jobs wait while it runs."
+    : "OpenClaw changes only when you run `nomarmy update` or `nomarmy doctor --fix`."));
+  if (last.result) console.log(c.dim(`Last automatic update: ${last.result.outcome}${last.result.to ? ` (${last.result.from ?? "?"} → ${last.result.to})` : ""}, ${last.result.at}.`));
+}
+
 // `nomarmy config max-jobs [n]`: api and subscription jobs at once, machine-wide.
 async function cmdConfigMaxJobs() {
   const { maxJobs, setMaxJobs, jobsThatFit, vmGibFor } = await import("../lib/limits.mjs");
@@ -3223,7 +3245,8 @@ async function cmdConfig() {
   if (sub === "max-jobs") return cmdConfigMaxJobs();
   if (sub === "max-verifications") return cmdConfigMaxVerifications();
   if (sub === "openclaw") return cmdConfigOpenclaw();
-  throw new Error(`Unknown config subcommand "${sub}". Use: nomarmy config <paths|max-jobs [n]|max-verifications [n|off]|openclaw [tested|latest]>`);
+  if (sub === "openclaw-auto") return cmdConfigOpenclawAuto();
+  throw new Error(`Unknown config subcommand "${sub}". Use: nomarmy config <paths|max-jobs [n]|max-verifications [n|off]|openclaw [tested|latest]|openclaw-auto [on|off]>`);
 }
 
 // --- `nomarmy jobs [--watch]`: what's running, from any session -----------
@@ -3853,13 +3876,14 @@ async function cmdDoctor() {
   const vendors = configuredSubscriptionVendors(agents);
   let armySummary = null;
   try { armySummary = describeArmy(loadArmy({ projectDir: repoDir }), { agents }); } catch { /* other doctor checks still run */ }
-  let checks;
-  if (flag("fix")) {
+  const print = json ? console.error : console.log;
+  // Upgrade OpenClaw and its plugins to the channel's target, checking the
+  // roles' models before and after (lib/openclaw-channel.mjs).
+  const upgrade = async ({ yes }) => {
     const { openclawChannel, upgradeOpenclaw, modelsToCheck } = await import("../lib/openclaw-channel.mjs");
     const { probeModel } = await import("../lib/model-probe.mjs");
     const repaired = await upgradeOpenclaw({
-      channel: openclawChannel(), command: openclawCmd(), vendors, yes: flag("yes"), isTTY: Boolean(input.isTTY),
-      print: json ? console.error : console.log,
+      channel: openclawChannel(), command: openclawCmd(), vendors, yes, isTTY: Boolean(input.isTTY), print,
       ask: async (prompt) => {
         const rl = createInterface({ input, output: json ? process.stderr : output });
         try { return await rl.question(prompt); } finally { rl.close(); }
@@ -3868,16 +3892,45 @@ async function cmdDoctor() {
       models: modelsToCheck({ agents, roles: armySummary?.roles ?? {}, providerOf: agentProviderId }),
       probe: ({ provider, model }) => probeModel({ provider, model, stateRoot: agentStateRoot(), openclawCmd: openclawCmd() }),
     });
-    checks = repaired.checks;
-    if (!repaired.ok && !checks.some((check) => !check.ok)) checks.push({ id: "openclaw-repair", ok: false, message: "OpenClaw repair was declined or failed.", fix: "nomarmy doctor --fix --yes" });
     if (repaired.ok) {
       const { refreshProviderConfigs } = await import("../lib/openclaw-config.mjs");
       for (const result of await refreshProviderConfigs(vendors.map((key) => SUBSCRIPTION_VENDORS[key]))) {
         const line = result.added?.length ? `Added ${result.added.join(", ")} to OpenClaw's ${result.provider} provider (backup: ${result.backup}).`
           : result.changed ? `Added the ${result.provider} provider to OpenClaw's config (backup: ${result.backup}).` : null;
-        if (line) (json ? console.error : console.log)(line);
+        if (line) print(line);
       }
     }
+    return repaired;
+  };
+  // `--fix --auto`: the daily automatic update an MCP server starts in the
+  // background (lib/openclaw-auto-update.mjs). Runs only when due and no job
+  // is running, holds the machine-wide lock, and records the outcome for
+  // health; no doctor report, since nobody is watching.
+  if (flag("fix") && flag("auto")) {
+    const { runAutoUpdate, openclawAutoEnabled } = await import("../lib/openclaw-auto-update.mjs");
+    const { openclawChannel } = await import("../lib/openclaw-channel.mjs");
+    print(`${new Date().toISOString()} nomArmy ${JSON.parse(fs.readFileSync(path.join(nomarmyRoot, "package.json"), "utf8")).version}: automatic OpenClaw update check`);
+    const result = await runAutoUpdate({
+      stateRoot: agentStateRoot(), leasesDir: path.join(agentStateRoot(), "leases"),
+      channel: openclawChannel(), enabled: openclawAutoEnabled(), force: flag("now"),
+      upgrade: () => upgrade({ yes: true }),
+    });
+    print(result.ran ? `Finished: ${result.outcome}.` : `Skipped: ${result.skipped}.`);
+    if (json) out(result);
+    return;
+  }
+  let checks;
+  if (flag("fix")) {
+    // The same lock as the automatic update, so new jobs wait for this one too.
+    const { takeUpdateLock } = await import("../lib/openclaw-auto-update.mjs");
+    const running = liveLeases(path.join(agentStateRoot(), "leases")).length;
+    if (running) throw new Error(`${running} nomArmy job(s) are running, and replacing OpenClaw under a job breaks it. Run this again when they're done (\`nomarmy jobs\`). Nothing was changed.`);
+    const release = takeUpdateLock(agentStateRoot());
+    if (!release) throw new Error("OpenClaw is already being updated (an automatic update, or another doctor --fix). Run this again in a few minutes.");
+    let repaired;
+    try { repaired = await upgrade({ yes: flag("yes") }); } finally { release(); }
+    checks = repaired.checks;
+    if (!repaired.ok && !checks.some((check) => !check.ok)) checks.push({ id: "openclaw-repair", ok: false, message: "OpenClaw repair was declined or failed.", fix: "nomarmy doctor --fix --yes" });
   } else {
     checks = verifyOpenclaw({ command: openclawCmd(), vendors });
   }

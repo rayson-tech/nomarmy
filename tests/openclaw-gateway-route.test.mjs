@@ -90,6 +90,24 @@ test("runOnGateway: adds the agent on the worktree, sets its sandbox, runs the t
   assert.equal(fs.existsSync(j.cwd), true);
 });
 
+test("runOnGateway: a config write that loses the race with another job's is tried again; other failures aren't", async (t) => {
+  const race = "Error: config changed since last load; re-run config.get and retry";
+  const oc = fakeOpenclaw();
+  let lost = 0;
+  const run = (cmd, args) => {
+    if (args[0] === "config" && args[1] === "set" && args[2] === "--batch-json" && lost < 2) { lost++; oc.calls.push(args.join(" ")); return Promise.reject(Object.assign(new Error(race), { stdout: "", stderr: race })); }
+    return oc.run(cmd, args);
+  };
+  const j = job(t, { ...oc, run }, { retryDelays: [0, 0, 0] });
+  assert.match((await j.go()).stdout, /STATUS: done/);
+  assert.equal(oc.calls.filter((c) => c.startsWith("config set --batch-json")).length, 3, "two lost races, then it lands");
+  assert.equal(oc.config[`agents.entries.${j.agentId}.sandbox.docker.image`], "nomarmy-go:1");
+
+  const bad = fakeOpenclaw({ failSet: true });
+  await assert.rejects(job(t, bad, { retryDelays: [0, 0, 0] }).go(), /Setting the job's sandbox on .* failed: invalid path/);
+  assert.equal(bad.calls.filter((c) => c.startsWith("config set --batch-json")).length, 1, "a real failure isn't retried");
+});
+
 test("runOnGateway: never deletes the agent while its workspace is still the worktree", async (t) => {
   const oc = fakeOpenclaw({ failWorkspaceSwap: true });
   const logged = [];

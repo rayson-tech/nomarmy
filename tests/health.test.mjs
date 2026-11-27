@@ -95,8 +95,10 @@ test("versionIssues: OpenClaw behind npm, and a plugin behind OpenClaw -- the re
   assert.equal(behind[0].id, "openclaw-update:2026.9.6");
   assert.equal(behind[0].fix, "nomarmy doctor --fix  (installs the tested OpenClaw release, when no nomArmy jobs are running)");
   assert.deepEqual(versionIssues({ installed: "OpenClaw 2026.9.6", latest: "2026.9.6" }), []);
-  assert.match(versionIssues({ installed: "OpenClaw 2026.10.3", latest: "2026.10.4" })[0].fix, /^No automatic upgrade: nomArmy keeps the tested release\. `nomarmy config openclaw latest` follows npm's latest/);
-  assert.match(versionIssues({ installed: "OpenClaw 2026.10.3", latest: "2026.10.4", channel: "latest" })[0].fix, /^nomarmy update  \(openclaw: latest; checks your roles' models and rolls back/);
+  assert.match(versionIssues({ installed: "OpenClaw 2026.10.3", latest: "2026.10.4", channel: "tested" })[0].fix, /^No automatic upgrade: nomArmy keeps the tested release\. `nomarmy config openclaw latest` follows npm's latest/);
+  assert.match(versionIssues({ installed: "OpenClaw 2026.10.3", latest: "2026.10.4" })[0].fix, /^Nothing to do: nomArmy updates it about once a day when no jobs run/);
+  assert.match(versionIssues({ installed: "OpenClaw 2026.10.3", latest: "2026.10.4", auto: false })[0].fix, /^nomarmy doctor --fix  \(checks your roles' models and rolls back if one breaks/);
+  assert.deepEqual(versionIssues({ installed: "OpenClaw 2026.10.3", latest: "2026.10.4", skipped: ["2026.10.4"] }), [], "a rolled-back release isn't offered again");
   const skew = versionIssues({ installed: "OpenClaw 2026.9.6", latest: "2026.9.6", plugins: [{ id: "codex", version: "2026.9.5" }] });
   assert.equal(skew[0].id, "plugin-skew:codex:2026.9.5");
   assert.equal(skew[0].severity, "info");

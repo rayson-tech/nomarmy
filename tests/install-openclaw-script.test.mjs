@@ -67,7 +67,7 @@ esac
 
 test("--update is silent and installs nothing at or past the pin", { skip: process.platform === "win32" && "fake commands are shell scripts" }, () => {
   for (const version of [PINNED_OPENCLAW_VERSION, "2099.1.1"]) {
-    const f = fakes({ version });
+    const f = fakes({ version, channel: "tested" });
     const r = f.run();
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stdout, "");
@@ -77,7 +77,7 @@ test("--update is silent and installs nothing at or past the pin", { skip: proce
 });
 
 test("--update below the pin without a terminal or --yes changes nothing and exits 2", { skip }, () => {
-  const f = fakes({ version: "2026.9.6" });
+  const f = fakes({ version: "2026.9.6", channel: "tested" });
   const r = f.run();
   assert.equal(r.status, 2, r.stderr);
   assert.ok(r.stdout.includes(`tested with OpenClaw ${PINNED_OPENCLAW_VERSION}; this machine has OpenClaw 2026.9.6`), r.stdout);
@@ -136,8 +136,11 @@ test("--update --yes on openclaw: latest installs npm's latest OpenClaw and the 
   assert.deepEqual(f.npmCalls().filter((call) => call.startsWith("install")), ["install -g openclaw@2099.1.1"]);
   assert.equal(f.installed(), "2099.1.1");
   assert.deepEqual(f.pluginUpdates(), ["plugins install clawhub:@openclaw/codex@2099.1.1 --force"]);
-  const tested = fakes({ version: PINNED_OPENCLAW_VERSION, npmLatest: "2099.1.1" });
+  const tested = fakes({ version: PINNED_OPENCLAW_VERSION, npmLatest: "2099.1.1", channel: "tested" });
   const quiet = tested.run("--yes");
   assert.equal(quiet.status, 0, quiet.stderr);
-  assert.equal(tested.installed(), PINNED_OPENCLAW_VERSION, "tested (the default) stays at the pin");
+  assert.equal(tested.installed(), PINNED_OPENCLAW_VERSION, "tested stays at the pin");
+  const unset = fakes({ version: PINNED_OPENCLAW_VERSION, npmLatest: "2099.1.1" });
+  assert.equal(unset.run("--yes").status, 0);
+  assert.equal(unset.installed(), "2099.1.1", "with nothing set, latest is the default");
 });
